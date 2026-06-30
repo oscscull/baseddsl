@@ -1,0 +1,19 @@
+[package]
+name = "based-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "based"
+path = "src/main.rs"
+
+[dependencies]
+based-ast = { workspace = true }
+based-diagnostics = { workspace = true }
+based-manifest = { workspace = true }
+based-parser = { workspace = true }
+based-sema = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

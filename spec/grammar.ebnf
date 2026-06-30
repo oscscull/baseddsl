@@ -1,0 +1,218 @@
+(* ============================================================================
+   based DSL — canonical grammar
+   ----------------------------------------------------------------------------
+   Source of truth for what parses. Where the prose specs were ambiguous, this
+   file commits; see decisions.md for the rationale of each commitment.
+
+   Notation (ISO-ish EBNF):
+     =            definition
+     |            alternation
+     { x }        zero or more x
+     [ x ]        optional x
+     ( x )        grouping
+     'lit'        terminal literal
+     (* ... *)    comment
+   Layout is free (principle 3: no positional/whitespace meaning). Whitespace and
+   comments separate tokens but never carry meaning. Items in a block are
+   separated by NEWLINE or ',' — both accepted, neither significant.
+   ============================================================================ *)
+
+(* ---------- File ---------------------------------------------------------- *)
+(* One extension (.bsl), one uniform grammar: any top-level declaration may     *)
+(* appear in any file. Splitting schema vs access across files (model.bsl /     *)
+(* queries.bsl) and grouping by domain dir is recommended convention, not       *)
+(* enforced (decisions.md D6/D9).                                               *)
+
+file        = { decl } ;
+decl        = model | shape | query | mutation | named_filter ;
+sep         = NEWLINE | ',' ;          (* item separator inside blocks/files   *)
+
+(* ---------- Models -------------------------------------------------------- *)
+
+model       = { decorator } model_name '{' { member sep } [ member ] '}' ;
+model_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
+
+member      = field | index_decl | soft_override ;
+
+(* Decorators stack above the model, one per line; never positional on header. *)
+decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
+deco_name   = ident ;                  (* soft_delete sort tenant scope index… *)
+deco_args   = deco_arg { ',' deco_arg } ;
+deco_arg    = sort_term | predicate | ident | path | literal ;
+
+(* Field line: uniform for columns and relations — `name: Type (modifiers)` *)
+field       = field_name ':' type_expr [ inverse_ref ] [ modifiers ]
+                                       [ relation_opts ] [ field_sort ] ;
+field_name  = lower_ident ;
+
+type_expr   = base_type { type_qualifier } ;
+base_type   = primitive | model_ref ;
+primitive   = 'text' | 'int' | 'bool' | 'timestamp' | 'date'
+            | 'json' | 'uuid' | 'Id' ;
+model_ref   = upper_ident ;            (* relation; resolves to a model (D7)   *)
+type_qualifier = '?'                   (* nullable / optional                  *)
+            | '[]' ;                   (* to-many                              *)
+
+(* Opt-in inverse: points at the forward edge it pairs with.  (Model.field)   *)
+inverse_ref = '(' model_ref '.' field_name ')' ;
+
+(* Behavioral modifiers in parens: (unique), (default "x"), (default now()),    *)
+(* (column "legacy_name") — alias a field onto a legacy / reserved-word column. *)
+modifiers   = '(' modifier { ',' modifier } ')' ;
+modifier    = 'unique'
+            | 'default' default_val
+            | 'column' STRING ;        (* legacy/reserved column-name override  *)
+default_val = literal | func_call ;
+
+(* Relation options — custom join condition for legacy keys (relations.md).    *)
+relation_opts = '(' 'on' ':' predicate ')' ;
+
+(* Per-field sort override for a relation traversal (sorting.md).              *)
+field_sort  = '@sort' '(' sort_term { ',' sort_term } ')' ;
+
+(* Index declaration inside a model body.                                      *)
+index_decl  = '@index' ( column_name | '(' column_name { ',' column_name } ')' )
+              [ 'unique' ] ;
+column_name = lower_ident ;
+
+(* Per-operation soft-delete override (soft-delete.md): `restore: sql`...``    *)
+soft_override = op_name ':' raw_sql ;
+op_name     = 'restore' | 'delete' | 'read' ;
+
+(* ---------- Shapes -------------------------------------------------------- *)
+
+shape       = 'shape' shape_name 'from' model_ref shape_body ;
+shape_name  = upper_ident | 'full' ;   (* `shape full` is the conventional view*)
+shape_body  = '{' { shape_field sep } [ shape_field ] '}' ;
+shape_field = bare_field                       (* local, same-name             *)
+            | out_name '=' shape_value          (* reach-and-rename / raw value *)
+            | bare_field shape_body ;           (* nest a relation into subobj  *)
+bare_field  = lower_ident ;
+out_name    = lower_ident ;
+shape_value = path | raw_sql ;                 (* dotted traversal OR raw value*)
+
+(* ---------- Queries ------------------------------------------------------- *)
+
+query       = 'query' query_name '(' [ params ] ')' '->' ret_type
+              ( query_inline | query_block | ';' ) ;
+query_name  = lower_ident ;
+
+(* Bare/per-param/full all share the param list; binding rides each param.     *)
+params      = param { ',' param } ;
+param       = param_name [ ':' type_expr ] [ param_binding ] [ '=' default_val ] ;
+param_name  = lower_ident ;
+(* binding forms: (queries.md)
+     (id)                         same-name equality, type inferred
+     (user: User)                 typed, same-name equality
+     (user -> author)             bind via named relation/edge
+     (since: timestamp > created_at)  explicit column + operator               *)
+param_binding = '->' field_name                          (* bind via edge      *)
+            | op column_name ;                           (* explicit col + op  *)
+
+ret_type    = type_ref [ '[]' ] ;
+type_ref    = shape_name | model_ref ;  (* a shape or a model's `full`         *)
+
+(* Inline tail clauses allowed on an otherwise-bare query (e.g. `order (...)`). *)
+query_inline = clause { clause } ';' ;
+
+query_block = '{' statement '}' ;       (* one read statement, ';'-terminated  *)
+
+(* ---------- Mutations ----------------------------------------------------- *)
+
+mutation    = 'mutation' query_name '(' [ params ] ')' '->' ret_type
+              [ 'guard' guard_name ] mut_block ;
+guard_name  = lower_ident ;             (* host-language fn (auth.md Handle 3)  *)
+mut_block   = '{' { write_stmt sep } [ write_stmt ] '}' ;
+
+write_stmt  = create_stmt | update_stmt | delete_stmt
+            | restore_stmt | hard_delete_stmt | tx_block | raw_sql ;
+
+create_stmt = 'create' model_ref assign_block ;
+update_stmt = 'update' model_ref where_clause assign_block ;
+delete_stmt = 'delete' model_ref where_clause ;
+restore_stmt= 'restore' model_ref where_clause ;
+hard_delete_stmt = 'hard' 'delete' model_ref where_clause ;
+
+assign_block = '{' { assign sep } [ assign ] '}' ;
+assign      = column_name '=' value ;
+
+(* Atomic group; back-reference a prior step's row with `^`.                   *)
+tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;
+
+(* ---------- Read statement (query block body) ----------------------------- *)
+
+statement   = verb model_ref { clause } ';' ;
+verb        = 'get' | 'list' ;          (* signature [] vs scalar still drives  *)
+                                        (* the client contract independently   *)
+clause      = where_clause | order_clause | page_clause ;
+where_clause= 'where' '(' predicate ')' ;
+order_clause= 'order' '(' sort_term { ',' sort_term } ')' ;
+sort_term   = path [ 'asc' | 'desc' ] ;
+
+(* Pagination (pagination.md): keyset default; offset / count are loud opt-ins.*)
+page_clause = 'page' '(' INT ')' [ 'offset' ] [ 'with' 'count' ] ;
+
+(* ---------- Named filters (queries.md) ------------------------------------ *)
+
+named_filter= 'filter' filter_name [ '(' params ')' ] '=' predicate ';' ;
+filter_name = lower_ident ;
+
+(* ---------- Predicate language (shared: where / scope / filter / guard) ---- *)
+(* One expression language everywhere. `and` binds tighter than `or`;          *)
+(* `not` is unary and binds tightest. No other precedence (queries.md).        *)
+
+predicate   = or_expr ;
+or_expr     = and_expr { 'or' and_expr } ;
+and_expr    = not_expr { 'and' not_expr } ;
+not_expr    = [ 'not' ] atom ;
+atom        = '(' predicate ')'
+            | comparison
+            | path                      (* bool column used directly: `active` *)
+            | filter_call               (* reuse a named filter                *)
+            | raw_sql ;                  (* raw predicate term (raw.md)          *)
+comparison  = path op value ;
+filter_call = filter_name [ '(' [ value { ',' value } ] ')' ] ;
+
+op          = '=' | '!=' | '>' | '<' | '>=' | '<='
+            | '~'                       (* like                                 *)
+            | 'in'
+            | 'has' ;                   (* array/json containment               *)
+
+(* ---------- Values, paths, literals --------------------------------------- *)
+
+value       = param_ref | path | literal | func_call ;
+param_ref   = '$' param_name { '.' lower_ident } ;   (* $id, $ctx.org          *)
+path        = lower_ident { '.' lower_ident } ;       (* dotted traversal       *)
+
+func_call   = func_name '(' [ value { ',' value } ] ')' ;
+func_name   = 'now' | ident ;           (* closed set enforced in sema, not here*)
+
+literal     = STRING | INT | FLOAT | 'true' | 'false' | 'null' ;
+
+(* ---------- Raw SQL escape hatch (raw.md) --------------------------------- *)
+(* Backtick `sql` form. `${param}` interpolates as a bound parameter only.     *)
+(* `{table}` / `{id}` are engine-provided safe interpolations in overrides.    *)
+
+raw_sql     = 'sql' '`' { raw_char | interp } '`' ;
+interp      = '${' param_ref '}' | '{' ident '}' ;
+raw_char    = ? any char except '`' and an interp opener ? ;
+
+(* ---------- Lexical ------------------------------------------------------- *)
+
+(* Keywords are globally reserved (decisions.md D8); an ident may not be one.   *)
+(* Legacy reserved-word columns/tables are reached via (column "...") /         *)
+(* @table("...") aliases, never by naming an ident a keyword.                   *)
+ident       = lower_ident | upper_ident ;
+lower_ident = lower_alpha { alnum | '_' } ;
+upper_ident = upper_alpha { alnum } ;   (* UpperCamel model references         *)
+alnum       = letter | digit ;
+lower_alpha = 'a'..'z' | '_' ;
+upper_alpha = 'A'..'Z' ;
+letter      = 'a'..'z' | 'A'..'Z' ;
+digit       = '0'..'9' ;
+
+INT         = digit { digit } ;
+FLOAT       = digit { digit } '.' digit { digit } ;
+STRING      = '"' { ? any char except '"' or escaped ? } '"' ;
+NEWLINE     = ? U+000A, optionally preceded by U+000D ? ;
+COMMENT     = '#' { ? any char except NEWLINE ? } ;   (* line comment, ignored  *)

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/based-ast",
+    "crates/based-diagnostics",
+    "crates/based-manifest",
+    "crates/based-parser",
+    "crates/based-sema",
+    "crates/based-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# internal
+based-ast = { path = "crates/based-ast" }
+based-diagnostics = { path = "crates/based-diagnostics" }
+based-manifest = { path = "crates/based-manifest" }
+based-parser = { path = "crates/based-parser" }
+based-sema = { path = "crates/based-sema" }
+# external
+logos = "0.14"
+ariadne = "0.5"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+walkdir = "2"
+
+[profile.release]
+lto = "thin"

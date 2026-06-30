@@ -1,0 +1,11 @@
+[package]
+name = "based-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+based-ast = { workspace = true }
+based-diagnostics = { workspace = true }
+# logos lexer is added when the lexer lands (parser milestone).

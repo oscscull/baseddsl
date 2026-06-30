@@ -1,0 +1,4 @@
+# based project manifest (decisions.md D5). Globs **/*.bsl under root.
+dialect = "mariadb"
+client  = "rust"
+# root defaults to this file's directory
