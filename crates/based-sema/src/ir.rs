@@ -43,7 +43,11 @@ pub mod code {
     pub const BINDING_EDGE: &str = "E0143"; // `-> edge` not a relation
     pub const GET_NOT_UNIQUE: &str = "E0144"; // get must key a unique field
     pub const RESTORE_NOT_SOFT: &str = "E0145";
-    // lints
+    // operand typing (PLAN.md sema #1)
+    pub const OP_TYPE: &str = "E0150"; // operator not applicable to the operand type
+    pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison
+    pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column (D1)
+                                          // lints
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";

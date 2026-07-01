@@ -53,6 +53,9 @@ holds `&mut`.
 
 **Implemented checks**
 
+- Operand type-checking (sema #1, done): op/operand applicability + operand family
+  compatibility in `Cmp` (`E0150`/`E0151`); param annotation vs. mapped column
+  (`E0152`, D1). See resume-points list below for the exact shape.
 - Name resolution: relation targets, inverse pairings (explicit `(M.field)` and
   inferred from the unique forward edge), shape `from`, return types, statement
   models, mutation write models, dotted paths (forward + backward traversal),
@@ -90,12 +93,19 @@ diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean.
 
 Ordered by value. Each is a real gap with a known approach.
 
-1. **Operand type-checking.** `resolve::Terminal` already carries the resolved
-   type/target but callers ignore the payload (it's `#[allow(dead_code)]`). Add:
-   op/value compatibility (`~` needs text, `in`/`has` need collection/json,
-   comparisons need scalars), param explicit-type vs. mapped-column-type agreement
-   (D1: a relation param may be typed `Id` or the target model), literal-vs-column
-   type. Thread `Terminal` out of `check_value`/`resolve_path`.
+1. ~~**Operand type-checking.**~~ ✅ **done.** `resolve::check_cmp_types` now consumes
+   the `Terminal` payload: op/operand applicability (`~` needs text → `E0150`;
+   `< > <= >=` need an orderable column, not bool/json/relation → `E0150`) and
+   family compatibility for `=`/`!=`/ordering against a literal *or* another column
+   (`age = "x"`, `qty = name` → `E0151`). Type families are coarse on purpose
+   (Timestamp/Date/Uuid/Id ride with text; Json matches anything; a relation key
+   accepts a uuid string or int, D1). Param explicit-type vs. mapped-column
+   agreement is `resolve::check_param_type` (D1: a relation param may be typed the
+   target model *or* a key `Id`/`Uuid`; scalar params match by family → `E0152`),
+   wired through `check::check_param`'s new `mapped_member`. `in`/`has` operand
+   typing is deliberately skipped (collection/json element type differs from the
+   column — needs the `many`/element model, not yet on `Terminal`). Tests: 11 new
+   cases in `check.rs` (40 total).
 2. **Named-filter body resolution.** A `filter` has no model at declaration, so its
    column paths are currently left unresolved (`check_predicate(.., None, ..)`).
    Resolve the body against each *call-site* model instead, and propagate
