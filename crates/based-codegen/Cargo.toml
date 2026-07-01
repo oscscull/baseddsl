@@ -1,0 +1,14 @@
+[package]
+name = "based-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+based-ast = { workspace = true }
+based-sema = { workspace = true }
+
+[dev-dependencies]
+based-parser = { workspace = true }
+based-diagnostics = { workspace = true }

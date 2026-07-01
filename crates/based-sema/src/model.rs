@@ -23,7 +23,10 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
             sink.error(
                 code::DUP_FIELD,
                 f.name.span,
-                format!("duplicate field `{}` in model `{}`", f.name.node, m.name.node),
+                format!(
+                    "duplicate field `{}` in model `{}`",
+                    f.name.node, m.name.node
+                ),
             );
             continue;
         }
@@ -53,6 +56,8 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
                     optional: false,
                     many: false,
                     column: "id".to_string(),
+                    unique: false, // PK, expressed as PRIMARY KEY not a UNIQUE constraint
+                    default: None, // engine-generated on insert (D1), no SQL default
                 },
             },
         );
@@ -96,6 +101,11 @@ fn classify(f: &Field) -> MemberKind {
             optional: f.ty.optional,
             many: f.ty.many,
             column: column_override(f).unwrap_or_else(|| f.name.node.clone()),
+            unique: f.modifiers.iter().any(|m| matches!(m, Modifier::Unique)),
+            default: f.modifiers.iter().find_map(|m| match m {
+                Modifier::Default(dv) => Some(dv.clone()),
+                _ => None,
+            }),
         },
         BaseType::Model(target) => {
             // A to-many model edge, or one carrying an explicit inverse ref, is a
@@ -111,8 +121,7 @@ fn classify(f: &Field) -> MemberKind {
                         .unwrap_or_default(),
                 }
             } else {
-                let fk_col = column_override(f)
-                    .unwrap_or_else(|| format!("{}_id", f.name.node));
+                let fk_col = column_override(f).unwrap_or_else(|| format!("{}_id", f.name.node));
                 MemberKind::Forward {
                     target: target.node.clone(),
                     optional: f.ty.optional,
@@ -326,10 +335,17 @@ fn deco_field(d: &Decorator) -> Option<&Ident> {
 
 fn resolve_soft_delete(field: &Ident, mi: usize, models: &mut [RModel], sink: &mut Sink) {
     let mode = match models[mi].member(&field.node).map(|m| &m.kind) {
-        Some(MemberKind::Scalar { ty: Primitive::Timestamp | Primitive::Date, optional: true, many: false, .. }) => {
-            Some(SoftMode::Timestamp)
-        }
-        Some(MemberKind::Scalar { ty: Primitive::Bool, many: false, .. }) => Some(SoftMode::Bool),
+        Some(MemberKind::Scalar {
+            ty: Primitive::Timestamp | Primitive::Date,
+            optional: true,
+            many: false,
+            ..
+        }) => Some(SoftMode::Timestamp),
+        Some(MemberKind::Scalar {
+            ty: Primitive::Bool,
+            many: false,
+            ..
+        }) => Some(SoftMode::Bool),
         Some(_) => {
             sink.error_note(
                 code::SOFT_DELETE_TYPE,
@@ -356,9 +372,18 @@ fn resolve_soft_delete(field: &Ident, mi: usize, models: &mut [RModel], sink: &m
     }
 }
 
-fn resolve_managed_ts(deco: &str, field: &Ident, mi: usize, models: &mut [RModel], sink: &mut Sink) {
+fn resolve_managed_ts(
+    deco: &str,
+    field: &Ident,
+    mi: usize,
+    models: &mut [RModel],
+    sink: &mut Sink,
+) {
     match models[mi].member(&field.node).map(|m| &m.kind) {
-        Some(MemberKind::Scalar { ty: Primitive::Timestamp | Primitive::Date, .. }) => {
+        Some(MemberKind::Scalar {
+            ty: Primitive::Timestamp | Primitive::Date,
+            ..
+        }) => {
             if deco == "created" {
                 models[mi].created = Some(field.node.clone());
             } else {

@@ -11,11 +11,14 @@ for *where the implementation stands*.
 *.bsl ──manifest::discover──▶ files
       ──parser::parse_file──▶ [Decl]           (per file; recovers at decl boundary)
       ──sema::check─────────▶ CheckedSchema + [Diagnostic]
-      ──codegen (TODO)──────▶ SQL DDL, query/mutation SQL, typed client
+      ──codegen::sql::ddl───▶ SQL DDL          (M2 ✅)
+      ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅; mutations + client TODO)
 ```
 
-`based check` (crates/based-cli) wires discover → parse → sema → render. Sema runs
-only when every file parsed clean (it assumes well-formed input).
+`based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
+same front end (`load_checked` in based-cli), then lowers the `CheckedSchema` to DDL,
+then appends the query SELECT templates (`sql::dml`, reading the AST alongside the IR).
+Both bail unless every file parses *and* checks clean (codegen assumes a clean schema).
 
 ## Crate status
 
@@ -26,8 +29,9 @@ only when every file parsed clean (it assumes well-formed input).
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: `$ctx` type, schema-version. |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
-| based-cli | ✅ works | `based check` only. `gen sql` / `gen client` are TODO. |
-| codegen / runtime | ❌ not started | see Milestones. |
+| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs). `gen client` is TODO. |
+| **based-codegen** | ✅ **M2 (DDL) + M3 read** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (soft-delete/scope injection). Mutations (M3 write) / client (M4) TODO. |
+| runtime | ❌ not started | see Milestones. |
 
 ## based-sema — what it does now
 
@@ -114,17 +118,48 @@ Ordered by value. Each is a real gap with a known approach.
 
 ## Milestones ahead (post-sema)
 
-**M2 — SQL codegen (`based gen sql`).** `CheckedSchema` → DDL. Tables from
-`RModel.table`; columns (scalars, FK `<field>_id`, implicit `id` as uuid/BINARY(16)
-per D1); indexes incl. soft-delete partial indexes (indexing.md); no FK constraints
-by default (relations.md). Dialect = MariaDB first (manifest `dialect`).
+**M2 — SQL DDL codegen (`based gen sql`). ✅ done.** `based-codegen::sql::ddl` renders
+`CheckedSchema` → MariaDB `CREATE TABLE`: columns (scalars, FK `<field>_id`, implicit
+`id`), PK, `(unique)` constraints, declared `@index`es (relation cols resolved to FKs),
+type mapping + no-FK-constraint rule recorded in decisions.md **D10**. IR enriched:
+`MemberKind::Scalar` now carries `unique` + `default`. Tests: `based-codegen/tests/ddl.rs`;
+commerce example generates clean DDL.
+  - *Deferred inside M2*: the **inferred baseline index set** (join keys, filter paths,
+    soft-delete columns → predicate-leading indexes, indexing.md). Needs the inference
+    model (sema resume #3); emitting it blindly spams duplicate keys, and MariaDB has no
+    partial indexes so "predicate-leading" = prepend `deleted_at`, a codegen concern for
+    that pass. Today only *declared* structure is emitted.
+  - *Deferred*: per-field length tuning for `text` (no length primitive; D10 uses
+    `VARCHAR(255)`); custom-PK FK type propagation is handled but untested for non-uuid keys.
 
-**M3 — query/mutation SQL.** Read statements → SELECT with the headline guarantee:
-soft-delete predicate injected across joins/aggregates/page-counts (soft-delete.md),
-before LIMIT. Shapes → projections + relation nesting. Keyset pagination with
-engine-appended unique tiebreaker (pagination.md). Mutations → INSERT/UPDATE/soft
-UPDATE/hard DELETE; `tx` boundaries owned by the engine (principle 7). `@scope`/
-`@tenant` injected like soft-delete (auth.md).
+**M3 — query/mutation SQL.**
+
+*Read side (`sql::dml`) ✅ done.* Each `query` lowers to a parameterized SELECT
+(`based gen sql` appends them after the DDL; tests: `based-codegen/tests/dml.rs`,
+10 cases; commerce generates clean SELECTs). Delivered:
+  - **Headline soft-delete injection** (soft-delete.md): tombstone predicate on the
+    root table (`WHERE`) *and* every joined table (in its `ON`, so `LEFT JOIN` stays
+    left). `@scope` (auth.md) rides the same path. Conventions recorded in **D11**.
+  - Shape projection: bare local columns, `out = path` relation reaches (each hop a
+    JOIN, deduped by path prefix, aliased `j_<prefix>`), `out = sql`…`` inline exprs.
+    Bare-model return projects every stored column (FKs as `<field>_id`).
+  - Filters: bare/inline same-name equality (relation param → FK col), per-param
+    bindings (`-> edge`, `op col`), explicit block/inline `where`; bare bool → `= TRUE`.
+  - Sort cascade (query `order` > model `@sort`) + keyset `id` tiebreaker; `page` →
+    `LIMIT`/`OFFSET`; `with count` → a second live-row `COUNT(*)`.
+  - *Deferred inside M3 read*: nested shape sub-objects (`field { … }` — needs JSON
+    aggregation / a second query; skipped in projection); named-filter calls in `where`
+    (filter bodies unresolved, sema #2 — rendered as a visible `TRUE /* … deferred */`
+    no-op); `@tenant` injection (semantics unspecified vs. `@scope`); keyset cursor
+    comparison + opaque cursor encoding (runtime concern — base SELECT is ORDER+LIMIT).
+
+*Write side (mutations) — next.* Mutations → INSERT/UPDATE/soft UPDATE/hard DELETE;
+`delete` on a soft-delete model rewritten to the tombstone UPDATE, `restore` to its
+inverse; `hard delete` the loud opt-out. `tx` boundaries owned by the engine
+(principle 7). Open runtime questions to settle first: app-generated `id` on INSERT
+(no SQL default, D1 — who binds it), returning the declared shape after a write
+(RETURNING vs. re-select), `^` tx back-references (not in lexer/AST — sema resume #6),
+and `@created`/`@updated` writes (engine-set `CURRENT_TIMESTAMP`, no DB default).
 
 **M4 — client codegen (`based gen client`).** One typed method + one wire route per
 query/mutation (calling.md); input type from params, return from `-> Output`;
@@ -135,8 +170,8 @@ editor: inferred inverse names, inferred indexes — never forced into source.
 
 ## Conventions
 
-- Rust workspace, edition 2021, rust-version 1.85. `cargo test` / `cargo clippy`
-  must stay clean.
+- Rust workspace, edition 2021, rust-version 1.85. `cargo test` / `cargo clippy` /
+  `cargo fmt --check` must stay clean (stock rustfmt, no config).
 - Diagnostics carry spans (`FileId` + byte range); `based-cli/src/render.rs` frames
   them rustc-style. New checks → new stable code in `ir::code` + a note when the fix
   isn't obvious from the message.

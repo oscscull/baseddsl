@@ -1,0 +1,30 @@
+//! based-codegen — turns a [`CheckedSchema`] into target artifacts.
+//!
+//! Milestone 2 wires SQL **DDL** ([`sql::ddl`]): `CheckedSchema` -> `CREATE TABLE`
+//! statements for the target dialect. Query/mutation DML (M3) and the typed client
+//! (M4) join this crate later; each is a module reading the same resolved IR.
+//!
+//! The compiler seed is `based_sema::CheckedSchema`. Codegen never re-derives
+//! resolution facts (table names, FK columns, soft-delete mode) — those live on the
+//! IR. It only picks physical representations (SQL types, index names) per dialect.
+
+pub mod sql;
+
+/// The SQL compile target (manifest `dialect`). MariaDB is first and only for now
+/// (D5); the enum exists so `sql::ddl` can branch when a second dialect lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    MariaDb,
+}
+
+impl Dialect {
+    /// Parse the manifest `dialect` string. Unknown values fall back to MariaDB
+    /// (the documented default) rather than failing — dialect selection is not a
+    /// schema error.
+    pub fn parse(s: &str) -> Dialect {
+        match s {
+            "mariadb" | "mysql" => Dialect::MariaDb,
+            _ => Dialect::MariaDb,
+        }
+    }
+}

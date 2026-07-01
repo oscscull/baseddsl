@@ -15,5 +15,6 @@ based-diagnostics = { workspace = true }
 based-manifest = { workspace = true }
 based-parser = { workspace = true }
 based-sema = { workspace = true }
+based-codegen = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

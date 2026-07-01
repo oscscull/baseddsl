@@ -117,3 +117,55 @@ Legacy names are still aliasable (never required): a column literally named with
 reached as-is where an identifier is expected, or — if you'd rather not spell the keyword — via
 `(column "order")` / `@table("order")` (D3). The alias is greppable and lives in one place
 (principle 4); it is now a convenience, not a requirement for adopting a legacy schema.
+
+## D10 — SQL type mapping (MariaDB DDL codegen)
+The physical SQL type each primitive lowers to (`based gen sql`, dialect `mariadb`). Chosen for
+correctness-by-default over a literal name match — an unbounded/overflow-prone default is a silent
+footgun, and this is a DB-first tool:
+- `text` -> **`VARCHAR(255)`**. Bounded so the column is directly index/unique-able (MariaDB cannot
+  index a `TEXT` column without a prefix length). The convention default; length tuning is a later
+  concern (no length primitive exists yet).
+- `int` -> **`BIGINT`**. The single `int` primitive must not silently overflow on the common
+  money/count use (prices, totals in the commerce example).
+- `bool` -> **`BOOLEAN`** (MariaDB alias for `TINYINT(1)`).
+- `timestamp` -> **`DATETIME`** (not `TIMESTAMP`): dodges MariaDB's implicit `ON UPDATE
+  CURRENT_TIMESTAMP` on the first timestamp column and the 2038 range cap. `@created`/`@updated` are
+  engine-managed explicitly, so no implicit column behavior is wanted.
+- `date` -> `DATE`; `json` -> `JSON`.
+- `uuid` / `Id` -> **`UUID`** (native MariaDB type, D1). The implicit `id` is app-generated, so it
+  gets no SQL `DEFAULT`; a relation's FK column takes the target's PK type (default `UUID`).
+- A to-many scalar (`text[]`) has no columnar form -> `JSON` (a JSON array).
+
+Relations emit the FK *column* (`<field>_id`) but **no** `FOREIGN KEY` constraint — constraints are
+opt-in (relations.md). `(unique)` -> a `UNIQUE` constraint; `@index` -> an inline `KEY` / `UNIQUE
+KEY` whose column list resolves relation fields to their FK columns. All identifiers are backtick-
+quoted (legacy/reserved names like `order`, `user` are common, D8).
+
+## D11 — SQL DML mapping (MariaDB, query SELECTs)
+How a `query` lowers to SQL (`based gen sql` query section, `based-codegen::sql::dml`). The read
+side; mutations are a later increment.
+- **Root alias = the table name** (`FROM \`order\``); every join is aliased `j_<path_prefix>` with
+  dots -> `_` (`address.city` -> `j_address_city`), so joins dedupe by the path prefix they traverse
+  and a shape + a `where` reaching the same relation share one join.
+- **Relation reaches become joins; a terminal relation is its FK column.** `placed_by.name` joins
+  `user` and reads `name`; a single-segment relation in a filter (`org = $org`) compares the local
+  FK (`order.org_id`), no join. Forward-optional -> `LEFT JOIN`, forward-required -> `JOIN`
+  (inner), inverse/to-many -> `LEFT JOIN`.
+- **Soft-delete + `@scope` injection is the headline guarantee** (soft-delete.md, auth.md). The
+  tombstone predicate is added to the root `WHERE` and to *every joined table's `ON`* (keeping a
+  `LEFT JOIN` a left join). Covered subset -> predicate: timestamp/date `IS NULL`, bool `= FALSE`.
+  `@scope(pred)` is lowered like any `where` and ANDed on. The user writes neither.
+- **Parameters render as named `:name` placeholders** (`$ctx.org` -> `:ctx_org`), not MariaDB's
+  native positional `?`. Named keeps the emitted template legible (readable > terse, CLAUDE.md);
+  the generated client (M4) translates to the driver's binding form.
+- **Sort cascade**: query `order (...)` > model `@sort` > none (sema lints the empty `list`). Keyset
+  pagination (a `page` without `offset`) appends `\`root\`.\`id\` ASC` as the unique tiebreaker —
+  shown in the SQL, never written in source (principle 8, pagination.md).
+- **Pagination**: `page (N)` -> `LIMIT N`; `offset` -> `... OFFSET :offset`; `with count` -> a
+  second `SELECT COUNT(*)` over the same FROM/JOIN/WHERE (live rows, no LIMIT). The keyset cursor
+  comparison itself is a runtime concern and is *not* in the generated base SELECT.
+- **Bare bool** in a predicate (`where (... and active)`) -> `\`t\`.\`active\` = TRUE`. Operators:
+  `~` -> `LIKE`, `in` -> `IN`, `has` -> `MEMBER OF` (JSON array containment), the rest verbatim.
+- *Deferred, rendered visibly rather than wrong*: nested shape sub-objects are skipped (need JSON
+  aggregation); a named-filter call in `where` becomes `TRUE /* filter … deferred */` (filter bodies
+  aren't resolved against the call site yet, sema resume #2).

@@ -6,6 +6,7 @@ members = [
     "crates/based-manifest",
     "crates/based-parser",
     "crates/based-sema",
+    "crates/based-codegen",
     "crates/based-cli",
 ]
 
@@ -22,6 +23,7 @@ based-diagnostics = { path = "crates/based-diagnostics" }
 based-manifest = { path = "crates/based-manifest" }
 based-parser = { path = "crates/based-parser" }
 based-sema = { path = "crates/based-sema" }
+based-codegen = { path = "crates/based-codegen" }
 # external
 logos = "0.14"
 ariadne = "0.5"

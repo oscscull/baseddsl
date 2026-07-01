@@ -13,7 +13,10 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
         sink.error(
             code::UNKNOWN_MODEL,
             s.from.span,
-            format!("shape `{}` is from unknown model `{}`", s.name.node, s.from.node),
+            format!(
+                "shape `{}` is from unknown model `{}`",
+                s.name.node, s.from.node
+            ),
         );
         return None;
     };
@@ -127,7 +130,10 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         sink.error_note(
             code::GET_NOT_UNIQUE,
             q.span,
-            format!("`get` query `{}` is not keyed on a unique field", q.name.node),
+            format!(
+                "`get` query `{}` is not keyed on a unique field",
+                q.name.node
+            ),
             "a scalar `get` needs an equality on `id`, a `(unique)` column, or a unique index",
         );
     }
@@ -158,7 +164,12 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
 
 /// Resolve a return type to its underlying model. A shape resolves via its `from`;
 /// a bare model resolves to itself; `full` needs a block body naming the model.
-fn resolve_return(ret: &RetType, body_model: Option<&str>, cx: &Cx, sink: &mut Sink) -> Option<Resolved> {
+fn resolve_return(
+    ret: &RetType,
+    body_model: Option<&str>,
+    cx: &Cx,
+    sink: &mut Sink,
+) -> Option<Resolved> {
     let name = ret.ty.node.as_str();
     if name == "full" {
         return match body_model {
@@ -167,7 +178,11 @@ fn resolve_return(ret: &RetType, body_model: Option<&str>, cx: &Cx, sink: &mut S
                 shape: Some("full".to_string()),
             }),
             Some(m) => {
-                sink.error(code::UNKNOWN_MODEL, ret.ty.span, format!("unknown model `{m}`"));
+                sink.error(
+                    code::UNKNOWN_MODEL,
+                    ret.ty.span,
+                    format!("unknown model `{m}`"),
+                );
                 None
             }
             None => {
@@ -209,7 +224,10 @@ fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
             Some(_) => sink.error(
                 code::BINDING_EDGE,
                 edge.span,
-                format!("`{}` is a column, not a relation, so a param can't bind via it", edge.node),
+                format!(
+                    "`{}` is a column, not a relation, so a param can't bind via it",
+                    edge.node
+                ),
             ),
             None => unknown_field(cx, ti, edge, sink),
         },
@@ -238,7 +256,13 @@ fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
 }
 
 /// Validate `where`/`order`/`page` clauses; returns whether an `order` is present.
-fn check_clauses(clauses: &[Clause], mi: usize, cx: &Cx, params: &[String], sink: &mut Sink) -> bool {
+fn check_clauses(
+    clauses: &[Clause],
+    mi: usize,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) -> bool {
     let mut has_order = false;
     for c in clauses {
         match c {
@@ -286,7 +310,9 @@ fn collect_eq_cols(p: &Predicate, out: &mut Vec<String>) {
             collect_eq_cols(b, out);
         }
         Predicate::Not(inner) => collect_eq_cols(inner, out),
-        Predicate::Cmp { path, op: Op::Eq, .. } if path.segments.len() == 1 => {
+        Predicate::Cmp {
+            path, op: Op::Eq, ..
+        } if path.segments.len() == 1 => {
             out.push(path.segments[0].node.clone());
         }
         _ => {}
@@ -322,7 +348,11 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], sink: &mut Sink) {
                 }
             }
         }
-        WriteStmt::Update { model, where_, assigns } => {
+        WriteStmt::Update {
+            model,
+            where_,
+            assigns,
+        } => {
             if let Some(mi) = write_model(model, cx, sink) {
                 resolve::check_predicate(where_, Some(mi), cx, params, sink);
                 for a in assigns {
@@ -341,7 +371,10 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], sink: &mut Sink) {
                     sink.error(
                         code::RESTORE_NOT_SOFT,
                         model.span,
-                        format!("`restore` requires a @soft_delete model; `{}` has none", model.node),
+                        format!(
+                            "`restore` requires a @soft_delete model; `{}` has none",
+                            model.node
+                        ),
                     );
                 }
                 resolve::check_predicate(where_, Some(mi), cx, params, sink);
@@ -373,7 +406,11 @@ fn write_model(name: &Ident, cx: &Cx, sink: &mut Sink) -> Option<usize> {
     match cx.find(&name.node) {
         Some(i) => Some(i),
         None => {
-            sink.error(code::UNKNOWN_MODEL, name.span, format!("unknown model `{}`", name.node));
+            sink.error(
+                code::UNKNOWN_MODEL,
+                name.span,
+                format!("unknown model `{}`", name.node),
+            );
             None
         }
     }

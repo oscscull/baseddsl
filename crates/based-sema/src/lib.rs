@@ -52,7 +52,11 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let mut index: HashMap<String, usize> = HashMap::new();
     for (i, m) in models.iter().enumerate() {
         if index.contains_key(&m.name.node) {
-            sink.error(code::DUP_MODEL, m.name.span, format!("duplicate model `{}`", m.name.node));
+            sink.error(
+                code::DUP_MODEL,
+                m.name.span,
+                format!("duplicate model `{}`", m.name.node),
+            );
         } else {
             index.insert(m.name.node.clone(), i);
         }
@@ -61,7 +65,11 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     for s in &shapes {
         // `full` is a per-model convention (D9), so duplicate `full` is allowed.
         if s.name.node != "full" && shape_from.contains_key(&s.name.node) {
-            sink.error(code::DUP_SHAPE, s.name.span, format!("duplicate shape `{}`", s.name.node));
+            sink.error(
+                code::DUP_SHAPE,
+                s.name.span,
+                format!("duplicate shape `{}`", s.name.node),
+            );
         } else {
             shape_from.insert(s.name.node.clone(), s.from.node.clone());
         }
@@ -69,7 +77,11 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let mut filter_arity: HashMap<String, usize> = HashMap::new();
     for f in &filters {
         if filter_arity.contains_key(&f.name.node) {
-            sink.error(code::DUP_FILTER, f.name.span, format!("duplicate filter `{}`", f.name.node));
+            sink.error(
+                code::DUP_FILTER,
+                f.name.span,
+                format!("duplicate filter `{}`", f.name.node),
+            );
         } else {
             filter_arity.insert(f.name.node.clone(), f.params.len());
         }
@@ -82,12 +94,19 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         .chain(mutations.iter().map(|m| (&m.name.node, m.name.span)))
     {
         if !callable.insert(name.as_str()) {
-            sink.error(code::DUP_CALLABLE, span, format!("duplicate query/mutation `{name}`"));
+            sink.error(
+                code::DUP_CALLABLE,
+                span,
+                format!("duplicate query/mutation `{name}`"),
+            );
         }
     }
 
     // 2. Skeletons, then 3. validate (needs &mut models + the name index).
-    let mut rmodels: Vec<RModel> = models.iter().map(|m| model::skeleton(m, &mut sink)).collect();
+    let mut rmodels: Vec<RModel> = models
+        .iter()
+        .map(|m| model::skeleton(m, &mut sink))
+        .collect();
     for (mi, ast) in models.iter().enumerate() {
         model::validate(ast, mi, &mut rmodels, &index, &mut sink);
     }
@@ -115,7 +134,10 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         .iter()
         .filter_map(|m| check::check_mutation(m, &cx, &mut sink))
         .collect();
-    let rfilters: Vec<RFilter> = filters.iter().map(|f| check::check_filter(f, &cx, &mut sink)).collect();
+    let rfilters: Vec<RFilter> = filters
+        .iter()
+        .map(|f| check::check_filter(f, &cx, &mut sink))
+        .collect();
 
     let schema = CheckedSchema {
         models: rmodels,

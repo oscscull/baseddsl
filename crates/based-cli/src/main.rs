@@ -1,12 +1,16 @@
 //! `based` — the compiler driver.
 //!
-//! Milestone 1 wires `based check`: discover `.bsl` files -> parse -> sema ->
-//! render diagnostics. Codegen subcommands (`gen sql`, `gen client`) come later.
+//! `based check`: discover `.bsl` files -> parse -> sema -> render diagnostics.
+//! `based gen sql`: the same front end, then emit SQL DDL from the checked schema.
+//! (`gen client` comes later.)
 
 mod render;
 
 use anyhow::{bail, Context};
-use based_ast::FileId;
+use based_ast::{Decl, FileId};
+use based_codegen::Dialect;
+use based_manifest::Project;
+use based_sema::CheckedSchema;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -25,16 +29,72 @@ enum Command {
         #[arg(default_value = ".")]
         root: PathBuf,
     },
+    /// Generate target artifacts from the checked schema.
+    Gen {
+        #[command(subcommand)]
+        target: GenTarget,
+    },
+}
+
+#[derive(Subcommand)]
+enum GenTarget {
+    /// Emit SQL DDL (`CREATE TABLE …`) for the manifest dialect.
+    Sql {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Write to this file instead of stdout.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Check { root } => cmd_check(&root),
+        Command::Gen { target } => match target {
+            GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
+        },
     }
 }
 
 fn cmd_check(root: &Path) -> anyhow::Result<()> {
+    let (_project, schema, _decls, warnings) = load_checked(root)?;
+    let n = schema.models.len();
+    if warnings > 0 {
+        println!("ok with warnings: {warnings} warning(s) across {n} model(s)");
+    } else {
+        println!("ok: {n} model(s) checked clean");
+    }
+    Ok(())
+}
+
+fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+    let (project, schema, decls, _warnings) = load_checked(root)?;
+    let dialect = Dialect::parse(&project.manifest.dialect);
+    // Schema DDL first, then the parameterized query templates (M3 read side).
+    let mut sql = based_codegen::sql::ddl(&schema, dialect);
+    if !schema.queries.is_empty() {
+        sql.push_str(
+            "\n\n-- ============================== queries ==============================\n",
+        );
+        sql.push_str(&based_codegen::sql::dml::dml(&schema, &decls, dialect));
+    }
+    match out {
+        Some(path) => {
+            std::fs::write(path, &sql).with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("wrote {} ({} models)", path.display(), schema.models.len());
+        }
+        None => print!("{sql}"),
+    }
+    Ok(())
+}
+
+/// Shared front end: discover -> parse -> sema. Renders every diagnostic and bails
+/// on any error (a clean schema is a precondition for codegen). Returns the project,
+/// the checked schema, and the warning count.
+fn load_checked(root: &Path) -> anyhow::Result<(Project, CheckedSchema, Vec<Decl>, usize)> {
     // 1. Discover the closed set of `.bsl` files under the manifest root.
     let project = match based_manifest::discover(root) {
         Ok(p) => p,
@@ -68,22 +128,19 @@ fn cmd_check(root: &Path) -> anyhow::Result<()> {
 
     // 3. Semantic analysis over the whole declaration set (only if parsing was
     //    clean — sema assumes well-formed input).
+    let mut schema = CheckedSchema::default();
     if errors == 0 {
-        let (_schema, diags) = based_sema::check(&all_decls);
+        let (checked, diags) = based_sema::check(&all_decls);
         count(&diags, &mut errors, &mut warnings);
         render::render(&diags, &sources);
+        schema = checked;
     }
 
     let n = sources.len();
     if errors > 0 {
         bail!("check failed: {errors} error(s), {warnings} warning(s) across {n} file(s)");
     }
-    if warnings > 0 {
-        println!("ok with warnings: {warnings} warning(s) across {n} file(s)");
-    } else {
-        println!("ok: {n} file(s) parsed clean");
-    }
-    Ok(())
+    Ok((project, schema, all_decls, warnings))
 }
 
 fn count(diags: &[based_diagnostics::Diagnostic], errors: &mut usize, warnings: &mut usize) {

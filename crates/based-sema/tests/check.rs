@@ -26,7 +26,11 @@ fn errors(diags: &[Diagnostic]) -> Vec<&str> {
 
 fn assert_clean(src: &str) {
     let (_, diags) = analyze(src);
-    assert!(diags.is_empty(), "expected no diagnostics, got: {:?}", codes(&diags));
+    assert!(
+        diags.is_empty(),
+        "expected no diagnostics, got: {:?}",
+        codes(&diags)
+    );
 }
 
 // ---------- happy path -----------------------------------------------------
@@ -68,14 +72,24 @@ fn resolved_schema_shape() {
         }
         "#,
     );
-    assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", codes(&diags));
+    assert!(
+        errors(&diags).is_empty(),
+        "unexpected errors: {:?}",
+        codes(&diags)
+    );
 
     let order = schema.model("Order").expect("Order resolved");
     assert_eq!(order.table, "order"); // snake_case, no pluralization (D3)
     assert_eq!(order.created.as_deref(), Some("created_at"));
-    assert!(matches!(order.soft_delete.as_ref().unwrap().mode, SoftMode::Timestamp));
+    assert!(matches!(
+        order.soft_delete.as_ref().unwrap().mode,
+        SoftMode::Timestamp
+    ));
     // implicit `id` is prepended (D2)
-    assert!(matches!(order.member("id").unwrap().kind, MemberKind::Scalar { .. }));
+    assert!(matches!(
+        order.member("id").unwrap().kind,
+        MemberKind::Scalar { .. }
+    ));
     // forward relation -> FK column `placed_by_id`
     match &order.member("placed_by").unwrap().kind {
         MemberKind::Forward { fk_col, target, .. } => {
@@ -107,7 +121,11 @@ fn query_verb_inference() {
         "#,
     );
     assert!(errors(&diags).is_empty(), "{:?}", codes(&diags));
-    let get = schema.queries.iter().find(|q| q.name == "user_by_id").unwrap();
+    let get = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "user_by_id")
+        .unwrap();
     assert_eq!(get.verb, Verb::Get);
     assert_eq!(get.target, "User");
     assert_eq!(get.ret_shape.as_deref(), Some("UserCard"));

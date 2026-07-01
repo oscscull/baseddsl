@@ -6,7 +6,7 @@
 //! codegen reads (alongside the AST) — the resolution facts that are *not* in the
 //! AST (inferred verb, relation targets, table names, soft-delete mode) live here.
 
-use based_ast::{Predicate, Primitive, SortTerm, Span, Verb};
+use based_ast::{DefaultVal, Predicate, Primitive, SortTerm, Span, Verb};
 use based_diagnostics::Diagnostic;
 use std::collections::HashMap;
 
@@ -33,10 +33,10 @@ pub mod code {
     pub const INDEX_COLUMN: &str = "E0122";
     pub const INVERSE_REF: &str = "E0123"; // (Model.field) does not name a forward edge
     pub const INVERSE_INFER: &str = "E0124"; // to-many with no inferable / ambiguous inverse
-    // shapes
+                                             // shapes
     pub const SHAPE_BARE_RELATION: &str = "E0130"; // bare relation must nest or `=`
     pub const SHAPE_NEST_SCALAR: &str = "E0131"; // nested a non-relation
-    // queries / mutations
+                                                 // queries / mutations
     pub const UNKNOWN_RETURN: &str = "E0140";
     pub const RETURN_MODEL_MISMATCH: &str = "E0141";
     pub const FULL_NEEDS_MODEL: &str = "E0142";
@@ -133,6 +133,10 @@ pub enum MemberKind {
         optional: bool,
         many: bool,
         column: String,
+        /// `(unique)` modifier — a single-column UNIQUE constraint at codegen.
+        unique: bool,
+        /// `(default …)` value, carried through for DDL column defaults.
+        default: Option<DefaultVal>,
     },
     /// To-one relation: FK lives on this table (`<field>_id`, or a custom join).
     Forward {
@@ -223,12 +227,10 @@ pub struct Sink {
 
 impl Sink {
     pub fn error(&mut self, code: &'static str, span: Span, msg: impl Into<String>) {
-        self.diags
-            .push(Diagnostic::error(code, msg).at(span));
+        self.diags.push(Diagnostic::error(code, msg).at(span));
     }
     pub fn warn(&mut self, code: &'static str, span: Span, msg: impl Into<String>) {
-        self.diags
-            .push(Diagnostic::warning(code, msg).at(span));
+        self.diags.push(Diagnostic::warning(code, msg).at(span));
     }
     pub fn error_note(
         &mut self,
