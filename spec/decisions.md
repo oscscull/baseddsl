@@ -224,3 +224,23 @@ arguments, never the DSL.
   surface without an invented HTTP stack. The generated module needs only `serde` + `serde_json`.
 - *Deferred, same as the read side*: nested shape sub-objects (`field { … }`) are skipped in the output
   struct (need JSON aggregation, PLAN M3); the keyset cursor is an opaque `Option<String>` (runtime).
+
+## D14 — Named-filter body resolution (call-site, `$`-params)
+A `filter name(params) = predicate` declares no model, so its column paths belong to no table until it is
+*used*. queries.md left two things open; both resolved here.
+- **Params are `$`-referenced.** A filter param is written `$c` in the body, identical to `$param`
+  everywhere else — the grammar's `param_ref = '$' param_name` already requires it, and "$ means bound
+  parameter everywhere" (queries.md) is the one rule. A bare `c` in a body is a *column*, not the param.
+  (queries.md's old `= c` example was pre-grammar prose; corrected to `= $c`.)
+- **Body columns resolve at each call site**, not at declaration. When a `where` / `@scope` / another
+  filter references `f(args)` (or a zero-arg `f` used as a bare atom), sema re-resolves `f`'s body against
+  the *caller's* model, with the filter's own params as the legal `$`-set. Column-name errors (`E0111`),
+  traversal errors, and operand typing (`E0150`/`E0151`) all fire against the real model — so the same
+  filter reused on two models is checked twice, once per shape. At declaration only params / nested-filter
+  arity / functions are checked (no model to bind columns to).
+- **Cycles terminate.** A filter that expands to itself (directly or transitively) is guarded by an
+  in-progress stack and simply stops re-expanding; recursion is not *rejected* (no error), just bounded.
+- *Deferred*: propagating soft-delete injection *through* a filter call into codegen (M3 read still
+  renders filter calls as a `TRUE /* deferred */` no-op — sema now resolves them, but the SQL lowering of
+  a filter body is a separate codegen pass); type-checking each `arg` against how its param is used in the
+  body (filter params carry no declared column, so arg/usage agreement is unchecked).

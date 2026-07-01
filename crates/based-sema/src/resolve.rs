@@ -17,8 +17,9 @@ pub struct Cx<'a> {
     pub models: &'a [RModel],
     /// model name -> index into `models`.
     pub index: &'a HashMap<String, usize>,
-    /// named filter -> parameter count (for call arity checks).
-    pub filters: &'a HashMap<String, usize>,
+    /// named filter -> its declaration (arity + body). The body is re-resolved
+    /// against each call-site model, since a filter has no model of its own.
+    pub filters: &'a HashMap<String, &'a NamedFilter>,
     /// shape name -> the model it projects (`from`). Used to resolve return types.
     pub shapes: &'a HashMap<String, String>,
 }
@@ -328,8 +329,9 @@ pub fn resolve_path(path: &Path, start: usize, cx: &Cx, sink: &mut Sink) -> Opti
 
 /// Check one predicate against an optional model context. `params` is the set of
 /// legal `$`-parameter names (besides `$ctx`, always allowed, D4). When `model`
-/// is `None` (a named filter, resolved without a caller), column paths are not
-/// bound to a model — only params, filter calls, and functions are checked.
+/// is `None` (a named filter checked at its declaration, without a caller), column
+/// paths are not bound to a model — only params, filter calls, and functions are
+/// checked; the body's columns resolve later at each call site (see below).
 pub fn check_predicate(
     pred: &Predicate,
     model: Option<usize>,
@@ -337,12 +339,26 @@ pub fn check_predicate(
     params: &[String],
     sink: &mut Sink,
 ) {
+    check_predicate_in(pred, model, cx, params, &mut Vec::new(), sink);
+}
+
+/// Inner walker carrying `in_filters`, the stack of named filters currently being
+/// expanded, so a filter that (directly or transitively) calls itself terminates
+/// instead of recursing forever.
+fn check_predicate_in(
+    pred: &Predicate,
+    model: Option<usize>,
+    cx: &Cx,
+    params: &[String],
+    in_filters: &mut Vec<String>,
+    sink: &mut Sink,
+) {
     match pred {
         Predicate::Or(a, b) | Predicate::And(a, b) => {
-            check_predicate(a, model, cx, params, sink);
-            check_predicate(b, model, cx, params, sink);
+            check_predicate_in(a, model, cx, params, in_filters, sink);
+            check_predicate_in(b, model, cx, params, in_filters, sink);
         }
-        Predicate::Not(p) => check_predicate(p, model, cx, params, sink),
+        Predicate::Not(p) => check_predicate_in(p, model, cx, params, in_filters, sink),
         Predicate::Cmp { path, op, value } => {
             if let Some(mi) = model {
                 resolve_path(path, mi, cx, sink);
@@ -356,8 +372,11 @@ pub fn check_predicate(
         }
         Predicate::Bare(path) => {
             // A bare atom is a bool column or a zero-arg named-filter reference.
-            if path.segments.len() == 1 && cx.filters.contains_key(&path.segments[0].node) {
-                return;
+            if path.segments.len() == 1 {
+                if let Some(def) = cx.filters.get(&path.segments[0].node) {
+                    resolve_filter_body(def, model, cx, in_filters, sink);
+                    return;
+                }
             }
             if let Some(mi) = model {
                 resolve_path(path, mi, cx, sink);
@@ -370,17 +389,23 @@ pub fn check_predicate(
                     name.span,
                     format!("unknown filter `{}`", name.node),
                 ),
-                Some(&arity) if arity != args.len() => sink.error(
+                Some(def) if def.params.len() != args.len() => sink.error(
                     code::FILTER_ARITY,
                     name.span,
                     format!(
-                        "filter `{}` takes {arity} argument(s), got {}",
+                        "filter `{}` takes {} argument(s), got {}",
                         name.node,
+                        def.params.len(),
                         args.len()
                     ),
                 ),
-                Some(_) => {}
+                // Arity is right: resolve the filter's body against the call-site
+                // model, so its column paths (`address.city = …`) are checked
+                // against the model the query actually runs on (a filter has no
+                // model of its own).
+                Some(def) => resolve_filter_body(def, model, cx, in_filters, sink),
             }
+            // The arguments themselves are values in the *caller's* param scope.
             for v in args {
                 check_value(v, model, cx, params, sink);
             }
@@ -401,6 +426,28 @@ pub fn check_predicate(
             }
         }
     }
+}
+
+/// Re-resolve a named filter's body against the call-site `model`. The filter's
+/// *own* params are the legal `$`-set inside its body (queries.md: a filter param
+/// is referenced as `$c`, same `$`-means-bound rule as everywhere else — D14).
+/// `in_filters` guards against a filter that expands to itself. With no call-site
+/// model (`model` is `None`, e.g. a filter reached while checking another filter's
+/// declaration) there is nothing to resolve columns against, so this is a no-op.
+fn resolve_filter_body(
+    def: &NamedFilter,
+    model: Option<usize>,
+    cx: &Cx,
+    in_filters: &mut Vec<String>,
+    sink: &mut Sink,
+) {
+    if model.is_none() || in_filters.iter().any(|n| n == &def.name.node) {
+        return;
+    }
+    let fparams: Vec<String> = def.params.iter().map(|p| p.name.node.clone()).collect();
+    in_filters.push(def.name.node.clone());
+    check_predicate_in(&def.pred, model, cx, &fparams, in_filters, sink);
+    in_filters.pop();
 }
 
 pub fn check_value(

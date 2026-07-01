@@ -74,16 +74,18 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             shape_from.insert(s.name.node.clone(), s.from.node.clone());
         }
     }
-    let mut filter_arity: HashMap<String, usize> = HashMap::new();
+    // Full filter defs (not just arity): the body is re-resolved against each
+    // call-site model in the predicate checker.
+    let mut filter_defs: HashMap<String, &based_ast::NamedFilter> = HashMap::new();
     for f in &filters {
-        if filter_arity.contains_key(&f.name.node) {
+        if filter_defs.contains_key(&f.name.node) {
             sink.error(
                 code::DUP_FILTER,
                 f.name.span,
                 format!("duplicate filter `{}`", f.name.node),
             );
         } else {
-            filter_arity.insert(f.name.node.clone(), f.params.len());
+            filter_defs.insert(f.name.node.clone(), *f);
         }
     }
     // Queries and mutations share the wire namespace (one route each, calling.md).
@@ -115,7 +117,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let cx = Cx {
         models: &rmodels,
         index: &index,
-        filters: &filter_arity,
+        filters: &filter_defs,
         shapes: &shape_from,
     };
 

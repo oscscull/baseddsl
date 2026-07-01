@@ -59,7 +59,8 @@ holds `&mut`.
 - Name resolution: relation targets, inverse pairings (explicit `(M.field)` and
   inferred from the unique forward edge), shape `from`, return types, statement
   models, mutation write models, dotted paths (forward + backward traversal),
-  index columns, `$param` refs (`$ctx` always allowed, D4), filter calls + arity,
+  index columns, `$param` refs (`$ctx` always allowed, D4), filter calls + arity
+  *and* their bodies re-resolved against the call-site model (D14, cycle-guarded),
   functions (closed set `KNOWN_FUNCS`).
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
@@ -86,7 +87,7 @@ scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (29 cases, positive + negative, keyed on
+Tests: `crates/based-sema/tests/check.rs` (45 cases, positive + negative, keyed on
 diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean.
 
 ## based-sema — deferred (resume points)
@@ -106,12 +107,17 @@ Ordered by value. Each is a real gap with a known approach.
    typing is deliberately skipped (collection/json element type differs from the
    column — needs the `many`/element model, not yet on `Terminal`). Tests: 11 new
    cases in `check.rs` (40 total).
-2. **Named-filter body resolution.** A `filter` has no model at declaration, so its
-   column paths are currently left unresolved (`check_predicate(.., None, ..)`).
-   Resolve the body against each *call-site* model instead, and propagate
-   soft-delete injection through filter calls. Note the `filter in_city(c) = … = c`
-   spec example references params bare (no `$`) — decide: require `$c`, or treat a
-   single-segment path matching a filter param as a param ref.
+2. ~~**Named-filter body resolution.**~~ ✅ **done** (D14). A `filter` still declares
+   no model, but its body is now re-resolved against each *call-site* model in
+   `resolve::resolve_filter_body` (reached from the `FilterCall` / bare-atom arms of
+   `check_predicate_in`), with the filter's own params as the legal `$`-set and an
+   `in_filters` stack guarding self-reference. Column errors, traversal errors, and
+   operand typing all fire against the real caller model. Decided the `$c` question:
+   filter params are `$`-referenced (grammar already required it; spec example
+   corrected). Tests: 5 new cases in `check.rs` (45 total). *Still deferred*:
+   codegen lowering of a resolved filter body (M3 read renders the call as a
+   `TRUE /* deferred */` no-op — sema resolves it, SQL emission is a separate pass);
+   arg-vs-usage type agreement (filter params carry no declared column).
 3. **Index lints (indexing.md).** Missing-index (`unindexed`) and useless-index are
    intentionally *not* implemented — they need the inferred baseline index set
    (join keys, filter paths, soft-delete columns) and "consequential table"

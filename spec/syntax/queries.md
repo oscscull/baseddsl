@@ -66,6 +66,6 @@ Contract/implementation split, not redundancy.
 ## Named filters (reuse)
 ```
 filter active = not banned and deleted_at = null;
-filter in_city(c) = address.city.name = c;
+filter in_city(c) = address.city.name = $c;
 ```
-Same predicate language as `where`, soft-delete injection, and auth scope. One expression type everywhere — never separate grammars.
+Same predicate language as `where`, soft-delete injection, and auth scope. One expression type everywhere — never separate grammars. A filter param is referenced as `$c` inside the body — the same `$`-means-bound-parameter rule as everywhere else ("$param vs column", above). A filter has no model of its own; its column paths (`address.city.name`) resolve against whichever model calls it (D14).
