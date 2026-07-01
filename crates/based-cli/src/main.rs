@@ -8,7 +8,7 @@ mod render;
 
 use anyhow::{bail, Context};
 use based_ast::{Decl, FileId};
-use based_codegen::Dialect;
+use based_codegen::{client::ClientTarget, Dialect};
 use based_manifest::Project;
 use based_sema::CheckedSchema;
 use clap::{Parser, Subcommand};
@@ -47,6 +47,15 @@ enum GenTarget {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Emit a typed client module for the manifest client target.
+    Client {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Write to this file instead of stdout.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,6 +64,7 @@ fn main() -> anyhow::Result<()> {
         Command::Check { root } => cmd_check(&root),
         Command::Gen { target } => match target {
             GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
+            GenTarget::Client { root, out } => cmd_gen_client(&root, out.as_deref()),
         },
     }
 }
@@ -95,6 +105,21 @@ fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
             eprintln!("wrote {} ({} models)", path.display(), schema.models.len());
         }
         None => print!("{sql}"),
+    }
+    Ok(())
+}
+
+fn cmd_gen_client(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+    let (project, schema, decls, _warnings) = load_checked(root)?;
+    let target = ClientTarget::parse(&project.manifest.client);
+    let code = based_codegen::client::client(&schema, &decls, target);
+    match out {
+        Some(path) => {
+            std::fs::write(path, &code).with_context(|| format!("writing {}", path.display()))?;
+            let n = schema.queries.len() + schema.mutations.len();
+            eprintln!("wrote {} ({n} callable(s))", path.display());
+        }
+        None => print!("{code}"),
     }
     Ok(())
 }

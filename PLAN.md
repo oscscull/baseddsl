@@ -13,14 +13,16 @@ for *where the implementation stands*.
       ──sema::check─────────▶ CheckedSchema + [Diagnostic]
       ──codegen::sql::ddl───▶ SQL DDL          (M2 ✅)
       ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅)
-      ──codegen::sql::mutations─▶ INSERT/UPDATE/DELETE  (M3 write side ✅; client TODO)
+      ──codegen::sql::mutations─▶ INSERT/UPDATE/DELETE  (M3 write side ✅)
+      ──codegen::client─────▶ typed Rust client (M4 ✅)
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
 same front end (`load_checked` in based-cli), then lowers the `CheckedSchema` to DDL,
 then appends the query SELECT templates (`sql::dml`) and the mutation write templates
-(`sql::mutations`), both reading the AST alongside the IR. Both bail unless every file
-parses *and* checks clean (codegen assumes a clean schema).
+(`sql::mutations`), both reading the AST alongside the IR. `based gen client [--out]`
+runs the same front end, then lowers to a typed Rust client module (`client`). All bail
+unless every file parses *and* checks clean (codegen assumes a clean schema).
 
 ## Crate status
 
@@ -31,8 +33,8 @@ parses *and* checks clean (codegen assumes a clean schema).
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: `$ctx` type, schema-version. |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
-| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations). `gen client` is TODO. |
-| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection). Client (M4) TODO. |
+| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust). |
+| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection); `client` → typed Rust client (inputs/outputs/routes). |
 | runtime | ❌ not started | see Milestones. |
 
 ## based-sema — what it does now
@@ -183,9 +185,27 @@ INSERT). Conventions recorded in **D12**. Delivered:
     erroring; raw write statements have no attached model so `{table}`/`{id}`
     interpolation has no root to bind.
 
-**M4 — client codegen (`based gen client`).** One typed method + one wire route per
-query/mutation (calling.md); input type from params, return from `-> Output`;
-pagination envelope `{ rows, cursor }`. Rust target first (manifest `client`).
+**M4 — client codegen (`based gen client`). ✅ done.** `based-codegen::client` renders the
+`CheckedSchema` → a typed Rust client module (manifest `client` target; Rust first + default).
+Conventions recorded in **D13**. Tests: `based-codegen/tests/client.rs` (10 cases); the commerce
+example generates a module that compiles clean against `serde`/`serde_json`. Delivered:
+  - **One route per callable** (`POST /q/<name>` / `POST /m/<name>`), each a `const` + a
+    `Client<T: Transport>` method that posts the input struct and decodes the output.
+  - **Input struct** per signature: explicit param annotations map through (model type → `Uuid` FK,
+    D1); untyped params infer from the mapped column (`-> edge`/same-name relation → `Uuid`, `op col`/
+    same-name scalar → its type); defaulted/optional params → `Option<T>`. `$ctx` is never an input.
+  - **Output type** from `-> Output`: a shape → a struct projecting its body (relation reach terminal →
+    `Uuid`); a bare model / `full` → every stored column (FKs as `Uuid`); shared shape → one struct.
+    **Return wrapper**: paginated → `Page<T>` (`{ rows, cursor }` envelope), `list`/many → `Vec<T>`,
+    `get` → `Option<T>`; mutation → the single `T`.
+  - **Type aliases** mirror the DDL side (`Uuid`/`Timestamp`/`Date` = `String`, `Json` =
+    `serde_json::Value`); Rust-keyword field names are `r#`-escaped.
+  - **Transport is abstract** — the generated `Client<T>` delegates to a `Transport` trait; the runtime
+    (M-runtime) supplies the concrete HTTP/driver binding. Codegen emits the typed surface only.
+  - *Deferred inside M4*: nested shape sub-objects skipped in the output struct (need JSON aggregation,
+    same as M3 read); a `sql`…`` shape field → `Json` (no static type); the keyset cursor is an opaque
+    `Option<String>` (its encoding is a runtime concern). A second client target (e.g. TypeScript) is
+    the natural next emitter — the `ClientTarget` enum already branches for it.
 
 **M5 — LSP (show-don't-write, principle 8).** Surface engine-derived facts in the
 editor: inferred inverse names, inferred indexes — never forced into source.

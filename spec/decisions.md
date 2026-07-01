@@ -195,3 +195,32 @@ The write side; reuses D11's join resolver so a mutation `where` lowers identica
   shape after a write (RETURNING vs. re-select) — a runtime concern, no trailing SELECT; required-field
   enforcement on `create` (sema resume #7) — an INSERT omits unassigned non-optional columns rather than
   erroring; a raw write statement has no attached model, so `{table}`/`{id}` interpolation has no root.
+
+## D13 — Typed client mapping (Rust, `based gen client`)
+How a `query`/`mutation` signature lowers to a typed client (`based-codegen::client`). The manifest
+`client` target selects the emitter; Rust is first and the default. calling.md's closed RPC surface:
+each signature generates exactly one input type, one output type, and one wire route — the wire carries
+arguments, never the DSL.
+- **One route per callable**: `POST /q/<name>` for a query, `POST /m/<name>` for a mutation. The route
+  is a `const` (`<NAME>_ROUTE`); a `Client<T>` method posts the input struct and decodes the output.
+- **Input struct** = one field per signature param. An explicit annotation wins (a *model* type ->
+  `Uuid`, the FK the wire carries, D1); an untyped param is inferred from the column it maps to (an
+  `-> edge` / same-name relation param -> `Uuid`; an `op col` / same-name scalar -> that column's type).
+  A param with a `(default)` or an optional annotation -> `Option<T>` (client may omit; engine applies
+  the default). `$ctx` is server context (auth.md), never a client input.
+- **Output type** from `-> Output`: a declared shape -> a struct projecting its body (each field typed
+  by the column it reaches; a relation reach's terminal FK is `Uuid`); a bare model / `full` -> a struct
+  of every stored column (forward FKs as `Uuid` under the relation field name, matching the SELECT alias).
+  A shape shared by two callables emits one struct.
+- **Return wrapper** (query): paginated (`page` without `offset`) -> `Page<T>` = `{ rows, cursor }` (the
+  envelope, calling.md — never a bare array); other `list`/many -> `Vec<T>`; a `get` (single) ->
+  `Option<T>` (a keyed lookup may miss). A mutation returns the single `T` (or `Vec<T>` if `-> T[]`).
+- **Type aliases** mirror the DDL side (D10): `Uuid`/`Timestamp`/`Date` alias `String`, `Json` aliases
+  `serde_json::Value`; `optional` -> `Option<T>`, to-many scalar -> `Vec<T>`. A `sql`…`` shape field
+  has no static type -> `Json`. Field names colliding with a Rust keyword are `r#`-escaped (`type` ->
+  `r#type`).
+- **Transport is abstract.** The runtime (not started) owns HTTP/driver binding, so codegen emits
+  `Client<T: Transport>` where `Transport::call(route, &input) -> Result<O, ClientError>` — the typed
+  surface without an invented HTTP stack. The generated module needs only `serde` + `serde_json`.
+- *Deferred, same as the read side*: nested shape sub-objects (`field { … }`) are skipped in the output
+  struct (need JSON aggregation, PLAN M3); the keyset cursor is an opaque `Option<String>` (runtime).
