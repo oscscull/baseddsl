@@ -12,13 +12,15 @@ for *where the implementation stands*.
       ──parser::parse_file──▶ [Decl]           (per file; recovers at decl boundary)
       ──sema::check─────────▶ CheckedSchema + [Diagnostic]
       ──codegen::sql::ddl───▶ SQL DDL          (M2 ✅)
-      ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅; mutations + client TODO)
+      ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅)
+      ──codegen::sql::mutations─▶ INSERT/UPDATE/DELETE  (M3 write side ✅; client TODO)
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
 same front end (`load_checked` in based-cli), then lowers the `CheckedSchema` to DDL,
-then appends the query SELECT templates (`sql::dml`, reading the AST alongside the IR).
-Both bail unless every file parses *and* checks clean (codegen assumes a clean schema).
+then appends the query SELECT templates (`sql::dml`) and the mutation write templates
+(`sql::mutations`), both reading the AST alongside the IR. Both bail unless every file
+parses *and* checks clean (codegen assumes a clean schema).
 
 ## Crate status
 
@@ -29,8 +31,8 @@ Both bail unless every file parses *and* checks clean (codegen assumes a clean s
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: `$ctx` type, schema-version. |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
-| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs). `gen client` is TODO. |
-| **based-codegen** | ✅ **M2 (DDL) + M3 read** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (soft-delete/scope injection). Mutations (M3 write) / client (M4) TODO. |
+| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations). `gen client` is TODO. |
+| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection). Client (M4) TODO. |
 | runtime | ❌ not started | see Milestones. |
 
 ## based-sema — what it does now
@@ -153,13 +155,33 @@ commerce example generates clean DDL.
     no-op); `@tenant` injection (semantics unspecified vs. `@scope`); keyset cursor
     comparison + opaque cursor encoding (runtime concern — base SELECT is ORDER+LIMIT).
 
-*Write side (mutations) — next.* Mutations → INSERT/UPDATE/soft UPDATE/hard DELETE;
-`delete` on a soft-delete model rewritten to the tombstone UPDATE, `restore` to its
-inverse; `hard delete` the loud opt-out. `tx` boundaries owned by the engine
-(principle 7). Open runtime questions to settle first: app-generated `id` on INSERT
-(no SQL default, D1 — who binds it), returning the declared shape after a write
-(RETURNING vs. re-select), `^` tx back-references (not in lexer/AST — sema resume #6),
-and `@created`/`@updated` writes (engine-set `CURRENT_TIMESTAMP`, no DB default).
+*Write side (`sql::mutations`) ✅ done.* Each `mutation` body lowers to INSERT /
+UPDATE / DELETE (`based gen sql` appends them after the queries; tests:
+`based-codegen/tests/mutations.rs`, 8 cases; commerce `place_order` generates a clean
+INSERT). Conventions recorded in **D12**. Delivered:
+  - **Soft-delete rewrite is the headline** (soft-delete.md): `delete` on a
+    `@soft_delete` model becomes the tombstone UPDATE, *never* a real DELETE;
+    `restore` clears it (inverse); `hard delete` is the loud opt-out that does emit a
+    real `DELETE`. Plain models get a plain `DELETE`.
+  - **Injected guards**: the soft-delete live predicate + `@scope` ride into every
+    UPDATE/DELETE `WHERE` so a write can't touch a tombstoned or out-of-scope row
+    (restore skips the live predicate — it targets deleted rows — but keeps scope;
+    hard delete skips the tombstone but keeps scope). Reuses the read-side join
+    resolver, so a relation-reaching `where` lowers to MariaDB's multi-table
+    `UPDATE m JOIN …` / `DELETE m FROM m JOIN …`.
+  - **Engine columns**: app-generated `id` bound as `:id` on INSERT (D1, no SQL
+    default; skipped if the caller sets its own `id`); `@created`/`@updated` set to
+    `CURRENT_TIMESTAMP` on insert, `@updated` bumped on every UPDATE (incl. the soft
+    delete/restore rewrites), all skipped when the caller assigns them explicitly.
+  - **`tx`** renders its inner writes in order under one engine-owned transaction
+    (principle 7 — the engine, not the emitted SQL, owns BEGIN/COMMIT).
+  - *Deferred inside M3 write*: `^` tx back-references (`user = ^.id`) — not in the
+    lexer/AST (sema resume #6), so a `tx` is a flat independent statement sequence;
+    returning the declared shape after a write (RETURNING vs. re-select) — a runtime
+    concern, no trailing SELECT emitted; required-field enforcement on `create`
+    (sema resume #7) — an INSERT omits unassigned non-optional columns rather than
+    erroring; raw write statements have no attached model so `{table}`/`{id}`
+    interpolation has no root to bind.
 
 **M4 — client codegen (`based gen client`).** One typed method + one wire route per
 query/mutation (calling.md); input type from params, return from `-> Output`;

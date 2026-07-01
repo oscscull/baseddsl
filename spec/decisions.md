@@ -169,3 +169,29 @@ side; mutations are a later increment.
 - *Deferred, rendered visibly rather than wrong*: nested shape sub-objects are skipped (need JSON
   aggregation); a named-filter call in `where` becomes `TRUE /* filter … deferred */` (filter bodies
   aren't resolved against the call site yet, sema resume #2).
+
+## D12 — SQL DML mapping (MariaDB, mutation writes)
+How a `mutation` body lowers to SQL (`based gen sql` mutation section, `based-codegen::sql::mutations`).
+The write side; reuses D11's join resolver so a mutation `where` lowers identically to a query `where`.
+- **`delete` on a `@soft_delete` model is rewritten to the tombstone UPDATE — never a real DELETE**
+  (the headline write-side guarantee, soft-delete.md). `restore` is the inverse (clears the tombstone).
+  `hard delete` is the loud, explicit opt-out that *does* emit a real `DELETE`. A plain model's `delete`
+  is a plain `DELETE`. Covered subset: timestamp/date -> `CURRENT_TIMESTAMP`/`NULL`, bool -> `TRUE`/`FALSE`.
+- **Injected guards.** The soft-delete live predicate and `@scope` (auth.md) are ANDed into every
+  UPDATE/DELETE `WHERE`, so a write can't touch a tombstoned or out-of-scope row — same injection the
+  read side does. Exceptions: `restore` skips the *live* predicate (it targets deleted rows) but keeps
+  `@scope`; `hard delete` skips the *tombstone* (that's the point) but keeps `@scope`.
+- **Relation-reaching `where`** lowers to MariaDB's multi-table forms: `UPDATE m JOIN j ON … SET … WHERE …`
+  and `DELETE m FROM m JOIN j ON … WHERE …` (single-table otherwise: `UPDATE m SET …` / `DELETE FROM m`).
+- **Engine-managed columns.** `create` binds the app-generated `id` as `:id` (D1 — uuid, no SQL default),
+  skipped only if the model declares its own `id` the caller sets. `@created`/`@updated` are set to
+  `CURRENT_TIMESTAMP` on insert (D2 — no DB default); `@updated` is bumped on every UPDATE, including the
+  soft delete/restore rewrites. All engine columns are skipped when the caller assigns them explicitly.
+- **`tx { … }`** renders its inner writes in declaration order under one engine-owned transaction
+  (principle 7): the engine, not the emitted SQL, owns BEGIN/COMMIT — no transaction control is emitted.
+- **Parameters** render as named `:name` placeholders, same as D11 (`$ctx.org` -> `:ctx_org`).
+- *Deferred, documented not silently wrong*: `^` tx back-references (`user = ^.id`) — not in the
+  lexer/AST (sema resume #6), so a `tx` is a flat independent statement sequence; returning the declared
+  shape after a write (RETURNING vs. re-select) — a runtime concern, no trailing SELECT; required-field
+  enforcement on `create` (sema resume #7) — an INSERT omits unassigned non-optional columns rather than
+  erroring; a raw write statement has no attached model, so `{table}`/`{id}` interpolation has no root.

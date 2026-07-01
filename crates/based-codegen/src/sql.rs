@@ -30,6 +30,7 @@ use based_sema::{CheckedSchema, MemberKind, RIndex, RModel};
 use crate::Dialect;
 
 pub mod dml;
+pub mod mutations;
 
 /// Render the whole schema as a DDL script (statements separated by blank lines).
 pub fn ddl(schema: &CheckedSchema, dialect: Dialect) -> String {

@@ -81,6 +81,14 @@ fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
         );
         sql.push_str(&based_codegen::sql::dml::dml(&schema, &decls, dialect));
     }
+    if !schema.mutations.is_empty() {
+        sql.push_str(
+            "\n\n-- ============================= mutations =============================\n",
+        );
+        sql.push_str(&based_codegen::sql::mutations::mutations(
+            &schema, &decls, dialect,
+        ));
+    }
     match out {
         Some(path) => {
             std::fs::write(path, &sql).with_context(|| format!("writing {}", path.display()))?;

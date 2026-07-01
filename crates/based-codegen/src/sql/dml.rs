@@ -278,25 +278,27 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<String> {
 
 /// A pending JOIN. Deduped by `alias` (one per traversed path prefix), so a shape
 /// and a `where` that both reach through `placed_by` share the single join.
-struct Join {
-    kind: &'static str, // "JOIN" | "LEFT JOIN"
-    table: String,
-    alias: String,
-    on: String,
+pub(crate) struct Join {
+    pub(crate) kind: &'static str, // "JOIN" | "LEFT JOIN"
+    pub(crate) table: String,
+    pub(crate) alias: String,
+    pub(crate) on: String,
 }
 
 /// Accumulates joins as paths are resolved, so the final FROM/JOIN block reflects
-/// every column any clause reached across.
-struct Select<'a> {
+/// every column any clause reached across. Shared by the read side (this module)
+/// and the write side (`mutations`), which reuses `predicate`/`value` so a
+/// mutation `where` lowers identically to a query `where`.
+pub(crate) struct Select<'a> {
     schema: &'a CheckedSchema,
-    root_alias: String,
-    joins: Vec<Join>,
+    pub(crate) root_alias: String,
+    pub(crate) joins: Vec<Join>,
     /// path-prefix key (e.g. "placed_by", "address.city") -> join alias.
     seen: HashMap<String, String>,
 }
 
 impl<'a> Select<'a> {
-    fn new(schema: &'a CheckedSchema, root: &RModel) -> Self {
+    pub(crate) fn new(schema: &'a CheckedSchema, root: &RModel) -> Self {
         Select {
             schema,
             root_alias: root.table.clone(),
@@ -308,7 +310,7 @@ impl<'a> Select<'a> {
     /// Resolve a dotted path from `root` to `(table_alias, column)`, materializing
     /// a JOIN for each relation step. A terminal relation resolves to its FK column
     /// (so `where (org = $org)` compares `org_id`), never a join.
-    fn resolve(&mut self, path: &Path, root: &RModel) -> (String, String) {
+    pub(crate) fn resolve(&mut self, path: &Path, root: &RModel) -> (String, String) {
         let mut cur = root;
         let mut alias = self.root_alias.clone();
         let mut prefix = String::new();
@@ -424,7 +426,7 @@ impl<'a> Select<'a> {
 
     // ---------- predicate lowering (where / @scope) -----------------------
 
-    fn predicate(&mut self, p: &Predicate, model: &RModel) -> String {
+    pub(crate) fn predicate(&mut self, p: &Predicate, model: &RModel) -> String {
         match p {
             Predicate::And(a, b) => {
                 format!(
@@ -466,7 +468,7 @@ impl<'a> Select<'a> {
         }
     }
 
-    fn value(&mut self, v: &Value, model: &RModel) -> String {
+    pub(crate) fn value(&mut self, v: &Value, model: &RModel) -> String {
         match v {
             Value::Param(pr) => format!(":{}", param_key(pr)),
             Value::Path(p) => {
@@ -482,7 +484,7 @@ impl<'a> Select<'a> {
 // ---------- small helpers --------------------------------------------------
 
 /// Soft-delete predicate for a table alias (soft-delete.md covered subset).
-fn soft_pred(alias: &str, model: &RModel, sd: &SoftDelete) -> String {
+pub(crate) fn soft_pred(alias: &str, model: &RModel, sd: &SoftDelete) -> String {
     let col = column_of(model, &sd.field);
     match sd.mode {
         SoftMode::Timestamp => format!("`{alias}`.`{col}` IS NULL"),
@@ -498,8 +500,19 @@ fn column_of(model: &RModel, field: &str) -> String {
     }
 }
 
+/// Physical column backing any field: a scalar's column, or a forward relation's FK
+/// (`<field>_id`). Falls back to the field name (inverse edge / unknown — the latter
+/// sema already rejected). Used by the write side to map `field = $x` assignments.
+pub(crate) fn physical_col(model: &RModel, field: &str) -> String {
+    match model.member(field).map(|m| &m.kind) {
+        Some(MemberKind::Scalar { column, .. }) => column.clone(),
+        Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
+        _ => field.to_string(),
+    }
+}
+
 /// A one-segment path, for the many call sites that resolve a single field name.
-fn single(name: &str) -> Path {
+pub(crate) fn single(name: &str) -> Path {
     Path {
         segments: vec![Spanned {
             node: name.to_string(),
@@ -522,7 +535,7 @@ fn push_prefix(prefix: &mut String, seg: &str) {
 }
 
 /// `$ctx.org` -> `ctx_org`; `$id` -> `id`. Placeholder-safe (dots removed).
-fn param_key(pr: &ParamRef) -> String {
+pub(crate) fn param_key(pr: &ParamRef) -> String {
     let mut k = pr.name.node.clone();
     for seg in &pr.path {
         k.push('_');
@@ -560,7 +573,7 @@ fn find_shape<'a>(decls: &'a [Decl], name: &str, model: &str) -> Option<&'a Shap
     })
 }
 
-fn sql_op(op: Op) -> &'static str {
+pub(crate) fn sql_op(op: Op) -> &'static str {
     match op {
         Op::Eq => "=",
         Op::Ne => "<>",
@@ -581,7 +594,7 @@ fn dir(d: SortDir) -> &'static str {
     }
 }
 
-fn render_lit(l: &Literal) -> String {
+pub(crate) fn render_lit(l: &Literal) -> String {
     match l {
         Literal::Str(s) => format!("'{}'", s.replace('\'', "''")),
         Literal::Int(i) => i.to_string(),
@@ -591,7 +604,7 @@ fn render_lit(l: &Literal) -> String {
     }
 }
 
-fn render_func(f: &FuncCall) -> String {
+pub(crate) fn render_func(f: &FuncCall) -> String {
     // `now()` is the only value-position function (ir::KNOWN_FUNCS).
     match f.name.node.as_str() {
         "now" => "CURRENT_TIMESTAMP".to_string(),
@@ -601,7 +614,7 @@ fn render_func(f: &FuncCall) -> String {
 
 /// Render a raw-SQL fragment (raw.md): text verbatim, `${param}` -> `:param`,
 /// `{table}`/`{id}` -> safe engine interpolation (root table / its `id`).
-fn render_raw(raw: &RawSql, root_alias: &str, table: &str) -> String {
+pub(crate) fn render_raw(raw: &RawSql, root_alias: &str, table: &str) -> String {
     let mut s = String::new();
     for part in &raw.parts {
         match part {
