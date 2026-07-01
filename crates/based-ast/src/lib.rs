@@ -59,6 +59,12 @@ pub struct Model {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// `Field` is much larger than the other variants (it inlines `TypeExpr`,
+// optional `Predicate`, and several `Vec`s). We keep it unboxed on purpose: this
+// is a build-once AST whose ergonomics — matching `Member::Field(f)` and reading
+// `f.relation_on` without a `Box` hop — matter more than the layout win. Box the
+// heavy *fields* instead if AST size ever shows up in a profile.
+#[allow(clippy::large_enum_variant)]
 pub enum Member {
     Field(Field),
     Index(IndexDecl),

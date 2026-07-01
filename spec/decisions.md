@@ -93,16 +93,27 @@ alike — so the reader and lexer classify an identifier by its case alone:
 - The only `UpperCamel -> snake` transform is **table-name generation** (D3), done at codegen,
   overridable via `@table`. Source identifiers never need folding to relate decl and ref.
 
-## D8 — Reserved words (globally reserved) + legacy alias
-Keywords are **globally reserved**, not contextual. Reserving is simpler and gives clearer
-errors than position-sensitive keywords. Set:
+## D8 — Keywords are contextual (positional), not globally reserved
+Keywords are recognized **positionally**: an identifier is read as a keyword only where the
+grammar expects one, and may otherwise be used as an ordinary identifier. The set of words
+that are keyword-in-position:
 `get list create update delete restore hard tx where order page offset count with guard
 from shape query mutation filter unindexed unsafe on column table by has in not and or
 true false null now`.
 
-A DSL identifier may not BE a reserved word. But the legacy DB we target may have columns or
-tables named with one (`order`, `status`, `group`, …) — we must not require it to change. So
-the escape is an alias: name the field/model with a legal identifier and map it to the real
-name via `(column "order")` / `@table("order")` (D3). The mapping is greppable and lives in
-one place (principle 4). This is the "ugly but explicit" path; it never blocks adopting a
-legacy schema.
+Why not global reservation: the canonical `OrderItem` model names a field `order:` (a would-be
+reserved word), and the same word is the `order (...)` clause keyword — so the two coexist in
+one schema. This is safe because the positional grammar is unambiguous at every decision point:
+a model member always starts with `ident :` (field / soft-override) or `@` (index), so `order:`
+can only be a field; a query clause is `where`/`order`/`page` followed by `(`, so `order (` can
+only be a clause; a statement verb is `get`/`list` at the head of a block. The lexer emits one
+`LowerIdent` token for every lowercase word; the parser matches keyword text only in-position.
+
+Tradeoff accepted: a keyword misused where an identifier is expected fails a token or two later
+with a generic message rather than "X is reserved." The collision surface is small and the
+grammar is tight, so this is worth the friendliness to legacy schemas.
+
+Legacy names are still aliasable (never required): a column literally named with a keyword can be
+reached as-is where an identifier is expected, or — if you'd rather not spell the keyword — via
+`(column "order")` / `@table("order")` (D3). The alias is greppable and lives in one place
+(principle 4); it is now a convenience, not a requirement for adopting a legacy schema.

@@ -8,3 +8,6 @@ rust-version.workspace = true
 [dependencies]
 based-ast = { workspace = true }
 based-diagnostics = { workspace = true }
+
+[dev-dependencies]
+based-parser = { workspace = true }

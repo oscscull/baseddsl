@@ -11,6 +11,7 @@ choice — compiler globs `**/*.bsl`. Recommended convention: `<domain>/model.bs
 + `<domain>/queries.bsl` (access layer). See spec/examples/commerce.
 
 Repo layout:
+- `PLAN.md` — implementation status + build-out roadmap (what's done/deferred/next). Read when resuming work.
 - `spec/` — language design docs (prose). Source of truth for *what* the language is.
 - `spec/grammar.ebnf` — canonical grammar. Source of truth for *what parses*; resolves prose ambiguity.
 - `spec/decisions.md` — resolved implementation decisions not in the prose (Id, implicit fields, table naming, $ctx, file layout).

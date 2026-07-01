@@ -199,9 +199,10 @@ raw_char    = ? any char except '`' and an interp opener ? ;
 
 (* ---------- Lexical ------------------------------------------------------- *)
 
-(* Keywords are globally reserved (decisions.md D8); an ident may not be one.   *)
-(* Legacy reserved-word columns/tables are reached via (column "...") /         *)
-(* @table("...") aliases, never by naming an ident a keyword.                   *)
+(* Keywords are contextual (decisions.md D8): a word is a keyword only where the *)
+(* grammar expects one; elsewhere it is an ordinary ident. A field may thus be   *)
+(* named `order:` even though `order (...)` is a clause. Legacy keyword-named    *)
+(* columns/tables may also be aliased via (column "...") / @table("...").        *)
 ident       = lower_ident | upper_ident ;
 lower_ident = lower_alpha { alnum | '_' } ;
 upper_ident = upper_alpha { alnum } ;   (* UpperCamel model references         *)
