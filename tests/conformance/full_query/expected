@@ -1,0 +1,3 @@
+OK
+query active_products  params=2  ret=ProductCard[]  body=block
+filter recent  params=0

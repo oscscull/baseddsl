@@ -1,0 +1,3 @@
+OK
+model Order  decorators=[soft_delete, sort]  fields=8  indexes=2
+shape OrderCard from Order  fields=4

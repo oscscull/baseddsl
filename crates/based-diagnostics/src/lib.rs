@@ -25,11 +25,23 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn error(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, severity: Severity::Error, message: message.into(), span: None, notes: Vec::new() }
+        Self {
+            code,
+            severity: Severity::Error,
+            message: message.into(),
+            span: None,
+            notes: Vec::new(),
+        }
     }
 
     pub fn warning(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, severity: Severity::Warning, message: message.into(), span: None, notes: Vec::new() }
+        Self {
+            code,
+            severity: Severity::Warning,
+            message: message.into(),
+            span: None,
+            notes: Vec::new(),
+        }
     }
 
     pub fn at(mut self, span: Span) -> Self {

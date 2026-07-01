@@ -280,11 +280,27 @@ pub struct Mutation {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WriteStmt {
-    Create { model: Ident, assigns: Vec<Assign> },
-    Update { model: Ident, where_: Predicate, assigns: Vec<Assign> },
-    Delete { model: Ident, where_: Predicate },
-    Restore { model: Ident, where_: Predicate },
-    HardDelete { model: Ident, where_: Predicate },
+    Create {
+        model: Ident,
+        assigns: Vec<Assign>,
+    },
+    Update {
+        model: Ident,
+        where_: Predicate,
+        assigns: Vec<Assign>,
+    },
+    Delete {
+        model: Ident,
+        where_: Predicate,
+    },
+    Restore {
+        model: Ident,
+        where_: Predicate,
+    },
+    HardDelete {
+        model: Ident,
+        where_: Predicate,
+    },
     Tx(Vec<WriteStmt>),
     Raw(RawSql),
 }
@@ -310,10 +326,17 @@ pub enum Predicate {
     Or(Box<Predicate>, Box<Predicate>),
     And(Box<Predicate>, Box<Predicate>),
     Not(Box<Predicate>),
-    Cmp { path: Path, op: Op, value: Value },
+    Cmp {
+        path: Path,
+        op: Op,
+        value: Value,
+    },
     /// bare bool column, e.g. `active`
     Bare(Path),
-    FilterCall { name: Ident, args: Vec<Value> },
+    FilterCall {
+        name: Ident,
+        args: Vec<Value>,
+    },
     Raw(RawSql),
 }
 

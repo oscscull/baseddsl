@@ -8,4 +8,4 @@ rust-version.workspace = true
 [dependencies]
 based-ast = { workspace = true }
 based-diagnostics = { workspace = true }
-# logos lexer is added when the lexer lands (parser milestone).
+logos = { workspace = true }

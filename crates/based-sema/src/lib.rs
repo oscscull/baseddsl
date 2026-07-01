@@ -19,6 +19,10 @@ pub struct CheckedSchema {
 }
 
 /// Resolve and check the whole declaration set (gathered from every `.bsl` file).
+///
+/// Milestone status: the parser pipeline is wired end-to-end, but the resolution
+/// and lint passes listed above are not implemented yet — this currently returns
+/// an empty schema and no diagnostics so `based check` reports parse errors only.
 pub fn check(_decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
-    todo!("sema — typecheck milestone")
+    (CheckedSchema::default(), Vec::new())
 }
