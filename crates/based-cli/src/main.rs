@@ -34,6 +34,15 @@ enum Command {
         #[command(subcommand)]
         target: GenTarget,
     },
+    /// Show the engine-derived facts (inferred inverses + indexes) — principle 8.
+    Facts {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Emit machine-readable JSON instead of the human-readable listing.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -66,11 +75,12 @@ fn main() -> anyhow::Result<()> {
             GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
             GenTarget::Client { root, out } => cmd_gen_client(&root, out.as_deref()),
         },
+        Command::Facts { root, json } => cmd_facts(&root, json),
     }
 }
 
 fn cmd_check(root: &Path) -> anyhow::Result<()> {
-    let (_project, schema, _decls, warnings) = load_checked(root)?;
+    let (_project, schema, _decls, _sources, warnings) = load_checked(root)?;
     let n = schema.models.len();
     if warnings > 0 {
         println!("ok with warnings: {warnings} warning(s) across {n} model(s)");
@@ -81,7 +91,7 @@ fn cmd_check(root: &Path) -> anyhow::Result<()> {
 }
 
 fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
-    let (project, schema, decls, _warnings) = load_checked(root)?;
+    let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
     // Schema DDL first, then the parameterized query templates (M3 read side).
     let mut sql = based_codegen::sql::ddl(&schema, dialect);
@@ -110,7 +120,7 @@ fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
 }
 
 fn cmd_gen_client(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
-    let (project, schema, decls, _warnings) = load_checked(root)?;
+    let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let target = ClientTarget::parse(&project.manifest.client);
     let code = based_codegen::client::client(&schema, &decls, target);
     match out {
@@ -124,10 +134,20 @@ fn cmd_gen_client(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The front end's output: the project, the checked schema, the declaration set,
+/// the file sources (indexed by `FileId`, for span -> line:col), and the count of
+/// warnings emitted.
+type Loaded = (
+    Project,
+    CheckedSchema,
+    Vec<Decl>,
+    Vec<(PathBuf, String)>,
+    usize,
+);
+
 /// Shared front end: discover -> parse -> sema. Renders every diagnostic and bails
-/// on any error (a clean schema is a precondition for codegen). Returns the project,
-/// the checked schema, and the warning count.
-fn load_checked(root: &Path) -> anyhow::Result<(Project, CheckedSchema, Vec<Decl>, usize)> {
+/// on any error (a clean schema is a precondition for codegen).
+fn load_checked(root: &Path) -> anyhow::Result<Loaded> {
     // 1. Discover the closed set of `.bsl` files under the manifest root.
     let project = match based_manifest::discover(root) {
         Ok(p) => p,
@@ -173,7 +193,22 @@ fn load_checked(root: &Path) -> anyhow::Result<(Project, CheckedSchema, Vec<Decl
     if errors > 0 {
         bail!("check failed: {errors} error(s), {warnings} warning(s) across {n} file(s)");
     }
-    Ok((project, schema, all_decls, warnings))
+    Ok((project, schema, all_decls, sources, warnings))
+}
+
+/// `based facts`: surface the engine-derived facts (principle 8) — the inferred
+/// inverse pairings and join-key indexes an editor would show as hints.
+fn cmd_facts(root: &Path, json: bool) -> anyhow::Result<()> {
+    let (_project, schema, decls, sources, _warnings) = load_checked(root)?;
+    let facts = based_facts::facts(&schema, &decls);
+    if json {
+        print!("{}", render::facts_json(&facts, &sources));
+    } else if facts.is_empty() {
+        println!("no derived facts");
+    } else {
+        print!("{}", render::facts_text(&facts, &sources));
+    }
+    Ok(())
 }
 
 fn count(diags: &[based_diagnostics::Diagnostic], errors: &mut usize, warnings: &mut usize) {

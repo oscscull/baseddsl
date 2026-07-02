@@ -1,0 +1,20 @@
+[package]
+name = "based-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "based-lsp"
+path = "src/main.rs"
+
+[dependencies]
+based-ast.workspace = true
+based-diagnostics.workspace = true
+based-manifest.workspace = true
+based-parser.workspace = true
+based-sema.workspace = true
+based-facts.workspace = true
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros"] }

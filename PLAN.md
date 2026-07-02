@@ -15,6 +15,8 @@ for *where the implementation stands*.
       ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅)
       ──codegen::sql::mutations─▶ INSERT/UPDATE/DELETE  (M3 write side ✅)
       ──codegen::client─────▶ typed Rust client (M4 ✅)
+      ──facts───────────────▶ engine-derived facts    (M5 ✅)
+                              └─ based-lsp ──▶ editor inlay hints + hover + diagnostics
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
@@ -33,8 +35,10 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: schema-version. (`$ctx` is inferred in sema, not declared here — D4.) |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
-| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust). |
+| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust) + `based facts [--json]` (derived facts, M5). |
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection); `client` → typed Rust client (inputs/outputs/routes). |
+| **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts (inferred inverse pairings + join-key indexes), span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
+| **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
 | runtime | ❌ not started | see Milestones. |
 
 ## based-sema — what it does now
@@ -323,8 +327,50 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
     `Option<String>` (its encoding is a runtime concern). A second client target (e.g. TypeScript) is
     the natural next emitter — the `ClientTarget` enum already branches for it.
 
-**M5 — LSP (show-don't-write, principle 8).** Surface engine-derived facts in the
-editor: inferred inverse names, inferred indexes — never forced into source.
+**M5 — LSP (show-don't-write, principle 8). ✅ done.** Engine-derived facts are
+*shown* in the editor, never forced into source. Two layers:
+
+- **`based-facts`** — the pure core. `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`
+  emits span-anchored `Fact { span, kind, label, detail }`. Two kinds today:
+  `InferredInverse` (a `[]` back-edge whose paired forward field sema inferred —
+  shown only when the author didn't write `(Model.field)`, so it's genuinely a
+  not-in-source fact; the `decls` arg is consulted only for that distinction) and
+  `InferredIndex` (a join-key baseline index the DDL will emit; the label/columns
+  reproduce `sql::ddl`'s `inf_<table>_<cols>` naming + soft-delete-leading order so
+  the shown fact matches the generated DDL exactly). Output is span-sorted for stable
+  goldens. Tests: `based-facts/tests/facts.rs` (5 cases); commerce surfaces the
+  `Order.items <- OrderItem via order` inverse.
+- **`based-lsp`** — the transport. A tower-lsp/tokio server over stdio. On
+  open/change/save it recompiles the project (the same discover→parse→check front end
+  as the CLI, with unsaved buffers overlaid on disk by canonical path) into a
+  `Snapshot` (sources + per-file `LineIndex` + facts + diagnostics), then serves:
+  **diagnostics** (every parse/sema error + lint, mapped span→range, republished for
+  all files so fixes clear), **inlay hints** (each fact placed next to its
+  declaration — inverse after the field, index at the model header line — with the
+  `detail` as tooltip), and **hover** (the fuller "why" for any fact whose span
+  covers the cursor). `LineIndex` does faithful UTF-16 position mapping (LSP's
+  default). Tests: `based-lsp/src/compile.rs` unit tests (position round-trips incl.
+  multibyte; `compile` over commerce). Smoke-tested end-to-end over the JSON-RPC wire.
+- **`based facts [--json]`** — the same core exposed on the CLI (`file:line:col  kind
+  label` + a `= note` "why" line, or a hand-rolled deterministic JSON array).
+  *Deferred inside M5* (what's shipped is the principle-8 core — derived facts +
+  diagnostics; the rest is sequenced MVP-first):
+  - Incremental (range) document sync — today FULL-sync recompiles the whole project
+    per edit (fine at this scale).
+  - Surfacing `$ctx` requirements + the resolved query shape as facts — the data is
+    already in the IR, so this is a natural next `FactKind` and stays squarely within
+    principle 8. Cheapest high-value next step.
+  - **VS Code client extension** — the next milestone for the editor line. The server
+    already speaks standard LSP, so any client attaches; an actual packaged extension
+    is what turns this into something a user runs. Wanted *before* the IDE-ergonomics
+    features below, because an MVP a human can use beats a smarter headless server.
+  - **Go-to-definition / completion / rename — planned, needed before v1, deferred.**
+    These are general IDE ergonomics, not derived-fact surfacing, so principle 8
+    neither requires nor forbids them — they're an ordinary product call, sequenced
+    after the VS Code client. They also need infra the server lacks today: a
+    position→symbol resolution layer (offset → the resolved thing here + all its
+    reference sites, cross-file), which rename in particular depends on. Land the
+    client first, then build this layer and these features on top.
 
 ## Conventions
 
