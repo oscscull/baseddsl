@@ -72,7 +72,6 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
         soft_delete: None,
         sort: Vec::new(),
         scope: None,
-        tenant: None,
         created: None,
         updated: None,
         indexes: Vec::new(),
@@ -286,19 +285,6 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
             "created" | "updated" => {
                 if let Some(field) = deco_field(d) {
                     resolve_managed_ts(&d.name.node, field, mi, models, sink);
-                }
-            }
-            "tenant" => {
-                if let Some(field) = deco_field(d) {
-                    if models[mi].member(&field.node).is_some() {
-                        models[mi].tenant = Some(field.node.clone());
-                    } else {
-                        sink.error(
-                            code::DECO_TARGET,
-                            field.span,
-                            format!("@tenant names unknown field `{}`", field.node),
-                        );
-                    }
                 }
             }
             // Scope/sort *paths* traverse other models — resolved in `resolve_exprs`.

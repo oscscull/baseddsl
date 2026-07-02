@@ -29,7 +29,7 @@ pub mod code {
     pub const UNKNOWN_FUNC: &str = "E0116";
     // models
     pub const SOFT_DELETE_TYPE: &str = "E0120"; // field not in the covered subset
-    pub const DECO_TARGET: &str = "E0121"; // @created/@updated/@tenant/@soft_delete target
+    pub const DECO_TARGET: &str = "E0121"; // @created/@updated/@soft_delete target
     pub const INDEX_COLUMN: &str = "E0122";
     pub const INVERSE_REF: &str = "E0123"; // (Model.field) does not name a forward edge
     pub const INVERSE_INFER: &str = "E0124"; // to-many with no inferable / ambiguous inverse
@@ -76,7 +76,6 @@ pub mod code {
 pub const KNOWN_DECORATORS: &[&str] = &[
     "soft_delete",
     "sort",
-    "tenant",
     "scope",
     "created",
     "updated",
@@ -118,8 +117,6 @@ pub struct RModel {
     pub sort: Vec<SortTerm>,
     /// `@scope(pred)` — a standing auth filter injected into every query (auth.md).
     pub scope: Option<Predicate>,
-    /// `@tenant(field)` — the tenant relation field, if declared.
-    pub tenant: Option<String>,
     /// `@created` / `@updated` engine-managed timestamp fields (D2).
     pub created: Option<String>,
     pub updated: Option<String>,

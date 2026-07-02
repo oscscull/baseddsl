@@ -2,7 +2,6 @@
 # created_at is declared + @created (timestamps are never implicit, D2);
 # product.queries sorts by it.
 @soft_delete(deleted_at)
-@tenant(org)
 @created(created_at)
 Product {
   deleted_at: timestamp?

@@ -370,3 +370,37 @@ text back, nor a separate serialized bind-manifest.
 - *Deferred*: the write path (mutations — engine id-gen behind a deterministic `IdGen` seam,
   `tx` under one engine-owned transaction, write-response); the concrete driver; the HTTP
   server (`based serve`, the `POST /q|m/<name>` wire surface, calling.md).
+
+## D19 — `@tenant` removed; `@scope` injection semantics are OPEN
+**Decided: `@tenant` is gone.** It was a validated-but-inert decorator (recorded the field,
+injected nothing) whose relationship to `@scope` was undefined — the worst quadrant of
+principle 1 (reads like an isolation guarantee, silently enforces nothing) and a principle-4
+duplication of `@scope`, whose own canonical example (auth.md Handle 2) *is* the tenant case
+`@scope(org = $ctx.org)`. Tenant isolation is not a distinct language feature: it is the
+single-owner instance of a scope predicate. Removed from grammar-known decorators, `RModel`,
+the resolver, and the conformance summary; commerce/product now carries no tenant decorator.
+Multi-owner ("writable by a *set* of orgs") is not even single-tenant scoping — it is a
+caller-computed filter value (auth.md Handle 1, `org in $ctx.writable_orgs`), further evidence
+`@tenant` modelled the wrong shape.
+
+**OPEN — do NOT implement `@scope` injection until this is resolved.** The feature is useful
+but must not land in an uncomfortable middle ground where it is neither the common case nor a
+clean edge case. Axes to settle first:
+1. **Per-model vs per-operation.** Model-level `@scope` injects the *same* predicate into every
+   query on the model (soft-delete-like, auth.md:18). Real access rules differ by operation
+   (broad read, owner-only write). Decide: is scope attachable per query/mutation, or is
+   non-uniform scoping always hand-written as a per-query `where` (Handle 1)? If the latter,
+   `@scope` is only ever correct when the predicate is *genuinely uniform across all ops* — say
+   so, or it will be misapplied.
+2. **Boundary vs `@scope`/guard.** The role/permission matrix stays out (principle 5, auth.md:6
+   — app logic, host seam, Handle 3 guards). `@scope` must own *only* the uniform, compiler-
+   guaranteeable row filter — and inherit soft-delete's cross-join correctness. Nail the line so
+   it doesn't creep toward being a policy engine.
+3. **Escape hatch (principle 6).** Cross-scope access (admin/support/jobs/provisioning) is
+   inevitable. Injection needs a *mandatory, minimal-scope, greppable, linted* opt-out before
+   anyone relies on it — else the first admin query disables the whole mechanism. No design =
+   not shippable.
+4. **What the compiler guarantees vs cannot.** It can guarantee the predicate is injected
+   everywhere (kills accidental cross-scope leaks); it cannot verify the role matrix is correct
+   (that lives in host guards). Document this honestly so `@scope` is not mistaken for a checked
+   authorization model.

@@ -23,10 +23,10 @@ Uniform for columns and relations: `name: Type (modifiers)`
 - Not-null default. `?` opts into nullable.
 
 ## Decorators (model-level)
-Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@tenant(field)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8).
+Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
 ```
 @soft_delete(deleted_at)
-@tenant(org)
+@scope(org = $ctx.org)
 Order {
   org:    Org
   status: text (default "pending")

@@ -152,9 +152,6 @@ fn summarize_model(m: &RModel) -> String {
     if m.scope.is_some() {
         head.push_str("  scope");
     }
-    if let Some(t) = &m.tenant {
-        head.push_str(&format!("  tenant={t}"));
-    }
     if !m.sort.is_empty() {
         head.push_str(&format!("  sort=[{}]", sorts(&m.sort)));
     }

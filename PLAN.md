@@ -82,7 +82,7 @@ holds `&mut`.
   skipped, exactly as on the read side.
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
-  `@updated` (timestamp role), `@tenant`, `@scope` (predicate, `$ctx`-only), `@sort`
+  `@updated` (timestamp role), `@scope` (predicate, `$ctx`-only), `@sort`
   (paths), `@table` (name override). Unknown `@foo` → `W0101`.
 - Table naming (D3): `snake_case`, no pluralization, `@table("…")` override.
   Relation FK column = `<field>_id` or `(column "…")`.
@@ -109,7 +109,7 @@ E0001/E0002, manifest E001x. Codes are stable — grep `ir.rs` for the registry.
 
 **`CheckedSchema`** (the codegen seed): `models: Vec<RModel>` (fully resolved:
 table name, members with kind Scalar/Forward/Inverse, soft_delete mode, sort,
-scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
+scope, created/updated, indexes, unique_cols), plus resolved summaries
 `shapes/queries/mutations/filters` and a `model_index` map. Codegen reads this
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
@@ -272,9 +272,9 @@ commerce example generates clean DDL.
     the write side as well (`Select` now carries the filter map). Tests: 3 new in
     `dml.rs` (13 total) + 1 in `mutations.rs` (9 total).
   - *Deferred inside M3 read*: nested shape sub-objects (`field { … }` — needs JSON
-    aggregation / a second query; skipped in projection); `@tenant` injection
-    (semantics unspecified vs. `@scope`); keyset cursor comparison + opaque cursor
-    encoding (runtime concern — base SELECT is ORDER+LIMIT).
+    aggregation / a second query; skipped in projection); `@scope` injection (design
+    open — see decisions.md; `@tenant` removed, folded into `@scope`); keyset cursor
+    comparison + opaque cursor encoding (runtime concern — base SELECT is ORDER+LIMIT).
 
 *Write side (`sql::mutations`) ✅ done.* Each `mutation` body lowers to INSERT /
 UPDATE / DELETE (`based gen sql` appends them after the queries; tests:
