@@ -449,6 +449,30 @@ pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
             _ => {}
         }
     }
+    // Custom `on:` joins span two tables (this model + the relation target), so
+    // resolve them here in the read pass where other models are reachable (D17).
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        let Some(pred) = &f.relation_on else { continue };
+        match &f.ty.base {
+            // A to-one forward relation — the only edge that owns a join. `on:` on a
+            // scalar, an optional is fine; a `[]` / explicit-inverse edge owns no FK.
+            BaseType::Model(target) if !f.ty.many && f.inverse.is_none() => {
+                if let Some(fi) = cx.find(&target.node) {
+                    resolve::check_relation_on(pred, mi, fi, cx, sink);
+                }
+            }
+            _ => sink.error(
+                code::JOIN_FORM,
+                f.name.span,
+                format!(
+                    "`on:` custom join applies only to a to-one relation, not `{}`",
+                    f.name.node
+                ),
+            ),
+        }
+    }
+
     // Relation `@sort` sorts the *target* rows; resolve terms against the target.
     for mem in &ast.members {
         let Member::Field(f) = mem else { continue };

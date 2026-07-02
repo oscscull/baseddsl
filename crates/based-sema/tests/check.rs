@@ -1118,3 +1118,94 @@ fn backref_in_query_predicate_rejected() {
     );
     assert!(errors(&d).contains(&"E0170"), "{:?}", codes(&d));
 }
+
+// ---------- custom `on:` joins (relations.md, resume #5) --------------------
+
+#[test]
+fn custom_join_resolves_clean() {
+    // A legacy-key join: both sides are table-qualified columns that resolve
+    // against the FK-holding model (`order`) and its target (`user`).
+    assert_clean(
+        r#"
+        Order {
+          user_ref: int
+          placed_by: User (on: order.user_ref = user.legacy_id)
+        }
+        User { name: text, legacy_id: int }
+        "#,
+    );
+}
+
+#[test]
+fn custom_join_unknown_column_rejected() {
+    // `user.nope` is not a column on the target model.
+    let (_, d) = analyze(
+        r#"
+        Order {
+          user_ref: int
+          placed_by: User (on: order.user_ref = user.nope)
+        }
+        User { name: text, legacy_id: int }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0111"), "{:?}", codes(&d));
+}
+
+#[test]
+fn custom_join_unknown_table_rejected() {
+    // `customers` names no table in the two-table join scope.
+    let (_, d) = analyze(
+        r#"
+        Order {
+          user_ref: int
+          placed_by: User (on: order.user_ref = customers.legacy_id)
+        }
+        User { name: text, legacy_id: int }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0125"), "{:?}", codes(&d));
+}
+
+#[test]
+fn custom_join_unqualified_column_rejected() {
+    // A join column must be `<table>.<column>`; a bare `user_ref` is malformed.
+    let (_, d) = analyze(
+        r#"
+        Order {
+          user_ref: int
+          placed_by: User (on: user_ref = user.legacy_id)
+        }
+        User { name: text, legacy_id: int }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
+}
+
+#[test]
+fn custom_join_on_scalar_rejected() {
+    // `on:` only makes sense on a to-one relation, not a scalar field.
+    let (_, d) = analyze(
+        r#"
+        Order {
+          user_ref: int (on: order.user_ref = user.legacy_id)
+        }
+        User { name: text, legacy_id: int }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
+}
+
+#[test]
+fn custom_join_param_rejected() {
+    // A join is static structure — a request `$` param has no meaning here.
+    let (_, d) = analyze(
+        r#"
+        Order {
+          user_ref: int
+          placed_by: User (on: order.user_ref = $x)
+        }
+        User { name: text, legacy_id: int }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
+}

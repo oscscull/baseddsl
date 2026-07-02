@@ -64,7 +64,9 @@ holds `&mut`.
   inferred per callable from use + checked for coherence, D4/D5), filter calls + arity
   *and* their bodies re-resolved against the call-site model (D14, cycle-guarded),
   functions (closed set `KNOWN_FUNCS`), `^.field` tx back-references (D16: resolved
-  against the immediately preceding `create`; `E0170` outside a tx / no prior create).
+  against the immediately preceding `create`; `E0170` outside a tx / no prior create),
+  custom `on:` join predicates (D17: two-table scope — FK-holding model + target —
+  table-qualified physical columns; `E0125` bad table, `E0126` malformed).
 - `create` required-field enforcement: every non-optional, non-defaulted column /
   forward FK must be assigned (`E0146`); engine-managed fields (`id`, `@created`/
   `@updated`, `@soft_delete`) and custom-join forwards are exempt.
@@ -167,9 +169,18 @@ Ordered by value. Each is a real gap with a known approach.
    annotation *at the use site* when `guard` grows args (decided direction, D4); it
    contributes nothing to inference today. Also deferred: `$ctx` passed *as a filter
    arg* (arg/usage typing, D14); emitting the per-callable `Ctx` type in the client.
-5. **Relation `on:` custom joins.** The predicate uses table-qualified names
-   (`orders.user_ref = users.legacy_id`) which the single-model path resolver
-   can't handle; currently accepted unchecked. Needs a two-table resolution scope.
+5. ~~**Relation `on:` custom joins.**~~ ✅ **done** (D17). A forward relation's
+   `(on: order.user_ref = user.legacy_id)` predicate is now resolved in a *two-table*
+   scope — the FK-holding model plus its target — in `model::resolve_exprs` (read
+   pass, where other models are reachable). `resolve::check_relation_on` walks the
+   join predicate; each column path must be `<table>.<column>` naming one of the two
+   tables in scope (`E0125` otherwise) and a real *physical* column on it (matched via
+   the new `RModel::column`, `E0111` otherwise). A join is static structure, so
+   `$`-params / filter calls / `^` back-refs / bad arity are `E0126`; `on:` on a
+   non-to-one field is also `E0126`. Tests: 6 new in `check.rs` (81 total). *Still
+   deferred*: self-ref join aliasing at codegen (resolution treats both sides as the
+   one model); lowering the custom `on:` predicate into the emitted JOIN (codegen twin
+   — today codegen still joins on the convention `fk_col`).
 6. ~~**`^` tx back-references (mutations.md).**~~ ✅ **done** (D16). Full vertical
    slice: lexer `^` token, AST `Value::Back(BackRef)`, parser `back_ref` in value
    position, sema resolves `^.field` against the *immediately preceding `create`* in

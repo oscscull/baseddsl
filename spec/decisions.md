@@ -305,6 +305,26 @@ full set of generated SQL, so "a query will scan" and "no query uses it" are fac
   index matching is lead-column only (no composite-prefix/permutation reasoning); prod-stats
   floors + `max_rows` re-checking; the LSP surface showing inferred indexes inline (M5).
 
+## D17 — relation `on:` custom-join resolution (relations.md)
+A forward relation may override the convention FK with a legacy-key join:
+`placed_by: User (on: order.user_ref = user.legacy_id)`. Unlike every other predicate this one
+spans *two* tables and refers to columns table-qualified, so it needs its own resolution scope.
+- **Two-table scope = the FK-holding model + the relation target.** The only two tables a to-one
+  join can touch. Each column path must be exactly `<table>.<column>` where `<table>` matches one of
+  the two models' physical table names and `<column>` is a physical column on it. Resolved in
+  `model::resolve_exprs` (the read pass — the target model must already be built) via
+  `resolve::check_relation_on`.
+- **Match physical columns, not field names.** Joins are written in DB terms (legacy keys), so
+  resolution goes through `RModel::column` (a scalar's `column` override or a forward's `fk_col`),
+  not `member`. A field with `(column "legacy_id")` therefore resolves by its column name.
+- **Codes.** Unknown table qualifier → `E0125`; unknown column → `E0111` (reuses the field code with
+  column wording); malformed join → `E0126` — a path that isn't `<table>.<column>`, a `$`-param /
+  function / `^` back-ref / named-filter (a join is static structure, no request scope), or `on:` on a
+  field that isn't a to-one relation (a `[]`/inverse edge owns no FK; a scalar owns no join).
+- *Deferred*: self-ref joins resolve against the one model on both sides (aliasing the two logical
+  sides is a codegen concern); **lowering** the custom predicate into the emitted JOIN — codegen still
+  joins on the convention `fk_col`, so `on:` is checked but not yet honored in SQL.
+
 ## D16 — tx back-references (`^`, mutations.md)
 `tx { create A{…}; create B{ x = ^.id } }` wires a just-created row's key into the next write. How it
 resolves and lowers (lexer `^` token → AST `Value::Back(BackRef)` → parser → `based-sema` → `based-codegen`).

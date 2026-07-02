@@ -33,7 +33,9 @@ pub mod code {
     pub const INDEX_COLUMN: &str = "E0122";
     pub const INVERSE_REF: &str = "E0123"; // (Model.field) does not name a forward edge
     pub const INVERSE_INFER: &str = "E0124"; // to-many with no inferable / ambiguous inverse
-                                             // shapes
+    pub const JOIN_TABLE: &str = "E0125"; // custom `on:` join names a table not in scope
+    pub const JOIN_FORM: &str = "E0126"; // custom `on:` join malformed (not `<table>.<col>`, or not a to-one relation)
+                                         // shapes
     pub const SHAPE_BARE_RELATION: &str = "E0130"; // bare relation must nest or `=`
     pub const SHAPE_NEST_SCALAR: &str = "E0131"; // nested a non-relation
                                                  // queries / mutations
@@ -134,6 +136,17 @@ pub struct RModel {
 impl RModel {
     pub fn member(&self, name: &str) -> Option<&RMember> {
         self.members.iter().find(|m| m.name == name)
+    }
+    /// Find a member by its *physical* column name (not the field name): a scalar's
+    /// `column` or a forward relation's `fk_col`. Custom `on:` join conditions are
+    /// written in terms of DB columns (legacy keys), so they resolve through this,
+    /// not `member` (relations.md).
+    pub fn column(&self, col: &str) -> Option<&RMember> {
+        self.members.iter().find(|m| match &m.kind {
+            MemberKind::Scalar { column, .. } => column == col,
+            MemberKind::Forward { fk_col, .. } => fk_col == col,
+            MemberKind::Inverse { .. } => false,
+        })
     }
     pub fn is_unique(&self, field: &str) -> bool {
         self.unique_cols.iter().any(|c| c == field)
