@@ -180,7 +180,10 @@ impl LanguageServer for Backend {
             // span is the whole model) reads best at the end of the model's header.
             let position = match f.kind {
                 FactKind::InferredInverse => idx.position(f.span.end as usize),
-                FactKind::InferredIndex => idx.end_of_line(f.span.start as usize),
+                // Model/callable-wide facts read best at the end of the header line.
+                FactKind::InferredIndex | FactKind::CtxRequirement | FactKind::ResolvedQuery => {
+                    idx.end_of_line(f.span.start as usize)
+                }
             };
             if position < params.range.start || position > params.range.end {
                 continue;

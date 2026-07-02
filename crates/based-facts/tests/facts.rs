@@ -91,7 +91,8 @@ fn soft_delete_column_leads_the_inferred_index() {
 
 #[test]
 fn no_derived_facts_on_a_flat_schema() {
-    // No relations, no traversal -> nothing to show.
+    // No relations, no traversal -> no inverse/index facts. A query still resolves a
+    // shape, so that one fact remains.
     let fs = facts_of(
         r#"
         Product { name: text, @index name }
@@ -99,5 +100,62 @@ fn no_derived_facts_on_a_flat_schema() {
         query products() -> P[] order (name);
     "#,
     );
-    assert!(fs.is_empty(), "{fs:#?}");
+    assert!(
+        of_kind(&fs, FactKind::InferredInverse).is_empty(),
+        "{fs:#?}"
+    );
+    assert!(of_kind(&fs, FactKind::InferredIndex).is_empty(), "{fs:#?}");
+    assert!(of_kind(&fs, FactKind::CtxRequirement).is_empty(), "{fs:#?}");
+}
+
+#[test]
+fn resolved_query_shape_is_shown() {
+    // Neither `list` nor the target `Product` appears in the signature — both are
+    // inferred from the return shape + cardinality (queries.md).
+    let fs = facts_of(
+        r#"
+        Product { name: text, @index name }
+        shape P from Product { name }
+        query products() -> P[] order (name);
+    "#,
+    );
+    let q = of_kind(&fs, FactKind::ResolvedQuery);
+    assert_eq!(q.len(), 1, "{fs:#?}");
+    assert_eq!(q[0].label, "list Product[]");
+}
+
+#[test]
+fn get_query_resolves_to_singular() {
+    let fs = facts_of(
+        r#"
+        Product { sku: text (unique), name: text }
+        shape P from Product { name }
+        query product(sku) -> P;
+    "#,
+    );
+    let q = of_kind(&fs, FactKind::ResolvedQuery);
+    assert_eq!(q.len(), 1, "{fs:#?}");
+    assert_eq!(q[0].label, "get Product");
+}
+
+#[test]
+fn ctx_requirement_is_shown_typed() {
+    // `$ctx.org` compares against a `-> Org` relation column, so the request-context
+    // field is inferred as a relation (D4/D5) — nothing in source declares it.
+    let fs = facts_of(
+        r#"
+        Org { name: text }
+        Product { org: Org, name: text, @index org }
+        shape P from Product { name }
+        query my_products() -> P[] where (org = $ctx.org) order (name);
+    "#,
+    );
+    let ctx = of_kind(&fs, FactKind::CtxRequirement);
+    assert_eq!(ctx.len(), 1, "{fs:#?}");
+    assert_eq!(ctx[0].label, "requires [org: -> Org]");
+    assert!(
+        ctx[0].detail.contains("generated client"),
+        "{}",
+        ctx[0].detail
+    );
 }

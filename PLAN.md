@@ -37,7 +37,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
 | based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust) + `based facts [--json]` (derived facts, M5). |
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection); `client` → typed Rust client (inputs/outputs/routes). |
-| **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts (inferred inverse pairings + join-key indexes), span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
+| **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
 | runtime | ❌ not started | see Milestones. |
 
@@ -337,9 +337,16 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
   not-in-source fact; the `decls` arg is consulted only for that distinction) and
   `InferredIndex` (a join-key baseline index the DDL will emit; the label/columns
   reproduce `sql::ddl`'s `inf_<table>_<cols>` naming + soft-delete-leading order so
-  the shown fact matches the generated DDL exactly). Output is span-sorted for stable
-  goldens. Tests: `based-facts/tests/facts.rs` (5 cases); commerce surfaces the
-  `Order.items <- OrderItem via order` inverse.
+  the shown fact matches the generated DDL exactly), plus two callable-level kinds:
+  `CtxRequirement` (the deduped `$ctx.<field>: type` bag a query/mutation silently
+  requires — typed by inference per callable, D4/D5; the label mirrors the sema
+  conformance rendering, `field: -> Model` / `field: <prim>`, and the client sends
+  exactly these) and `ResolvedQuery` (a query's inferred verb/target/cardinality/
+  pagination — none of it in the signature, queries.md). Both anchor at the callable
+  declaration; the LSP places them at the header line's end. Output is span-sorted
+  for stable goldens. Tests: `based-facts/tests/facts.rs` (8 cases); commerce
+  surfaces the `Order.items <- OrderItem via order` inverse, the `my_org_orders`
+  `ctx requires [org: -> Org]`, and every query's resolved shape.
 - **`based-lsp`** — the transport. A tower-lsp/tokio server over stdio. On
   open/change/save it recompiles the project (the same discover→parse→check front end
   as the CLI, with unsaved buffers overlaid on disk by canonical path) into a
@@ -357,9 +364,12 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
   diagnostics; the rest is sequenced MVP-first):
   - Incremental (range) document sync — today FULL-sync recompiles the whole project
     per edit (fine at this scale).
-  - Surfacing `$ctx` requirements + the resolved query shape as facts — the data is
-    already in the IR, so this is a natural next `FactKind` and stays squarely within
-    principle 8. Cheapest high-value next step.
+  - ~~Surfacing `$ctx` requirements + the resolved query shape as facts.~~ ✅ **done.**
+    Two new `FactKind`s in `based-facts` (`CtxRequirement`, `ResolvedQuery`) read
+    straight off the IR (`RQuery`/`RMutation.ctx_requires`, `RQuery.verb/target/
+    many/paginated`) — no new resolution. Both surface via `based facts` and the LSP
+    (inlay + hover) with no LSP-side logic beyond one inlay-placement arm. Tests: 3
+    new in `facts.rs` (8 total).
   - **VS Code client extension** — the next milestone for the editor line. The server
     already speaks standard LSP, so any client attaches; an actual packaged extension
     is what turns this into something a user runs. Wanted *before* the IDE-ergonomics

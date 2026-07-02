@@ -10,8 +10,8 @@
 //! tell an *inferred* pairing from one the author wrote explicitly), so it is
 //! golden-testable without an editor in the loop.
 
-use based_ast::{Decl, Member, Span};
-use based_sema::{CheckedSchema, MemberKind, RModel};
+use based_ast::{Decl, Member, Primitive, Span, Verb};
+use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel, RQuery};
 
 /// What kind of derived fact this is — the editor keys presentation off it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,14 @@ pub enum FactKind {
     /// (indexing.md, D15). Shown so the write cost is visible without living in
     /// source.
     InferredIndex,
+    /// The `$ctx` fields a callable silently requires — inferred per-callable from
+    /// the columns each use compares against (D4/D5). Nothing in source declares the
+    /// request contract; the generated client sends exactly these.
+    CtxRequirement,
+    /// A query's resolved shape — verb (`get`/`list`), target model, cardinality,
+    /// pagination — inferred from the return shape + cardinality (queries.md). None
+    /// of it is written in the signature.
+    ResolvedQuery,
 }
 
 impl FactKind {
@@ -31,6 +39,8 @@ impl FactKind {
         match self {
             FactKind::InferredInverse => "inverse",
             FactKind::InferredIndex => "index",
+            FactKind::CtxRequirement => "ctx",
+            FactKind::ResolvedQuery => "query",
         }
     }
 }
@@ -92,8 +102,104 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
         }
     }
 
+    // Per-query facts: the resolved shape (queries.md inferences) and the `$ctx`
+    // requirement bag — neither is written in the signature.
+    for q in &schema.queries {
+        out.push(resolved_query_fact(q));
+        if let Some(fact) = ctx_fact(q.span, &q.ctx_requires, "query") {
+            out.push(fact);
+        }
+    }
+    // Mutations carry no inferred shape (their write model is explicit), but they do
+    // require context the same way.
+    for m in &schema.mutations {
+        if let Some(fact) = ctx_fact(m.span, &m.ctx_requires, "mutation") {
+            out.push(fact);
+        }
+    }
+
     out.sort_by_key(|f| (f.span.file.0, f.span.start, f.span.end));
     out
+}
+
+/// The `$ctx` bag a callable requires, as one aggregate fact anchored at its
+/// declaration — `None` when it needs no context. The bag is inference-derived
+/// (D4/D5): each field's type comes from the column its use compares against, and
+/// the generated client sends exactly this set.
+fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
+    if reqs.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = reqs
+        .iter()
+        .map(|r| format!("{}: {}", r.field, ctx_ty(&r.ty)))
+        .collect();
+    parts.sort();
+    let bag = parts.join(", ");
+    Some(Fact {
+        span,
+        kind: FactKind::CtxRequirement,
+        label: format!("requires [{bag}]"),
+        detail: format!(
+            "request context: this {kind} requires `$ctx` fields [{bag}], inferred \
+             per-callable from the columns they compare against (D4/D5). Nothing in \
+             source declares them — the generated client sends exactly these.",
+        ),
+    })
+}
+
+/// A `$ctx` field's inferred type, rendered like the sema conformance summary: a
+/// primitive verbatim, a relation as `-> Model` (the caller supplies its key, D1).
+fn ctx_ty(ty: &CtxField) -> String {
+    match ty {
+        CtxField::Scalar(p) => prim(*p).to_string(),
+        CtxField::Relation(m) => format!("-> {m}"),
+    }
+}
+
+/// Primitive -> its DSL spelling (matches the sema conformance summary; `Id` keeps
+/// its casing, the rest are lowercase).
+fn prim(p: Primitive) -> &'static str {
+    match p {
+        Primitive::Text => "text",
+        Primitive::Int => "int",
+        Primitive::Bool => "bool",
+        Primitive::Timestamp => "timestamp",
+        Primitive::Date => "date",
+        Primitive::Json => "json",
+        Primitive::Uuid => "uuid",
+        Primitive::Id => "Id",
+    }
+}
+
+/// The resolved shape of a query: verb + target + cardinality + pagination, none of
+/// which appears in the signature (queries.md infers them from the return shape).
+fn resolved_query_fact(q: &RQuery) -> Fact {
+    let verb = match q.verb {
+        Verb::Get => "get",
+        Verb::List => "list",
+    };
+    let card = if q.many { "[]" } else { "" };
+    let mut label = format!("{verb} {}{card}", q.target);
+    if q.paginated {
+        label.push_str(" paginated");
+    }
+    Fact {
+        span: q.span,
+        kind: FactKind::ResolvedQuery,
+        label,
+        detail: format!(
+            "resolved query: reads `{}` as a `{verb}` returning {} (inferred from the \
+             return shape and cardinality, queries.md){}.",
+            q.target,
+            if q.many { "many rows" } else { "one row" },
+            if q.paginated {
+                "; keyset-paginated"
+            } else {
+                ""
+            },
+        ),
+    }
 }
 
 /// True when the model's field declared an inverse edge with no explicit
