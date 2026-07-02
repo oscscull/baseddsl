@@ -208,6 +208,74 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
     }
 }
 
+/// The family a column accepts on assignment: a scalar's primitive family, or a
+/// forward relation FK's key. An inverse edge owns no column, so it can't be
+/// assigned — `None` skips the check (the misuse, if any, is out of scope here).
+fn member_family(kind: &MemberKind) -> Option<Family> {
+    match kind {
+        MemberKind::Scalar { ty, .. } => Some(prim_family(*ty)),
+        MemberKind::Forward { .. } => Some(Family::Key),
+        MemberKind::Inverse { .. } => None,
+    }
+}
+
+/// Type-check one `create`/`update` assignment: the value's family must agree with
+/// the target column's — the write-side twin of the `=` compatibility rule
+/// (`check_cmp_types`). A literal or another column is family-checked; a `^`
+/// back-reference is typed by the field it reads on the preceding create (`back`,
+/// the same model `check::check_back` resolved it against). Params (typed at their
+/// declaration / `$ctx` inferred) and functions (return type unmodelled) are
+/// skipped, exactly as on the read side. Silent when a side fails to resolve — that
+/// name error is already reported by the caller.
+pub fn check_assign_type(
+    target: &MemberKind,
+    col: &Ident,
+    value: &Value,
+    mi: usize,
+    back: Option<usize>,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let Some(lf) = member_family(target) else {
+        return;
+    };
+    let rf = match value {
+        Value::Lit(l) => match lit_family(l) {
+            Some(f) => f,
+            None => return, // null: no constraint
+        },
+        Value::Path(p) => match resolve_quiet(p, mi, cx) {
+            Some(t) => terminal_family(&t),
+            None => return, // unresolved column: name error already reported
+        },
+        Value::Back(b) => match back.and_then(|bm| cx.model(bm).member(&b.field.node)) {
+            Some(m) => match member_family(&m.kind) {
+                Some(f) => f,
+                None => return,
+            },
+            None => return, // scope / unknown-field error already reported
+        },
+        Value::Param(_) | Value::Func(_) => return,
+    };
+    if !compatible(lf, rf) {
+        let target_desc = match target {
+            MemberKind::Scalar { ty, .. } => format!("`{}`", prim_name(*ty)),
+            MemberKind::Forward { target, .. } => format!("relation `{target}`"),
+            MemberKind::Inverse { .. } => return,
+        };
+        sink.error(
+            code::ASSIGN_TYPE,
+            col.span,
+            format!(
+                "cannot assign a {} value to `{}` (a {} column)",
+                family_name(rf),
+                col.node,
+                target_desc
+            ),
+        );
+    }
+}
+
 /// The column a param maps onto, for annotation agreement (D1).
 pub enum Mapped<'a> {
     Scalar(Primitive),

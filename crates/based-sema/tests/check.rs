@@ -396,6 +396,69 @@ fn mutation_create_defaulted_and_optional_not_required() {
     );
 }
 
+#[test]
+fn mutation_create_wrong_literal_type_rejected() {
+    // `count` is an int column; assigning a text literal is `E0153` — the write-side
+    // twin of the `=` operand-typing on the read side.
+    let (_, d) = analyze(
+        r#"
+        Doc { count: int, title: text }
+        shape D from Doc { title }
+        mutation make(t: text) -> D { create Doc { count = "lots", title = $t }; }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0153"]);
+}
+
+#[test]
+fn mutation_update_wrong_column_type_rejected() {
+    // Assigning one column to another of an incompatible family (text ← int).
+    let (_, d) = analyze(
+        r#"
+        Doc { count: int, title: text }
+        shape D from Doc { title }
+        mutation rename(id: Id) -> D { update Doc where (id = $id) { title = count }; }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0153"]);
+}
+
+#[test]
+fn mutation_assign_relation_key_is_clean() {
+    // A forward FK accepts its key as a uuid string or an int (D1); a param or a
+    // matching literal is fine. Correct scalar types pass too.
+    assert_clean(
+        r#"
+        Org { name: text }
+        Doc { org: Org, count: int, title: text }
+        shape D from Doc { title }
+        mutation make(o: Org, t: text) -> D {
+          create Doc { org = $o, count = 3, title = $t };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn tx_backref_type_mismatch_rejected() {
+    // `^.count` reads an int off the preceding create; assigning it to a text column
+    // is a family clash (`E0153`), typed through the back-reference.
+    let (_, d) = analyze(
+        r#"
+        Batch { count: int }
+        Doc { label: text, batch: Batch }
+        shape D from Doc { label }
+        mutation run(n: int) -> D {
+          tx {
+            create Batch { count = $n };
+            create Doc { label = ^.count, batch = ^.id };
+          }
+        }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0153"]);
+}
+
 // ---------- filters --------------------------------------------------------
 
 #[test]

@@ -459,9 +459,10 @@ fn check_assign(
     back: Option<usize>,
     sink: &mut Sink,
 ) {
-    if cx.model(mi).member(&a.col.node).is_none() {
+    let Some(member) = cx.model(mi).member(&a.col.node) else {
         unknown_field(cx, mi, &a.col, sink);
-    }
+        return;
+    };
     // A `^.field` back-reference resolves against the preceding create's model, not
     // the model being assigned; delegate the rest of the value to the shared checker.
     if let Value::Back(b) = &a.value {
@@ -469,6 +470,9 @@ fn check_assign(
     } else {
         resolve::check_value(&a.value, Some(mi), cx, params, sink);
     }
+    // The assigned value's type must agree with the target column (E0153); silent
+    // when either side failed to resolve above.
+    resolve::check_assign_type(&member.kind, &a.col, &a.value, mi, back, cx, sink);
 }
 
 /// A `create` must assign every *required* column: a non-optional, non-defaulted

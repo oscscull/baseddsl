@@ -51,6 +51,7 @@ pub mod code {
     pub const OP_TYPE: &str = "E0150"; // operator not applicable to the operand type
     pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison
     pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column (D1)
+    pub const ASSIGN_TYPE: &str = "E0153"; // create/update assigns a value of the wrong type to a column
 
     // $ctx typing (D4/D5): the caller-supplied request context. Its type is not
     // declared — it is inferred per callable from use and checked for coherence.

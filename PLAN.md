@@ -70,6 +70,11 @@ holds `&mut`.
 - `create` required-field enforcement: every non-optional, non-defaulted column /
   forward FK must be assigned (`E0146`); engine-managed fields (`id`, `@created`/
   `@updated`, `@soft_delete`) and custom-join forwards are exempt.
+- `create`/`update` assign type agreement (`E0153`): the assigned value's family must
+  match the target column — the write-side twin of the `=` operand typing. Literals and
+  columns are family-checked; a `^` back-reference is typed by the field it reads on the
+  preceding create; params (typed at declaration / `$ctx` inferred) and functions are
+  skipped, exactly as on the read side.
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
   `@updated` (timestamp role), `@tenant`, `@scope` (predicate, `$ctx`-only), `@sort`
@@ -194,7 +199,8 @@ Ordered by value. Each is a real gap with a known approach.
    (`^.<other>` reuses that create's assigned param/literal). Tests: 4 sema, 1 parser,
    2 codegen. *Still deferred*: `^.field` for a field the prior create didn't set
    (needs a re-select / RETURNING, a runtime concern) emits a `NULL /* … */` marker;
-   multi-level `^^`; back-ref *type* agreement with the assigned column.
+   multi-level `^^`. (Back-ref *type* agreement with the assigned column is now done —
+   see resume #7, `E0153`.)
 7. ~~**create/required-field enforcement.**~~ ✅ **done.** `check::check_create_required`
    now verifies a `create` assigns every *required* column — a non-optional,
    non-defaulted scalar or forward FK — reporting all missing fields in one
@@ -202,8 +208,10 @@ Ordered by value. Each is a real gap with a known approach.
    field) and custom-join forwards (no FK column) are exempt; inverse edges own no
    column so they never count. Tests: 3 new in `check.rs`; commerce `place_order`
    grew a `total: int` param (its `create` had silently omitted the required
-   `total`). *Still deferred*: back-ref/assign *type* agreement with the target
-   column (D16 residue).
+   `total`). ~~*Still deferred*: back-ref/assign *type* agreement with the target
+   column (D16 residue).~~ ✅ **done** — `resolve::check_assign_type` (`E0153`) now
+   family-checks every `create`/`update` assign, `^` back-references included (typed by
+   the field they read on the preceding create). Tests: 4 new in `check.rs` (85 total).
 8. ~~**Sema conformance goldens.**~~ ✅ **done.** `crates/based-sema/tests/conformance.rs`
    mirrors the parser harness against a sibling case dir `tests/conformance-sema/<case>/`
    (`input.bsl` + `expected`); re-bless with `BLESS=1 cargo test -p based-sema --test
