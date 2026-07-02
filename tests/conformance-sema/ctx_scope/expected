@@ -1,0 +1,16 @@
+DIAGNOSTICS
+  W0100: `list` query `my_org_orders` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
+  W0103: query `my_org_orders` will scan `Order`: no index leads with any of (org)
+SCHEMA
+model Org  table=org  soft_delete=deleted_at(timestamp)
+  id: Id
+  deleted_at: timestamp?
+  name: text
+model Order  table=order  soft_delete=deleted_at(timestamp)  scope
+  id: Id
+  deleted_at: timestamp?
+  org: -> Org  fk=org_id
+  total: int
+shape OrderCard from Order
+query my_org_orders  target=Order verb=list many  shape=OrderCard  ctx=[org: -> Org]
+mutation place_order  ret=Order

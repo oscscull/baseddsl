@@ -1,0 +1,12 @@
+DIAGNOSTICS
+  W0100: `list` query `widgets` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
+  W0101: unknown decorator `@frobnicate` (ignored)
+  W0104: no query filters, sorts, or joins on `color` — this index is pure write tax; drop it or add the query that needs it
+SCHEMA
+model Widget  table=widget
+  id: Id
+  name: text
+  color: text
+  index(color)
+shape WidgetCard from Widget
+query widgets  target=Widget verb=list many  shape=WidgetCard

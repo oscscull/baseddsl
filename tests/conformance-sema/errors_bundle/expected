@@ -1,0 +1,16 @@
+DIAGNOSTICS
+  E0100: duplicate model `User`
+  E0111: `User` has no field `handle`
+  E0140: unknown return type `Missing` (not a declared shape or model)
+  E0144: `get` query `user_by_name` is not keyed on a unique field
+  W0103: query `user_by_name` will scan `User`: no index leads with any of (name)
+SCHEMA
+model User  table=user
+  id: Id
+  name: text
+  email: text  unique
+model User  table=user
+  id: Id
+  name: text
+shape UserCard from User
+query user_by_name  target=User verb=get  shape=UserCard

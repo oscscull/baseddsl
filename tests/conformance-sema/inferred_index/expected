@@ -1,0 +1,14 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Order  table=order
+  id: Id
+  placed_at: timestamp
+  items: <- OrderItem via order
+model OrderItem  table=order_item
+  id: Id
+  order: -> Order  fk=order_id
+  qty: int
+  index inferred(order)
+shape OrderCard from Order
+query busy_orders  target=Order verb=list many  shape=OrderCard

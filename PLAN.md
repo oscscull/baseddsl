@@ -102,9 +102,12 @@ scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (75 cases, positive + negative, keyed on
-diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean
-(including a `$ctx.org` query whose context is inferred with zero config, D4/D5).
+Tests: `crates/based-sema/tests/check.rs` (81 cases, positive + negative, keyed on
+diagnostic codes), plus `tests/conformance.rs` — a golden harness over
+`tests/conformance-sema/<case>/` that pins the resolved-schema summary + diagnostics
+(resume #8; re-bless with `BLESS=1`). Commerce example (`spec/examples/commerce`)
+checks clean (including a `$ctx.org` query whose context is inferred with zero
+config, D4/D5).
 
 ## based-sema — deferred (resume points)
 
@@ -201,8 +204,16 @@ Ordered by value. Each is a real gap with a known approach.
    grew a `total: int` param (its `create` had silently omitted the required
    `total`). *Still deferred*: back-ref/assign *type* agreement with the target
    column (D16 residue).
-8. **Sema conformance goldens.** Parser has `tests/conformance/`; add a sema golden
-   harness (schema → resolved summary + diagnostics) mirroring that pattern.
+8. ~~**Sema conformance goldens.**~~ ✅ **done.** `crates/based-sema/tests/conformance.rs`
+   mirrors the parser harness against a sibling case dir `tests/conformance-sema/<case>/`
+   (`input.bsl` + `expected`); re-bless with `BLESS=1 cargo test -p based-sema --test
+   conformance`. The summary is the resolution facts *not* in the AST — table names,
+   relation kinds (`-> T fk=…` / `<- T via …`), soft-delete mode, `@scope`/`@sort`,
+   declared + `inferred(...)` indexes, inferred verb/target/many/shape/paginated, and
+   the deduped per-callable `ctx=[…]` — plus the diagnostics, sorted by `(code, message)`
+   so the golden is pass-order-independent. A parse failure short-circuits to `PARSE-ERR`
+   (malformed input belongs in the parser goldens). Five seed cases: `clean_relations`,
+   `ctx_scope`, `inferred_index`, `errors_bundle`, `lints`.
 
 ## Milestones ahead (post-sema)
 

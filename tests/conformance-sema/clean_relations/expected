@@ -1,0 +1,22 @@
+DIAGNOSTICS
+  W0103: query `orders_by_buyer` will scan `Order`: no index leads with any of (placed_by, placed_at)
+SCHEMA
+model Order  table=order  soft_delete=deleted_at(timestamp)  sort=[placed_at desc]
+  id: Id
+  deleted_at: timestamp?
+  placed_by: -> User  fk=placed_by_id
+  total: int
+  placed_at: timestamp  default=now()
+  items: <- OrderItem via order
+model OrderItem  table=order_item
+  id: Id
+  order: -> Order  fk=order_id
+  qty: int
+model User  table=user
+  id: Id
+  name: text
+  email: text  unique
+  orders: <- Order via placed_by
+shape OrderCard from Order
+query order_by_id  target=Order verb=get  shape=OrderCard
+query orders_by_buyer  target=Order verb=list many  shape=OrderCard
