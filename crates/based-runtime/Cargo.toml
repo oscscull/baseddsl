@@ -1,0 +1,18 @@
+[package]
+name = "based-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+based-ast.workspace = true
+based-diagnostics.workspace = true
+based-manifest.workspace = true
+based-parser.workspace = true
+based-sema.workspace = true
+based-codegen.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+based-parser.workspace = true

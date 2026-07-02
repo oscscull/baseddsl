@@ -17,6 +17,7 @@ for *where the implementation stands*.
       ──codegen::client─────▶ typed Rust client (M4 ✅)
       ──facts───────────────▶ engine-derived facts    (M5 ✅)
                               └─ based-lsp ──▶ editor inlay hints + hover + diagnostics
+      ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read ✅)
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
@@ -39,7 +40,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection); `client` → typed Rust client (inputs/outputs/routes). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| runtime | ❌ not started | see Milestones. |
+| **based-runtime** | 🚧 **M6 (read path)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query lowering; `plan_query` validates args/`$ctx`, binds `:name`→positional `?`, picks the response envelope; `run_query` shapes rows to JSON via an abstract `Db` (mock-tested). **Write path (mutations) + concrete MariaDB driver + HTTP server not started.** |
 
 ## based-sema — what it does now
 
@@ -381,6 +382,53 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
     position→symbol resolution layer (offset → the resolved thing here + all its
     reference sites, cross-file), which rename in particular depends on. Land the
     client first, then build this layer and these features on top.
+
+**M6 — runtime (`based-runtime`). 🚧 read path done.** The engine that turns a wire
+request into a bound, executable statement and shapes the result. Architecture:
+**in-process** (D18) — the runtime links `based-sema` + `based-codegen`, holds the
+same `CheckedSchema` the compiler produced, and reuses codegen's *one* query
+lowering (`sql::lower_queries`) rather than re-deriving SQL or parsing a serialized
+artifact. So the executed SQL and its bind surface can never drift from `based gen
+sql` (principle 4). Tests: `based-runtime/tests/query.rs` (12 cases) + the scanner
+unit tests (6); the whole request→JSON path runs against a `MockDb`, no live DB.
+
+*Read side (this slice) — delivered:*
+  - **`Compiled::load`** runs the front end (discover→parse→check, bail on any error
+    — a dirty schema never reaches the runtime) then lowers every query, keyed by
+    name for O(1) dispatch. `from_checked` is the disk-free seam tests use.
+  - **`plan_query`** (`plan.rs`) — the core. Validates each arg against the signature
+    (required / `(default)` applied / family-coerced from JSON, calling.md #3), threads
+    the per-callable `$ctx` requirement bag (D4/D5 — `:ctx_<field>` binds from request
+    context, *not* args; a missing one is `MissingCtx`), and binds every `:name`
+    placeholder to positional `?` in SQL order. Picks the response `Envelope` from the
+    inferred verb/pagination: `get`→`One`, `list`→`Many`, paginated `list`→`Page`.
+  - **Named→positional binding** (`scan.rs`) — a quote-aware scanner rewrites `:name`
+    →`?`, pulling values from one environment assembled from the validated inputs. The
+    *names* are unambiguous given the schema (`:<param>` / `:ctx_<field>` / `:offset`),
+    so no parallel bind manifest is kept — the SQL is the one source of the bind
+    surface (P4). Skips colons inside `'…'`/`"…"`/`` `…` `` literals and `::`.
+  - **Input coercion** (`value.rs`) — `SqlValue` is the driver-neutral bound value;
+    coercion is family-aware (an `int` param rejects a JSON string *before* SQL).
+    Families are coarse, matching sema's `=`-operand families (D1): `uuid`/`timestamp`/
+    `date`/`Id` ride as text. An untyped param is shape-coerced (`Family::Any`).
+  - **`run_query` + `Db`** (`run.rs`) — execution goes through the abstract `Db` trait
+    (the runtime's twin of the client's abstract `Transport`); a `MockDb` returns canned
+    rows. Row shaping realizes the envelope: `get`→object/`null`, `list`→array,
+    paginated→`{ rows, cursor }` (+`total` for `with count`).
+  - *Deferred inside M6 read*: the keyset **cursor** rides as `null` (encoding is a
+    driver concern, pagination.md); strict per-column typing of *untyped* params (the
+    mapped-column family isn't re-derived — the typed client already sends the right
+    shape); the offset value arrives as an `offset` arg (defaulting to 0).
+
+*Not started (next slices):*
+  - **Write path** — mutations: engine id-gen (a deterministic `IdGen` seam for tests,
+    uuid in prod), multi-statement `tx` under one engine-owned transaction (principle
+    7), and the write-response (RETURNING vs. re-select, D12 residue). Needs codegen to
+    expose structured mutation lowering the way `lower_queries` now does for reads.
+  - **Concrete MariaDB driver** — a real `Db` impl (reuse a hardened driver, principle
+    7: `mysql_async`/`sqlx`) mapping `SqlValue`→its bind form and rows back to JSON.
+  - **HTTP server** — the `POST /q/<name>` / `POST /m/<name>` wire surface (calling.md):
+    decode JSON body + context → `Request` → `run_query` → JSON response. `based serve`.
 
 ## Conventions
 

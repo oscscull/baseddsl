@@ -65,7 +65,54 @@ pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
 
 // ---------- per-query lowering --------------------------------------------
 
+/// A query lowered to its structured SQL: the primary SELECT plus, for a
+/// `with count` page, the live-row COUNT. Both carry the `:name` placeholders
+/// verbatim — the runtime (M6) binds them; the text emitter frames them with
+/// `-- query` headers (`dml`). This is the one lowering; `render_query` and the
+/// runtime both read it, so the SQL and its bind surface can never drift (P4).
+#[derive(Debug, Clone)]
+pub struct LoweredQuery {
+    pub name: String,
+    /// Primary SELECT, ending in `;\n`, no comment header.
+    pub sql: String,
+    /// The live-row `COUNT(*)` SELECT for a `with count` page, else `None`.
+    pub count_sql: Option<String>,
+}
+
+/// Lower every query in the schema to its structured SQL, in declaration order.
+/// The in-process runtime consumes this directly (no serialized artifact).
+pub fn lower_queries(schema: &CheckedSchema, decls: &[Decl]) -> Vec<LoweredQuery> {
+    let queries: HashMap<&str, &RQuery> = schema
+        .queries
+        .iter()
+        .map(|q| (q.name.as_str(), q))
+        .collect();
+    let mut out = Vec::new();
+    for decl in decls {
+        if let Decl::Query(q) = decl {
+            if let Some(rq) = queries.get(q.name.node.as_str()) {
+                out.push(lower_query(schema, decls, q, rq));
+            }
+        }
+    }
+    out
+}
+
+/// Text emitter for one query: the SQL body framed with `-- query` comment
+/// headers (the `based gen sql` surface). Delegates the SQL to `lower_query`.
 fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -> String {
+    let low = lower_query(schema, decls, q, rq);
+    let mut out = format!("-- query {}\n{}", low.name, low.sql);
+    if let Some(count) = &low.count_sql {
+        out.push('\n');
+        out.push_str(&format!("-- query {} (count)\n{}", low.name, count));
+    }
+    out
+}
+
+/// The single query lowering: builds the primary SELECT (and count SELECT) as
+/// header-free SQL. Both `render_query` (text) and the runtime read this.
+fn lower_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -> LoweredQuery {
     let root = schema.model(&rq.target).expect("target resolved by sema");
     let mut sel = Select::new(schema, decls, root);
 
@@ -86,10 +133,7 @@ fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) 
     let order = build_order(&mut sel, q, root);
 
     // Assemble. Joins were accumulated by every resolve above, so emit them now.
-    let mut sql = format!(
-        "-- query {}\nSELECT\n{}\nFROM `{}`",
-        q.name.node, projection, root.table
-    );
+    let mut sql = format!("SELECT\n{}\nFROM `{}`", projection, root.table);
     for j in &sel.joins {
         sql.push_str(&format!(
             "\n{} `{}` AS `{}` ON {}",
@@ -112,11 +156,8 @@ fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) 
 
     // `with count`: a second query for the live-row total (soft-delete applied, no
     // LIMIT). Meaningless for keyset, hence opt-in (pagination.md).
-    if query_page(q).is_some_and(|p| p.with_count) {
-        let mut cnt = format!(
-            "-- query {} (count)\nSELECT COUNT(*) AS `count`\nFROM `{}`",
-            q.name.node, root.table
-        );
+    let count_sql = if query_page(q).is_some_and(|p| p.with_count) {
+        let mut cnt = format!("SELECT COUNT(*) AS `count`\nFROM `{}`", root.table);
         for j in &sel.joins {
             cnt.push_str(&format!(
                 "\n{} `{}` AS `{}` ON {}",
@@ -127,10 +168,16 @@ fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) 
             cnt.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
         }
         cnt.push_str(";\n");
-        sql.push('\n');
-        sql.push_str(&cnt);
+        Some(cnt)
+    } else {
+        None
+    };
+
+    LoweredQuery {
+        name: q.name.node.clone(),
+        sql,
+        count_sql,
     }
-    sql
 }
 
 // ---------- projection -----------------------------------------------------
