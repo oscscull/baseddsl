@@ -191,8 +191,9 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
         },
         // A param's type is checked at its declaration (check_param); a `$ctx.field`
         // is typed by inference from *this* comparison (ctx.rs), so it never clashes
-        // here; a function's return type is not modelled yet.
-        Value::Param(_) | Value::Func(_) => return,
+        // here; a function's return type is not modelled yet. A `^` back-reference is
+        // only valid in a write assign (not a predicate), reported there.
+        Value::Param(_) | Value::Func(_) | Value::Back(_) => return,
     };
     if !compatible(lf, rf) {
         sink.error(
@@ -467,6 +468,14 @@ pub fn check_value(
         }
         Value::Lit(_) => {}
         Value::Func(f) => check_func(f, model, cx, params, sink),
+        // A `^` back-reference is only meaningful in a `tx` write assign, where
+        // `check::check_assign` resolves it against the preceding create. Reaching it
+        // here (a predicate, a function argument, a query) is a misuse.
+        Value::Back(b) => sink.error(
+            code::BACKREF_SCOPE,
+            b.span,
+            "`^` back-reference is only valid in a `tx` write (e.g. `user = ^.id`)",
+        ),
     }
 }
 

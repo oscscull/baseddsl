@@ -1095,6 +1095,7 @@ impl<'a> Parser<'a> {
     fn value(&mut self) -> PResult<Value> {
         match self.peek().map(|l| l.tok) {
             Some(Tok::Dollar) => Ok(Value::Param(self.param_ref()?)),
+            Some(Tok::Caret) => Ok(Value::Back(self.back_ref()?)),
             Some(Tok::Int | Tok::Float | Tok::Str) => Ok(Value::Lit(self.literal()?)),
             Some(Tok::LowerIdent) => match self.ident_at(0) {
                 Some("true") | Some("false") | Some("null") => Ok(Value::Lit(self.literal()?)),
@@ -1106,6 +1107,20 @@ impl<'a> Parser<'a> {
                 Err(())
             }
         }
+    }
+
+    /// `^.field` — a tx back-reference (mutations.md). One field segment: the
+    /// reference is to a just-created row's column (`^.id` for FK wiring).
+    fn back_ref(&mut self) -> PResult<BackRef> {
+        let caret = self.expect(Tok::Caret, "`^`")?;
+        self.expect(Tok::Dot, "`.` after `^`")?;
+        let field = self.lower_ident("field name")?;
+        let span = Span {
+            file: self.file,
+            start: caret.start,
+            end: field.span.end,
+        };
+        Ok(BackRef { field, span })
     }
 
     fn param_ref(&mut self) -> PResult<ParamRef> {

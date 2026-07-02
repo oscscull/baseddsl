@@ -63,7 +63,8 @@ holds `&mut`.
   index columns, `$param` refs (`$ctx.<field>` structural check; its type is
   inferred per callable from use + checked for coherence, D4/D5), filter calls + arity
   *and* their bodies re-resolved against the call-site model (D14, cycle-guarded),
-  functions (closed set `KNOWN_FUNCS`).
+  functions (closed set `KNOWN_FUNCS`), `^.field` tx back-references (D16: resolved
+  against the immediately preceding `create`; `E0170` outside a tx / no prior create).
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
   `@updated` (timestamp role), `@tenant`, `@scope` (predicate, `$ctx`-only), `@sort`
@@ -96,7 +97,7 @@ scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (67 cases, positive + negative, keyed on
+Tests: `crates/based-sema/tests/check.rs` (72 cases, positive + negative, keyed on
 diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean
 (including a `$ctx.org` query whose context is inferred with zero config, D4/D5).
 
@@ -166,8 +167,17 @@ Ordered by value. Each is a real gap with a known approach.
 5. **Relation `on:` custom joins.** The predicate uses table-qualified names
    (`orders.user_ref = users.legacy_id`) which the single-model path resolver
    can't handle; currently accepted unchecked. Needs a two-table resolution scope.
-6. **`^` tx back-references (mutations.md).** Not in the lexer/AST yet — parser +
-   AST work precede any sema check. `tx { create A{…}; create B{ x = ^.id } }`.
+6. ~~**`^` tx back-references (mutations.md).**~~ ✅ **done** (D16). Full vertical
+   slice: lexer `^` token, AST `Value::Back(BackRef)`, parser `back_ref` in value
+   position, sema resolves `^.field` against the *immediately preceding `create`* in
+   the enclosing `tx` (`check::check_back`; `E0170` when there is no prior create or
+   `^` is used outside a tx / in a predicate, `E0111` for an unknown field), and
+   codegen (`sql::mutations`): sibling creates in a tx get distinct id binds
+   (`:id_<step>`) so they don't collide, and `^.id` binds the prior create's id
+   (`^.<other>` reuses that create's assigned param/literal). Tests: 4 sema, 1 parser,
+   2 codegen. *Still deferred*: `^.field` for a field the prior create didn't set
+   (needs a re-select / RETURNING, a runtime concern) emits a `NULL /* … */` marker;
+   multi-level `^^`; back-ref *type* agreement with the assigned column.
 7. **create/required-field enforcement.** `create` currently only checks that named
    columns exist; it doesn't verify all non-optional, non-defaulted columns are
    assigned.
@@ -237,8 +247,10 @@ INSERT). Conventions recorded in **D12**. Delivered:
     delete/restore rewrites), all skipped when the caller assigns them explicitly.
   - **`tx`** renders its inner writes in order under one engine-owned transaction
     (principle 7 — the engine, not the emitted SQL, owns BEGIN/COMMIT).
-  - *Deferred inside M3 write*: `^` tx back-references (`user = ^.id`) — not in the
-    lexer/AST (sema resume #6), so a `tx` is a flat independent statement sequence;
+  - **`^` tx back-references** (`user = ^.id`) now lower (D16, sema resume #6): sibling
+    creates in a `tx` get distinct id binds (`:id_<step>`) and a back-reference reads
+    the immediately preceding create.
+  - *Deferred inside M3 write*:
     returning the declared shape after a write (RETURNING vs. re-select) — a runtime
     concern, no trailing SELECT emitted; required-field enforcement on `create`
     (sema resume #7) — an INSERT omits unassigned non-optional columns rather than

@@ -228,6 +228,30 @@ fn tx_renders_each_write_in_order() {
     let u = out.find("INSERT INTO `user`").unwrap();
     let a = out.find("INSERT INTO `address`").unwrap();
     assert!(u < a, "tx statement order not preserved:\n{out}");
+    // sibling creates in a tx get distinct id binds so they don't collide.
+    assert!(out.contains("VALUES (:id_0, :email)"), "\n{out}");
+    assert!(out.contains("VALUES (:id_1, :city)"), "\n{out}");
+}
+
+#[test]
+fn tx_backref_binds_prior_create_id() {
+    let out = gen(r#"
+        User { email: text }
+        Address { user: User, city: text }
+        shape UserCard from User { email }
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email };
+            create Address { user = ^.id, city = $city };
+          }
+        }
+        "#);
+    // `^.id` binds the preceding create's generated id (`:id_0`); Address's own id is `:id_1`.
+    assert!(
+        out.contains("INSERT INTO `address` (`id`, `user_id`, `city`)"),
+        "\n{out}"
+    );
+    assert!(out.contains("VALUES (:id_1, :id_0, :city)"), "\n{out}");
 }
 
 #[test]

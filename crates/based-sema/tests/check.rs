@@ -986,3 +986,85 @@ fn ctx_from_create_assign_is_recorded() {
     assert_eq!(add.ctx_requires.len(), 1);
     assert_eq!(add.ctx_requires[0].field, "org");
 }
+
+// ---------- tx back-references (`^`, mutations.md) --------------------------
+
+#[test]
+fn tx_backref_to_prior_create_is_clean() {
+    assert_clean(
+        r#"
+        User { email: text }
+        Address { user: User, city: text }
+        shape UserCard from User { email }
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email };
+            create Address { user = ^.id, city = $city };
+          }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn tx_backref_to_unknown_field_rejected() {
+    let (_, d) = analyze(
+        r#"
+        User { email: text }
+        Address { user: User, city: text }
+        shape UserCard from User { email }
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email };
+            create Address { user = ^.nope, city = $city };
+          }
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0111"), "{:?}", codes(&d));
+}
+
+#[test]
+fn backref_without_prior_create_rejected() {
+    // First statement in the tx: nothing precedes it to back-reference.
+    let (_, d) = analyze(
+        r#"
+        Address { city: text, ref_id: text }
+        shape A from Address { city }
+        mutation m(city: text) -> A {
+          tx {
+            create Address { ref_id = ^.id, city = $city };
+          }
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0170"), "{:?}", codes(&d));
+}
+
+#[test]
+fn backref_outside_tx_rejected() {
+    // `^` in a plain (non-tx) create has no preceding step in scope.
+    let (_, d) = analyze(
+        r#"
+        Address { city: text, ref_id: text }
+        shape A from Address { city }
+        mutation m(city: text) -> A {
+          create Address { ref_id = ^.id, city = $city };
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0170"), "{:?}", codes(&d));
+}
+
+#[test]
+fn backref_in_query_predicate_rejected() {
+    // `^` is only valid in a tx write; a query `where` is a misuse.
+    let (_, d) = analyze(
+        r#"
+        Doc { title: text }
+        shape D from Doc { title }
+        query find() -> D[] { list Doc where (title = ^.id); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0170"), "{:?}", codes(&d));
+}

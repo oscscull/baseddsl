@@ -300,6 +300,19 @@ pub(crate) struct Select<'a> {
     /// Filters currently mid-expansion; guards a self-referential filter from looping
     /// (sema permits recursion, so we must terminate on our own, like sema does).
     filter_stack: Vec<&'a str>,
+    /// The immediately preceding `create` in an enclosing `tx`, so a `^.field`
+    /// back-reference can bind to it (mutations.md). `None` outside a `tx`.
+    back: Option<BackCtx<'a>>,
+}
+
+/// What a `^.field` back-reference resolves to: the preceding `create`'s bound `id`
+/// parameter and its assigns (to reuse a caller-supplied value for a non-`id` field).
+#[derive(Clone)]
+pub(crate) struct BackCtx<'a> {
+    /// The bind name the prior create's app-generated `id` was emitted under
+    /// (`id_<step>` inside a tx). `^.id` lowers to this.
+    pub(crate) id_param: String,
+    pub(crate) assigns: &'a [Assign],
 }
 
 impl<'a> Select<'a> {
@@ -318,7 +331,15 @@ impl<'a> Select<'a> {
             seen: HashMap::new(),
             filters,
             filter_stack: Vec::new(),
+            back: None,
         }
+    }
+
+    /// Attach a tx back-reference context so a `^.field` in this statement's assigns
+    /// binds to the preceding `create` (mutations.md).
+    pub(crate) fn with_back(mut self, back: Option<BackCtx<'a>>) -> Self {
+        self.back = back;
+        self
     }
 
     /// Resolve a dotted path from `root` to `(table_alias, column)`, materializing
@@ -498,6 +519,36 @@ impl<'a> Select<'a> {
             }
             Value::Lit(l) => render_lit(l),
             Value::Func(f) => render_func(f),
+            Value::Back(b) => self.back_value(b),
+        }
+    }
+
+    /// Lower a `^.field` back-reference (mutations.md). `^.id` binds to the preceding
+    /// create's app-generated id (`:id_<step>`); any other field reuses the value the
+    /// prior create assigned to it (a caller param/literal), which the engine already
+    /// binds. Sema (E0170) guarantees a prior create and a real field exist.
+    fn back_value(&self, b: &BackRef) -> String {
+        let Some(back) = &self.back else {
+            return "NULL /* ^ needs a prior create */".to_string();
+        };
+        // Reuse the value the prior create assigned to this field (a caller
+        // param/literal the engine already binds), if it set one.
+        if let Some(a) = back.assigns.iter().find(|a| a.col.node == b.field.node) {
+            return match &a.value {
+                Value::Param(pr) => format!(":{}", param_key(pr)),
+                Value::Lit(l) => render_lit(l),
+                Value::Func(f) => render_func(f),
+                // A path or nested back-ref in the prior create is not a plain bind;
+                // leave a visible marker rather than emit something unbindable.
+                _ => format!("NULL /* ^.{} unresolved */", b.field.node),
+            };
+        }
+        // Otherwise: `^.id` is the app-generated id the prior create binds under
+        // `:id_<step>`; any other unset field needs a re-select (runtime).
+        if b.field.node == "id" {
+            format!(":{}", back.id_param)
+        } else {
+            format!("NULL /* ^.{} not set by prior create */", b.field.node)
         }
     }
 

@@ -300,6 +300,38 @@ fn mutation_with_create_and_param_refs() {
 }
 
 #[test]
+fn tx_create_with_backreference() {
+    let sf = parse_ok(
+        r#"
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email };
+            create Address { user = ^.id, city = $city };
+          }
+        }
+        "#,
+    );
+    let mu = match &sf.decls[0] {
+        Decl::Mutation(m) => m,
+        other => panic!("expected mutation, got {other:?}"),
+    };
+    let inner = match &mu.body[0] {
+        WriteStmt::Tx(inner) => inner,
+        other => panic!("expected tx, got {other:?}"),
+    };
+    match &inner[1] {
+        WriteStmt::Create { assigns, .. } => {
+            assert!(
+                matches!(&assigns[0].value, Value::Back(b) if b.field.node == "id"),
+                "expected `^.id` back-reference, got {:?}",
+                assigns[0].value
+            );
+        }
+        other => panic!("expected create, got {other:?}"),
+    }
+}
+
+#[test]
 fn raw_sql_shape_value_with_interpolation() {
     let sf = parse_ok(
         r#"

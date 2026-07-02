@@ -185,8 +185,9 @@ op          = '=' | '!=' | '>' | '<' | '>=' | '<='
 
 (* ---------- Values, paths, literals --------------------------------------- *)
 
-value       = param_ref | path | literal | func_call ;
+value       = param_ref | back_ref | path | literal | func_call ;
 param_ref   = '$' param_name { '.' lower_ident } ;   (* $id, $ctx.org          *)
+back_ref    = '^' '.' lower_ident ;                  (* tx back-ref: `^.id`     *)
 path        = lower_ident { '.' lower_ident } ;       (* dotted traversal       *)
 
 func_call   = func_name '(' [ value { ',' value } ] ')' ;

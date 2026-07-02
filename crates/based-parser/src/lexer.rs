@@ -69,6 +69,9 @@ pub enum Tok {
     Arrow,
     #[token("?")]
     Question,
+    /// `^` — tx back-reference marker (`^.field`, mutations.md).
+    #[token("^")]
+    Caret,
 
     // --- operators (multi-char forms first so they win the longest match) ---
     #[token("!=")]

@@ -374,8 +374,9 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         }
     }
     let ret = resolve_return(&m.ret, None, cx, sink)?;
+    // At the top level there is no enclosing `tx`, so no back-reference is in scope.
     for stmt in &m.body {
-        check_write(stmt, cx, &params, sink);
+        check_write(stmt, cx, &params, None, sink);
     }
     Some(RMutation {
         name: m.name.node.clone(),
@@ -385,12 +386,15 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     })
 }
 
-fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], sink: &mut Sink) {
+/// Check one write statement. `back` is the model of the immediately preceding
+/// `create` in the enclosing `tx` (`None` at the top level or before the first
+/// create) — the model a `^.field` back-reference resolves against.
+fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], back: Option<usize>, sink: &mut Sink) {
     match stmt {
         WriteStmt::Create { model, assigns } => {
             if let Some(mi) = write_model(model, cx, sink) {
                 for a in assigns {
-                    check_assign(a, mi, cx, params, sink);
+                    check_assign(a, mi, cx, params, back, sink);
                 }
             }
         }
@@ -402,7 +406,7 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], sink: &mut Sink) {
             if let Some(mi) = write_model(model, cx, sink) {
                 resolve::check_predicate(where_, Some(mi), cx, params, sink);
                 for a in assigns {
-                    check_assign(a, mi, cx, params, sink);
+                    check_assign(a, mi, cx, params, back, sink);
                 }
             }
         }
@@ -427,8 +431,13 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], sink: &mut Sink) {
             }
         }
         WriteStmt::Tx(inner) => {
+            // `^` reads the immediately preceding `create`; track it as we descend.
+            let mut prev = back;
             for s in inner {
-                check_write(s, cx, params, sink);
+                check_write(s, cx, params, prev, sink);
+                if let WriteStmt::Create { model, .. } = s {
+                    prev = write_model(model, cx, &mut Sink::default());
+                }
             }
         }
         WriteStmt::Raw(raw) => {
@@ -441,11 +450,41 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], sink: &mut Sink) {
     }
 }
 
-fn check_assign(a: &Assign, mi: usize, cx: &Cx, params: &[String], sink: &mut Sink) {
+fn check_assign(
+    a: &Assign,
+    mi: usize,
+    cx: &Cx,
+    params: &[String],
+    back: Option<usize>,
+    sink: &mut Sink,
+) {
     if cx.model(mi).member(&a.col.node).is_none() {
         unknown_field(cx, mi, &a.col, sink);
     }
-    resolve::check_value(&a.value, Some(mi), cx, params, sink);
+    // A `^.field` back-reference resolves against the preceding create's model, not
+    // the model being assigned; delegate the rest of the value to the shared checker.
+    if let Value::Back(b) = &a.value {
+        check_back(b, back, cx, sink);
+    } else {
+        resolve::check_value(&a.value, Some(mi), cx, params, sink);
+    }
+}
+
+/// Resolve a `^.field` back-reference: there must be a preceding `create` in the
+/// enclosing `tx` (`back`), and `field` must be one of its columns.
+fn check_back(b: &BackRef, back: Option<usize>, cx: &Cx, sink: &mut Sink) {
+    match back {
+        None => sink.error(
+            code::BACKREF_SCOPE,
+            b.span,
+            "`^` needs a preceding `create` in the same `tx`",
+        ),
+        Some(mi) => {
+            if cx.model(mi).member(&b.field.node).is_none() {
+                unknown_field(cx, mi, &b.field, sink);
+            }
+        }
+    }
 }
 
 fn write_model(name: &Ident, cx: &Cx, sink: &mut Sink) -> Option<usize> {

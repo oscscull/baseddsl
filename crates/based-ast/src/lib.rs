@@ -383,6 +383,17 @@ pub enum Value {
     Path(Path),
     Lit(Literal),
     Func(FuncCall),
+    /// `^.field` — a tx back-reference (mutations.md). Reads a field of the row the
+    /// immediately preceding `create` in the enclosing `tx` produced (the FK-wiring
+    /// case is `user = ^.id`). Legal only in a `tx` write body.
+    Back(BackRef),
+}
+
+/// `^.field` — see `Value::Back`. `span` covers the whole `^.field` for diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackRef {
+    pub field: Ident,
+    pub span: Span,
 }
 
 /// `$name` or `$ctx.org` (decisions.md D4).

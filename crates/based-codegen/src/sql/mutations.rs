@@ -22,11 +22,11 @@
 //! - `hard delete M where (p)` -> real `DELETE FROM m WHERE p` (soft-delete opt-out;
 //!   `@scope` still applies).
 //! - `tx { ... }` -> the inner statements, run in one engine-owned transaction
-//!   (principle 7; the engine, not this SQL, owns BEGIN/COMMIT).
+//!   (principle 7; the engine, not this SQL, owns BEGIN/COMMIT). Sibling `create`s
+//!   get distinct id binds (`:id_<step>`), and a `^.field` back-reference reads the
+//!   immediately preceding create — `^.id` binds that create's generated id.
 //!
 //! ## Deferred (documented, not silently wrong)
-//! - `^` tx back-references (`user = ^.id`): not in the lexer/AST yet (sema resume
-//!   #6). A `tx` today is a flat, independent statement sequence.
 //! - Returning the declared shape after a write (RETURNING vs. re-select) is a
 //!   runtime concern (PLAN M3); no trailing SELECT is emitted.
 //! - Multi-row WHERE that reaches across relations lowers to MariaDB's multi-table
@@ -35,7 +35,7 @@
 use based_ast::*;
 use based_sema::{CheckedSchema, RModel, SoftDelete, SoftMode};
 
-use crate::sql::dml::{physical_col, render_raw, soft_pred, Join, Select};
+use crate::sql::dml::{physical_col, render_raw, soft_pred, BackCtx, Join, Select};
 use crate::Dialect;
 
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
@@ -56,20 +56,28 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
     out
 }
 
-fn render_mutation(schema: &CheckedSchema, decls: &[Decl], m: &Mutation) -> String {
+fn render_mutation<'a>(schema: &'a CheckedSchema, decls: &'a [Decl], m: &'a Mutation) -> String {
     let mut out = format!("-- mutation {}\n", m.name.node);
     for stmt in &m.body {
-        out.push_str(&render_write(schema, decls, stmt));
+        out.push_str(&render_write(schema, decls, stmt, "id", None));
     }
     out
 }
 
-/// One write statement -> its SQL. `tx` recurses (a flat statement sequence; `^`
-/// back-references are deferred, sema resume #6).
-fn render_write(schema: &CheckedSchema, decls: &[Decl], stmt: &WriteStmt) -> String {
+/// One write statement -> its SQL. `id_param` is the bind name a `create`'s
+/// app-generated `id` is emitted under (`id` at top level, `id_<step>` inside a
+/// `tx` so sibling creates stay distinct); `back` is the preceding create a
+/// `^.field` reads from (mutations.md).
+fn render_write<'a>(
+    schema: &'a CheckedSchema,
+    decls: &'a [Decl],
+    stmt: &'a WriteStmt,
+    id_param: &str,
+    back: Option<BackCtx<'a>>,
+) -> String {
     match stmt {
         WriteStmt::Create { model, assigns } => match schema.model(&model.node) {
-            Some(m) => render_create(schema, decls, m, assigns),
+            Some(m) => render_create(schema, decls, m, assigns, id_param, back),
             None => String::new(),
         },
         WriteStmt::Update {
@@ -77,7 +85,7 @@ fn render_write(schema: &CheckedSchema, decls: &[Decl], stmt: &WriteStmt) -> Str
             where_,
             assigns,
         } => match schema.model(&model.node) {
-            Some(m) => render_update(schema, decls, m, where_, assigns),
+            Some(m) => render_update(schema, decls, m, where_, assigns, back),
             None => String::new(),
         },
         WriteStmt::Delete { model, where_ } => match schema.model(&model.node) {
@@ -95,8 +103,23 @@ fn render_write(schema: &CheckedSchema, decls: &[Decl], stmt: &WriteStmt) -> Str
         WriteStmt::Tx(inner) => {
             let mut s = "-- tx: one engine-owned transaction (principle 7); rolls back together\n"
                 .to_string();
+            // `^` reads the immediately preceding create; number creates so their
+            // generated ids get distinct binds and a back-reference can name one.
+            let mut prev: Option<BackCtx<'a>> = back;
+            let mut step = 0usize;
             for st in inner {
-                s.push_str(&render_write(schema, decls, st));
+                let idp = match st {
+                    WriteStmt::Create { .. } => format!("id_{step}"),
+                    _ => "id".to_string(),
+                };
+                s.push_str(&render_write(schema, decls, st, &idp, prev.clone()));
+                if let WriteStmt::Create { assigns, .. } = st {
+                    prev = Some(BackCtx {
+                        id_param: idp,
+                        assigns,
+                    });
+                    step += 1;
+                }
             }
             s
         }
@@ -108,13 +131,15 @@ fn render_write(schema: &CheckedSchema, decls: &[Decl], stmt: &WriteStmt) -> Str
 
 // ---------- create ---------------------------------------------------------
 
-fn render_create(
-    schema: &CheckedSchema,
-    decls: &[Decl],
+fn render_create<'a>(
+    schema: &'a CheckedSchema,
+    decls: &'a [Decl],
     model: &RModel,
-    assigns: &[Assign],
+    assigns: &'a [Assign],
+    id_param: &str,
+    back: Option<BackCtx<'a>>,
 ) -> String {
-    let mut sel = Select::new(schema, decls, model);
+    let mut sel = Select::new(schema, decls, model).with_back(back);
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
@@ -130,7 +155,7 @@ fn render_create(
     // model declares its own `id` that the caller sets explicitly.
     if !assigned.iter().any(|c| c == "id") {
         cols.insert(0, "`id`".to_string());
-        vals.insert(0, ":id".to_string());
+        vals.insert(0, format!(":{id_param}"));
     }
 
     // `@created`/`@updated` are set on insert (D2), unless the caller already did.
@@ -152,14 +177,15 @@ fn render_create(
 
 // ---------- update ---------------------------------------------------------
 
-fn render_update(
-    schema: &CheckedSchema,
-    decls: &[Decl],
+fn render_update<'a>(
+    schema: &'a CheckedSchema,
+    decls: &'a [Decl],
     model: &RModel,
     where_: &Predicate,
-    assigns: &[Assign],
+    assigns: &'a [Assign],
+    back: Option<BackCtx<'a>>,
 ) -> String {
-    let mut sel = Select::new(schema, decls, model);
+    let mut sel = Select::new(schema, decls, model).with_back(back);
     let mut sets: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
 

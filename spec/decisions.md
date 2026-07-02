@@ -304,3 +304,23 @@ full set of generated SQL, so "a query will scan" and "no query uses it" are fac
 - *Deferred, recorded not silent*: mutation `where` patterns don't feed W0103 (write-side scans);
   index matching is lead-column only (no composite-prefix/permutation reasoning); prod-stats
   floors + `max_rows` re-checking; the LSP surface showing inferred indexes inline (M5).
+
+## D16 — tx back-references (`^`, mutations.md)
+`tx { create A{…}; create B{ x = ^.id } }` wires a just-created row's key into the next write. How it
+resolves and lowers (lexer `^` token → AST `Value::Back(BackRef)` → parser → `based-sema` → `based-codegen`).
+- **`^` reads the *immediately preceding* `create`** in the enclosing `tx`. Not "any prior step" — the
+  most recent create only. Simple, matches the spec example (`create User; create Address{ user = ^.id }`),
+  and needs no step labels. `^.field` reads a column of that created row; `^.id` (the FK-wiring case) is
+  the overwhelming use.
+- **Scope is the `tx`.** A `^` at the first statement of a tx (nothing precedes), in a plain non-tx
+  `create`, or in a query/predicate position is a misuse → `E0170`. An unknown `^.field` → `E0111`
+  (resolved against the preceding create's model, *not* the model being written).
+- **Codegen: sibling creates get distinct id binds.** Ids are app-generated (D1), so within a `tx` each
+  `create` at step *k* emits its id as `:id_<k>` (top-level lone creates keep `:id`). This both fixes the
+  latent collision (two creates both binding `:id`) and gives a back-reference a name: `^.id` lowers to the
+  prior create's `:id_<k>`. `^.<other>` reuses the value that create assigned to the field (a caller
+  `:param`/literal), which the engine already binds.
+- *Deferred*: `^.field` for a column the prior create did **not** set (engine default, or read-after-write)
+  emits a visible `NULL /* ^.field … */` marker — recovering it needs a re-select/RETURNING, a runtime
+  concern; multi-level `^^`; back-ref *type* agreement with the assigned column (like D14 filter args,
+  the referenced value carries no re-checked column type at the use site).

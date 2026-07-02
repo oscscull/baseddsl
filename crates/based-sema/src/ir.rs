@@ -52,7 +52,11 @@ pub mod code {
     // declared — it is inferred per callable from use and checked for coherence.
     pub const CTX_BAD_PATH: &str = "E0160"; // $ctx used without exactly one field segment
     pub const CTX_CONFLICT: &str = "E0161"; // $ctx.<field> used at incompatible types across uses
-                                            // lints
+
+    // tx back-references (mutations.md): `^.field` reads the immediately preceding
+    // `create` in the same `tx`.
+    pub const BACKREF_SCOPE: &str = "E0170"; // `^` outside a `tx`, or with no preceding `create`
+                                             // lints
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
