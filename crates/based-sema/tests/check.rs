@@ -839,3 +839,150 @@ fn scope_filter_counts_toward_pattern() {
         "#,
     );
 }
+
+// ---------- $ctx inference + coherence (D4/D5) -----------------------------
+
+#[test]
+fn ctx_inferred_from_use_is_clean() {
+    // No declaration anywhere: `$ctx.org`'s type is inferred from the `org` column
+    // it compares against (auth.md Handle 1).
+    assert_clean(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] { list Doc where (org = $ctx.org) order (title); }
+        "#,
+    );
+}
+
+#[test]
+fn ctx_requirement_is_recorded_per_callable() {
+    // The inferred requirement is attached to the callable that reads it — the
+    // client sends exactly this as request context.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] { list Doc where (org = $ctx.org) order (title); }
+        query all() -> D[] order (title);
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let docs = schema.queries.iter().find(|q| q.name == "docs").unwrap();
+    assert_eq!(docs.ctx_requires.len(), 1);
+    assert_eq!(docs.ctx_requires[0].field, "org");
+    // a query that reads no context requires none
+    let all = schema.queries.iter().find(|q| q.name == "all").unwrap();
+    assert!(all.ctx_requires.is_empty());
+}
+
+#[test]
+fn ctx_scope_propagates_to_every_query() {
+    // `@scope` reads `$ctx.org`, so every query on the model requires it even with
+    // no `where` of its own (auth.md Handle 2).
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let docs = schema.queries.iter().find(|q| q.name == "docs").unwrap();
+    assert_eq!(docs.ctx_requires.len(), 1);
+    assert_eq!(docs.ctx_requires[0].field, "org");
+}
+
+#[test]
+fn ctx_bad_path_errors() {
+    // `$ctx` fields are flat: exactly one segment.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] { list Doc where (org = $ctx.org.deep) order (title); }
+        "#,
+    );
+    assert_eq!(errors(&d), vec!["E0160"]);
+}
+
+#[test]
+fn ctx_bare_no_field_errors() {
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] { list Doc where (org = $ctx) order (title); }
+        "#,
+    );
+    assert_eq!(errors(&d), vec!["E0160"]);
+}
+
+#[test]
+fn ctx_coherent_across_callables_is_clean() {
+    // `$ctx.org` is an `Org` key in both queries — one coherent request-context bag.
+    assert_clean(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query a() -> D[] { list Doc where (org = $ctx.org) order (title); }
+        query b() -> D[] { list Doc where (org = $ctx.org) order (title); }
+        "#,
+    );
+}
+
+#[test]
+fn ctx_conflict_across_callables_errors() {
+    // `$ctx.org` is an `Org` key in `a` but a text value in `b` — the caller can't
+    // build one bag that satisfies both.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org, @index title }
+        shape D from Doc { title }
+        query a() -> D[] { list Doc where (org = $ctx.org) order (title); }
+        query b() -> D[] { list Doc where (title = $ctx.org) order (title); }
+        "#,
+    );
+    assert_eq!(errors(&d), vec!["E0161"]);
+}
+
+#[test]
+fn ctx_conflict_within_one_callable_errors() {
+    // Same field used at two types in one query is itself incoherent.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text, @index org, @index title }
+        shape D from Doc { title }
+        query a() -> D[] {
+          list Doc where (org = $ctx.x and title = $ctx.x) order (title);
+        }
+        "#,
+    );
+    assert_eq!(errors(&d), vec!["E0161"]);
+}
+
+#[test]
+fn ctx_from_create_assign_is_recorded() {
+    // A `create` can set a column from context; the field types from that column.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        mutation add(t: text) -> D { create Doc { org = $ctx.org, title = $t }; }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let add = schema.mutations.iter().find(|m| m.name == "add").unwrap();
+    assert_eq!(add.ctx_requires.len(), 1);
+    assert_eq!(add.ctx_requires[0].field, "org");
+}

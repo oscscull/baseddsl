@@ -189,8 +189,9 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
             Some(t) => terminal_family(&t),
             None => return, // unresolved RHS: name error already reported
         },
-        // A param's type is checked at its declaration (check_param); a function's
-        // return type is not modelled yet.
+        // A param's type is checked at its declaration (check_param); a `$ctx.field`
+        // is typed by inference from *this* comparison (ctx.rs), so it never clashes
+        // here; a function's return type is not modelled yet.
         Value::Param(_) | Value::Func(_) => return,
     };
     if !compatible(lf, rf) {
@@ -470,8 +471,19 @@ pub fn check_value(
 }
 
 pub fn check_param_ref(pr: &ParamRef, params: &[String], sink: &mut Sink) {
-    // `$ctx` is a reserved namespace typed by the manifest (D4) — always legal.
+    // `$ctx` is the caller-supplied request context (D4/D5). It must be referenced
+    // as exactly `$ctx.<field>` (one segment — the fields are flat). Its *type* is
+    // not declared: it is inferred per callable from the column each use compares
+    // against, and checked for cross-callable coherence (see `ctx.rs`).
     if pr.name.node == "ctx" {
+        if pr.path.len() != 1 {
+            let span = pr.path.last().map_or(pr.name.span, |s| s.span);
+            sink.error(
+                code::CTX_BAD_PATH,
+                span,
+                "`$ctx` takes exactly one field (e.g. `$ctx.org`)",
+            );
+        }
         return;
     }
     if !params.iter().any(|p| p == &pr.name.node) {

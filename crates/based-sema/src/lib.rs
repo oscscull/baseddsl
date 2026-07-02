@@ -17,6 +17,7 @@
 //!   5. check shapes / queries / mutations / filters against the resolved models.
 
 mod check;
+mod ctx;
 mod indexes;
 mod ir;
 mod model;
@@ -152,6 +153,11 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     for (m, inf) in rmodels.iter_mut().zip(inferred) {
         m.inferred_indexes = inf;
     }
+
+    // 7. `$ctx` coherence (D4/D5): each callable's inferred context requirement is
+    // its own, but a field name must mean one type everywhere the caller's shared
+    // context bag is read — closed world makes that a fact, not a guess.
+    ctx::check_coherence(&rqueries, &rmutations, &mut sink);
 
     let schema = CheckedSchema {
         models: rmodels,

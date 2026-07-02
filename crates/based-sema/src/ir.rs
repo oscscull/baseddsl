@@ -47,7 +47,12 @@ pub mod code {
     pub const OP_TYPE: &str = "E0150"; // operator not applicable to the operand type
     pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison
     pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column (D1)
-                                          // lints
+
+    // $ctx typing (D4/D5): the caller-supplied request context. Its type is not
+    // declared — it is inferred per callable from use and checked for coherence.
+    pub const CTX_BAD_PATH: &str = "E0160"; // $ctx used without exactly one field segment
+    pub const CTX_CONFLICT: &str = "E0161"; // $ctx.<field> used at incompatible types across uses
+                                            // lints
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
@@ -214,6 +219,10 @@ pub struct RQuery {
     /// The return shape, or `None` when the return type is a bare model.
     pub ret_shape: Option<String>,
     pub paginated: bool,
+    /// The `$ctx.<field>` this query requires (its own `where` + the target model's
+    /// `@scope` + expanded filters), each typed by inference (D4/D5). Deduped per
+    /// callable; the client sends exactly these as request context.
+    pub ctx_requires: Vec<CtxReq>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +230,10 @@ pub struct RMutation {
     pub name: String,
     pub span: Span,
     pub ret_model: String,
+    /// The `$ctx.<field>` this mutation requires (its write `where`s + the write
+    /// models' `@scope` + `create`/`update` assigns), each typed by inference
+    /// (D4/D5). Deduped per callable.
+    pub ctx_requires: Vec<CtxReq>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +278,27 @@ impl Sink {
         self.diags
             .push(Diagnostic::warning(code, msg).at(span).note(note));
     }
+}
+
+/// One `$ctx.<field>` requirement of a single callable (D4/D5): the field name and
+/// the type it was used at, inferred from the column the use compared against.
+/// `$ctx` is per-request; there is no global context type — each query/mutation
+/// requires exactly the fields *it* (plus its `@scope`/filters) reads. Cross-
+/// callable coherence (a field must mean one type everywhere the caller's context
+/// bag is shared) is checked separately (`CTX_CONFLICT`).
+#[derive(Debug, Clone)]
+pub struct CtxReq {
+    pub field: String,
+    pub ty: CtxField,
+    pub span: Span,
+}
+
+/// A `$ctx` field's inferred type: a primitive, or a relation to a model (the
+/// caller supplies that model's key, D1).
+#[derive(Debug, Clone)]
+pub enum CtxField {
+    Scalar(Primitive),
+    Relation(String),
 }
 
 /// Table name for a model (D3): `snake_case(Name)`, no pluralization.

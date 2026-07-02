@@ -44,22 +44,41 @@ A query may only sort by `created_at` if that model declares it (see the product
   `(on: ...)` on a relation (relations.md). The convention is the default only, never a
   requirement on the existing database.
 
-## D4 — `$ctx`
+## D4 — `$ctx` (per-request context; inferred, never a global type)
 `$ctx` is a reserved param namespace holding caller-supplied request context (auth.md
 Handles 1 & 2). `$ctx.org` is a path into it.
 - For the parser: `$ctx` is a normal `$`-param whose name is `ctx`, followed by a dotted path.
-- Its shape/type is declared in a project manifest (D5), not inferred. Typing `$ctx.*` is a
-  sema concern; deferred past the parser milestone.
+- **There is no single "ctx type."** `$ctx` is per-*request* — the caller builds one context bag per
+  call. Correspondingly there is no global declaration: each **callable requires exactly the
+  `$ctx.<field>`s it reads** (its `where`, its target model's `@scope`, expanded filter bodies,
+  `create`/`update` assigns). A public query requires none. This is the honest unit — "the ctx *this
+  request* needs" — not "the ctx." (An earlier iteration put a `[ctx]` table in `based.toml`; that
+  encoded the "one global ctx" fallacy and was removed.)
+- **A field's type is inferred from use, not declared** (implemented, `based-sema::ctx`; sema resume
+  #4). `where (org = $ctx.org)` types `$ctx.org` as `org`'s FK — the same inference untyped query
+  params already use (queries.md). Uses with no column to infer against (a literal, a raw block, a
+  `guard` arg) contribute nothing.
+- **Coherence is the one global fact** (closed-world, D5): every callable reads the same caller-built
+  bag, so a field *name* must mean one *type* everywhere. A clash — across callables *or* within one —
+  is `E0161`. Structural rule: `$ctx.<field>` is exactly one segment (`E0160`); the fields are flat.
+- The inferred requirement is attached per callable (`RQuery`/`RMutation.ctx_requires`) and is what
+  the generated client will send as request context (one `Ctx` shape *per route*, not a monolith).
+  A relation-typed field carries the model's key (D1); codegen renders it `:ctx_<field>` (D11).
+- **Residue (deferred):** a `$ctx` field used *only* where inference can't reach — a `guard` (Handle
+  3, which takes no args yet) or a raw block — is typed by a **local annotation at the use site** when
+  `guard` grows args. No central registry, ever. Also deferred: `$ctx` passed *as a filter arg*
+  (arg/usage typing, D14).
 
 ## D5 — Project manifest & schema discovery
 A project root holds a manifest `based.toml` (name TBD) declaring:
 - a format/schema version (room for migration as the language evolves),
 - the dialect compile target (default `mariadb`),
 - the schema source root (default the project root),
-- the generated-client target language (`rust` for now),
-- the `$ctx` type binding.
+- the generated-client target language (`rust` for now).
 The manifest globs `**/*.bsl` under the schema root into the schema = the closed set of
 declarations. Closed-world is required by calling.md (index inference, N+1 lint, etc.).
+(`$ctx` is **not** declared here — its shape is inferred per callable from use, D4. Closed-world is
+exactly what makes that inference + its coherence check decidable.)
 
 ## D6 — One extension, uniform grammar
 Single file extension `.bsl`. The grammar is uniform: any declaration (model, shape, query,

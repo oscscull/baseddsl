@@ -30,7 +30,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 |-------|-------|-------|
 | based-ast | ✅ stable | AST mirrors grammar.ebnf node-for-node. No logic. |
 | based-diagnostics | ✅ stable | `Diagnostic` + `Severity`; stable codes; builder API. |
-| based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: `$ctx` type, schema-version. |
+| based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: schema-version. (`$ctx` is inferred in sema, not declared here — D4.) |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
 | based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust). |
@@ -44,8 +44,8 @@ Entry: `check(&[Decl]) -> (CheckedSchema, Vec<Diagnostic>)`.
 Modules: `ir` (resolved types + codes + `Sink` + `snake_case`), `model` (AST model
 → `RModel`, two-phase), `resolve` (path resolution + the shared predicate/value
 checker + `Cx` context), `check` (shapes/queries/mutations/filters + the four query
-inferences), `indexes` (inferred-index model + the index lints, D15), `lib`
-(orchestration).
+inferences), `ctx` (`$ctx` per-callable inference + coherence, D4/D5), `indexes`
+(inferred-index model + the index lints, D15), `lib` (orchestration).
 
 Pass order (see `lib.rs`): collect+dedup → skeletons → validate (mut) → resolve
 exprs (read-only) → check shapes/queries/mutations/filters. Split into mut/read
@@ -60,7 +60,8 @@ holds `&mut`.
 - Name resolution: relation targets, inverse pairings (explicit `(M.field)` and
   inferred from the unique forward edge), shape `from`, return types, statement
   models, mutation write models, dotted paths (forward + backward traversal),
-  index columns, `$param` refs (`$ctx` always allowed, D4), filter calls + arity
+  index columns, `$param` refs (`$ctx.<field>` structural check; its type is
+  inferred per callable from use + checked for coherence, D4/D5), filter calls + arity
   *and* their bodies re-resolved against the call-site model (D14, cycle-guarded),
   functions (closed set `KNOWN_FUNCS`).
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
@@ -95,8 +96,9 @@ scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (58 cases, positive + negative, keyed on
-diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean.
+Tests: `crates/based-sema/tests/check.rs` (67 cases, positive + negative, keyed on
+diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean
+(including a `$ctx.org` query whose context is inferred with zero config, D4/D5).
 
 ## based-sema — deferred (resume points)
 
@@ -142,8 +144,25 @@ Ordered by value. Each is a real gap with a known approach.
    `(unique)` constraint always flagged). *Still deferred*: mutation-`where`
    patterns feeding W0103; composite-prefix matching; prod-stats floors +
    `max_rows` re-checking; the `unsafe` audit listing; LSP surface (M5).
-4. **`$ctx` typing (D4/D5).** Manifest must declare the `$ctx` shape; sema then
-   types `$ctx.org` paths. Today `$ctx.*` is accepted unchecked.
+4. ~~**`$ctx` typing (D4/D5).**~~ ✅ **done — by inference, not declaration**
+   (`based-sema::ctx`). `$ctx` is per-request: there is no global context type. Each
+   callable *requires* exactly the `$ctx.<field>`s it reads (its `where`, its target
+   model's `@scope`, expanded filter bodies, `create`/`update` assigns), and each
+   field's type is **inferred from the column the use compares against** — the same
+   inference untyped query params already use. `ctx::collect_query`/`collect_mutation`
+   attach a deduped `Vec<CtxReq>` to each `RQuery`/`RMutation` (the client will send
+   exactly these). The one global fact is **coherence** (`ctx::check_coherence`,
+   closed-world): a field name must mean one type everywhere the caller's shared
+   context bag is read → `E0161` on a clash (across *or* within a callable).
+   `resolve::check_param_ref` enforces the structural rule (`$ctx.<field>`, one
+   segment → `E0160`). No manifest `[ctx]`, no config: commerce's `my_org_orders`
+   (`where (org = $ctx.org)`) checks clean and lowers to `WHERE order.org_id =
+   :ctx_org` with zero declaration. Tests: 9 new in `check.rs` (67 total).
+   *Deferred residue*: a `$ctx` field with no column to infer from — used only in a
+   `guard` (Handle 3, which takes no args yet) or a raw block — is typed by a local
+   annotation *at the use site* when `guard` grows args (decided direction, D4); it
+   contributes nothing to inference today. Also deferred: `$ctx` passed *as a filter
+   arg* (arg/usage typing, D14); emitting the per-callable `Ctx` type in the client.
 5. **Relation `on:` custom joins.** The predicate uses table-qualified names
    (`orders.user_ref = users.legacy_id`) which the single-model path resolver
    can't handle; currently accepted unchecked. Needs a two-table resolution scope.
