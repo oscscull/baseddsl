@@ -44,7 +44,8 @@ Entry: `check(&[Decl]) -> (CheckedSchema, Vec<Diagnostic>)`.
 Modules: `ir` (resolved types + codes + `Sink` + `snake_case`), `model` (AST model
 → `RModel`, two-phase), `resolve` (path resolution + the shared predicate/value
 checker + `Cx` context), `check` (shapes/queries/mutations/filters + the four query
-inferences), `lib` (orchestration).
+inferences), `indexes` (inferred-index model + the index lints, D15), `lib`
+(orchestration).
 
 Pass order (see `lib.rs`): collect+dedup → skeletons → validate (mut) → resolve
 exprs (read-only) → check shapes/queries/mutations/filters. Split into mut/read
@@ -76,6 +77,13 @@ holds `&mut`.
   wire namespace) / filter / field.
 - Lints: `W0100` nondeterministic `list` (no sort at any tier), `W0102` raw SQL on
   a `@soft_delete` model (tombstone gap).
+- Index inference + lints (indexing.md, D15, `indexes.rs`): per-query access
+  patterns (eq/range/sort off the conjunctive spine, params + `@scope` + call-site
+  filter bodies included) vs. available indexes → `W0103` missing-index (satisfied
+  by `@index` or the `unindexed(max_rows: N)` / `unindexed(unsafe)` query clause,
+  `W0105` when that annotation goes stale); pooled usage → `W0104` useless-index.
+  Traversed inverse edges seed `RModel.inferred_indexes` (join-key baseline, DDL
+  emits them `inf_`-prefixed, soft-delete predicate-leading).
 
 **Diagnostic codes** live in `ir::code` (E01xx errors, W01xx lints). Parser owns
 E0001/E0002, manifest E001x. Codes are stable — grep `ir.rs` for the registry.
@@ -87,7 +95,7 @@ scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (45 cases, positive + negative, keyed on
+Tests: `crates/based-sema/tests/check.rs` (58 cases, positive + negative, keyed on
 diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean.
 
 ## based-sema — deferred (resume points)
@@ -119,11 +127,21 @@ Ordered by value. Each is a real gap with a known approach.
    substituted through the body, lowered against the call-site model, joins and all;
    self-reference guarded with a visible `/* filter … recursion */` marker. *Still
    deferred*: arg-vs-usage type agreement (filter params carry no declared column).
-3. **Index lints (indexing.md).** Missing-index (`unindexed`) and useless-index are
-   intentionally *not* implemented — they need the inferred baseline index set
-   (join keys, filter paths, soft-delete columns) and "consequential table"
-   heuristics (`unindexed(max_rows)`, `unindexed(unsafe)`), else they spam the
-   reference schema with false positives. Build the inferred-index model first.
+3. ~~**Index lints (indexing.md).**~~ ✅ **done** (D15, `indexes.rs`). The inferred
+   baseline is *traversed join keys only* (inverse-edge FK columns — the one class
+   that is unambiguously right to auto-create; DDL emits them `inf_`-prefixed,
+   soft-delete column prepended since MariaDB has no partial indexes). Filter-path
+   indexes are shown via `W0103` missing-index instead of auto-created (write tax
+   is a human call, principle 8): per-query eq/range/sort pattern vs. first column
+   of any available index; `or`/raw patterns are opaque → silent (precision over
+   recall). Satisfied by `@index` or the new `unindexed(max_rows: N)` /
+   `unindexed(unsafe[, "reason"])` *query clause* (grammar + AST + parser);
+   `W0105` flags a stale annotation. `W0104` useless-index fires on a declared
+   non-unique index whose lead nothing filters/sorts/joins on (broad usage pool,
+   under-fires by design; unique indexes exempt; single-col duplicate of a
+   `(unique)` constraint always flagged). *Still deferred*: mutation-`where`
+   patterns feeding W0103; composite-prefix matching; prod-stats floors +
+   `max_rows` re-checking; the `unsafe` audit listing; LSP surface (M5).
 4. **`$ctx` typing (D4/D5).** Manifest must declare the `$ctx` shape; sema then
    types `$ctx.org` paths. Today `$ctx.*` is accepted unchecked.
 5. **Relation `on:` custom joins.** The predicate uses table-qualified names
@@ -145,11 +163,11 @@ Ordered by value. Each is a real gap with a known approach.
 type mapping + no-FK-constraint rule recorded in decisions.md **D10**. IR enriched:
 `MemberKind::Scalar` now carries `unique` + `default`. Tests: `based-codegen/tests/ddl.rs`;
 commerce example generates clean DDL.
-  - *Deferred inside M2*: the **inferred baseline index set** (join keys, filter paths,
-    soft-delete columns → predicate-leading indexes, indexing.md). Needs the inference
-    model (sema resume #3); emitting it blindly spams duplicate keys, and MariaDB has no
-    partial indexes so "predicate-leading" = prepend `deleted_at`, a codegen concern for
-    that pass. Today only *declared* structure is emitted.
+  - ~~*Deferred inside M2*: the inferred baseline index set.~~ ✅ **done with sema
+    resume #3** (D15): DDL now appends the sema-inferred join-key indexes
+    (`KEY inf_<table>_<cols>`), soft-delete column prepended (predicate-leading —
+    MariaDB has no partial indexes), deduped against declared structure. Filter-path
+    indexes deliberately stay out of DDL — they surface as `W0103` instead.
   - *Deferred*: per-field length tuning for `text` (no length primitive; D10 uses
     `VARCHAR(255)`); custom-PK FK type propagation is handled but untested for non-uuid keys.
 

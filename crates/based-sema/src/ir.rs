@@ -51,6 +51,10 @@ pub mod code {
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
+    // index lints (indexing.md, D15)
+    pub const UNINDEXED: &str = "W0103"; // a query will scan: no usable index, no annotation
+    pub const USELESS_INDEX: &str = "W0104"; // declared index no query uses (pure write-tax)
+    pub const STALE_UNINDEXED: &str = "W0105"; // unindexed(...) on a query that is indexed
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
@@ -106,6 +110,11 @@ pub struct RModel {
     pub created: Option<String>,
     pub updated: Option<String>,
     pub indexes: Vec<RIndex>,
+    /// Engine-inferred baseline indexes (indexing.md, D15): FK columns of inverse
+    /// edges the access layer actually traverses, minus anything a declared index
+    /// already covers. Columns are field-level (like `indexes`); DDL prepends the
+    /// soft-delete column (predicate-leading). Never `unique`.
+    pub inferred_indexes: Vec<RIndex>,
     /// Field names that are individually unique (id, `(unique)`, single-col unique
     /// index). Drives `get`-must-be-keyed lint and codegen constraints.
     pub unique_cols: Vec<String>,
@@ -245,6 +254,16 @@ impl Sink {
     ) {
         self.diags
             .push(Diagnostic::error(code, msg).at(span).note(note));
+    }
+    pub fn warn_note(
+        &mut self,
+        code: &'static str,
+        span: Span,
+        msg: impl Into<String>,
+        note: impl Into<String>,
+    ) {
+        self.diags
+            .push(Diagnostic::warning(code, msg).at(span).note(note));
     }
 }
 

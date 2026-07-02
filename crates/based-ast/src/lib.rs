@@ -253,6 +253,24 @@ pub enum Clause {
     Where(Predicate),
     Order(Vec<SortTerm>),
     Page(PageClause),
+    Unindexed(Unindexed),
+}
+
+/// `unindexed(...)` — the query is knowingly unindexed (indexing.md): satisfies
+/// the missing-index lint without declaring an index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unindexed {
+    pub kind: UnindexedKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnindexedKind {
+    /// `unindexed(max_rows: N)` — checked assertion: bounded-and-fine; re-fires
+    /// if prod stats ever show N exceeded.
+    MaxRows(u64),
+    /// `unindexed(unsafe[, "reason"])` — unbounded, uncheckable; greppable.
+    Unsafe(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -244,3 +244,44 @@ A `filter name(params) = predicate` declares no model, so its column paths belon
   renders filter calls as a `TRUE /* deferred */` no-op — sema now resolves them, but the SQL lowering of
   a filter body is a separate codegen pass); type-checking each `arg` against how its param is used in the
   body (filter params carry no declared column, so arg/usage agreement is unchecked).
+
+## D15 — Index inference, baseline emission, and the index lints
+How indexing.md's inference + bidirectional lint lower (`based-sema::indexes`; DDL emission in
+`based-codegen::sql`). Closed-world (D5) is what makes this decidable: the access layer *is* the
+full set of generated SQL, so "a query will scan" and "no query uses it" are facts, not guesses.
+- **Inferred baseline = traversed join keys only.** Every inverse edge some query traverses — via a
+  `where`/`order`/`@scope` path, a shape reach, or a nested sub-object — needs an index on the FK
+  column the join runs through (the forward `via` field's `<field>_id`). That is the one class of
+  index that is unambiguously right to auto-create, so it is emitted in DDL as
+  `KEY inf_<table>_<cols>` (the `inf_` prefix marks engine-owned keys), deduped against declared
+  structure. Forward joins land on the target's PK, already indexed. On a `@soft_delete` model the
+  tombstone column is physically prepended (`(deleted_at, order_id)`): MariaDB has no partial
+  indexes, so "predicate-leading" (indexing.md) means leading with the always-filtered column.
+- **Filter-path indexes are shown, never auto-created** (principle 8). Whether one is worth its
+  write tax is a human call, so they surface as the W0103 lint and the human answers with an
+  `@index` or an `unindexed` annotation.
+- **W0103 `unindexed` (missing-index).** Per query, sema collects the root-table access pattern:
+  equality fields (`=`/`in`/bare bool — including param bindings on the bare/inline tiers, the
+  model's `@scope`, and named filters expanded at the call site, D14), range fields
+  (`< > <= >= ~`), and the leading local sort field (query `order`, else model `@sort`). The query
+  is *served* if any available index — PK, unique columns, declared `@index`es, inferred join
+  keys — leads with one of the eq/range fields; a declared index's own leading soft-delete column
+  is skipped when finding its lead. With no filter at all, only a *paginated* list is checked,
+  against its sort key (an index there is early-exit instead of full filesort). Unserved → W0103.
+  A pattern containing `or` or a raw atom is opaque: the lint stays silent rather than guess
+  (precision over recall — a warn lint must not cry wolf). Every table is treated as
+  plausibly-consequential today ("unknown", indexing.md — there are no prod stats yet);
+  `max_rows` is carried for the future stats ratchet.
+- **The annotation is a query clause** (grammar `unindexed_clause`), legal wherever
+  `where`/`order`/`page` are: `unindexed(max_rows: 500)` / `unindexed(unsafe[, "reason"])`.
+  W0105 flags a stale annotation (the query turns out indexed — drop it). Surfacing `unsafe` in
+  an audit listing is deferred (a CLI/LSP concern, not a check-time diagnostic).
+- **W0104 `useless-index`.** A declared non-unique index whose effective lead no query filters,
+  sorts, or joins on is pure write tax. Usage is pooled broadly — both `or` branches count, and a
+  column reached *through* a relation counts against the model it lives on — so the lint
+  under-fires rather than over-fires. Exempt: unique indexes (constraints, not perf) and an index
+  leading with the soft-delete column (used by construction). A single-column index duplicating a
+  `(unique)` constraint is flagged regardless of queries.
+- *Deferred, recorded not silent*: mutation `where` patterns don't feed W0103 (write-side scans);
+  index matching is lead-column only (no composite-prefix/permutation reasoning); prod-stats
+  floors + `max_rows` re-checking; the LSP surface showing inferred indexes inline (M5).

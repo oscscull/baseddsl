@@ -379,7 +379,7 @@ fn filter_body_resolves_at_call_site() {
     // declaration; they resolve against Product when the query calls it.
     assert_clean(
         r#"
-        Product { name: text, active: bool, stock: int }
+        Product { name: text, active: bool, stock: int, @index(active, stock) }
         shape P from Product { name }
         filter sellable = active and stock > 0;
         query q() -> P[] { list Product where (sellable) order (name); }
@@ -524,7 +524,7 @@ fn like_on_non_text_rejected() {
 fn like_on_text_ok() {
     assert_clean(
         r#"
-        Product { name: text }
+        Product { name: text, @index name }
         shape P from Product { name }
         query q() -> P[] { list Product where (name ~ "%a%") order (name); }
         "#,
@@ -576,7 +576,7 @@ fn relation_compared_to_uuid_literal_ok() {
     // a relation edge is comparable to its key (a uuid string).
     assert_clean(
         r#"
-        Product { name: text, maker: Maker }
+        Product { name: text, maker: Maker, @index maker }
         Maker { name: text }
         shape P from Product { name }
         query q() -> P[] { list Product where (maker = "0f-uuid") order (name); }
@@ -614,7 +614,7 @@ fn relation_param_typed_as_model_ok() {
     assert_clean(
         r#"
         @sort(name asc)
-        Product { name: text, maker: Maker }
+        Product { name: text, maker: Maker, @index maker }
         Maker { name: text }
         shape P from Product { name }
         query by_maker(maker: Maker) -> P[];
@@ -642,10 +642,200 @@ fn relation_param_typed_as_id_ok() {
     assert_clean(
         r#"
         @sort(name asc)
-        Product { name: text, maker: Maker }
+        Product { name: text, maker: Maker, @index maker }
         Maker { name: text }
         shape P from Product { name }
         query by_maker(maker: Id) -> P[];
+        "#,
+    );
+}
+
+// ---------- index inference + lints (indexing.md, D15) ----------------------
+
+#[test]
+fn traversed_inverse_edge_infers_join_key() {
+    // The shape reaches `items.qty` (an inverse hop), so OrderItem needs an index
+    // on the FK the join runs through — inferred, not declared.
+    let (schema, diags) = analyze(
+        r#"
+        @sort(placed_at desc)
+        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
+        OrderItem { order: Order, qty: int }
+        shape O from Order { first_qty = items.qty }
+        query orders() -> O[];
+        "#,
+    );
+    assert!(diags.is_empty(), "{:?}", codes(&diags));
+    let inferred = &schema.model("OrderItem").unwrap().inferred_indexes;
+    assert_eq!(inferred.len(), 1, "{inferred:?}");
+    assert_eq!(inferred[0].columns, vec!["order".to_string()]);
+}
+
+#[test]
+fn inferred_join_key_deduped_by_declared_index() {
+    // The user already declared the join-key index; nothing is inferred, and the
+    // declared index counts as used (no W0104).
+    let (schema, diags) = analyze(
+        r#"
+        @sort(placed_at desc)
+        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
+        OrderItem { order: Order, qty: int, @index order }
+        shape O from Order { first_qty = items.qty }
+        query orders() -> O[];
+        "#,
+    );
+    assert!(diags.is_empty(), "{:?}", codes(&diags));
+    assert!(schema
+        .model("OrderItem")
+        .unwrap()
+        .inferred_indexes
+        .is_empty());
+}
+
+#[test]
+fn unindexed_query_warns() {
+    // `by_status` filters `status`, but no index leads with it — the query scans.
+    let (_, d) = analyze(
+        r#"
+        Product { name: text, status: text, @index name }
+        shape P from Product { name }
+        query by_status(status) -> P[] order (name);
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0103"]);
+}
+
+#[test]
+fn unindexed_satisfied_by_declared_index() {
+    assert_clean(
+        r#"
+        Product { name: text, status: text, @index status }
+        shape P from Product { name }
+        query by_status(status) -> P[] order (name);
+        "#,
+    );
+}
+
+#[test]
+fn unindexed_satisfied_by_unsafe_annotation() {
+    // The loud opt-out: greppable, silences W0103, never silently dropped.
+    assert_clean(
+        r#"
+        Product { name: text, status: text, @index name }
+        shape P from Product { name }
+        query by_status(status) -> P[] order (name) unindexed(unsafe, "ops table, stays tiny");
+        "#,
+    );
+}
+
+#[test]
+fn unindexed_satisfied_by_max_rows_in_block() {
+    assert_clean(
+        r#"
+        Product { name: text, status: text, @index name }
+        shape P from Product { name }
+        query by_status(s) -> P[] {
+          list Product where (status = $s) order (name) unindexed(max_rows: 500);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn stale_unindexed_annotation_warns() {
+    // `sku` is unique, so the get is indexed — the annotation is stale.
+    let (_, d) = analyze(
+        r#"
+        Product { sku: text (unique), name: text }
+        shape P from Product { name }
+        query by_sku(sku) -> P unindexed(max_rows: 10);
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0105"]);
+}
+
+#[test]
+fn useless_index_warns() {
+    // Nothing filters, sorts, or joins on `price`; the index is pure write tax.
+    let (_, d) = analyze(
+        r#"
+        @sort(name asc)
+        Product { name: text, price: int, @index price, @index name }
+        shape P from Product { name }
+        query all() -> P[];
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0104"]);
+}
+
+#[test]
+fn paginated_sort_wants_an_index() {
+    // No filter at all: a paginated list still pays for its sort — W0103 unless
+    // the sort key is indexed.
+    let (_, d) = analyze(
+        r#"
+        Product { name: text, created_at: timestamp }
+        shape P from Product { name }
+        query recent() -> P[] order (created_at desc) page (20);
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0103"]);
+    assert_clean(
+        r#"
+        Product { name: text, created_at: timestamp, @index created_at }
+        shape P from Product { name }
+        query recent() -> P[] order (created_at desc) page (20);
+        "#,
+    );
+}
+
+#[test]
+fn unique_index_is_never_useless() {
+    // A unique index is a constraint, not a perf structure — exempt from W0104
+    // even with no queries at all.
+    assert_clean("M { a: text, b: text, @index(a, b) unique }");
+}
+
+#[test]
+fn index_duplicating_unique_constraint_warns() {
+    let (_, d) = analyze("Org { slug: text (unique), @index slug }");
+    assert_eq!(codes(&d), vec!["W0104"]);
+}
+
+#[test]
+fn or_predicate_is_opaque_to_unindexed() {
+    // First-column reasoning can't judge an `or`; W0103 stays silent rather than
+    // guess (precision over recall).
+    assert_clean(
+        r#"
+        Product { name: text, a: text, b: text, @index name }
+        shape P from Product { name }
+        query q() -> P[] { list Product where (a = "x" or b = "y") order (name); }
+        "#,
+    );
+}
+
+#[test]
+fn scope_filter_counts_toward_pattern() {
+    // `@scope` is injected into every query on the model (auth.md), so its
+    // columns are part of every query's index pattern.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0103"]);
+    assert_clean(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
         "#,
     );
 }

@@ -17,6 +17,7 @@
 //!   5. check shapes / queries / mutations / filters against the resolved models.
 
 mod check;
+mod indexes;
 mod ir;
 mod model;
 mod resolve;
@@ -113,33 +114,44 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         model::validate(ast, mi, &mut rmodels, &index, &mut sink);
     }
 
-    // 4/5. Everything from here reads the finished models through one context.
-    let cx = Cx {
-        models: &rmodels,
-        index: &index,
-        filters: &filter_defs,
-        shapes: &shape_from,
-    };
+    // 4/5. Everything from here reads the finished models through one context
+    // (scoped so its borrow of `rmodels` ends before the inferred indexes land).
+    let (rshapes, rqueries, rmutations, rfilters, inferred) = {
+        let cx = Cx {
+            models: &rmodels,
+            index: &index,
+            filters: &filter_defs,
+            shapes: &shape_from,
+        };
 
-    for ast in &models {
-        model::resolve_exprs(ast, &cx, &mut sink);
+        for ast in &models {
+            model::resolve_exprs(ast, &cx, &mut sink);
+        }
+        let rshapes: Vec<RShape> = shapes
+            .iter()
+            .filter_map(|s| check::check_shape(s, &cx, &mut sink))
+            .collect();
+        let rqueries: Vec<RQuery> = queries
+            .iter()
+            .filter_map(|q| check::check_query(q, &cx, &mut sink))
+            .collect();
+        let rmutations: Vec<RMutation> = mutations
+            .iter()
+            .filter_map(|m| check::check_mutation(m, &cx, &mut sink))
+            .collect();
+        let rfilters: Vec<RFilter> = filters
+            .iter()
+            .map(|f| check::check_filter(f, &cx, &mut sink))
+            .collect();
+
+        // 6. Index inference + lints (indexing.md, D15). Last on purpose: it
+        // reasons over the *whole* resolved access layer (closed world, D5).
+        let inferred = indexes::run(&models, &queries, &shapes, &rqueries, &cx, &mut sink);
+        (rshapes, rqueries, rmutations, rfilters, inferred)
+    };
+    for (m, inf) in rmodels.iter_mut().zip(inferred) {
+        m.inferred_indexes = inf;
     }
-    let rshapes: Vec<RShape> = shapes
-        .iter()
-        .filter_map(|s| check::check_shape(s, &cx, &mut sink))
-        .collect();
-    let rqueries: Vec<RQuery> = queries
-        .iter()
-        .filter_map(|q| check::check_query(q, &cx, &mut sink))
-        .collect();
-    let rmutations: Vec<RMutation> = mutations
-        .iter()
-        .filter_map(|m| check::check_mutation(m, &cx, &mut sink))
-        .collect();
-    let rfilters: Vec<RFilter> = filters
-        .iter()
-        .map(|f| check::check_filter(f, &cx, &mut sink))
-        .collect();
 
     let schema = CheckedSchema {
         models: rmodels,

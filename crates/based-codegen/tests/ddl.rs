@@ -136,3 +136,39 @@ fn index_columns_resolve_relations_to_fk() {
         "\n{ddl}"
     );
 }
+
+#[test]
+fn inferred_join_key_emitted_predicate_leading() {
+    // The shape traverses `items` (an inverse edge), so the child table gets an
+    // engine-inferred index on the join FK, led by the soft-delete column
+    // (predicate-leading, D15 — MariaDB has no partial indexes).
+    let ddl = gen(r#"
+        @sort(placed_at desc)
+        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
+        @soft_delete(deleted_at)
+        OrderItem { deleted_at: timestamp?, order: Order, qty: int }
+        shape O from Order { first_qty = items.qty }
+        query orders() -> O[];
+        "#);
+    assert!(
+        ddl.contains("KEY `inf_order_item_deleted_at_order` (`deleted_at`, `order_id`)"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn inferred_join_key_deduped_when_declared() {
+    // The user declared the join-key index; nothing engine-owned is emitted.
+    let ddl = gen(r#"
+        @sort(placed_at desc)
+        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
+        OrderItem { order: Order, qty: int, @index order }
+        shape O from Order { first_qty = items.qty }
+        query orders() -> O[];
+        "#);
+    assert!(
+        ddl.contains("KEY `idx_order_item_order` (`order_id`)"),
+        "\n{ddl}"
+    );
+    assert!(!ddl.contains("`inf_"), "\n{ddl}");
+}

@@ -313,6 +313,9 @@ fn check_clauses(
                 }
             }
             Clause::Page(_) => {}
+            // Validated by the index pass (indexes.rs): satisfies W0103, or is
+            // itself flagged stale (W0105) when the query turns out indexed.
+            Clause::Unindexed(_) => {}
         }
     }
     has_order

@@ -76,6 +76,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
         created: None,
         updated: None,
         indexes: Vec::new(),
+        inferred_indexes: Vec::new(),
         unique_cols: Vec::new(),
     }
 }

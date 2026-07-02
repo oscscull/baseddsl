@@ -723,7 +723,7 @@ impl<'a> Parser<'a> {
     }
 
     fn at_clause(&self) -> bool {
-        self.at_kw("where") || self.at_kw("order") || self.at_kw("page")
+        self.at_kw("where") || self.at_kw("order") || self.at_kw("page") || self.at_kw("unindexed")
     }
 
     fn clause(&mut self) -> PResult<Clause> {
@@ -754,8 +754,35 @@ impl<'a> Parser<'a> {
                 offset,
                 with_count,
             }))
+        } else if self.at_kw("unindexed") {
+            let start = self.bump().unwrap().start;
+            self.expect(Tok::LParen, "`(`")?;
+            let kind = if self.eat_kw("unsafe") {
+                let reason = if self.eat(Tok::Comma) {
+                    let s = self.expect(Tok::Str, "a reason string")?;
+                    Some(unquote(self.text(s)))
+                } else {
+                    None
+                };
+                UnindexedKind::Unsafe(reason)
+            } else if self.eat_kw("max_rows") {
+                self.expect(Tok::Colon, "`:`")?;
+                UnindexedKind::MaxRows(self.int_lit()? as u64)
+            } else {
+                self.err("expected `max_rows: N` or `unsafe`");
+                return Err(());
+            };
+            let end = self.expect(Tok::RParen, "`)`")?.end;
+            Ok(Clause::Unindexed(Unindexed {
+                kind,
+                span: Span {
+                    file: self.file,
+                    start,
+                    end,
+                },
+            }))
         } else {
-            self.err("expected `where`, `order`, or `page`");
+            self.err("expected `where`, `order`, `page`, or `unindexed`");
             Err(())
         }
     }

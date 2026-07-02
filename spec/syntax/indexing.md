@@ -22,3 +22,5 @@ Fires on consequential unindexed queries. Default = warn (legacy onboarding must
 Satisfy by index OR annotation:
 - `unindexed(max_rows: N)` — checked assertion: bounded-and-fine; re-fires if prod stats show N exceeded. Self-policing, not a mute.
 - `unindexed(unsafe)` / `unindexed(unsafe, "reason")` — unbounded, uncheckable. Permitted but greppable + surfaced in audit, never silently satisfied. Means "guarantees end here, human vouches."
+
+The annotation is a query clause (grammar `unindexed_clause`), legal wherever `where`/`order`/`page` are. A stale annotation — the query turns out indexed — is itself linted. Lint semantics + inference boundaries: decisions.md D15.

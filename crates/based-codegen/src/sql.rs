@@ -5,11 +5,12 @@
 //! declared `@index`es. No foreign-key constraints are emitted — relations.md makes
 //! them opt-in, so the FK *column* exists but no `FOREIGN KEY` clause references it.
 //!
-//! Deferred (needs the inferred-index model, PLAN resume #3): the soft-delete /
-//! join-key / filter-path *baseline* index set. MariaDB has no partial indexes, so
-//! the "predicate-leading" soft-delete index (indexing.md) is a codegen concern for
-//! that later pass, not something we synthesize here — emitting it blindly would
-//! spam duplicate keys. Today we emit exactly what the schema declares.
+//! Besides declared structure, each table carries the sema-inferred baseline
+//! indexes (indexing.md, D15): join-key indexes for inverse edges the access
+//! layer traverses, named `inf_…` so engine-owned keys are distinguishable from
+//! declared `idx_…` ones. On a `@soft_delete` model the soft-delete column is
+//! prepended (predicate-leading — MariaDB has no partial indexes). Filter-path
+//! indexes are *not* auto-created; they surface as the W0103 lint instead.
 //!
 //! ## Type mapping (MariaDB)
 //! | primitive   | SQL            | note |
@@ -102,6 +103,24 @@ fn create_table(schema: &CheckedSchema, model: &RModel) -> String {
     // Declared `@index`es (composite or single; unique or plain).
     for idx in &model.indexes {
         lines.push(index_clause(model, idx));
+    }
+
+    // Inferred baseline indexes (indexing.md, D15): join keys of traversed
+    // inverse edges, deduped by sema against declared structure. MariaDB has no
+    // partial indexes, so "predicate-leading" means the soft-delete column is
+    // physically prepended — the engine filters it on every generated query.
+    for idx in &model.inferred_indexes {
+        let mut columns = idx.columns.clone();
+        if let Some(sd) = &model.soft_delete {
+            columns.insert(0, sd.field.clone());
+        }
+        let cols = columns
+            .iter()
+            .map(|c| format!("`{}`", physical_col(model, c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let name = constraint_name("inf", &model.table, &columns);
+        lines.push(format!("KEY `{name}` ({cols})"));
     }
 
     let body = lines

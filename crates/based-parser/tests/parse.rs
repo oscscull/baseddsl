@@ -374,3 +374,43 @@ fn separators_are_insignificant() {
     assert_eq!(with_commas.members.len(), with_newlines.members.len());
     assert_eq!(with_commas.members.len(), 3);
 }
+
+#[test]
+fn unindexed_clause_forms() {
+    // Both annotation forms (indexing.md), inline and in a block statement.
+    let sf = parse_ok(
+        r#"
+        query a(status) -> P[] unindexed(max_rows: 500);
+        query b(status) -> P[] unindexed(unsafe);
+        query c(s) -> P[] { list Product where (status = $s) unindexed(unsafe, "ops table, tiny"); }
+        "#,
+    );
+    let clause_of = |d: &Decl| -> Unindexed {
+        let Decl::Query(q) = d else {
+            panic!("expected query")
+        };
+        let clauses = match &q.body {
+            QueryBody::Inline(cs) => cs.as_slice(),
+            QueryBody::Block(s) => s.clauses.as_slice(),
+            QueryBody::Bare => panic!("expected clauses"),
+        };
+        match clauses.iter().find_map(|c| match c {
+            Clause::Unindexed(u) => Some(u.clone()),
+            _ => None,
+        }) {
+            Some(u) => u,
+            None => panic!("no unindexed clause on `{}`", q.name.node),
+        }
+    };
+    assert!(matches!(
+        clause_of(&sf.decls[0]).kind,
+        UnindexedKind::MaxRows(500)
+    ));
+    assert!(matches!(
+        clause_of(&sf.decls[1]).kind,
+        UnindexedKind::Unsafe(None)
+    ));
+    assert!(
+        matches!(clause_of(&sf.decls[2]).kind, UnindexedKind::Unsafe(Some(r)) if r == "ops table, tiny")
+    );
+}

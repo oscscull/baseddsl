@@ -12,6 +12,7 @@ Order {
   items:        OrderItem[]
   @index(org, status)
   @index placed_at
+  @index placed_by
 }
 
 shape OrderCard from Order {

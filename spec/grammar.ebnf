@@ -144,13 +144,18 @@ tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;
 statement   = verb model_ref { clause } ';' ;
 verb        = 'get' | 'list' ;          (* signature [] vs scalar still drives  *)
                                         (* the client contract independently   *)
-clause      = where_clause | order_clause | page_clause ;
+clause      = where_clause | order_clause | page_clause | unindexed_clause ;
 where_clause= 'where' '(' predicate ')' ;
 order_clause= 'order' '(' sort_term { ',' sort_term } ')' ;
 sort_term   = path [ 'asc' | 'desc' ] ;
 
 (* Pagination (pagination.md): keyset default; offset / count are loud opt-ins.*)
 page_clause = 'page' '(' INT ')' [ 'offset' ] [ 'with' 'count' ] ;
+
+(* Missing-index annotation (indexing.md): the query is knowingly unindexed.    *)
+(* `max_rows` is a checked assertion; `unsafe` is the loud, greppable opt-out.  *)
+unindexed_clause = 'unindexed' '(' ( 'max_rows' ':' INT
+                                   | 'unsafe' [ ',' STRING ] ) ')' ;
 
 (* ---------- Named filters (queries.md) ------------------------------------ *)
 
