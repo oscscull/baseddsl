@@ -81,6 +81,25 @@ fn update_injects_soft_delete_scope_and_bumps_updated() {
 }
 
 #[test]
+fn update_where_inlines_named_filter() {
+    // A named filter used in a mutation `where` is inlined the same way as on the
+    // read side — the write chain threads `decls` so the filter body is available.
+    let out = gen(r#"
+        @updated(updated_at)
+        Product { updated_at: timestamp, active: bool, stock: int, name: text }
+        shape P from Product { name }
+        filter sellable = active and stock > 0;
+        mutation retire(name: text) -> P {
+          update Product where (sellable) { active = false };
+        }
+        "#);
+    assert!(
+        out.contains("`product`.`active` = TRUE AND `product`.`stock` > 0"),
+        "\n{out}"
+    );
+}
+
+#[test]
 fn delete_on_soft_model_rewrites_to_tombstone_update() {
     let out = gen(r#"
         @soft_delete(deleted_at)

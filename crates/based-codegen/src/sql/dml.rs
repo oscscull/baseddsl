@@ -14,6 +14,8 @@
 //!   column. (Nested shape sub-objects are deferred — see PLAN M3.)
 //! - WHERE from the query filter (bare-param same-name equality, per-param
 //!   bindings, or an explicit `where`), then the injected soft-delete + scope.
+//!   A named-filter call in `where` is inlined: its body is substituted with the
+//!   call args and lowered against the call-site model (the codegen twin of sema D14).
 //! - ORDER from the sort cascade (query `order` > model `@sort`); keyset queries
 //!   get the unique `id` tiebreaker appended, shown not written (pagination.md).
 //! - LIMIT / OFFSET from `page (...)`; `with count` emits a second COUNT(*).
@@ -27,9 +29,6 @@
 //! ## Deferred (documented, not silently wrong)
 //! - Nested shape sub-objects (`field { ... }`): need JSON aggregation / a second
 //!   query; skipped in projection for now.
-//! - Named-filter calls inside `where`: filter bodies aren't resolved against the
-//!   call site yet (sema resume #2), so a `FilterCall` renders as a visible
-//!   `TRUE /* filter … deferred */` no-op rather than wrong SQL.
 //! - Keyset cursor comparison + opaque cursor encoding: runtime concern; the base
 //!   SELECT carries only ORDER + LIMIT + tiebreaker.
 
@@ -68,7 +67,7 @@ pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
 
 fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -> String {
     let root = schema.model(&rq.target).expect("target resolved by sema");
-    let mut sel = Select::new(schema, root);
+    let mut sel = Select::new(schema, decls, root);
 
     // 1. Projection (drives the SELECT list; also seeds joins for reached columns).
     let projection = build_projection(&mut sel, decls, rq, root);
@@ -295,15 +294,30 @@ pub(crate) struct Select<'a> {
     pub(crate) joins: Vec<Join>,
     /// path-prefix key (e.g. "placed_by", "address.city") -> join alias.
     seen: HashMap<String, String>,
+    /// Named filters by name, so a `FilterCall` (or a bare atom naming a filter) can
+    /// inline its body against the call-site model — the codegen mirror of sema D14.
+    filters: HashMap<&'a str, &'a NamedFilter>,
+    /// Filters currently mid-expansion; guards a self-referential filter from looping
+    /// (sema permits recursion, so we must terminate on our own, like sema does).
+    filter_stack: Vec<&'a str>,
 }
 
 impl<'a> Select<'a> {
-    pub(crate) fn new(schema: &'a CheckedSchema, root: &RModel) -> Self {
+    pub(crate) fn new(schema: &'a CheckedSchema, decls: &'a [Decl], root: &RModel) -> Self {
+        let filters = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Filter(f) => Some((f.name.node.as_str(), f)),
+                _ => None,
+            })
+            .collect();
         Select {
             schema,
             root_alias: root.table.clone(),
             joins: Vec::new(),
             seen: HashMap::new(),
+            filters,
+            filter_stack: Vec::new(),
         }
     }
 
@@ -455,15 +469,22 @@ impl<'a> Select<'a> {
                     _ => format!("{lhs} {} {rhs}", sql_op(*op)),
                 }
             }
-            // A bare atom is a bool column here (a zero-arg filter ref is deferred).
+            // A bare atom is either a zero-arg named filter or a plain bool column.
             Predicate::Bare(path) => {
+                if path.segments.len() == 1 {
+                    if let Some(f) = self.filters.get(path.segments[0].node.as_str()).copied() {
+                        return self.filter_call(f, &[], model);
+                    }
+                }
                 let (alias, col) = self.resolve(path, model);
                 format!("`{alias}`.`{col}` = TRUE")
             }
-            // Filter bodies aren't resolved against the call site yet (sema #2).
-            Predicate::FilterCall { name, .. } => {
-                format!("TRUE /* filter {} deferred */", name.node)
-            }
+            // Inline the filter's body, substituting args for its params, resolved
+            // against the call-site model (sema D14 guarantees the body resolves).
+            Predicate::FilterCall { name, args } => match self.filters.get(name.node.as_str()) {
+                Some(f) => self.filter_call(f, args, model),
+                None => format!("TRUE /* filter {} unresolved */", name.node),
+            },
             Predicate::Raw(raw) => format!("({})", render_raw(raw, &self.root_alias, &model.table)),
         }
     }
@@ -478,6 +499,76 @@ impl<'a> Select<'a> {
             Value::Lit(l) => render_lit(l),
             Value::Func(f) => render_func(f),
         }
+    }
+
+    /// Inline a named filter: bind its params to the call arguments, substitute those
+    /// bindings through its body, then lower the result against `model`. The filter
+    /// carries no model of its own, so its column paths resolve at the call site.
+    fn filter_call(&mut self, f: &'a NamedFilter, args: &[Value], model: &RModel) -> String {
+        // Recursion guard: a self-referential filter is legal (sema terminates it);
+        // stop re-expanding and leave a visible marker rather than looping.
+        if self.filter_stack.contains(&f.name.node.as_str()) {
+            return format!("TRUE /* filter {} recursion */", f.name.node);
+        }
+        // Arity is enforced by sema (E0115); guard defensively against a mismatch.
+        if f.params.len() != args.len() {
+            return format!("TRUE /* filter {} arity */", f.name.node);
+        }
+        let binds: HashMap<&str, &Value> = f
+            .params
+            .iter()
+            .map(|p| p.name.node.as_str())
+            .zip(args)
+            .collect();
+        let body = subst_pred(&f.pred, &binds);
+        self.filter_stack.push(f.name.node.as_str());
+        let sql = self.predicate(&body, model);
+        self.filter_stack.pop();
+        format!("({sql})")
+    }
+}
+
+/// Substitute a filter's param bindings into its body. A filter param appears only
+/// in value position (`= $c`, or an argument to a nested filter), so only `$name`
+/// refs are rewritten; column paths are left to resolve against the call-site model.
+fn subst_pred(p: &Predicate, binds: &HashMap<&str, &Value>) -> Predicate {
+    match p {
+        Predicate::And(a, b) => Predicate::And(
+            Box::new(subst_pred(a, binds)),
+            Box::new(subst_pred(b, binds)),
+        ),
+        Predicate::Or(a, b) => Predicate::Or(
+            Box::new(subst_pred(a, binds)),
+            Box::new(subst_pred(b, binds)),
+        ),
+        Predicate::Not(inner) => Predicate::Not(Box::new(subst_pred(inner, binds))),
+        Predicate::Cmp { path, op, value } => Predicate::Cmp {
+            path: path.clone(),
+            op: *op,
+            value: subst_value(value, binds),
+        },
+        Predicate::Bare(path) => Predicate::Bare(path.clone()),
+        Predicate::FilterCall { name, args } => Predicate::FilterCall {
+            name: name.clone(),
+            args: args.iter().map(|a| subst_value(a, binds)).collect(),
+        },
+        Predicate::Raw(raw) => Predicate::Raw(raw.clone()),
+    }
+}
+
+/// Replace a bare `$name` value with its bound argument. A `$name.path` or an
+/// unbound `$name` (e.g. `$ctx`) is left untouched; nested function args recurse.
+fn subst_value(v: &Value, binds: &HashMap<&str, &Value>) -> Value {
+    match v {
+        Value::Param(pr) if pr.path.is_empty() => match binds.get(pr.name.node.as_str()) {
+            Some(rep) => (*rep).clone(),
+            None => v.clone(),
+        },
+        Value::Func(f) => Value::Func(FuncCall {
+            name: f.name.clone(),
+            args: f.args.iter().map(|a| subst_value(a, binds)).collect(),
+        }),
+        _ => v.clone(),
     }
 }
 

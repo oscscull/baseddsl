@@ -183,6 +183,56 @@ fn bare_model_return_projects_all_stored_columns() {
 }
 
 #[test]
+fn zero_arg_filter_is_inlined_against_call_site() {
+    let ddl = gen(r#"
+        @sort(id asc)
+        Product { name: text, active: bool, stock: int }
+        shape P from Product { name }
+        filter sellable = active and stock > 0;
+        query q() -> P[] { list Product where (sellable) order (name); }
+        "#);
+    // the bare filter atom expands to its body, resolved against Product.
+    assert!(
+        ddl.contains("`product`.`active` = TRUE AND `product`.`stock` > 0"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn filter_call_substitutes_args_and_traverses_relation() {
+    let ddl = gen(r#"
+        City { name: text }
+        Address { city: City }
+        @sort(id asc)
+        User { address: Address, name: text }
+        shape U from User { name }
+        filter in_city(c) = address.city.name = $c;
+        query users_in(c) -> U[] { list User where (in_city($c)) order (name); }
+        "#);
+    // `$c` (the filter param) is bound to the query's `$c` arg -> `:c`; the body's
+    // relation path resolves through the call-site model's joins.
+    assert!(
+        ddl.contains("JOIN `address` AS `j_address` ON `j_address`.`id` = `user`.`address_id`"),
+        "\n{ddl}"
+    );
+    assert!(ddl.contains("`j_address_city`.`name` = :c"), "\n{ddl}");
+}
+
+#[test]
+fn recursive_filter_terminates_in_codegen() {
+    // Mirrors the sema `recursive_filter_terminates` case: lowering must not loop.
+    let ddl = gen(r#"
+        @sort(id asc)
+        Product { name: text, active: bool }
+        shape P from Product { name }
+        filter loopy = active and loopy;
+        query q() -> P[] { list Product where (loopy) order (name); }
+        "#);
+    assert!(ddl.contains("`product`.`active` = TRUE"), "\n{ddl}");
+    assert!(ddl.contains("/* filter loopy recursion */"), "\n{ddl}");
+}
+
+#[test]
 fn multi_hop_path_chains_joins() {
     let ddl = gen(r#"
         City { name: text }

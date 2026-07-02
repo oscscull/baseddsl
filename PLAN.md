@@ -114,10 +114,11 @@ Ordered by value. Each is a real gap with a known approach.
    `in_filters` stack guarding self-reference. Column errors, traversal errors, and
    operand typing all fire against the real caller model. Decided the `$c` question:
    filter params are `$`-referenced (grammar already required it; spec example
-   corrected). Tests: 5 new cases in `check.rs` (45 total). *Still deferred*:
-   codegen lowering of a resolved filter body (M3 read renders the call as a
-   `TRUE /* deferred */` no-op — sema resolves it, SQL emission is a separate pass);
-   arg-vs-usage type agreement (filter params carry no declared column).
+   corrected). Tests: 5 new cases in `check.rs` (45 total). **Codegen lowering now
+   done too** (see M3 read): a `FilterCall`/bare-filter atom is inlined — args
+   substituted through the body, lowered against the call-site model, joins and all;
+   self-reference guarded with a visible `/* filter … recursion */` marker. *Still
+   deferred*: arg-vs-usage type agreement (filter params carry no declared column).
 3. **Index lints (indexing.md).** Missing-index (`unindexed`) and useless-index are
    intentionally *not* implemented — they need the inferred baseline index set
    (join keys, filter paths, soft-delete columns) and "consequential table"
@@ -167,11 +168,17 @@ commerce example generates clean DDL.
     bindings (`-> edge`, `op col`), explicit block/inline `where`; bare bool → `= TRUE`.
   - Sort cascade (query `order` > model `@sort`) + keyset `id` tiebreaker; `page` →
     `LIMIT`/`OFFSET`; `with count` → a second live-row `COUNT(*)`.
+  - **Named-filter calls in `where` are inlined** (D14 codegen twin): a `FilterCall`
+    (or a bare atom naming a filter) substitutes its args through the filter body and
+    lowers it against the call-site model, reusing the join/predicate resolver — so a
+    relation-reaching filter body emits its joins too. Self-reference is guarded
+    (`filter_stack`) with a visible `/* filter … recursion */` marker. Threaded through
+    the write side as well (`Select` now carries the filter map). Tests: 3 new in
+    `dml.rs` (13 total) + 1 in `mutations.rs` (9 total).
   - *Deferred inside M3 read*: nested shape sub-objects (`field { … }` — needs JSON
-    aggregation / a second query; skipped in projection); named-filter calls in `where`
-    (filter bodies unresolved, sema #2 — rendered as a visible `TRUE /* … deferred */`
-    no-op); `@tenant` injection (semantics unspecified vs. `@scope`); keyset cursor
-    comparison + opaque cursor encoding (runtime concern — base SELECT is ORDER+LIMIT).
+    aggregation / a second query; skipped in projection); `@tenant` injection
+    (semantics unspecified vs. `@scope`); keyset cursor comparison + opaque cursor
+    encoding (runtime concern — base SELECT is ORDER+LIMIT).
 
 *Write side (`sql::mutations`) ✅ done.* Each `mutation` body lowers to INSERT /
 UPDATE / DELETE (`based gen sql` appends them after the queries; tests:

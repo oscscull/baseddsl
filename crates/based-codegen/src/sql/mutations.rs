@@ -50,26 +50,26 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
     for decl in decls {
         if let Decl::Mutation(m) = decl {
             out.push('\n');
-            out.push_str(&render_mutation(schema, m));
+            out.push_str(&render_mutation(schema, decls, m));
         }
     }
     out
 }
 
-fn render_mutation(schema: &CheckedSchema, m: &Mutation) -> String {
+fn render_mutation(schema: &CheckedSchema, decls: &[Decl], m: &Mutation) -> String {
     let mut out = format!("-- mutation {}\n", m.name.node);
     for stmt in &m.body {
-        out.push_str(&render_write(schema, stmt));
+        out.push_str(&render_write(schema, decls, stmt));
     }
     out
 }
 
 /// One write statement -> its SQL. `tx` recurses (a flat statement sequence; `^`
 /// back-references are deferred, sema resume #6).
-fn render_write(schema: &CheckedSchema, stmt: &WriteStmt) -> String {
+fn render_write(schema: &CheckedSchema, decls: &[Decl], stmt: &WriteStmt) -> String {
     match stmt {
         WriteStmt::Create { model, assigns } => match schema.model(&model.node) {
-            Some(m) => render_create(schema, m, assigns),
+            Some(m) => render_create(schema, decls, m, assigns),
             None => String::new(),
         },
         WriteStmt::Update {
@@ -77,26 +77,26 @@ fn render_write(schema: &CheckedSchema, stmt: &WriteStmt) -> String {
             where_,
             assigns,
         } => match schema.model(&model.node) {
-            Some(m) => render_update(schema, m, where_, assigns),
+            Some(m) => render_update(schema, decls, m, where_, assigns),
             None => String::new(),
         },
         WriteStmt::Delete { model, where_ } => match schema.model(&model.node) {
-            Some(m) => render_delete(schema, m, where_, false),
+            Some(m) => render_delete(schema, decls, m, where_, false),
             None => String::new(),
         },
         WriteStmt::HardDelete { model, where_ } => match schema.model(&model.node) {
-            Some(m) => render_delete(schema, m, where_, true),
+            Some(m) => render_delete(schema, decls, m, where_, true),
             None => String::new(),
         },
         WriteStmt::Restore { model, where_ } => match schema.model(&model.node) {
-            Some(m) => render_restore(schema, m, where_),
+            Some(m) => render_restore(schema, decls, m, where_),
             None => String::new(),
         },
         WriteStmt::Tx(inner) => {
             let mut s = "-- tx: one engine-owned transaction (principle 7); rolls back together\n"
                 .to_string();
             for st in inner {
-                s.push_str(&render_write(schema, st));
+                s.push_str(&render_write(schema, decls, st));
             }
             s
         }
@@ -108,8 +108,13 @@ fn render_write(schema: &CheckedSchema, stmt: &WriteStmt) -> String {
 
 // ---------- create ---------------------------------------------------------
 
-fn render_create(schema: &CheckedSchema, model: &RModel, assigns: &[Assign]) -> String {
-    let mut sel = Select::new(schema, model);
+fn render_create(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    model: &RModel,
+    assigns: &[Assign],
+) -> String {
+    let mut sel = Select::new(schema, decls, model);
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
@@ -149,11 +154,12 @@ fn render_create(schema: &CheckedSchema, model: &RModel, assigns: &[Assign]) -> 
 
 fn render_update(
     schema: &CheckedSchema,
+    decls: &[Decl],
     model: &RModel,
     where_: &Predicate,
     assigns: &[Assign],
 ) -> String {
-    let mut sel = Select::new(schema, model);
+    let mut sel = Select::new(schema, decls, model);
     let mut sets: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
 
@@ -174,8 +180,14 @@ fn render_update(
 
 // ---------- delete / hard delete -------------------------------------------
 
-fn render_delete(schema: &CheckedSchema, model: &RModel, where_: &Predicate, hard: bool) -> String {
-    let mut sel = Select::new(schema, model);
+fn render_delete(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    model: &RModel,
+    where_: &Predicate,
+    hard: bool,
+) -> String {
+    let mut sel = Select::new(schema, decls, model);
 
     // Soft model + plain `delete` -> tombstone UPDATE, never a real DELETE.
     if let (Some(sd), false) = (&model.soft_delete, hard) {
@@ -208,8 +220,13 @@ fn render_delete(schema: &CheckedSchema, model: &RModel, where_: &Predicate, har
 
 // ---------- restore --------------------------------------------------------
 
-fn render_restore(schema: &CheckedSchema, model: &RModel, where_: &Predicate) -> String {
-    let mut sel = Select::new(schema, model);
+fn render_restore(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    model: &RModel,
+    where_: &Predicate,
+) -> String {
+    let mut sel = Select::new(schema, decls, model);
     // sema (E-restore) guarantees a soft-delete model here; fall back defensively.
     let mut sets = match &model.soft_delete {
         Some(sd) => vec![tombstone_set(
