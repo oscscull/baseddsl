@@ -855,6 +855,45 @@ fn unindexed_satisfied_by_max_rows_in_block() {
 }
 
 #[test]
+fn mutation_where_unindexed_warns() {
+    // A bulk `update` filtering a non-unique, unindexed column scans just like a
+    // query would — W0103 (mutations carry no `unindexed(…)` clause to suppress it).
+    let (_, d) = analyze(
+        r#"
+        Product { name: text, status: text }
+        shape P from Product { name }
+        mutation archive(s: text) -> P { update Product where (status = $s) { name = "x" }; }
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0103"]);
+}
+
+#[test]
+fn mutation_where_keyed_on_unique_is_clean() {
+    // The common case: a write keyed on `id` (unique) is served, no W0103.
+    assert_clean(
+        r#"
+        Product { name: text, status: text }
+        shape P from Product { name }
+        mutation rename(id: Id, n: text) -> P { update Product where (id = $id) { name = $n }; }
+        "#,
+    );
+}
+
+#[test]
+fn mutation_where_marks_index_used() {
+    // An index a mutation's `where` relies on is not useless: feeding writes into
+    // the usage pool keeps W0104 from firing on a mutation-only index.
+    assert_clean(
+        r#"
+        Product { name: text, status: text, @index status }
+        shape P from Product { name }
+        mutation archive(s: text) -> P { update Product where (status = $s) { name = "x" }; }
+        "#,
+    );
+}
+
+#[test]
 fn stale_unindexed_annotation_warns() {
     // `sku` is unique, so the get is indexed — the annotation is stale.
     let (_, d) = analyze(

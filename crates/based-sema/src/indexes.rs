@@ -10,15 +10,18 @@
 //!     inverse edge some query/shape actually traverses — the join keys, the one
 //!     class of index that is unambiguously right to auto-create. Deduped against
 //!     declared structure; emitted by DDL codegen (predicate-leading there).
-//!   * **W0103 `unindexed`** (missing-index): a query whose filter pattern no
-//!     available index serves — it will scan. Satisfied by an `@index` or by the
-//!     `unindexed(max_rows: N)` / `unindexed(unsafe)` annotation. Filter-path
+//!   * **W0103 `unindexed`** (missing-index): a query — or a mutation's `update`/
+//!     `delete`/`restore` `where`, which scans the same way — whose filter pattern
+//!     no available index serves. Satisfied by an `@index` or by the
+//!     `unindexed(max_rows: N)` / `unindexed(unsafe)` annotation (a query-body
+//!     clause; a bulk write has no such clause, so it simply shows). Filter-path
 //!     indexes are *not* auto-created (whether one is worth its write tax is a
 //!     human call — principle 8: shown, not written); this lint is how they show.
-//!   * **W0104 `useless-index`**: a declared non-unique index no query filters,
-//!     sorts, or joins on — pure write tax. (Unique indexes are constraints, not
-//!     perf, so they are exempt.) W0105 flags the inverse staleness: an
-//!     `unindexed` annotation on a query that turns out indexed.
+//!   * **W0104 `useless-index`**: a declared non-unique index nothing in the access
+//!     layer (queries *and* mutation `where`s) filters, sorts, or joins on — pure
+//!     write tax. (Unique indexes are constraints, not perf, so they are exempt.)
+//!     W0105 flags the inverse staleness: an `unindexed` annotation on a query that
+//!     turns out indexed.
 //!
 //! The pattern model is coarse on purpose (same spirit as operand typing): eq/
 //! range columns off the conjunctive spine, first-column index matching. It aims
@@ -38,6 +41,7 @@ pub fn run(
     models_ast: &[&Model],
     queries_ast: &[&Query],
     shapes_ast: &[&Shape],
+    mutations_ast: &[&Mutation],
     rqueries: &[RQuery],
     cx: &Cx,
     sink: &mut Sink,
@@ -68,6 +72,15 @@ pub fn run(
         // A shape only creates traversal demand through a query that returns it.
         if let Some(shape) = rq.ret_shape.as_deref().and_then(|s| shape_by_name.get(s)) {
             shape_demand(&shape.body, mi, cx, &mut usage);
+        }
+    }
+
+    // A mutation's `update`/`delete`/`restore` `where` scans exactly like a query's
+    // — feed each into the same pool so W0103 flags an unindexed bulk write and
+    // W0104 counts a column a mutation filters on as used.
+    for mu in mutations_ast {
+        for stmt in &mu.body {
+            collect_write(stmt, &mu.name.node, cx, &mut usage, &mut patterns);
         }
     }
 
@@ -197,6 +210,67 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
         pat.note_sort(&terms, mi, cx, usage);
     }
     // `@scope` rides into every query on the model (auth.md), filters included.
+    if let Some(scope) = cx.model(mi).scope.clone() {
+        pat.walk(&scope, mi, cx, usage, &mut Vec::new());
+    }
+    pat
+}
+
+/// Turn a write statement's `where` into a root-table access pattern (recursing
+/// through `tx`). `create` has no `where`; `raw` has no bound model. A mutation
+/// carries no `unindexed(…)` clause (that is a query-body annotation), so a
+/// scanning bulk write can't be annotated away — it just shows.
+fn collect_write(
+    stmt: &WriteStmt,
+    mut_name: &str,
+    cx: &Cx,
+    usage: &mut [Usage],
+    patterns: &mut Vec<(usize, Pattern)>,
+) {
+    let (model, where_) = match stmt {
+        WriteStmt::Update { model, where_, .. }
+        | WriteStmt::Delete { model, where_ }
+        | WriteStmt::HardDelete { model, where_ }
+        | WriteStmt::Restore { model, where_ } => (model, where_),
+        WriteStmt::Tx(inner) => {
+            for s in inner {
+                collect_write(s, mut_name, cx, usage, patterns);
+            }
+            return;
+        }
+        WriteStmt::Create { .. } | WriteStmt::Raw(_) => return,
+    };
+    let Some(mi) = cx.find(&model.node) else {
+        return;
+    };
+    patterns.push((
+        mi,
+        write_pattern(mut_name, model.span, where_, mi, cx, usage),
+    ));
+}
+
+/// The access pattern of one write `where`: its conjunctive eq/range spine plus the
+/// model's `@scope` (which rides into every write, auth.md). No sort or pagination
+/// applies to a write, and there is no annotation to suppress it.
+fn write_pattern(
+    name: &str,
+    span: Span,
+    where_: &Predicate,
+    mi: usize,
+    cx: &Cx,
+    usage: &mut [Usage],
+) -> Pattern {
+    let mut pat = Pattern {
+        name: name.to_string(),
+        span,
+        eq: Vec::new(),
+        range: Vec::new(),
+        sort: None,
+        paginated: false,
+        opaque: false,
+        annotation: None,
+    };
+    pat.walk(where_, mi, cx, usage, &mut Vec::new());
     if let Some(scope) = cx.model(mi).scope.clone() {
         pat.walk(&scope, mi, cx, usage, &mut Vec::new());
     }

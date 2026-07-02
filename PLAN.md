@@ -89,11 +89,13 @@ holds `&mut`.
   wire namespace) / filter / field.
 - Lints: `W0100` nondeterministic `list` (no sort at any tier), `W0102` raw SQL on
   a `@soft_delete` model (tombstone gap).
-- Index inference + lints (indexing.md, D15, `indexes.rs`): per-query access
-  patterns (eq/range/sort off the conjunctive spine, params + `@scope` + call-site
-  filter bodies included) vs. available indexes → `W0103` missing-index (satisfied
-  by `@index` or the `unindexed(max_rows: N)` / `unindexed(unsafe)` query clause,
-  `W0105` when that annotation goes stale); pooled usage → `W0104` useless-index.
+- Index inference + lints (indexing.md, D15, `indexes.rs`): per-query *and* per
+  mutation-`where` access patterns (eq/range/sort off the conjunctive spine, params
+  + `@scope` + call-site filter bodies included) vs. available indexes → `W0103`
+  missing-index (satisfied by `@index` or the `unindexed(max_rows: N)` /
+  `unindexed(unsafe)` query clause; a bulk `update`/`delete` scans the same way but
+  has no such clause, so it simply shows; `W0105` when a query annotation goes
+  stale); pooled usage (queries + mutation `where`s) → `W0104` useless-index.
   Traversed inverse edges seed `RModel.inferred_indexes` (join-key baseline, DDL
   emits them `inf_`-prefixed, soft-delete predicate-leading).
 
@@ -155,9 +157,12 @@ Ordered by value. Each is a real gap with a known approach.
    `W0105` flags a stale annotation. `W0104` useless-index fires on a declared
    non-unique index whose lead nothing filters/sorts/joins on (broad usage pool,
    under-fires by design; unique indexes exempt; single-col duplicate of a
-   `(unique)` constraint always flagged). *Still deferred*: mutation-`where`
-   patterns feeding W0103; composite-prefix matching; prod-stats floors +
-   `max_rows` re-checking; the `unsafe` audit listing; LSP surface (M5).
+   `(unique)` constraint always flagged). Mutation `update`/`delete`/`restore`
+   `where`s now feed the same pool: an unindexed bulk write draws `W0103` (no
+   `unindexed(…)` clause exists on a write, so it just shows), and a column a
+   mutation filters on counts as used for `W0104`; tests in `check.rs`. *Still
+   deferred*: composite-prefix matching; prod-stats floors + `max_rows` re-checking;
+   the `unsafe` audit listing; LSP surface (M5).
 4. ~~**`$ctx` typing (D4/D5).**~~ ✅ **done — by inference, not declaration**
    (`based-sema::ctx`). `$ctx` is per-request: there is no global context type. Each
    callable *requires* exactly the `$ctx.<field>`s it reads (its `where`, its target
