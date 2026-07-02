@@ -396,6 +396,7 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], back: Option<usize>
                 for a in assigns {
                     check_assign(a, mi, cx, params, back, sink);
                 }
+                check_create_required(mi, assigns, model, cx, sink);
             }
         }
         WriteStmt::Update {
@@ -467,6 +468,58 @@ fn check_assign(
         check_back(b, back, cx, sink);
     } else {
         resolve::check_value(&a.value, Some(mi), cx, params, sink);
+    }
+}
+
+/// A `create` must assign every *required* column: a non-optional, non-defaulted
+/// stored column or forward FK. Engine-managed fields — the `id`, `@created` /
+/// `@updated` timestamps, and the `@soft_delete` field — are set by the engine on
+/// insert, so they are exempt. Inverse edges own no column here, so they never
+/// count. A missing field is `E0146` (all missing fields reported in one error).
+fn check_create_required(mi: usize, assigns: &[Assign], at: &Ident, cx: &Cx, sink: &mut Sink) {
+    let m = cx.model(mi);
+    let assigned: Vec<&str> = assigns.iter().map(|a| a.col.node.as_str()).collect();
+    let managed = |name: &str| {
+        name == "id"
+            || m.created.as_deref() == Some(name)
+            || m.updated.as_deref() == Some(name)
+            || m.soft_delete.as_ref().map(|s| s.field.as_str()) == Some(name)
+    };
+    let missing: Vec<&str> = m
+        .members
+        .iter()
+        .filter(|mem| is_required(&mem.kind))
+        .map(|mem| mem.name.as_str())
+        .filter(|name| !managed(name) && !assigned.contains(name))
+        .collect();
+    if !missing.is_empty() {
+        sink.error(
+            code::CREATE_MISSING,
+            at.span,
+            format!(
+                "`create {}` is missing required field{}: {}",
+                m.name,
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", ")
+            ),
+        );
+    }
+}
+
+/// A column the caller must supply on `create`: a non-optional scalar with no
+/// default, or a non-optional forward FK (a custom-join edge has no FK column to
+/// set, so it is excluded).
+fn is_required(kind: &MemberKind) -> bool {
+    match kind {
+        MemberKind::Scalar {
+            optional, default, ..
+        } => !*optional && default.is_none(),
+        MemberKind::Forward {
+            optional,
+            custom_join,
+            ..
+        } => !*optional && !*custom_join,
+        MemberKind::Inverse { .. } => false,
     }
 }
 

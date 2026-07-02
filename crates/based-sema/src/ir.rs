@@ -43,6 +43,8 @@ pub mod code {
     pub const BINDING_EDGE: &str = "E0143"; // `-> edge` not a relation
     pub const GET_NOT_UNIQUE: &str = "E0144"; // get must key a unique field
     pub const RESTORE_NOT_SOFT: &str = "E0145";
+    // create omits a required (non-optional, non-defaulted) column.
+    pub const CREATE_MISSING: &str = "E0146";
     // operand typing (PLAN.md sema #1)
     pub const OP_TYPE: &str = "E0150"; // operator not applicable to the operand type
     pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison

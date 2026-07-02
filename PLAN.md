@@ -65,6 +65,9 @@ holds `&mut`.
   *and* their bodies re-resolved against the call-site model (D14, cycle-guarded),
   functions (closed set `KNOWN_FUNCS`), `^.field` tx back-references (D16: resolved
   against the immediately preceding `create`; `E0170` outside a tx / no prior create).
+- `create` required-field enforcement: every non-optional, non-defaulted column /
+  forward FK must be assigned (`E0146`); engine-managed fields (`id`, `@created`/
+  `@updated`, `@soft_delete`) and custom-join forwards are exempt.
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
   `@updated` (timestamp role), `@tenant`, `@scope` (predicate, `$ctx`-only), `@sort`
@@ -97,7 +100,7 @@ scope, tenant, created/updated, indexes, unique_cols), plus resolved summaries
 alongside the AST (`RQuery` carries inferred verb/target/many/paginated that are
 *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (72 cases, positive + negative, keyed on
+Tests: `crates/based-sema/tests/check.rs` (75 cases, positive + negative, keyed on
 diagnostic codes). Commerce example (`spec/examples/commerce`) checks clean
 (including a `$ctx.org` query whose context is inferred with zero config, D4/D5).
 
@@ -178,9 +181,15 @@ Ordered by value. Each is a real gap with a known approach.
    2 codegen. *Still deferred*: `^.field` for a field the prior create didn't set
    (needs a re-select / RETURNING, a runtime concern) emits a `NULL /* … */` marker;
    multi-level `^^`; back-ref *type* agreement with the assigned column.
-7. **create/required-field enforcement.** `create` currently only checks that named
-   columns exist; it doesn't verify all non-optional, non-defaulted columns are
-   assigned.
+7. ~~**create/required-field enforcement.**~~ ✅ **done.** `check::check_create_required`
+   now verifies a `create` assigns every *required* column — a non-optional,
+   non-defaulted scalar or forward FK — reporting all missing fields in one
+   `E0146`. Engine-managed fields (`id`, `@created`/`@updated`, the `@soft_delete`
+   field) and custom-join forwards (no FK column) are exempt; inverse edges own no
+   column so they never count. Tests: 3 new in `check.rs`; commerce `place_order`
+   grew a `total: int` param (its `create` had silently omitted the required
+   `total`). *Still deferred*: back-ref/assign *type* agreement with the target
+   column (D16 residue).
 8. **Sema conformance goldens.** Parser has `tests/conformance/`; add a sema golden
    harness (schema → resolved summary + diagnostics) mirroring that pattern.
 
@@ -253,8 +262,8 @@ INSERT). Conventions recorded in **D12**. Delivered:
   - *Deferred inside M3 write*:
     returning the declared shape after a write (RETURNING vs. re-select) — a runtime
     concern, no trailing SELECT emitted; required-field enforcement on `create`
-    (sema resume #7) — an INSERT omits unassigned non-optional columns rather than
-    erroring; raw write statements have no attached model so `{table}`/`{id}`
+    is now a sema error (resume #7, `E0146`), so a clean schema never reaches
+    codegen with unassigned required columns; raw write statements have no attached model so `{table}`/`{id}`
     interpolation has no root to bind.
 
 **M4 — client codegen (`based gen client`). ✅ done.** `based-codegen::client` renders the

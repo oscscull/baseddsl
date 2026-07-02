@@ -8,6 +8,6 @@ query orders_by_buyer(user -> placed_by) -> OrderCard[];
 # by `@index(org, status)`.
 query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
 
-mutation place_order(org: Id, buyer: Id) -> OrderCard {
-  create Order { org = $org, placed_by = $buyer };
+mutation place_order(org: Id, buyer: Id, total: int) -> OrderCard {
+  create Order { org = $org, placed_by = $buyer, total = $total };
 }

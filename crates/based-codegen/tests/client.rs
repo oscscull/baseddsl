@@ -123,7 +123,7 @@ fn mutation_returns_single_shape_and_maps_to_m_route() {
         Order { deleted_at: timestamp?, org: Org, placed_by: Org, total: int }
         shape OrderCard from Order { total }
         mutation place_order(org: Id, buyer: Id) -> OrderCard {
-          create Order { org = $org, placed_by = $buyer };
+          create Order { org = $org, placed_by = $buyer, total = 0 };
         }
         "#);
     // A mutation posts to `/m/<name>` and returns the (single) shape.

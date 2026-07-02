@@ -338,12 +338,62 @@ fn restore_requires_soft_delete() {
 fn mutation_create_unknown_column() {
     let (_, d) = analyze(
         r#"
-        Doc { name: text }
+        Doc { name: text? }
         shape D from Doc { name }
         mutation make(t: text) -> D { create Doc { nope = $t }; }
         "#,
     );
     assert_eq!(errors(&d), ["E0111"]);
+}
+
+#[test]
+fn mutation_create_missing_required_field() {
+    // `title` is a non-optional, non-defaulted column, so a create that omits it
+    // is `E0146`. `id`/soft-delete/`@created`/`@updated` are engine-set, exempt.
+    let (_, d) = analyze(
+        r#"
+        @soft_delete(deleted_at)
+        @created(created_at)
+        Doc { deleted_at: timestamp?, created_at: timestamp, title: text, note: text? }
+        shape D from Doc { title }
+        mutation make(n: text) -> D { create Doc { note = $n }; }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0146"]);
+}
+
+#[test]
+fn mutation_create_missing_required_relation_fk() {
+    // A non-optional forward relation must have its FK set on create.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        mutation make(t: text) -> D { create Doc { title = $t }; }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0146"]);
+}
+
+#[test]
+fn mutation_create_defaulted_and_optional_not_required() {
+    // Defaulted, optional, and engine-managed columns need no assignment.
+    assert_clean(
+        r#"
+        @soft_delete(deleted_at)
+        @updated(updated_at)
+        Doc {
+          deleted_at: timestamp?
+          updated_at: timestamp
+          title: text
+          status: text (default "draft")
+          note: text?
+        }
+        shape D from Doc { title }
+        mutation make(t: text) -> D { create Doc { title = $t }; }
+        "#,
+    );
 }
 
 // ---------- filters --------------------------------------------------------

@@ -203,7 +203,7 @@ fn delete_on_plain_model_is_a_real_delete() {
 fn tx_renders_each_write_in_order() {
     let out = gen(r#"
         User { email: text }
-        Address { user: User, city: text }
+        Address { user: User?, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
           tx {
