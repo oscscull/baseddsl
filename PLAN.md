@@ -43,7 +43,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit`. `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Live-DB integration + more dialects + polyglot clients (via `based gen openapi`, not per-language emitters — D23; gRPC rejected) not started (architecture ready, D21/D22/D23).** |
+| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` and re-selects a create's declared shape as the response (D12). `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Live-DB integration + more dialects + polyglot clients (via `based gen openapi`, not per-language emitters — D23; gRPC rejected) not started (architecture ready, D21/D22/D23).** |
 
 ## based-sema — what it does now
 
@@ -302,12 +302,14 @@ INSERT). Conventions recorded in **D12**. Delivered:
   - **`^` tx back-references** (`user = ^.id`) now lower (D16, sema resume #6): sibling
     creates in a `tx` get distinct id binds (`:id_<step>`) and a back-reference reads
     the immediately preceding create.
-  - *Deferred inside M3 write*:
-    returning the declared shape after a write (RETURNING vs. re-select) — a runtime
-    concern, no trailing SELECT emitted; required-field enforcement on `create`
-    is now a sema error (resume #7, `E0146`), so a clean schema never reaches
-    codegen with unassigned required columns; raw write statements have no attached model so `{table}`/`{id}`
-    interpolation has no root to bind.
+  - **Declared-shape re-select** (D12): a create-returning mutation now emits a trailing
+    `SELECT` reading the created row back in its declared shape (`ret_select`, keyed on
+    `:result_id`), reusing the read side's `project_return`. The runtime runs it inside the
+    write tx (M6 write). A pure update/delete still emits none (deferred).
+  - *Deferred inside M3 write*: required-field enforcement on `create` is now a sema error
+    (resume #7, `E0146`), so a clean schema never reaches codegen with unassigned required
+    columns; raw write statements have no attached model so `{table}`/`{id}` interpolation
+    has no root to bind.
 
 **M4 — client codegen (`based gen client`). ✅ done.** `based-codegen::client` renders the
 `CheckedSchema` → a typed Rust client module (manifest `client` target; Rust first + default).
@@ -450,12 +452,21 @@ a `MockDb`, no live DB.
     `run_mutation` executes every write in order between one `begin`/`commit`
     (principle 7 — the engine owns the transaction, not the emitted SQL) and returns
     the write response.
-  - *Deferred inside M6 write*: the **write response is the created row's engine `id`**
-    (`{ "id": … }`) or `{}` when nothing is created — the declared-shape re-select
-    (RETURNING vs. re-select, D12) is still deferred, so the response does not yet
-    match the client's decoded output type; a `create` whose `id` the caller sets
-    (`gen_id: None`) is not surfaced in `result_id`; the concrete uuid `IdGen` lands
-    with the driver.
+  - **Declared-shape re-select** (D12, this slice): a mutation that **creates** its return
+    row now reads it back in its declared shape after the writes. Codegen (`sql::mutations`)
+    emits a trailing `ret_select` — `SELECT <return shape> FROM <return model> WHERE id =
+    :result_id [AND <live> AND <scope>]` — reusing the read side's `project_return` so it
+    can't drift from a `get` (P4); `plan_mutation` binds `:result_id` to that create's engine
+    id and `run_mutation` runs the re-select **inside** the write tx (read-your-writes), and
+    its single shaped row *is* the response — matching the client's decoded output type.
+    `tests/embed.rs` now round-trips the verbatim generated `place_order` into a typed
+    `OrderCard`. Chose re-select over MariaDB `INSERT … RETURNING`: dialect-portable, reuses
+    the one projector, handles the shape's relation joins uniformly.
+  - *Deferred inside M6 write*: a **pure update/delete** that declares a return shape still
+    responds `{ id }`/`{}` — it has no engine-generated id to key a re-select on (its
+    re-select would key off the write `where`, cardinality-ambiguous); a `create` whose `id`
+    the caller sets (`gen_id: None`) is not surfaced in `result_id`; the concrete uuid `IdGen`
+    lands with the driver.
 
 *Dispatch + driver core (this slice) — delivered (D20):*
   - **Enterprise-scale architecture decided (D20):** sync + bounded connection pools,
@@ -538,9 +549,8 @@ should chase the former.
     → ClientError`) lives in the embedding crate — shown in `Engine`'s docs and exercised by
     the worked example `tests/embed.rs` (the *verbatim* `based gen client` output over a
     `MockDb`: typed `order_by_id`/`orders_in_org`/`my_org_orders` round-trips, `$ctx` supplied
-    straight in — no header dance). `$ctx` note: the write response is still `{ id }` (the
-    typed mutation method decodes clean only once the declared-shape re-select / RETURNING
-    lands, D12 — the example pins this gap). Unlocks one binary (no sidecar), steadier latency,
+    straight in — no header dance, and the write `place_order` now decodes into a typed
+    `OrderCard` via the declared-shape re-select, D12). Unlocks one binary (no sidecar), steadier latency,
     `MockDb` end-to-end tests, and the path toward **app-owned transactions** (compose several
     callables in one unit-of-work over a shared connection — inexpressible on stateless HTTP RPC;
     the real long-term prize). Concurrency: one connection ⇒ one thread at a time; a pooled embed

@@ -176,8 +176,11 @@ fn missing_required_ctx_is_400() {
 }
 
 #[test]
-fn mutation_over_the_socket_returns_created_id() {
-    let backend = MockBackend { rows: vec![] };
+fn mutation_over_the_socket_returns_the_declared_shape() {
+    // The backend answers the post-write re-select with the shaped row (D12).
+    let backend = MockBackend {
+        rows: vec![vec![row(json!({ "status": "open", "total": 5 }))]],
+    };
     let addr = start(backend);
     let resp = post(
         &addr,
@@ -186,9 +189,8 @@ fn mutation_over_the_socket_returns_created_id() {
         &[],
     );
     assert_eq!(resp.status, 200);
-    // The write response is the created row's engine uuid (D12 residue).
-    let id = resp.body["id"].as_str().expect("an id string");
-    assert_eq!(id.len(), 36, "a v4 uuid: {id}");
+    // The write response is the created row read back in its declared `OrderCard` shape.
+    assert_eq!(resp.body, json!({ "status": "open", "total": 5 }));
 }
 
 #[test]

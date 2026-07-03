@@ -99,11 +99,13 @@ fn list_route_returns_array() {
     assert_eq!(resp.body.as_array().unwrap().len(), 2);
 }
 
-/// A mutation route runs the write path and returns the created row's engine id.
+/// A mutation route runs the write path and returns the created row in its declared
+/// shape (D12), read back inside the transaction.
 #[test]
-fn mutation_route_returns_created_id() {
+fn mutation_route_returns_the_created_rows_declared_shape() {
     let c = compile(SCHEMA);
-    let mut db = MockDb::new(vec![]);
+    // The re-select of `OrderCard { status, total }` after the INSERT.
+    let mut db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
     let mut ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
@@ -115,11 +117,12 @@ fn mutation_route_returns_created_id() {
         json!({}),
     );
     assert_eq!(resp.status, 200);
-    assert_eq!(resp.body, json!({ "id": "id-0" }));
-    // One INSERT executed between begin/commit.
+    assert_eq!(resp.body, json!({ "status": "open", "total": 7 }));
+    // INSERT then the shaped re-select, between one begin/commit.
     assert_eq!(db.tx, vec!["begin", "commit"]);
-    assert_eq!(db.calls.len(), 1);
+    assert_eq!(db.calls.len(), 2);
     assert!(db.calls[0].0.contains("INSERT INTO `order`"));
+    assert!(db.calls[1].0.starts_with("SELECT"), "{}", db.calls[1].0);
 }
 
 /// `$ctx` arrives as the server-supplied context (not the body); a required one that

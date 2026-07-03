@@ -247,6 +247,10 @@ pub struct RMutation {
     pub name: String,
     pub span: Span,
     pub ret_model: String,
+    /// The return shape, or `None` when the return type is a bare model — the twin of
+    /// [`RQuery::ret_shape`]. Codegen projects it when re-selecting the written row's
+    /// declared shape after the write (D12).
+    pub ret_shape: Option<String>,
     /// The `$ctx.<field>` this mutation requires (its write `where`s + the write
     /// models' `@scope` + `create`/`update` assigns), each typed by inference
     /// (D4/D5). Deduped per callable.

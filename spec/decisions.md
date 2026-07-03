@@ -209,9 +209,19 @@ The write side; reuses D11's join resolver so a mutation `where` lowers identica
 - **`tx { … }`** renders its inner writes in declaration order under one engine-owned transaction
   (principle 7): the engine, not the emitted SQL, owns BEGIN/COMMIT — no transaction control is emitted.
 - **Parameters** render as named `:name` placeholders, same as D11 (`$ctx.org` -> `:ctx_org`).
+- **Declared-shape return via re-select (done).** A mutation that **creates** its return row emits a
+  trailing re-select — `SELECT <return shape> FROM <return model> WHERE id = :result_id [AND <live> AND
+  <scope>]` — reusing the read side's `project_return`, so the projection can't drift from a `get` of the
+  same shape (principle 4). MariaDB *has* `INSERT … RETURNING`, but re-select was chosen: it is
+  dialect-portable (Postgres/SQLite/MySQL alike), handles the relation-reaching shape joins uniformly, and
+  reuses the one read-side projector rather than a second RETURNING path. The runtime (`plan_mutation`)
+  binds `:result_id` to that create's engine id and runs the re-select **inside** the write transaction
+  (read-your-writes, atomic with the writes). A pure update/delete has no engine id to key on, so it emits
+  no re-select and the response falls back to `{ id }`/`{}` (its re-select would key off the write `where`
+  — cardinality-ambiguous, still deferred). The live + `@scope` guards ride the re-select exactly as a
+  `get` would, so a create that lands out of scope reads back as absent.
 - *Deferred, documented not silently wrong*: `^` tx back-references (`user = ^.id`) — not in the
-  lexer/AST (sema resume #6), so a `tx` is a flat independent statement sequence; returning the declared
-  shape after a write (RETURNING vs. re-select) — a runtime concern, no trailing SELECT; required-field
+  lexer/AST (sema resume #6), so a `tx` is a flat independent statement sequence; required-field
   enforcement on `create` (sema resume #7) — an INSERT omits unassigned non-optional columns rather than
   erroring; a raw write statement has no attached model, so `{table}`/`{id}` interpolation has no root.
 
@@ -514,9 +524,11 @@ and return the identical `WireResponse` (principle 4 — the doors can't drift).
   connection — inexpressible on stateless HTTP RPC). Binding the input struct straight to
   `SqlValue` (skipping JSON) is explicitly *not* pursued: its payoff is nanoseconds against a
   millisecond DB call (PLAN Tier 3).
-- **Known residue (D12).** A mutation's wire response is still `{ id }`, so the typed client's
-  mutation method (which expects the declared shape) decodes clean only once the declared-shape
-  re-select / `RETURNING` lands. The example pins this so it isn't a surprise.
+- **Resolved (D12).** A create-returning mutation's wire response is now the created row read back
+  in its **declared shape** (the trailing re-select, D12), so the typed client's mutation method
+  decodes clean into that type — the same typed round-trip a `get` gets. `tests/embed.rs` proves the
+  verbatim generated `place_order` returns a typed `OrderCard`. (A pure update/delete still responds
+  `{ id }`/`{}` — its re-select is deferred, D12.)
 
 ## D23 — polyglot clients via OpenAPI, not per-language emitters (and not gRPC)
 The container door (D21/D22) exists to serve non-Rust callers, so the schema must yield clients in
@@ -536,9 +548,11 @@ emitter, then a Python one, then Go":
   surface `serve::dispatch` already serves — it invents no new wire.
 - **`$ctx` is not a body param.** It rides the `X-Based-Context` header (D21, auth.md/D7), so the
   spec models it as a header / security scheme, never an input field.
-- **Soft prerequisite: D12.** An accurate *mutation* spec needs the declared-shape re-select
-  (`RETURNING`) — until then the response is `{ id }`, and the spec must not advertise the declared
-  shape it can't yet return. Read specs are accurate today.
+- **Soft prerequisite: D12 (met for creates).** An accurate *mutation* spec needs the declared-shape
+  re-select, now landed for create-returning mutations (D12) — so the OpenAPI response schema for a
+  create can advertise the declared shape. A pure update/delete still responds `{ id }`/`{}` (its
+  re-select is deferred), so the emitter must model *those* as the `{ id }` schema until they follow.
+  Read specs are accurate today.
 
 **Why not gRPC** (the obvious "typed polyglot RPC" alternative — its one real draw is that `protoc`
 generates clients in ~10 languages, i.e. it also solves the N-emitters problem):

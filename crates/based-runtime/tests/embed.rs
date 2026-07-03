@@ -285,39 +285,48 @@ fn ctx_supplied_in_process_and_required() {
     );
 }
 
-/// The write path runs in-process and returns the created row's engine `id`. The typed
-/// `place_order` method expects an `OrderCard`, but the engine's write response is
-/// `{ "id": … }` today (the declared-shape re-select / RETURNING is deferred, D12), so
-/// the typed decode *fails* — this test pins that documented gap. The raw `Engine::call`
-/// shows the actual `200` body; when RETURNING lands, the typed method will decode clean.
+/// The write path runs in-process and returns the created row in its **declared shape**
+/// (D12): after the INSERT the engine re-selects the created `Order` as an `OrderCard`,
+/// still inside the transaction, and *that* is the `200` body — so the typed
+/// `place_order` method decodes clean into an `OrderCard`, exactly like a `get`. This
+/// closes the gap the earlier `{ id }` response left.
 #[test]
-fn mutation_response_shape_is_the_created_id_for_now() {
-    let engine = Engine::new(compiled(), MockDb::new(vec![]), SeqIdGen::default());
+fn mutation_response_is_the_created_rows_declared_shape() {
+    // Two writes below (raw + typed), each answered by a post-write re-select of the
+    // shaped row.
+    let engine = Engine::new(
+        compiled(),
+        MockDb::new(vec![
+            vec![row(json!({ "status": "open", "total": 7 }))],
+            vec![row(json!({ "status": "open", "total": 7 }))],
+        ]),
+        SeqIdGen::default(),
+    );
 
-    // Raw: the engine returns the created id.
+    // Raw: the engine returns the declared shape, not `{ id }`.
     let raw = engine.call(
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
         json!({}),
     );
     assert_eq!(raw.status, 200);
-    assert_eq!(raw.body, json!({ "id": "id-0" }));
+    assert_eq!(raw.body, json!({ "status": "open", "total": 7 }));
 
-    // Typed: `place_order` wants an `OrderCard`, so decoding `{ "id": … }` is a miss
-    // until RETURNING lands (D12). Documented, not a surprise.
+    // Typed: `place_order` returns `OrderCard`, and the shaped body decodes into it —
+    // the same typed round-trip a `get` gets.
     let api = client::Client {
         transport: InProcess {
             engine: &engine,
             ctx: json!({}),
         },
     };
-    let decoded = api.place_order(client::PlaceOrderInput {
-        org: "o-2".into(),
-        status: "open".into(),
-        total: 5,
-    });
-    assert!(
-        decoded.is_err(),
-        "write response is not yet the shaped row (D12)"
-    );
+    let card = api
+        .place_order(client::PlaceOrderInput {
+            org: "o-2".into(),
+            status: "open".into(),
+            total: 7,
+        })
+        .expect("write response decodes into the declared OrderCard (D12)");
+    assert_eq!(card.status, "open");
+    assert_eq!(card.total, 7);
 }

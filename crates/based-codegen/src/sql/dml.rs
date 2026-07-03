@@ -182,13 +182,27 @@ fn lower_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -
 
 // ---------- projection -----------------------------------------------------
 
-/// Build the indented SELECT-list text. Uses the return shape when present, else
-/// projects every stored column of a bare-model return.
+/// Build the indented SELECT-list text for a query. Delegates to [`project_return`],
+/// the shape-projection core the write side reuses for its post-write re-select (D12).
 fn build_projection(sel: &mut Select, decls: &[Decl], rq: &RQuery, root: &RModel) -> String {
+    project_return(sel, decls, rq.ret_shape.as_deref(), &rq.target, root)
+}
+
+/// Build the indented SELECT-list text from a return type. Uses the named return shape
+/// when present, else projects every stored column of a bare-model return. Shared by
+/// the read side (queries) and the write side (`mutations`'s declared-shape re-select,
+/// D12), so a mutation returns the *same* projection a `get` of that shape would.
+pub(crate) fn project_return(
+    sel: &mut Select,
+    decls: &[Decl],
+    ret_shape: Option<&str>,
+    target: &str,
+    root: &RModel,
+) -> String {
     let mut cols: Vec<String> = Vec::new();
-    match &rq.ret_shape {
+    match ret_shape {
         Some(name) => {
-            if let Some(shape) = find_shape(decls, name, &rq.target) {
+            if let Some(shape) = find_shape(decls, name, target) {
                 project_body(sel, &shape.body, root, &mut cols);
             }
         }

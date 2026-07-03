@@ -34,6 +34,11 @@ fn req(name: &str, args: serde_json::Value) -> Request {
     Request::new(name, args, json!({}))
 }
 
+/// A canned result row for a `MockDb` re-select response (the D12 declared-shape read-back).
+fn row(pairs: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    pairs.as_object().cloned().unwrap()
+}
+
 const CREATE_SCHEMA: &str = r#"
     Org { name: text }
     User { name: text }
@@ -88,10 +93,13 @@ fn create_generates_id_and_binds_params_positionally() {
 }
 
 #[test]
-fn run_create_wraps_in_a_transaction_and_echoes_id() {
+fn run_create_reselects_the_declared_shape_inside_the_tx() {
     let c = compile(CREATE_SCHEMA);
     let mut ids = SeqIdGen::default();
-    let mut db = MockDb::default();
+    // The mutation returns `OrderCard { total }`, so after the INSERT the engine
+    // re-selects the created row in that shape (D12). The mock replies to that fetch
+    // with the shaped row — which becomes the response, not a bare `{ id }`.
+    let mut db = MockDb::new(vec![vec![row(json!({ "total": 42 }))]]);
     let out = run_mutation(
         &c,
         &mut db,
@@ -103,10 +111,21 @@ fn run_create_wraps_in_a_transaction_and_echoes_id() {
     )
     .unwrap();
 
-    assert_eq!(out, json!({ "id": "id-0" }));
-    // exactly one write, between one begin/commit (principle 7).
+    // The response is the declared shape (matches the client's decoded output type),
+    // not `{ id }`.
+    assert_eq!(out, json!({ "total": 42 }));
+    // The re-select runs inside the transaction: INSERT then the shaped SELECT, all
+    // between one begin/commit (principle 7).
     assert_eq!(db.tx, vec!["begin", "commit"]);
-    assert_eq!(db.calls.len(), 1);
+    assert_eq!(db.calls.len(), 2);
+    let (write_sql, _) = &db.calls[0];
+    assert!(write_sql.contains("INSERT INTO `order`"), "{write_sql}");
+    let (sel_sql, sel_params) = &db.calls[1];
+    assert!(sel_sql.starts_with("SELECT"), "{sel_sql}");
+    assert!(sel_sql.contains("FROM `order`"), "{sel_sql}");
+    // keyed on the created row's engine id, bound positionally.
+    assert!(sel_sql.contains("`order`.`id` = ?"), "{sel_sql}");
+    assert_eq!(sel_params, &vec![SqlValue::Text("id-0".into())]);
 }
 
 #[test]
@@ -270,15 +289,19 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     // the response identifies the User row (the return model).
     assert_eq!(plan.result_id.as_deref(), Some("id-0"));
 
-    // both writes run under one transaction, in order.
-    let mut db = MockDb::default();
-    run_mutation(
+    // both writes plus the declared-shape re-select run under one transaction, in
+    // order; the re-select reads the created User (the return model) back as UserCard.
+    let mut db = MockDb::new(vec![vec![row(json!({ "email": "a@b.c" }))]]);
+    let out = run_mutation(
         &c,
         &mut db,
         &mut SeqIdGen::default(),
         &req("signup", json!({ "email": "a@b.c", "city": "NYC" })),
     )
     .unwrap();
+    assert_eq!(out, json!({ "email": "a@b.c" }));
     assert_eq!(db.tx, vec!["begin", "commit"]);
-    assert_eq!(db.calls.len(), 2);
+    // two INSERTs, then the shaped re-select.
+    assert_eq!(db.calls.len(), 3);
+    assert!(db.calls[2].0.starts_with("SELECT"), "{}", db.calls[2].0);
 }

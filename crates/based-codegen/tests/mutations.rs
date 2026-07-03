@@ -255,6 +255,60 @@ fn tx_backref_binds_prior_create_id() {
 }
 
 #[test]
+fn create_returning_mutation_reselects_the_declared_shape() {
+    let out = gen(r#"
+        Org { name: text }
+        User { name: text }
+        @soft_delete(deleted_at)
+        Order {
+          deleted_at: timestamp?,
+          org: Org,
+          placed_by: User,
+          total: int,
+        }
+        shape OrderCard from Order { total, buyer = placed_by.name }
+        mutation place_order(org: Id, buyer: Id, total: int) -> OrderCard {
+          create Order { org = $org, placed_by = $buyer, total = $total };
+        }
+        "#);
+    // After the INSERT the created row is read back in its declared shape (D12).
+    assert!(
+        out.contains("-- return: re-select the created row's declared shape (D12)"),
+        "\n{out}"
+    );
+    // Projects the shape exactly as a `get` would: local `total` + the relation reach
+    // `buyer = placed_by.name`, which joins the target (soft-delete guarded in the ON).
+    assert!(out.contains("`order`.`total` AS `total`"), "\n{out}");
+    assert!(out.contains("`j_placed_by`.`name` AS `buyer`"), "\n{out}");
+    assert!(out.contains("JOIN `user` AS `j_placed_by`"), "\n{out}");
+    // Keyed on the created row's id (bound to `:result_id` by the runtime), and the
+    // root soft-delete live predicate rides along — a re-select is just a `get`.
+    assert!(
+        out.contains("WHERE `order`.`id` = :result_id AND `order`.`deleted_at` IS NULL"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn update_only_mutation_emits_no_reselect() {
+    let out = gen(r#"
+        @updated(updated_at)
+        Order { updated_at: timestamp, status: text }
+        shape OrderCard from Order { status }
+        mutation set_status(id: Id, status: text) -> OrderCard {
+          update Order where (id = $id) { status = $status };
+        }
+        "#);
+    // A pure update creates no return row, so there is no engine `id` to key a
+    // re-select on — the response falls back to `{ id }`/`{}` at runtime (D12).
+    assert!(
+        !out.contains(":result_id"),
+        "update-only mutation must not re-select:\n{out}"
+    );
+    assert!(!out.contains("-- return:"), "\n{out}");
+}
+
+#[test]
 fn update_where_across_relation_uses_multi_table_form() {
     let out = gen(r#"
         Org { name: text }

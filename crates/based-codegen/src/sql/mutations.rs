@@ -26,16 +26,24 @@
 //!   get distinct id binds (`:id_<step>`), and a `^.field` back-reference reads the
 //!   immediately preceding create — `^.id` binds that create's generated id.
 //!
+//! ## Returning the declared shape (D12)
+//! A mutation that **creates** its return row also carries a re-select: a trailing
+//! `SELECT <return shape> FROM <return model> WHERE id = :result_id [AND <live> AND
+//! <scope>]` that reads the created row back in its declared shape (`ret_select`),
+//! reusing the read side's `project_return` so the projection can't drift from a `get`
+//! (principle 4). The runtime binds `:result_id` to that create's engine id and runs the
+//! re-select inside the write transaction. A pure update/delete has no engine-generated
+//! id to key on, so it emits no re-select and the response falls back to `{ id }`/`{}`
+//! (its re-select would key off the write `where` — deferred, PLAN M6 write).
+//!
 //! ## Deferred (documented, not silently wrong)
-//! - Returning the declared shape after a write (RETURNING vs. re-select) is a
-//!   runtime concern (PLAN M3); no trailing SELECT is emitted.
 //! - Multi-row WHERE that reaches across relations lowers to MariaDB's multi-table
 //!   `UPDATE m JOIN ...` / `DELETE m FROM m JOIN ...`, reusing the read-side joiner.
 
 use based_ast::*;
 use based_sema::{CheckedSchema, RModel, SoftDelete, SoftMode};
 
-use crate::sql::dml::{physical_col, render_raw, soft_pred, BackCtx, Join, Select};
+use crate::sql::dml::{physical_col, project_return, render_raw, soft_pred, BackCtx, Join, Select};
 use crate::Dialect;
 
 /// A mutation lowered to its ordered write statements. The whole body already runs
@@ -49,6 +57,15 @@ use crate::Dialect;
 pub struct LoweredMutation {
     pub name: String,
     pub stmts: Vec<LoweredWrite>,
+    /// The declared-shape re-select (D12): a `SELECT <return shape> FROM <return model>
+    /// WHERE id = :result_id [AND <live> AND <scope>]` that reads back the row the
+    /// mutation created, so the write response matches the client's decoded output type
+    /// (the same projection a `get` of that shape emits, principle 4). `Some` only when
+    /// the mutation *creates* its return row (its engine-generated `id` binds
+    /// `:result_id` at runtime); a pure update/delete has no such id, so it stays `None`
+    /// and the response falls back to `{ id }` / `{}` (PLAN M6 write — that case's
+    /// re-select would key off the write `where`, deferred).
+    pub ret_select: Option<String>,
 }
 
 /// One write statement of a mutation: header-free SQL plus the metadata the runtime
@@ -87,6 +104,10 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
             out.push_str(&w.header);
             out.push_str(&w.sql);
         }
+        if let Some(rs) = &lm.ret_select {
+            out.push_str("-- return: re-select the created row's declared shape (D12)\n");
+            out.push_str(rs);
+        }
     }
     out
 }
@@ -112,10 +133,59 @@ fn lower_mutation<'a>(
     for stmt in &m.body {
         lower_write(schema, decls, stmt, "id", None, &mut stmts);
     }
+    // Re-select the declared shape (D12) only when the mutation *creates* its return
+    // row — i.e. some write generates the engine `id` that binds `:result_id` at
+    // runtime. This mirrors `plan_mutation`'s `result_id` rule exactly, so codegen and
+    // the runtime agree on which mutations carry a re-select.
+    let ret_select = schema
+        .mutations
+        .iter()
+        .find(|rm| rm.name == m.name.node)
+        .filter(|rm| {
+            stmts
+                .iter()
+                .any(|w| w.gen_id.is_some() && w.model == rm.ret_model)
+        })
+        .map(|rm| lower_ret_select(schema, decls, &rm.ret_model, rm.ret_shape.as_deref()));
     LoweredMutation {
         name: m.name.node.clone(),
         stmts,
+        ret_select,
     }
+}
+
+/// Build the declared-shape re-select for a mutation's created row (D12): the same
+/// projection a `get` of that shape emits (`project_return`, reused from the read side
+/// so the two can't drift, principle 4), keyed on the created row's `id` — bound to
+/// `:result_id` by the runtime. The soft-delete live predicate and `@scope` ride the
+/// read path exactly as a `get` would, so a create that lands out of scope reads back
+/// as absent, consistent with every other read.
+fn lower_ret_select(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    ret_model: &str,
+    ret_shape: Option<&str>,
+) -> String {
+    let model = schema
+        .model(ret_model)
+        .expect("return model resolved by sema");
+    let mut sel = Select::new(schema, decls, model);
+
+    // Projection first (it seeds joins for reached columns), then scope (may seed more).
+    let projection = project_return(&mut sel, decls, ret_shape, ret_model, model);
+    let mut wheres = vec![format!("`{}`.`id` = :result_id", sel.root_alias)];
+    if let Some(sd) = &model.soft_delete {
+        wheres.push(soft_pred(&sel.root_alias, model, sd));
+    }
+    if let Some(scope) = &model.scope {
+        wheres.push(sel.predicate(scope, model));
+    }
+
+    let mut sql = format!("SELECT\n{}\nFROM `{}`", projection, model.table);
+    push_joins(&mut sql, &sel.joins);
+    push_where(&mut sql, &wheres);
+    sql.push_str(";\n");
+    sql
 }
 
 /// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`

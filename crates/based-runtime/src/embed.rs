@@ -159,10 +159,11 @@ mod tests {
         assert_eq!(resp.body, json!({ "status": "paid", "total": 42 }));
     }
 
-    /// A write call runs the transaction and returns the created id — no socket.
+    /// A write call runs the transaction and returns the created row in its declared
+    /// shape (D12), read back inside the tx — no socket.
     #[test]
     fn engine_runs_a_mutation() {
-        let db = MockDb::new(vec![]);
+        let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
         let engine = Engine::new(compiled(), db, SeqIdGen::default());
 
         let resp = engine.call(
@@ -171,7 +172,7 @@ mod tests {
             json!({}),
         );
         assert_eq!(resp.status, 200);
-        assert_eq!(resp.body, json!({ "id": "id-0" }));
+        assert_eq!(resp.body, json!({ "status": "open", "total": 7 }));
     }
 
     /// Boundary failures map to the same statuses the wire uses (unknown route → 404).

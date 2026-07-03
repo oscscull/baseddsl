@@ -79,9 +79,14 @@ pub struct MutationPlan {
     pub stmts: Vec<Stmt>,
     /// The engine-generated `id` of the create matching the mutation's return model —
     /// the row the write response identifies. `None` when the mutation creates no such
-    /// row (a pure update/delete, or a create whose `id` the caller set); the shaped
-    /// re-select is deferred (PLAN M6 write).
+    /// row (a pure update/delete, or a create whose `id` the caller set).
     pub result_id: Option<String>,
+    /// The declared-shape re-select (D12): reads the created row back in the mutation's
+    /// return shape (`:result_id` bound to [`result_id`](Self::result_id)) so the write
+    /// response matches the client's decoded output type. `Some` exactly when
+    /// `result_id` is — a mutation that creates its return row. `None` otherwise, and
+    /// the response falls back to `{ id }` / `{}`.
+    pub ret_select: Option<Stmt>,
 }
 
 /// Why a request could not be planned — all boundary failures, before any SQL.
@@ -212,10 +217,22 @@ pub fn plan_mutation(
         .map(|w| env.bind(&w.sql))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // 4. The declared-shape re-select (D12), when the mutation creates its return row:
+    //    bind `:result_id` to that create's engine id (already in `result_id`). Codegen
+    //    emits the re-select under the same rule, so both are `Some` together.
+    let ret_select = match (&low.ret_select, &result_id) {
+        (Some(sql), Some(id)) => {
+            env.insert("result_id".to_string(), SqlValue::Text(id.clone()));
+            Some(env.bind(sql)?)
+        }
+        _ => None,
+    };
+
     Ok(MutationPlan {
         name: req.callable.clone(),
         stmts,
         result_id,
+        ret_select,
     })
 }
 
