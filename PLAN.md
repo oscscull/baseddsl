@@ -514,6 +514,41 @@ a `MockDb`, no live DB.
     `create` under 503/timeout could double-insert; a dedupe/idempotency key (likely in
     `$ctx`) is wanted before write retries are safe at scale.
 
+*Two front doors — embed as a library (Rust) OR run as a container (any lang). Planned,
+mostly-glue:* the engine is already **in-process by design** (D18) and `serve::dispatch`
+is transport-agnostic (method/path/args/`$ctx` → `WireResponse`, no socket), and the
+generated client is generic over an abstract `Transport` trait (`call(route, input) ->
+Result<O>`, M4) whose own doc reserves it for "the runtime's client". So both doors are
+the *same* engine; what's missing is connective tissue, not architecture. **Key insight
+that orders the effort:** the per-call cost is the DB round-trip (0.2–5 ms, D20) and, over
+the wire, the loopback TCP + HTTP framing — JSON ser/deser of a small arg object is
+negligible next to those. So the win is *dropping the socket*, not *dropping JSON*; effort
+should chase the former.
+  - **Tier 1 — in-process `Transport` (recommended, ~zero engine change).** A
+    `based-runtime` impl of the client's `Transport` backed by `Compiled` + a `Db`:
+    serialize the typed input → JSON args, call `dispatch(.., "POST", route, args, ctx)`,
+    decode the `WireResponse` body into `O` (non-200 → `ClientError`). Gives Rust users the
+    *same typed generated client* with no socket, today. Ship a worked **embed example**
+    (the library twin of `based serve`) — `Compiled::from_checked` + building a `Db` are
+    already public. Advantages this unlocks: one binary (no sidecar), lower/steadier
+    latency, embed-with-`MockDb` tests, and the path toward **app-owned transactions**
+    (compose several callables in one unit-of-work over a shared connection — inexpressible
+    on stateless HTTP RPC; the real long-term prize).
+  - **Tier 2 — embed ergonomics.** A small `Engine` convenience wrapper over
+    `Compiled` + the caller's own `Db`/pool (the `Db` seam already lets an app plug an
+    existing pool — a feature, not a gap); document the in-process `$ctx` path (supplied
+    straight to `Request::new`, cleaner than the header dance the HTTP edge needs, D21).
+  - **Tier 3 — JSON-free typed path: explicitly NOT planned.** Binding the input struct
+    straight to `SqlValue` (no `serde_json` in the middle) is a real codegen effort whose
+    payoff is nanoseconds against a millisecond DB call — skip unless profiling ever
+    demands it. Recorded here so the "purity" idea isn't re-litigated.
+  - **Gates the *container* door for non-Rust langs (orthogonal to the above):** only the
+    **Rust** client is emitted today — polyglot is the container's whole reason to exist, so
+    a **second client emitter** (TypeScript, M4's noted next; `ClientTarget` already
+    branches) matters more here than the in-process work — plus a container image +
+    health/readiness + graceful shutdown, and the **live-DB hardening** above (the
+    standalone story isn't production-real until that lands).
+
 ## Conventions
 
 - Rust workspace, edition 2021, rust-version 1.85. `cargo test` / `cargo clippy` /
