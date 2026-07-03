@@ -5,6 +5,30 @@ Working notes for whoever picks this up next. Records what's **done**, what's
 **remaining milestones**. Spec is truth for *what* the language is; this is truth
 for *where the implementation stands*.
 
+## Autonomous build loop (how this is being built out)
+
+This roadmap is executed by a self-driving loop. Protocol, for whoever (human or agent)
+resumes it:
+
+- **One item per iteration, in fresh context.** Each iteration spawns ONE fresh
+  general-purpose subagent that reads CLAUDE.md + `spec/principles.md` + this file +
+  `spec/decisions.md`, picks the **highest-leverage unstarted item**, implements it fully,
+  and commits it. A fresh subagent per item is what keeps context clean between iterations
+  (the whole point); the coordinator retains only one-line summaries, never the work.
+- **Gate before commit.** `cargo test --workspace --all-features`, `cargo fmt --check`, and
+  `cargo clippy --workspace --all-features` must all be clean. Never commit red.
+- **Commit style.** On the current working branch (no push, no PR): first line
+  `m6: <desc> (D<n>)`, short body, ending with the trailer
+  `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Update this file
+  and `decisions.md` in the *same* commit as the code.
+- **Sequential only.** Each iteration commits before the next starts (so the next reads
+  updated state). The coordinator NEVER touches the repo/git while a subagent is running —
+  they share one working tree + index.
+- **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
+  WITHOUT committing and reports), or when the unstarted items are exhausted.
+
+Batch progress: D12 (`b7de7b3`) + D24 (`fe382a4`) done — 2/3; next iteration is #3.
+
 ## Pipeline (data flow)
 
 ```
