@@ -25,7 +25,7 @@
 use mysql::prelude::Queryable;
 use mysql::{Opts, OptsBuilder, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Value};
 
-use crate::run::{Db, DbError, Row};
+use crate::run::{Backend, Db, DbError, Row};
 use crate::value::SqlValue;
 
 /// A physical shard's identity: its index into the router's shard list.
@@ -263,6 +263,15 @@ impl ShardRouter {
     /// How many physical shards the router spans.
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+}
+
+/// The router is the MariaDB [`Backend`]: it checks out a pooled [`MariaDb`] for the
+/// key's shard. The HTTP edge depends only on this trait, so a future Postgres / MySQL
+/// / SQLite backend is a drop-in without touching `based serve`.
+impl Backend for ShardRouter {
+    fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        Ok(Box::new(ShardRouter::checkout(self, shard_key)?))
     }
 }
 

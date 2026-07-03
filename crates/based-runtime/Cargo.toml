@@ -10,6 +10,10 @@ rust-version.workspace = true
 # runtime (planning + dispatch) stays dependency-light and the seam tests need no
 # database; `based serve` turns it on.
 mariadb = ["dep:mysql"]
+# The HTTP listener (`based serve`) — the socket edge over `serve::dispatch`. Pulls
+# in a hardened sync HTTP server + a production uuid id-gen, and requires the concrete
+# driver it routes to. Off by default so the core stays a plain library.
+serve = ["mariadb", "dep:tiny_http", "dep:uuid"]
 
 [dependencies]
 based-ast.workspace = true
@@ -25,6 +29,11 @@ serde_json.workspace = true
 mysql = { version = "26", optional = true, default-features = false, features = [
     "minimal",
 ] }
+# The HTTP listener: a small, hardened, blocking HTTP/1 server (principle 7 — reuse,
+# not a hand-rolled socket loop). We drive it with our own bounded worker-thread pool.
+tiny_http = { version = "0.12", optional = true }
+# Production id generation (D1): unpredictable, globally unique v4 uuids.
+uuid = { version = "1", optional = true, features = ["v4"] }
 
 [dev-dependencies]
 based-parser.workspace = true

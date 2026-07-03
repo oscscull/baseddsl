@@ -1,10 +1,10 @@
 //! Engine id generation (D1: the app generates a model's `id`, no SQL default).
 //!
 //! A `create` binds its `id` to an engine-generated value (`:id` / `:id_<step>`);
-//! the runtime fills it from an [`IdGen`]. The trait is the seam: production uses a
-//! uuid generator (arriving with the concrete MariaDB driver, the next slice), while
-//! tests use the deterministic [`SeqIdGen`] so a planned INSERT's bound id is
-//! predictable — the write path's twin of the read path's `MockDb`.
+//! the runtime fills it from an [`IdGen`]. The trait is the seam: production uses the
+//! uuid generator ([`UuidGen`], behind the `serve` feature), while tests use the
+//! deterministic [`SeqIdGen`] so a planned INSERT's bound id is predictable — the
+//! write path's twin of the read path's `MockDb`.
 
 /// Produces fresh ids for engine-generated `id` columns. Called once per `create`
 /// (and once more is never needed — a `^.id` back-reference *reuses* the value the
@@ -43,5 +43,21 @@ impl IdGen for SeqIdGen {
         let id = format!("{}-{}", self.prefix, self.n);
         self.n += 1;
         id
+    }
+}
+
+/// The production generator: a fresh random v4 uuid per `create`. Unpredictable and
+/// globally unique (D1) — no coordination with the database, so a `create`'s id is
+/// known *before* the INSERT, which is what lets a `^.id` back-reference bind the same
+/// value the INSERT used. One is built per request in `based serve` (id state is
+/// per-request, never shared across threads).
+#[cfg(feature = "serve")]
+#[derive(Default)]
+pub struct UuidGen;
+
+#[cfg(feature = "serve")]
+impl IdGen for UuidGen {
+    fn next_id(&mut self) -> String {
+        uuid::Uuid::new_v4().to_string()
     }
 }

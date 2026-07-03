@@ -85,6 +85,19 @@ pub trait Db {
     }
 }
 
+/// A source of per-request database connections for the listener, keyed by shard.
+/// Given a request's shard key it hands back a boxed [`Db`] to run that request on
+/// (single-shard dispatch, D20). This is the seam that keeps the HTTP edge
+/// **driver-neutral**: the MariaDB [`crate::driver::ShardRouter`] is one implementation;
+/// a Postgres / MySQL / SQLite backend is another (the [`Db`] trait below is already
+/// dialect-agnostic — it speaks positional SQL + [`SqlValue`], not a MariaDB protocol).
+/// A single-file SQLite backend simply ignores the key and returns the one connection.
+pub trait Backend: Send + Sync {
+    /// Check out a connection for the shard the key routes to. A failure (pool
+    /// exhausted, shard/host down) is a [`DbError`] → the wire's retryable `503`.
+    fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError>;
+}
+
 /// Plan and run a query request, returning the shaped JSON response.
 pub fn run_query(
     compiled: &Compiled,

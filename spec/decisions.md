@@ -451,3 +451,38 @@ serving architecture that meets that bar:
 - **Known gap — write idempotency.** App-side `id`-gen (D1) means a client retry of a `create`
   after a 503/timeout can double-insert. A dedupe/idempotency key (likely carried in `$ctx`) is
   wanted before write retries are safe at enterprise scale. Not yet designed.
+
+## D21 — HTTP listener (`based serve`) + multi-dialect readiness
+The listener (`based-runtime::http`, feature `serve`) is the thin socket edge over the pure
+`serve::dispatch` core (D18). Per D20 it is a **sync bounded worker-thread pool** over the
+bounded connection pool: N workers share one blocking `tiny_http::Server` (a hardened lib,
+principle 7), each looping `recv → decode → dispatch → respond`. Decisions:
+- **`$ctx` from headers, never the body** (auth.md, D7). A pluggable `ContextSource` derives
+  `$ctx` + the shard key from request headers; the default `TrustedHeaderContext` reads a
+  pre-authenticated `X-Based-Context` (JSON) set by an upstream auth proxy (which strips any
+  client copy). This is the trusted-edge seam, not an authenticator — policy stays outside the
+  runtime (principle 5).
+- **Pre-checkout guard.** `serve::preflight` rejects a non-POST / unroutable request *before* a
+  pooled connection is borrowed, and `dispatch` runs the same guard, so a malformed-request flood
+  can't drain the pool and the two paths can't diverge.
+- **Production id-gen.** `UuidGen` (v4 uuids, D1) is built fresh per request — id state is
+  per-request, never shared across worker threads.
+
+**Multi-dialect readiness (MySQL / Postgres / SQLite are wanted; not built yet).** The
+architecture is deliberately shaped so a second engine is *additive*, not a rewrite. Two seams
+carry it:
+- **Codegen: the `Dialect` enum** (`based-codegen`). `ddl` / `dml` / `mutations` already branch
+  on it (only `MariaDb` today). A new engine = a new variant + its branches (placeholder style,
+  quoting, type map, `RETURNING`/upsert availability, tx syntax).
+- **Runtime: the `Db` + `Backend` traits** (`based-runtime::run`). `Db` speaks *positional SQL +
+  driver-neutral `SqlValue`*, not a MariaDB protocol; `Backend` is the connection source keyed by
+  shard. `MariaDb`/`ShardRouter` are one impl; a `postgres`/`rusqlite` impl is a drop-in (SQLite
+  ignores the shard key and returns its one connection). **The HTTP edge is fully `Backend`-generic
+  — it never names a concrete driver**, so `based serve` needs no change when a driver is added.
+- **The one concrete coupling to fix when a non-`?` engine lands:** the named→positional scanner
+  (`scan.rs`) hardcodes `:name` → `?` (MySQL/SQLite/MariaDB style). Postgres uses `$1, $2, …`, so
+  the rewrite must become dialect-aware (emit `?` or `$n`) at that point. Left hardcoded now rather
+  than abstracted speculatively — it is a localized, well-understood change.
+- **Coherence rule:** one `Dialect` drives *both* codegen lowering and driver selection — you
+  serve Postgres-lowered SQL only to a Postgres `Backend`. The pairing is a deployment invariant,
+  not something the wire negotiates.

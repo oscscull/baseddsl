@@ -38,8 +38,11 @@ impl WireResponse {
         WireResponse { status: 200, body }
     }
 
-    /// An error envelope: `{ "error": { "code": "...", "message": "..." } }`.
-    fn err(status: u16, code: &str, message: String) -> WireResponse {
+    /// An error envelope: `{ "error": { "code": "...", "message": "..." } }`. Public so
+    /// the listener edge (`http`) can build the same-shaped response for a failure it
+    /// handles before `dispatch` (a bad body, a missing/invalid `$ctx` header, a pool
+    /// checkout failure).
+    pub fn error(status: u16, code: &str, message: String) -> WireResponse {
         WireResponse {
             status,
             body: serde_json::json!({ "error": { "code": code, "message": message } }),
@@ -60,22 +63,12 @@ pub fn dispatch(
     args: serde_json::Value,
     ctx: serde_json::Value,
 ) -> WireResponse {
-    if !method.eq_ignore_ascii_case("POST") {
-        // Only POST carries a body; a GET query string is exactly the injection
-        // surface calling.md's closed RPC removes.
-        return WireResponse::err(
-            405,
-            "method_not_allowed",
-            format!("{method} not allowed; use POST"),
-        );
+    // The method + route checks are shared with `preflight` (the listener runs them
+    // before borrowing a connection), so there is one source of truth for these errors.
+    if let Some(resp) = preflight(method, path) {
+        return resp;
     }
-    let Some((kind, name)) = parse_route(path) else {
-        return WireResponse::err(
-            404,
-            "not_found",
-            format!("no route for {path}; expected /q/<name> or /m/<name>"),
-        );
-    };
+    let (kind, name) = parse_route(path).expect("preflight guaranteed a routable path");
 
     let req = Request::new(name, args, ctx);
     let result = match kind {
@@ -89,7 +82,32 @@ pub fn dispatch(
         // exhausted). The SQL is machine-generated from a checked schema, so this is
         // overwhelmingly operational, not a query bug → a retryable 503 (the client /
         // LB can retry, another shard's traffic is unaffected).
-        Err(RunError::Db(e)) => WireResponse::err(503, "database_error", e.message),
+        Err(RunError::Db(e)) => WireResponse::error(503, "database_error", e.message),
+    }
+}
+
+/// The cheap pre-check the listener runs *before* borrowing a database connection:
+/// reject a non-POST method or an unroutable path with exactly the response `dispatch`
+/// would produce, so a malformed request never checks a connection out of the pool.
+/// Returns `None` when the request is routable (the caller then runs it). `dispatch`
+/// calls this too, so the two never diverge.
+pub fn preflight(method: &str, path: &str) -> Option<WireResponse> {
+    if !method.eq_ignore_ascii_case("POST") {
+        // Only POST carries a body; a GET query string is exactly the injection
+        // surface calling.md's closed RPC removes.
+        return Some(WireResponse::error(
+            405,
+            "method_not_allowed",
+            format!("{method} not allowed; use POST"),
+        ));
+    }
+    match parse_route(path) {
+        Some(_) => None,
+        None => Some(WireResponse::error(
+            404,
+            "not_found",
+            format!("no route for {path}; expected /q/<name> or /m/<name>"),
+        )),
     }
 }
 
@@ -120,16 +138,16 @@ fn parse_route(path: &str) -> Option<(Kind, &str)> {
 fn plan_error_response(e: PlanError) -> WireResponse {
     use PlanError::*;
     match e {
-        UnknownQuery(n) => WireResponse::err(404, "unknown_query", format!("no query `{n}`")),
+        UnknownQuery(n) => WireResponse::error(404, "unknown_query", format!("no query `{n}`")),
         UnknownMutation(n) => {
-            WireResponse::err(404, "unknown_mutation", format!("no mutation `{n}`"))
+            WireResponse::error(404, "unknown_mutation", format!("no mutation `{n}`"))
         }
-        MissingArg(n) => WireResponse::err(400, "missing_arg", format!("missing argument `{n}`")),
+        MissingArg(n) => WireResponse::error(400, "missing_arg", format!("missing argument `{n}`")),
         BadArg {
             name,
             expected,
             got,
-        } => WireResponse::err(
+        } => WireResponse::error(
             400,
             "bad_arg",
             format!(
@@ -137,7 +155,7 @@ fn plan_error_response(e: PlanError) -> WireResponse {
                 family(expected)
             ),
         ),
-        MissingCtx(f) => WireResponse::err(
+        MissingCtx(f) => WireResponse::error(
             400,
             "missing_ctx",
             format!("missing request context `${{ctx}}.{f}`"),
@@ -146,7 +164,7 @@ fn plan_error_response(e: PlanError) -> WireResponse {
             field,
             expected,
             got,
-        } => WireResponse::err(
+        } => WireResponse::error(
             400,
             "bad_ctx",
             format!(
@@ -154,7 +172,7 @@ fn plan_error_response(e: PlanError) -> WireResponse {
                 family(expected)
             ),
         ),
-        UnboundPlaceholder(n) => WireResponse::err(
+        UnboundPlaceholder(n) => WireResponse::error(
             500,
             "internal",
             format!("unbound placeholder `:{n}` (codegen/planner mismatch)"),

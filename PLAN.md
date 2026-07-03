@@ -18,6 +18,8 @@ for *where the implementation stands*.
       ──facts───────────────▶ engine-derived facts    (M5 ✅)
                               └─ based-lsp ──▶ editor inlay hints + hover + diagnostics
       ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read+write ✅)
+      ──runtime::serve──────▶ WireResponse (dispatch core; PlanError→4xx, DbError→503)  (M6 ✅)
+      ──runtime::http───────▶ `based serve`: tiny_http listener over dispatch  (M6 ✅ D21)
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
@@ -40,7 +42,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit`. `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener (`based serve`) + live-DB integration not started.** |
+| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit`. `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **Live-DB integration + more dialects not started (architecture ready, D21).** |
 
 ## based-sema — what it does now
 
@@ -478,11 +480,33 @@ a `MockDb`, no live DB.
     Key extraction is left pluggable + **decoupled from D19** (`@scope`/tenant still OPEN),
     so the shard key is not yet bound to a `$ctx.<field>`.
 
+*HTTP listener (`based serve`) — delivered (D21):*
+  - **`based-runtime::http`** (feature `serve`) — the thin socket edge over `serve::dispatch`.
+    A **sync bounded worker-thread pool** over the bounded connection pool (D20): N workers
+    share one blocking `tiny_http::Server` (hardened lib, principle 7), each looping
+    `recv → decode → dispatch → respond`. `based serve <root>` (CLI) loads the checked schema,
+    builds the `ShardRouter`, and runs it (`--listen`, `--database-url` × shards / `BASED_DATABASE_URL`,
+    `--workers`, `--pool-{min,max}`, `--shard-key-field`).
+  - **`$ctx` from headers, never the body** (auth.md/D7): a pluggable `ContextSource` derives
+    `$ctx` + the shard key from request headers; the default `TrustedHeaderContext` reads a
+    pre-authenticated `X-Based-Context` (JSON) an upstream auth proxy sets. Non-object → 400.
+  - **Pre-checkout guard** (`serve::preflight`): a non-POST / unroutable request is rejected
+    *before* a pooled connection is borrowed; `dispatch` runs the same guard (one source of truth).
+  - **Production `UuidGen`** (v4, D1), built fresh per request (id state is per-request, never
+    shared across worker threads).
+  - **Driver-neutral edge (multi-dialect readiness, D21):** the listener depends only on the new
+    `Backend` seam (`run::Backend` — a connection source yielding a boxed `Db`), never a concrete
+    driver, so a future Postgres/MySQL/SQLite backend drops in without touching `based serve`. See
+    D21 for the full readiness story (the `Dialect` codegen seam + the one `?`-vs-`$n` scanner
+    coupling to fix when a non-`?` engine lands).
+  - Tests: `based-runtime/tests/http.rs` (7 end-to-end over a real loopback socket — routing,
+    header-`$ctx`, body decode, uuid write response, 400/404 edges) + 5 `http` unit tests (header
+    view + `TrustedHeaderContext`). The pure `serve.rs` dispatch tests (8) still cover the core.
+
 *Not started (next slices):*
-  - **HTTP listener (`based serve`)** — the thin socket edge over `serve::dispatch`: a
-    bounded-worker-thread sync server (principle 7 — reuse a hardened lib, e.g. tiny_http)
-    that decodes the request line + JSON body + server-derived `$ctx`, checks a connection
-    out of the `ShardRouter`, calls `dispatch`, writes `WireResponse.status` + body.
+  - **Additional dialects (MySQL / Postgres / SQLite)** — architecture is ready (D21); each is a
+    `Dialect` codegen variant + a `Db`/`Backend` driver impl. Postgres additionally needs the
+    named→positional scanner made dialect-aware (`?` → `$n`).
   - **Live-DB integration** — exercise `MariaDb` against a real MariaDB (the connect/exec
     paths only compile-verified today): typed JSON reconstruction for `JSON` columns,
     statement timeouts, deadlock-retry, pool-exhaustion → 503 under load.

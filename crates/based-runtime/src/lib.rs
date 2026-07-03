@@ -39,7 +39,18 @@
 //! pooled connection, and [`driver::ShardRouter`] is the scale-out seam: one bounded
 //! pool per physical shard, single-shard dispatch by a stable logical-shard hash (no
 //! scatter-gather → a `tx` is one shard, no distributed transaction; add capacity
-//! without rehashing keys). The HTTP listener (`based serve`) is the remaining edge.
+//! without rehashing keys).
+//!
+//! ## The socket edge (feature `serve`, D21)
+//! [`http::serve`] is the HTTP listener (`based serve`): a sync bounded worker-thread
+//! pool over `tiny_http`, decoding each request into `dispatch`'s arguments. `$ctx`
+//! comes from headers via a pluggable [`http::ContextSource`], never the body
+//! (auth.md/D7); ids come from the production [`id::UuidGen`]. The edge depends only on
+//! the driver-neutral [`run::Backend`] seam (a connection source yielding a boxed
+//! [`run::Db`]), so a future Postgres / MySQL / SQLite backend drops in without a change
+//! here — the `Db` trait speaks positional SQL + [`value::SqlValue`], not a MariaDB
+//! protocol (multi-dialect readiness, D21).
+//!
 //! The write response is the created row's engine `id` today — the declared-shape
 //! re-select (RETURNING) is deferred (D12).
 
@@ -54,11 +65,19 @@ pub mod value;
 #[cfg(feature = "mariadb")]
 pub mod driver;
 
+#[cfg(feature = "serve")]
+pub mod http;
+
 pub use id::{IdGen, SeqIdGen};
 pub use load::Compiled;
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };
-pub use run::{run_mutation, run_query, Db, DbError, MockDb, Row, RunError};
-pub use serve::{dispatch, WireResponse};
+pub use run::{run_mutation, run_query, Backend, Db, DbError, MockDb, Row, RunError};
+pub use serve::{dispatch, preflight, WireResponse};
 pub use value::SqlValue;
+
+#[cfg(feature = "serve")]
+pub use http::{
+    serve, Context, ContextSource, HeaderView, ServeConfig, ServeError, TrustedHeaderContext,
+};

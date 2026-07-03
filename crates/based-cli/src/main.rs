@@ -43,6 +43,33 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the checked schema as a live RPC service (`POST /q|m/<name>`).
+    Serve {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Address to bind the HTTP listener on.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: String,
+        /// A database URL per physical shard (repeat for a sharded fleet). Falls back
+        /// to `BASED_DATABASE_URL` (comma-separated) when none is passed.
+        #[arg(long = "database-url")]
+        database_url: Vec<String>,
+        /// Worker threads (the per-process concurrency ceiling). Defaults to the pool
+        /// ceiling so every worker can hold a connection.
+        #[arg(long)]
+        workers: Option<usize>,
+        /// Warm connections kept per shard pool.
+        #[arg(long, default_value_t = 4)]
+        pool_min: usize,
+        /// Max connections per shard pool (the per-box concurrency cap).
+        #[arg(long, default_value_t = 32)]
+        pool_max: usize,
+        /// The `$ctx` field to route on when no `X-Based-Shard-Key` header is sent
+        /// (e.g. `org`). Omit for the single-shard common case.
+        #[arg(long)]
+        shard_key_field: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +103,23 @@ fn main() -> anyhow::Result<()> {
             GenTarget::Client { root, out } => cmd_gen_client(&root, out.as_deref()),
         },
         Command::Facts { root, json } => cmd_facts(&root, json),
+        Command::Serve {
+            root,
+            listen,
+            database_url,
+            workers,
+            pool_min,
+            pool_max,
+            shard_key_field,
+        } => cmd_serve(
+            &root,
+            &listen,
+            database_url,
+            workers,
+            pool_min,
+            pool_max,
+            shard_key_field,
+        ),
     }
 }
 
@@ -209,6 +253,64 @@ fn cmd_facts(root: &Path, json: bool) -> anyhow::Result<()> {
         print!("{}", render::facts_text(&facts, &sources));
     }
     Ok(())
+}
+
+/// `based serve`: stand the checked schema up as a live RPC service. Runs the same
+/// front end as every other command (rendering diagnostics, bailing on any error —
+/// a dirty schema never serves), builds the sharded connection pool, and hands both to
+/// the runtime's HTTP listener. Blocks until the process is killed.
+#[allow(clippy::too_many_arguments)]
+fn cmd_serve(
+    root: &Path,
+    listen: &str,
+    database_url: Vec<String>,
+    workers: Option<usize>,
+    pool_min: usize,
+    pool_max: usize,
+    shard_key_field: Option<String>,
+) -> anyhow::Result<()> {
+    use based_runtime::driver::{PoolConfig, ShardRouter};
+    use based_runtime::http::{serve, ServeConfig, TrustedHeaderContext};
+    use based_runtime::Compiled;
+
+    // Shard URLs: the repeated flag wins; else BASED_DATABASE_URL (comma-separated).
+    let urls: Vec<String> = if !database_url.is_empty() {
+        database_url
+    } else {
+        std::env::var("BASED_DATABASE_URL")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default()
+    };
+    if urls.is_empty() {
+        bail!("no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL");
+    }
+
+    // Reuse the shared front end so diagnostics render exactly as `based check` does,
+    // then build the served artifact from the clean schema (no second parse/check).
+    let (_project, schema, decls, _sources, _warnings) = load_checked(root)?;
+    let compiled = Compiled::from_checked(schema, decls);
+
+    let pool = PoolConfig {
+        min: pool_min,
+        max: pool_max,
+    };
+    let router = ShardRouter::new(&urls, pool)
+        .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
+    let ctx_source = TrustedHeaderContext { shard_key_field };
+    // Default workers to the pool ceiling so a worker never blocks waiting for a free
+    // connection on a single shard (D20: bounded worker pool over the bounded conn pool).
+    let config = ServeConfig {
+        listen: listen.to_string(),
+        workers: workers.unwrap_or(pool_max),
+    };
+
+    eprintln!(
+        "based serve: {} shard(s), {} worker(s), listening on {listen}",
+        router.shard_count(),
+        config.workers,
+    );
+    serve(compiled, router, ctx_source, config).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn count(diags: &[based_diagnostics::Diagnostic], errors: &mut usize, warnings: &mut usize) {

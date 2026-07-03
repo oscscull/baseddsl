@@ -17,5 +17,9 @@ based-parser = { workspace = true }
 based-sema = { workspace = true }
 based-codegen = { workspace = true }
 based-facts = { workspace = true }
+# The runtime, with the HTTP listener + concrete MariaDB driver, so `based serve` can
+# stand the schema up as a live RPC service. (The `serve` feature pulls the driver +
+# HTTP server in; the front-end commands — check/gen/facts — don't touch them.)
+based-runtime = { path = "../based-runtime", features = ["serve"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
