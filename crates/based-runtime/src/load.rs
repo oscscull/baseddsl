@@ -10,17 +10,20 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use based_ast::{Decl, FileId};
-use based_codegen::sql::{lower_queries, LoweredQuery};
+use based_codegen::sql::{lower_mutations, lower_queries, LoweredMutation, LoweredQuery};
 use based_diagnostics::{Diagnostic, Severity};
 use based_parser::parse_file;
 use based_sema::{check, CheckedSchema};
 
-/// A project compiled and ready to serve: resolved schema + AST + lowered queries.
+/// A project compiled and ready to serve: resolved schema + AST + lowered queries
+/// and mutations (the read + write dispatch tables).
 pub struct Compiled {
     pub schema: CheckedSchema,
     pub decls: Vec<Decl>,
     /// Lowered query SQL, keyed by callable name for O(1) request dispatch.
     pub queries: HashMap<String, LoweredQuery>,
+    /// Lowered mutation write statements, keyed by callable name (write dispatch).
+    pub mutations: HashMap<String, LoweredMutation>,
 }
 
 /// How loading failed: either the front end reported errors (the schema is not
@@ -69,10 +72,15 @@ impl Compiled {
             .into_iter()
             .map(|q| (q.name.clone(), q))
             .collect();
+        let mutations = lower_mutations(&schema, &decls)
+            .into_iter()
+            .map(|m| (m.name.clone(), m))
+            .collect();
         Compiled {
             schema,
             decls,
             queries,
+            mutations,
         }
     }
 }

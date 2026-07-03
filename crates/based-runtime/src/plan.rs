@@ -11,9 +11,10 @@
 //! environment from the validated inputs and lets [`crate::scan::to_positional`]
 //! pull from it in SQL order.
 
-use based_ast::{BaseType, Decl, DefaultVal, Literal, Param, Query, Verb};
+use based_ast::{BaseType, Decl, DefaultVal, Literal, Mutation, Param, Query, Verb};
 use based_sema::{CtxField, CtxReq};
 
+use crate::id::IdGen;
 use crate::load::Compiled;
 use crate::scan::to_positional;
 use crate::value::{coerce, CoerceError, Family, SqlValue};
@@ -70,11 +71,26 @@ pub struct QueryPlan {
     pub envelope: Envelope,
 }
 
+/// A planned mutation: the write statements in execution order (all bound
+/// positionally), run under one engine-owned transaction (principle 7).
+#[derive(Debug, Clone)]
+pub struct MutationPlan {
+    pub name: String,
+    pub stmts: Vec<Stmt>,
+    /// The engine-generated `id` of the create matching the mutation's return model —
+    /// the row the write response identifies. `None` when the mutation creates no such
+    /// row (a pure update/delete, or a create whose `id` the caller set); the shaped
+    /// re-select is deferred (PLAN M6 write).
+    pub result_id: Option<String>,
+}
+
 /// Why a request could not be planned — all boundary failures, before any SQL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanError {
-    /// No query with this name (a mutation name lands here too, this slice).
+    /// No query with this name.
     UnknownQuery(String),
+    /// No mutation with this name.
+    UnknownMutation(String),
     /// A required arg was absent (and had no default).
     MissingArg(String),
     /// An arg was present but the wrong JSON type for its param.
@@ -141,6 +157,65 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         main,
         count,
         envelope,
+    })
+}
+
+/// Plan a mutation request against a compiled project. Validates the args + `$ctx`
+/// (exactly like a query), then generates the engine `id` for every `create` and
+/// binds every write statement positionally. The generated ids are seeded into the
+/// value environment *before* binding, so a `^.id` back-reference — which lowers to
+/// the prior create's `:id_<step>` — resolves to the same value the INSERT used.
+pub fn plan_mutation(
+    compiled: &Compiled,
+    req: &Request,
+    id_gen: &mut dyn IdGen,
+) -> Result<MutationPlan, PlanError> {
+    let low = compiled
+        .mutations
+        .get(&req.callable)
+        .ok_or_else(|| PlanError::UnknownMutation(req.callable.clone()))?;
+    let rm = compiled
+        .schema
+        .mutations
+        .iter()
+        .find(|m| m.name == req.callable)
+        .ok_or_else(|| PlanError::UnknownMutation(req.callable.clone()))?;
+    let ast = find_mutation(&compiled.decls, &req.callable)
+        .ok_or_else(|| PlanError::UnknownMutation(req.callable.clone()))?;
+
+    // 1. Assemble the value environment: params, then `$ctx` (no pagination on a write).
+    let mut env = Env::default();
+    for p in &ast.params {
+        env.insert(p.name.node.clone(), bind_param(p, req)?);
+    }
+    for c in &rm.ctx_requires {
+        env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
+    }
+
+    // 2. Generate the engine `id` for each create (D1). Record the id of the first
+    //    create matching the return model — the row the response identifies.
+    let mut result_id = None;
+    for w in &low.stmts {
+        if let Some(bind) = &w.gen_id {
+            let id = id_gen.next_id();
+            if result_id.is_none() && w.model == rm.ret_model {
+                result_id = Some(id.clone());
+            }
+            env.insert(bind.clone(), SqlValue::Text(id));
+        }
+    }
+
+    // 3. Bind every write statement to positional form, in execution order.
+    let stmts = low
+        .stmts
+        .iter()
+        .map(|w| env.bind(&w.sql))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(MutationPlan {
+        name: req.callable.clone(),
+        stmts,
+        result_id,
     })
 }
 
@@ -274,6 +349,14 @@ fn offset_paginated(ast: &Query) -> bool {
 fn find_query<'a>(decls: &'a [Decl], name: &str) -> Option<&'a Query> {
     decls.iter().find_map(|d| match d {
         Decl::Query(q) if q.name.node == name => Some(q),
+        _ => None,
+    })
+}
+
+/// Find a mutation decl by name.
+fn find_mutation<'a>(decls: &'a [Decl], name: &str) -> Option<&'a Mutation> {
+    decls.iter().find_map(|d| match d {
+        Decl::Mutation(m) if m.name.node == name => Some(m),
         _ => None,
     })
 }

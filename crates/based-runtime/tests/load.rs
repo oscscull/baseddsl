@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use based_runtime::value::SqlValue;
-use based_runtime::{plan_query, Compiled, Request};
+use based_runtime::{plan_mutation, plan_query, Compiled, Request, SeqIdGen};
 
 fn commerce() -> Compiled {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,4 +43,28 @@ fn plans_a_commerce_ctx_query() {
         plan.main.sql
     );
     assert_eq!(plan.main.params, vec![SqlValue::Text("org-42".into())]);
+}
+
+#[test]
+fn plans_the_commerce_place_order_mutation() {
+    let c = commerce();
+    // `place_order` creates an Order; the engine generates its id, and the response
+    // identifies that row (return model = Order).
+    let mut ids = SeqIdGen::default();
+    let r = Request::new(
+        "place_order",
+        json!({ "org": "org-1", "buyer": "user-1", "total": 99 }),
+        json!({}),
+    );
+    let plan = plan_mutation(&c, &r, &mut ids).unwrap();
+    assert_eq!(plan.stmts.len(), 1);
+    assert!(
+        plan.stmts[0].sql.contains("INSERT INTO `order`"),
+        "{}",
+        plan.stmts[0].sql
+    );
+    // engine id leads the bound values; params carry no unresolved `:name`.
+    assert!(!plan.stmts[0].sql.contains(':'), "{}", plan.stmts[0].sql);
+    assert_eq!(plan.stmts[0].params[0], SqlValue::Text("id-0".into()));
+    assert_eq!(plan.result_id.as_deref(), Some("id-0"));
 }

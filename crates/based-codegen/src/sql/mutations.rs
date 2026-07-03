@@ -38,8 +38,41 @@ use based_sema::{CheckedSchema, RModel, SoftDelete, SoftMode};
 use crate::sql::dml::{physical_col, render_raw, soft_pred, BackCtx, Join, Select};
 use crate::Dialect;
 
+/// A mutation lowered to its ordered write statements. The whole body already runs
+/// under one engine-owned transaction (principle 7), so a `tx { ... }` block is
+/// flattened here — its statements sit inline in execution order. The in-process
+/// runtime (M6 write path) consumes this directly, exactly as it consumes
+/// [`super::LoweredQuery`] for reads, so the executed SQL and its bind surface can
+/// never drift from `based gen sql` (principle 4). `render_mutation` (the text
+/// emitter) and the runtime both read this one lowering.
+#[derive(Debug, Clone)]
+pub struct LoweredMutation {
+    pub name: String,
+    pub stmts: Vec<LoweredWrite>,
+}
+
+/// One write statement of a mutation: header-free SQL plus the metadata the runtime
+/// needs to bind and respond.
+#[derive(Debug, Clone)]
+pub struct LoweredWrite {
+    /// The `-- create …` / `-- delete (soft): …` comment lines the text emitter
+    /// frames the SQL with (a `tx` banner is prepended to the block's first write).
+    /// The runtime ignores this.
+    pub header: String,
+    /// Header-free SQL, ending in `;\n`. `:name` placeholders — including the engine
+    /// `:id` / `:id_<step>` for a create — are bound by the runtime.
+    pub sql: String,
+    /// The model this statement writes. A create's model identifies the row the
+    /// mutation's declared return refers to (empty for a raw write, which has none).
+    pub model: String,
+    /// For a `create` whose `id` the engine generates (D1, no caller-set id), the
+    /// bind name that id fills (`id`, or `id_<step>` inside a `tx`); else `None`.
+    pub gen_id: Option<String>,
+}
+
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
-/// declaration order, separated by blank lines.
+/// declaration order, separated by blank lines. Delegates the SQL to
+/// [`lower_mutations`] and frames each write with its comment header.
 pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
     let Dialect::MariaDb = dialect;
     let mut out = String::new();
@@ -47,62 +80,89 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
     out.push_str(
         "-- Mutation templates: `:name` placeholders are bound by the generated client.\n",
     );
-    for decl in decls {
-        if let Decl::Mutation(m) = decl {
-            out.push('\n');
-            out.push_str(&render_mutation(schema, decls, m));
+    for lm in lower_mutations(schema, decls) {
+        out.push('\n');
+        out.push_str(&format!("-- mutation {}\n", lm.name));
+        for w in &lm.stmts {
+            out.push_str(&w.header);
+            out.push_str(&w.sql);
         }
     }
     out
 }
 
-fn render_mutation<'a>(schema: &'a CheckedSchema, decls: &'a [Decl], m: &'a Mutation) -> String {
-    let mut out = format!("-- mutation {}\n", m.name.node);
-    for stmt in &m.body {
-        out.push_str(&render_write(schema, decls, stmt, "id", None));
+/// Lower every mutation in the schema to its structured write statements, in
+/// declaration order. The in-process runtime consumes this directly.
+pub fn lower_mutations(schema: &CheckedSchema, decls: &[Decl]) -> Vec<LoweredMutation> {
+    let mut out = Vec::new();
+    for decl in decls {
+        if let Decl::Mutation(m) = decl {
+            out.push(lower_mutation(schema, decls, m));
+        }
     }
     out
 }
 
-/// One write statement -> its SQL. `id_param` is the bind name a `create`'s
-/// app-generated `id` is emitted under (`id` at top level, `id_<step>` inside a
-/// `tx` so sibling creates stay distinct); `back` is the preceding create a
-/// `^.field` reads from (mutations.md).
-fn render_write<'a>(
+fn lower_mutation<'a>(
+    schema: &'a CheckedSchema,
+    decls: &'a [Decl],
+    m: &'a Mutation,
+) -> LoweredMutation {
+    let mut stmts = Vec::new();
+    for stmt in &m.body {
+        lower_write(schema, decls, stmt, "id", None, &mut stmts);
+    }
+    LoweredMutation {
+        name: m.name.node.clone(),
+        stmts,
+    }
+}
+
+/// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`
+/// is the bind name a `create`'s app-generated `id` is emitted under (`id` at top
+/// level, `id_<step>` inside a `tx` so sibling creates stay distinct); `back` is the
+/// preceding create a `^.field` reads from (mutations.md). A `tx` flattens: it
+/// pushes its inner writes inline and prepends the tx banner to the first of them.
+fn lower_write<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
     stmt: &'a WriteStmt,
     id_param: &str,
     back: Option<BackCtx<'a>>,
-) -> String {
+    out: &mut Vec<LoweredWrite>,
+) {
     match stmt {
-        WriteStmt::Create { model, assigns } => match schema.model(&model.node) {
-            Some(m) => render_create(schema, decls, m, assigns, id_param, back),
-            None => String::new(),
-        },
+        WriteStmt::Create { model, assigns } => {
+            if let Some(m) = schema.model(&model.node) {
+                out.push(lower_create(schema, decls, m, assigns, id_param, back));
+            }
+        }
         WriteStmt::Update {
             model,
             where_,
             assigns,
-        } => match schema.model(&model.node) {
-            Some(m) => render_update(schema, decls, m, where_, assigns, back),
-            None => String::new(),
-        },
-        WriteStmt::Delete { model, where_ } => match schema.model(&model.node) {
-            Some(m) => render_delete(schema, decls, m, where_, false),
-            None => String::new(),
-        },
-        WriteStmt::HardDelete { model, where_ } => match schema.model(&model.node) {
-            Some(m) => render_delete(schema, decls, m, where_, true),
-            None => String::new(),
-        },
-        WriteStmt::Restore { model, where_ } => match schema.model(&model.node) {
-            Some(m) => render_restore(schema, decls, m, where_),
-            None => String::new(),
-        },
+        } => {
+            if let Some(m) = schema.model(&model.node) {
+                out.push(lower_update(schema, decls, m, where_, assigns, back));
+            }
+        }
+        WriteStmt::Delete { model, where_ } => {
+            if let Some(m) = schema.model(&model.node) {
+                out.push(lower_delete(schema, decls, m, where_, false));
+            }
+        }
+        WriteStmt::HardDelete { model, where_ } => {
+            if let Some(m) = schema.model(&model.node) {
+                out.push(lower_delete(schema, decls, m, where_, true));
+            }
+        }
+        WriteStmt::Restore { model, where_ } => {
+            if let Some(m) = schema.model(&model.node) {
+                out.push(lower_restore(schema, decls, m, where_));
+            }
+        }
         WriteStmt::Tx(inner) => {
-            let mut s = "-- tx: one engine-owned transaction (principle 7); rolls back together\n"
-                .to_string();
+            let start = out.len();
             // `^` reads the immediately preceding create; number creates so their
             // generated ids get distinct binds and a back-reference can name one.
             let mut prev: Option<BackCtx<'a>> = back;
@@ -112,7 +172,7 @@ fn render_write<'a>(
                     WriteStmt::Create { .. } => format!("id_{step}"),
                     _ => "id".to_string(),
                 };
-                s.push_str(&render_write(schema, decls, st, &idp, prev.clone()));
+                lower_write(schema, decls, st, &idp, prev.clone(), out);
                 if let WriteStmt::Create { assigns, .. } = st {
                     prev = Some(BackCtx {
                         id_param: idp,
@@ -121,24 +181,37 @@ fn render_write<'a>(
                     step += 1;
                 }
             }
-            s
+            // The tx is one engine-owned transaction (principle 7): the runtime wraps
+            // the whole body, so the flattened statements need no per-tx marker beyond
+            // this banner on the first write (text surface only).
+            if let Some(first) = out.get_mut(start) {
+                first.header = format!(
+                    "-- tx: one engine-owned transaction (principle 7); rolls back together\n{}",
+                    first.header
+                );
+            }
         }
         // A raw write is an escape hatch (raw.md): text verbatim, `${param}` -> `:param`.
         // No model is attached, so `{table}`/`{id}` interpolation has no root to bind.
-        WriteStmt::Raw(raw) => format!("{};\n", render_raw(raw, "", "")),
+        WriteStmt::Raw(raw) => out.push(LoweredWrite {
+            header: String::new(),
+            sql: format!("{};\n", render_raw(raw, "", "")),
+            model: String::new(),
+            gen_id: None,
+        }),
     }
 }
 
 // ---------- create ---------------------------------------------------------
 
-fn render_create<'a>(
+fn lower_create<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
     model: &RModel,
     assigns: &'a [Assign],
     id_param: &str,
     back: Option<BackCtx<'a>>,
-) -> String {
+) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model).with_back(back);
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
@@ -152,11 +225,15 @@ fn render_create<'a>(
     }
 
     // Implicit `id` is app-generated (D1: uuid, no SQL default) — bind it unless the
-    // model declares its own `id` that the caller sets explicitly.
-    if !assigned.iter().any(|c| c == "id") {
+    // model declares its own `id` that the caller sets explicitly. Only then does the
+    // engine generate the id at runtime, under this bind name.
+    let gen_id = if !assigned.iter().any(|c| c == "id") {
         cols.insert(0, "`id`".to_string());
         vals.insert(0, format!(":{id_param}"));
-    }
+        Some(id_param.to_string())
+    } else {
+        None
+    };
 
     // `@created`/`@updated` are set on insert (D2), unless the caller already did.
     for col in timestamp_cols(model, &[model.created.as_deref(), model.updated.as_deref()]) {
@@ -166,25 +243,29 @@ fn render_create<'a>(
         }
     }
 
-    format!(
-        "-- create {}\nINSERT INTO `{}` ({})\nVALUES ({});\n",
-        model.name,
-        model.table,
-        cols.join(", "),
-        vals.join(", ")
-    )
+    LoweredWrite {
+        header: format!("-- create {}\n", model.name),
+        sql: format!(
+            "INSERT INTO `{}` ({})\nVALUES ({});\n",
+            model.table,
+            cols.join(", "),
+            vals.join(", ")
+        ),
+        model: model.name.clone(),
+        gen_id,
+    }
 }
 
 // ---------- update ---------------------------------------------------------
 
-fn render_update<'a>(
+fn lower_update<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
     model: &RModel,
     where_: &Predicate,
     assigns: &'a [Assign],
     back: Option<BackCtx<'a>>,
-) -> String {
+) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model).with_back(back);
     let mut sets: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
@@ -201,18 +282,23 @@ fn render_update<'a>(
 
     let mut wheres = vec![sel.predicate(where_, model)];
     inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
-    update_stmt(&sel, model, &sets, &wheres, None)
+    LoweredWrite {
+        header: String::new(),
+        sql: update_stmt(&sel, model, &sets, &wheres),
+        model: model.name.clone(),
+        gen_id: None,
+    }
 }
 
 // ---------- delete / hard delete -------------------------------------------
 
-fn render_delete(
+fn lower_delete(
     schema: &CheckedSchema,
     decls: &[Decl],
     model: &RModel,
     where_: &Predicate,
     hard: bool,
-) -> String {
+) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model);
 
     // Soft model + plain `delete` -> tombstone UPDATE, never a real DELETE.
@@ -228,30 +314,38 @@ fn render_delete(
         }
         let mut wheres = vec![sel.predicate(where_, model)];
         inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
-        return update_stmt(
-            &sel,
-            model,
-            &sets,
-            &wheres,
-            Some("-- delete (soft): tombstone, never a real DELETE\n"),
-        );
+        return LoweredWrite {
+            header: "-- delete (soft): tombstone, never a real DELETE\n".to_string(),
+            sql: update_stmt(&sel, model, &sets, &wheres),
+            model: model.name.clone(),
+            gen_id: None,
+        };
     }
 
     // Plain model, or the loud `hard delete` opt-out -> real DELETE.
     let mut wheres = vec![sel.predicate(where_, model)];
     inject_guards(&mut sel, model, &mut wheres, /* live = */ false);
-    let comment = hard.then_some("-- hard delete: real DELETE (explicit soft-delete opt-out)\n");
-    delete_stmt(&sel, model, &wheres, comment)
+    let header = if hard {
+        "-- hard delete: real DELETE (explicit soft-delete opt-out)\n".to_string()
+    } else {
+        String::new()
+    };
+    LoweredWrite {
+        header,
+        sql: delete_stmt(&sel, model, &wheres),
+        model: model.name.clone(),
+        gen_id: None,
+    }
 }
 
 // ---------- restore --------------------------------------------------------
 
-fn render_restore(
+fn lower_restore(
     schema: &CheckedSchema,
     decls: &[Decl],
     model: &RModel,
     where_: &Predicate,
-) -> String {
+) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model);
     // sema (E-restore) guarantees a soft-delete model here; fall back defensively.
     let mut sets = match &model.soft_delete {
@@ -272,31 +366,20 @@ fn render_restore(
     if let Some(scope) = &model.scope {
         wheres.push(sel.predicate(scope, model));
     }
-    update_stmt(
-        &sel,
-        model,
-        &sets,
-        &wheres,
-        Some("-- restore: clear the tombstone\n"),
-    )
+    LoweredWrite {
+        header: "-- restore: clear the tombstone\n".to_string(),
+        sql: update_stmt(&sel, model, &sets, &wheres),
+        model: model.name.clone(),
+        gen_id: None,
+    }
 }
 
 // ---------- statement assembly ---------------------------------------------
 
 /// `UPDATE t [JOIN ...] SET ... WHERE ...`. Joins (from a relation-reaching `where`)
 /// make it MariaDB's multi-table UPDATE; without them it is a plain single-table one.
-fn update_stmt(
-    sel: &Select,
-    model: &RModel,
-    sets: &[String],
-    wheres: &[String],
-    comment: Option<&str>,
-) -> String {
-    let mut s = String::new();
-    if let Some(c) = comment {
-        s.push_str(c);
-    }
-    s.push_str(&format!("UPDATE `{}`", model.table));
+fn update_stmt(sel: &Select, model: &RModel, sets: &[String], wheres: &[String]) -> String {
+    let mut s = format!("UPDATE `{}`", model.table);
     push_joins(&mut s, &sel.joins);
     s.push_str(&format!("\nSET {}", sets.join(", ")));
     push_where(&mut s, wheres);
@@ -306,11 +389,8 @@ fn update_stmt(
 
 /// `DELETE FROM t WHERE ...`, or the multi-table `DELETE t FROM t JOIN ...` form
 /// when the `where` reaches across relations.
-fn delete_stmt(sel: &Select, model: &RModel, wheres: &[String], comment: Option<&str>) -> String {
+fn delete_stmt(sel: &Select, model: &RModel, wheres: &[String]) -> String {
     let mut s = String::new();
-    if let Some(c) = comment {
-        s.push_str(c);
-    }
     if sel.joins.is_empty() {
         s.push_str(&format!("DELETE FROM `{}`", model.table));
     } else {

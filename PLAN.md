@@ -17,7 +17,7 @@ for *where the implementation stands*.
       ──codegen::client─────▶ typed Rust client (M4 ✅)
       ──facts───────────────▶ engine-derived facts    (M5 ✅)
                               └─ based-lsp ──▶ editor inlay hints + hover + diagnostics
-      ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read ✅)
+      ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read+write ✅)
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
@@ -37,10 +37,10 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
 | based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust) + `based facts [--json]` (derived facts, M5). |
-| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs; `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection); `client` → typed Rust client (inputs/outputs/routes). |
+| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read path)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query lowering; `plan_query` validates args/`$ctx`, binds `:name`→positional `?`, picks the response envelope; `run_query` shapes rows to JSON via an abstract `Db` (mock-tested). **Write path (mutations) + concrete MariaDB driver + HTTP server not started.** |
+| **based-runtime** | 🚧 **M6 (read + write path)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` — all via an abstract `Db` (mock-tested). **Concrete MariaDB driver + HTTP server not started.** |
 
 ## based-sema — what it does now
 
@@ -383,14 +383,16 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
     reference sites, cross-file), which rename in particular depends on. Land the
     client first, then build this layer and these features on top.
 
-**M6 — runtime (`based-runtime`). 🚧 read path done.** The engine that turns a wire
-request into a bound, executable statement and shapes the result. Architecture:
+**M6 — runtime (`based-runtime`). 🚧 read + write path done.** The engine that turns
+a wire request into a bound, executable statement and shapes the result. Architecture:
 **in-process** (D18) — the runtime links `based-sema` + `based-codegen`, holds the
-same `CheckedSchema` the compiler produced, and reuses codegen's *one* query
-lowering (`sql::lower_queries`) rather than re-deriving SQL or parsing a serialized
-artifact. So the executed SQL and its bind surface can never drift from `based gen
-sql` (principle 4). Tests: `based-runtime/tests/query.rs` (12 cases) + the scanner
-unit tests (6); the whole request→JSON path runs against a `MockDb`, no live DB.
+same `CheckedSchema` the compiler produced, and reuses codegen's *one* query and
+mutation lowering (`sql::lower_queries` / `sql::lower_mutations`) rather than
+re-deriving SQL or parsing a serialized artifact. So the executed SQL and its bind
+surface can never drift from `based gen sql` (principle 4). Tests:
+`based-runtime/tests/query.rs` (12) + `mutation.rs` (8) + `load.rs` (commerce, incl.
+`place_order`) + the scanner unit tests (6); the whole request→JSON path runs against
+a `MockDb`, no live DB.
 
 *Read side (this slice) — delivered:*
   - **`Compiled::load`** runs the front end (discover→parse→check, bail on any error
@@ -420,15 +422,40 @@ unit tests (6); the whole request→JSON path runs against a `MockDb`, no live D
     mapped-column family isn't re-derived — the typed client already sends the right
     shape); the offset value arrives as an `offset` arg (defaulting to 0).
 
+*Write side (this slice) — delivered:*
+  - **Structured mutation lowering** (`sql::lower_mutations`, codegen) — the write twin
+    of `lower_queries`. Each mutation lowers to a flat `Vec<LoweredWrite>` (a `tx` is
+    flattened — the whole body already runs under one transaction), each carrying
+    header-free SQL, the target model, and the bind name of the engine `id` a `create`
+    generates (`gen_id`). The text emitter (`based gen sql`) now frames this one
+    lowering with comment headers, so the emitted and executed writes can't drift (P4).
+  - **`plan_mutation`** (`plan.rs`) — mirrors `plan_query`: validates args + `$ctx`
+    (reusing `bind_param`/`bind_ctx`), then generates each `create`'s engine `id`
+    (`IdGen`, D1) into the value environment *before* binding — so a `^.id` back-ref,
+    which lowered to the prior create's `:id_<step>`, resolves to the same value the
+    INSERT used. Binds every write to positional `?` in SQL order. Records the
+    return-model create's id as `result_id` (the row the response identifies).
+  - **`IdGen` seam** (`id.rs`) — the write twin of the read path's `MockDb`: a trait so
+    prod supplies uuids (with the driver slice) and tests supply the deterministic
+    `SeqIdGen` (`id-0`, `id-1`, …), making a planned INSERT's bound id predictable.
+  - **`run_mutation` + `Db` writes** (`run.rs`) — the `Db` trait grew `execute` +
+    `begin`/`commit`/`rollback` (defaulted, so a read-only `Db` is unaffected).
+    `run_mutation` executes every write in order between one `begin`/`commit`
+    (principle 7 — the engine owns the transaction, not the emitted SQL) and returns
+    the write response.
+  - *Deferred inside M6 write*: the **write response is the created row's engine `id`**
+    (`{ "id": … }`) or `{}` when nothing is created — the declared-shape re-select
+    (RETURNING vs. re-select, D12) is still deferred, so the response does not yet
+    match the client's decoded output type; a `create` whose `id` the caller sets
+    (`gen_id: None`) is not surfaced in `result_id`; the concrete uuid `IdGen` lands
+    with the driver.
+
 *Not started (next slices):*
-  - **Write path** — mutations: engine id-gen (a deterministic `IdGen` seam for tests,
-    uuid in prod), multi-statement `tx` under one engine-owned transaction (principle
-    7), and the write-response (RETURNING vs. re-select, D12 residue). Needs codegen to
-    expose structured mutation lowering the way `lower_queries` now does for reads.
   - **Concrete MariaDB driver** — a real `Db` impl (reuse a hardened driver, principle
     7: `mysql_async`/`sqlx`) mapping `SqlValue`→its bind form and rows back to JSON.
   - **HTTP server** — the `POST /q/<name>` / `POST /m/<name>` wire surface (calling.md):
-    decode JSON body + context → `Request` → `run_query` → JSON response. `based serve`.
+    decode JSON body + context → `Request` → `run_query`/`run_mutation` → JSON
+    response. `based serve`.
 
 ## Conventions
 

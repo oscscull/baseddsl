@@ -34,6 +34,7 @@ pub mod dml;
 pub mod mutations;
 
 pub use dml::{lower_queries, LoweredQuery};
+pub use mutations::{lower_mutations, LoweredMutation, LoweredWrite};
 
 /// Render the whole schema as a DDL script (statements separated by blank lines).
 pub fn ddl(schema: &CheckedSchema, dialect: Dialect) -> String {
