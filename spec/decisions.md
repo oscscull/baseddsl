@@ -404,3 +404,50 @@ clean edge case. Axes to settle first:
    everywhere (kills accidental cross-scope leaks); it cannot verify the role matrix is correct
    (that lives in host guards). Document this honestly so `@scope` is not mistaken for a checked
    authorization model.
+
+## D20 — runtime serving model: sync + bounded pools, single-shard scale-out
+Target is **scaled-enterprise, very high load, long-term uptime, low complexity**. The
+serving architecture that meets that bar:
+
+- **Sync, not async.** The `Db` trait stays synchronous; the server is a bounded worker-thread
+  pool over a bounded connection pool. Async was evaluated and rejected *for this workload*:
+  - The real concurrency ceiling is the **DB connection pool**, which you must bound in either
+    model to protect a MariaDB box (per-connection server memory + lock contention past a few
+    hundred–low-thousand active conns). Async does not raise that ceiling.
+  - Async's genuine win is cheap *idle* sockets (C10k). This is a short-request RPC service
+    behind a load balancer, which terminates keep-alive/slow clients — the app sees only active
+    requests, so that win doesn't apply.
+  - For DB-bound work each request blocks ~0.2–5 ms on a MySQL round-trip; a thread
+    context-switch is ~1–5 µs, so async's scheduling efficiency saves a cost that isn't ours.
+    200 blocked worker threads × 512 KB stack ≈ 100 MB — negligible.
+  - Async's cost is real and permanent (infects `run`/`serve`, `Send+'static`, cancellation
+    safety, executor-starvation footguns) — directly against "very dependable, low complexity."
+  - The one case where async would pay — in-process cross-shard **scatter-gather** — is
+    explicitly out of scope (single-shard, below). If direct streaming to slow clients without a
+    buffering proxy ever becomes a requirement, revisit; it's a bounded `run`/`serve` rewrite.
+- **Scale for load horizontally**: shards + more app instances behind an LB, not
+  threads-per-process. Bounded pools cap per-box concurrency; capacity is added by adding boxes.
+- **Single-shard per request, no scatter-gather.** A request routes to exactly one physical
+  shard. Consequences that buy dependability + simplicity: a mutation's `tx` is one shard →
+  engine-owned BEGIN/COMMIT with **no distributed transaction/2PC**; a down shard fails only its
+  own traffic; the router stays trivial (pick one pool). Cross-shard/analytics is a separate
+  read-replica/warehouse path, off the hot path — not expressible on the RPC wire.
+- **Route through a fixed logical-shard space, not `hash % N`.** A key is FNV-hashed (a *stable*
+  algorithm — `DefaultHasher` is not stable across releases and would strand data) into a
+  permanent `LOGICAL_SHARDS` space (4096), then a small `logical→physical` assignment maps it to
+  a pool. Adding a physical shard moves *whole logical shards* (a bounded data migration) without
+  rehashing any key (the Vitess/Citus model). This is what preserves usability as the fleet grows.
+- **`Db` is fallible; writes are all-or-nothing.** Every `Db` method returns `Result<_, DbError>`
+  (a dependable driver surfaces connection/timeout/deadlock failures, never panics); a mutation
+  rolls back on any write error. The wire maps a `DbError` to a **retryable 503** (the generated
+  SQL comes from a checked schema, so runtime DB errors are operational, not query bugs), distinct
+  from a boundary `PlanError` → 4xx.
+- **Driver = reuse, not hand-roll (principle 7).** The `mysql` crate (pure Rust) + its built-in
+  bounded pool; TLS/compression off by default to avoid a system OpenSSL dependency (a deployment
+  that needs in-transit TLS re-enables it).
+- **Shard-key source deferred, decoupled from D19.** The natural shard key is the tenant/owner —
+  the same field `@scope` would use — but `@scope` injection is OPEN (D19), so the key extractor
+  is left pluggable and **not** yet bound to a `$ctx.<field>`; today it takes an explicit key.
+- **Known gap — write idempotency.** App-side `id`-gen (D1) means a client retry of a `create`
+  after a 503/timeout can double-insert. A dedupe/idempotency key (likely carried in `$ctx`) is
+  wanted before write retries are safe at enterprise scale. Not yet designed.

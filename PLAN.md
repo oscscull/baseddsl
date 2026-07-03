@@ -40,7 +40,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read + write path)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` — all via an abstract `Db` (mock-tested). **Concrete MariaDB driver + HTTP server not started.** |
+| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit`. `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener (`based serve`) + live-DB integration not started.** |
 
 ## based-sema — what it does now
 
@@ -450,12 +450,45 @@ a `MockDb`, no live DB.
     (`gen_id: None`) is not surfaced in `result_id`; the concrete uuid `IdGen` lands
     with the driver.
 
+*Dispatch + driver core (this slice) — delivered (D20):*
+  - **Enterprise-scale architecture decided (D20):** sync + bounded connection pools,
+    horizontal **scale-out** for load (shards + app instances behind an LB), **single-shard
+    per request** (no scatter-gather → a `tx` is one shard, no distributed transaction;
+    a down shard fails only its own traffic). Async was weighed and rejected: the DB
+    connection pool is the real ceiling and is bounded in *both* models, so async's
+    idle-socket win doesn't apply to a bounded-pool, DB-bound, LB-fronted RPC service —
+    while its complexity/cancellation cost is at odds with "very dependable, low complexity."
+  - **Fallible `Db`** — every method returns `Result<_, DbError>`; a mutation rolls back
+    on any write failure (all-or-nothing, principle 7). `run_query`/`run_mutation` return
+    `RunError` = `Plan(PlanError)` | `Db(DbError)`.
+  - **`serve::dispatch`** (`serve.rs`) — the wire core, pure and mock-tested (no socket):
+    routes `POST /q|m/<name>` (prefix authoritative, no cross-dispatch), builds the
+    `Request` (`$ctx` supplied out-of-band, never the body — auth.md/D7), runs it, and
+    maps every outcome to a `WireResponse`: 200 + shaped JSON; PlanError → 400/404/500;
+    DbError → retryable **503**. Tests: `based-runtime/tests/serve.rs` (8).
+  - **Concrete `MariaDb` driver** (`driver.rs`, feature `mariadb`) — a real `Db` over one
+    pooled `mysql`-crate connection (pure-Rust driver + its hardened pool, principle 7,
+    TLS/compression off to avoid a system OpenSSL dep). `SqlValue`↔`mysql::Value` mapping
+    is pure + unit-tested; connecting/executing is compile-verified (no live DB here).
+  - **`ShardRouter`** — the scale-out seam: one bounded pool per physical shard, routing
+    each request to exactly one shard via a **stable FNV logical-shard hash** (fixed
+    `LOGICAL_SHARDS=4096` space, `logical→physical` assignment) so adding a shard moves
+    whole logical shards without rehashing keys (Vitess/Citus model). `single(url)` for
+    the N=1 common case; the router is the seam so splitting later is config, not code.
+    Key extraction is left pluggable + **decoupled from D19** (`@scope`/tenant still OPEN),
+    so the shard key is not yet bound to a `$ctx.<field>`.
+
 *Not started (next slices):*
-  - **Concrete MariaDB driver** — a real `Db` impl (reuse a hardened driver, principle
-    7: `mysql_async`/`sqlx`) mapping `SqlValue`→its bind form and rows back to JSON.
-  - **HTTP server** — the `POST /q/<name>` / `POST /m/<name>` wire surface (calling.md):
-    decode JSON body + context → `Request` → `run_query`/`run_mutation` → JSON
-    response. `based serve`.
+  - **HTTP listener (`based serve`)** — the thin socket edge over `serve::dispatch`: a
+    bounded-worker-thread sync server (principle 7 — reuse a hardened lib, e.g. tiny_http)
+    that decodes the request line + JSON body + server-derived `$ctx`, checks a connection
+    out of the `ShardRouter`, calls `dispatch`, writes `WireResponse.status` + body.
+  - **Live-DB integration** — exercise `MariaDb` against a real MariaDB (the connect/exec
+    paths only compile-verified today): typed JSON reconstruction for `JSON` columns,
+    statement timeouts, deadlock-retry, pool-exhaustion → 503 under load.
+  - **Idempotency for write retries** — app-side `id`-gen (D1) means a client retry of a
+    `create` under 503/timeout could double-insert; a dedupe/idempotency key (likely in
+    `$ctx`) is wanted before write retries are safe at scale.
 
 ## Conventions
 

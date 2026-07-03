@@ -28,22 +28,37 @@
 //! is the one lowering both `based gen sql` and the runtime read, so the executed
 //! writes can never drift from the emitted SQL either.
 //!
-//! The concrete MariaDB driver + HTTP server are the *next* slice; the [`run::Db`]
-//! trait is the seam (a [`run::MockDb`] stands in for tests), exactly mirroring the
-//! generated client's abstract `Transport`. The write response is the created row's
-//! engine `id` today — the declared-shape re-select (RETURNING) is deferred (D12).
+//! ## Wire + driver
+//! [`serve::dispatch`] is the wire surface: it routes `POST /q|m/<name>` → the callable,
+//! runs it, and maps every outcome to a [`serve::WireResponse`] (HTTP status + JSON) —
+//! a pure core testable against [`run::MockDb`], no socket. Every [`run::Db`] method is
+//! **fallible** (a dependable driver surfaces failures, not panics); a boundary
+//! [`plan::PlanError`] maps to `4xx`, a [`run::DbError`] to a retryable `503`.
+//!
+//! The concrete [`driver::MariaDb`] (feature `mariadb`) is the production `Db` over one
+//! pooled connection, and [`driver::ShardRouter`] is the scale-out seam: one bounded
+//! pool per physical shard, single-shard dispatch by a stable logical-shard hash (no
+//! scatter-gather → a `tx` is one shard, no distributed transaction; add capacity
+//! without rehashing keys). The HTTP listener (`based serve`) is the remaining edge.
+//! The write response is the created row's engine `id` today — the declared-shape
+//! re-select (RETURNING) is deferred (D12).
 
 pub mod id;
 pub mod load;
 pub mod plan;
 pub mod run;
 pub mod scan;
+pub mod serve;
 pub mod value;
+
+#[cfg(feature = "mariadb")]
+pub mod driver;
 
 pub use id::{IdGen, SeqIdGen};
 pub use load::Compiled;
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };
-pub use run::{run_mutation, run_query, Db, MockDb, Row};
+pub use run::{run_mutation, run_query, Db, DbError, MockDb, Row, RunError};
+pub use serve::{dispatch, WireResponse};
 pub use value::SqlValue;

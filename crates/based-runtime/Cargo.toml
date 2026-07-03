@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# The concrete MariaDB driver + connection pool. Off by default so the core
+# runtime (planning + dispatch) stays dependency-light and the seam tests need no
+# database; `based serve` turns it on.
+mariadb = ["dep:mysql"]
+
 [dependencies]
 based-ast.workspace = true
 based-diagnostics.workspace = true
@@ -13,6 +19,12 @@ based-parser.workspace = true
 based-sema.workspace = true
 based-codegen.workspace = true
 serde_json.workspace = true
+# The MariaDB/MySQL driver (pure Rust) + its built-in connection pool — a hardened
+# external component (principle 7), not a hand-rolled driver. TLS/compression off to
+# avoid a system OpenSSL dependency; a deployment that needs TLS re-enables it.
+mysql = { version = "26", optional = true, default-features = false, features = [
+    "minimal",
+] }
 
 [dev-dependencies]
 based-parser.workspace = true
