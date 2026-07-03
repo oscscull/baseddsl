@@ -517,3 +517,44 @@ and return the identical `WireResponse` (principle 4 — the doors can't drift).
 - **Known residue (D12).** A mutation's wire response is still `{ id }`, so the typed client's
   mutation method (which expects the declared shape) decodes clean only once the declared-shape
   re-select / `RETURNING` lands. The example pins this so it isn't a surprise.
+
+## D23 — polyglot clients via OpenAPI, not per-language emitters (and not gRPC)
+The container door (D21/D22) exists to serve non-Rust callers, so the schema must yield clients in
+many languages. The decision is **how**, and it is deliberately *not* "hand-write a TypeScript
+emitter, then a Python one, then Go":
+- **A single `based gen openapi` emitter** off the same `CheckedSchema` the Rust client uses. It
+  emits an OpenAPI document (`paths` for each `POST /q|m/<name>`, `components.schemas` for the
+  input/output types) — one machine-readable contract that `openapi-generator` (or similar) turns
+  into a typed client in any language. So polyglot is *one* emitter, not N. This subsumes the
+  earlier "second emitter = TypeScript" note (M4/PLAN): TS/Python/Go all fall out of the spec.
+- **The Rust client stays hand-emitted** (`based gen client`). It is the in-process `Transport`
+  path (D22) — tighter and more useful than a generated HTTP stub would be. `ClientTarget` still
+  branches, but only for emitters we hand-write, not for every wire language.
+- **Type mapping reuses D10/D13** near-verbatim: `Uuid`/`Timestamp`/`Date` → `string`, `Json` →
+  `object`, `int` → `integer`; the `get`/`list`/paginated envelopes → the response schemas; the
+  `{ error: { code, message } }` envelope → the error responses. The emitter *documents* the
+  surface `serve::dispatch` already serves — it invents no new wire.
+- **`$ctx` is not a body param.** It rides the `X-Based-Context` header (D21, auth.md/D7), so the
+  spec models it as a header / security scheme, never an input field.
+- **Soft prerequisite: D12.** An accurate *mutation* spec needs the declared-shape re-select
+  (`RETURNING`) — until then the response is `{ id }`, and the spec must not advertise the declared
+  shape it can't yet return. Read specs are accurate today.
+
+**Why not gRPC** (the obvious "typed polyglot RPC" alternative — its one real draw is that `protoc`
+generates clients in ~10 languages, i.e. it also solves the N-emitters problem):
+- **Its headline win is void here.** Binary protobuf + HTTP/2 framing saves microseconds against a
+  0.2–5 ms DB round-trip (D20) — the same cost logic that killed the JSON-free Tier 3 path. No
+  measurable gain.
+- **It re-imports the complexity D20 rejected.** The mainstream Rust stack (tonic) is async/tokio;
+  D20 weighed and rejected async for the serving model (bounded DB pool is the ceiling in both;
+  async's cancellation complexity conflicts with "dependable, low complexity").
+- **It penalizes the primary caller.** Browsers/web-TS (the biggest client audience) can't speak
+  native gRPC — they need grpc-web + an Envoy-style proxy. Plain `POST`+JSON works from a browser,
+  curl, and any LB/gateway/WAF with no proxy (principle 7 — reuse boring, hardened infra).
+- **It adds a second IDL.** `.bsl` is already the contract; protobuf would be a parallel schema to
+  generate + keep coherent. OpenAPI describes the *existing* JSON wire instead of replacing it.
+- **Half of it is unused.** gRPC's real differentiator is streaming; the query/mutation model is
+  unary request/response CRUD (queries.md/mutations.md), so the streaming surface goes to waste.
+- gRPC would only start to earn its cost as high-fanout internal service-to-service traffic wanting
+  deadlines/mTLS/streaming by default — not the stated web/BFF audience. Recorded so it isn't
+  re-litigated.
