@@ -8,7 +8,9 @@ rust-version.workspace = true
 [dependencies]
 based-ast = { workspace = true }
 based-sema = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 based-parser = { workspace = true }
 based-diagnostics = { workspace = true }
+serde_json = { workspace = true }

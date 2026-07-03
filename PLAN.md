@@ -15,6 +15,7 @@ for *where the implementation stands*.
       ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅)
       ──codegen::sql::mutations─▶ INSERT/UPDATE/DELETE  (M3 write side ✅)
       ──codegen::client─────▶ typed Rust client (M4 ✅)
+      ──codegen::openapi────▶ OpenAPI 3.1 doc → polyglot clients (D24 ✅)
       ──facts───────────────▶ engine-derived facts    (M5 ✅)
                               └─ based-lsp ──▶ editor inlay hints + hover + diagnostics
       ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read+write ✅)
@@ -27,8 +28,10 @@ for *where the implementation stands*.
 same front end (`load_checked` in based-cli), then lowers the `CheckedSchema` to DDL,
 then appends the query SELECT templates (`sql::dml`) and the mutation write templates
 (`sql::mutations`), both reading the AST alongside the IR. `based gen client [--out]`
-runs the same front end, then lowers to a typed Rust client module (`client`). All bail
-unless every file parses *and* checks clean (codegen assumes a clean schema).
+runs the same front end, then lowers to a typed Rust client module (`client`). `based gen
+openapi [--out]` runs the same front end, then emits one OpenAPI 3.1 document over the
+same wire (`openapi`, D24) — feed it to `openapi-generator` for a client in any language.
+All bail unless every file parses *and* checks clean (codegen assumes a clean schema).
 
 ## Crate status
 
@@ -39,8 +42,8 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). Missing: schema-version. (`$ctx` is inferred in sema, not declared here — D4.) |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
-| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust) + `based facts [--json]` (derived facts, M5). |
-| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes). |
+| based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust) + `based gen openapi` (OpenAPI 3.1, D24) + `based facts [--json]` (derived facts, M5) + `based serve` (HTTP listener, D21). |
+| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client) + OpenAPI (D24)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes); `openapi` → one OpenAPI 3.1 doc over the same wire (polyglot clients via `openapi-generator`, D23/D24). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
 | **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` and re-selects a create's declared shape as the response (D12). `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Live-DB integration + more dialects + polyglot clients (via `based gen openapi`, not per-language emitters — D23; gRPC rejected) not started (architecture ready, D21/D22/D23).** |
@@ -330,12 +333,13 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
     (M-runtime) supplies the concrete HTTP/driver binding. Codegen emits the typed surface only.
   - *Deferred inside M4*: nested shape sub-objects skipped in the output struct (need JSON aggregation,
     same as M3 read); a `sql`…`` shape field → `Json` (no static type); the keyset cursor is an opaque
-    `Option<String>` (its encoding is a runtime concern). Polyglot clients are **not** a
-    per-language emitter — they come from an **OpenAPI spec emitter** (`based gen openapi`, D23):
-    emit one contract, let `openapi-generator` produce TS/Python/Go/etc. The Rust client stays
-    hand-emitted (it's the in-process `Transport` path, tighter than a generated HTTP stub). The
-    `ClientTarget` enum still branches, but for the emitters we hand-write (Rust today), not for
-    every wire language.
+    `Option<String>` (its encoding is a runtime concern). ~~Polyglot clients are **not** a
+    per-language emitter — they come from an **OpenAPI spec emitter**.~~ ✅ **delivered
+    (`based gen openapi`, D24):** one OpenAPI 3.1 contract off the *same* `CheckedSchema` +
+    AST + type resolver the Rust client uses, so `openapi-generator` produces TS/Python/Go/etc.
+    from one artifact (D23's decision, now built). The Rust client stays hand-emitted (it's the
+    in-process `Transport` path, tighter than a generated HTTP stub); `ClientTarget` still
+    branches only for the emitters we hand-write (Rust today), not for every wire language.
 
 **M5 — LSP (show-don't-write, principle 8). ✅ done.** Engine-derived facts are
 *shown* in the editor, never forced into source. Two layers:
@@ -563,17 +567,18 @@ should chase the former.
     straight to `SqlValue` (no `serde_json` in the middle) is a real codegen effort whose
     payoff is nanoseconds against a millisecond DB call — skip unless profiling ever
     demands it. Recorded here so the "purity" idea isn't re-litigated.
-  - **Gates the *container* door for non-Rust langs (orthogonal to the above) — via OpenAPI,
-    not per-language emitters (D23):** only the **Rust** client is emitted today, and polyglot
-    is the container's whole reason to exist. The move is **not** to hand-write a TS emitter,
-    then a Python one, etc. — it is a single **`based gen openapi`** emitter off the same
-    `CheckedSchema`: one machine-readable contract that `openapi-generator` turns into a client
-    in any language. Rejected gRPC for this (D23): its perf win is void here (D20 — DB-bound,
-    small args, unary CRUD, no streaming), it re-imports the async/heavy stack D20 avoided, and
-    it penalizes the primary web/TS caller (needs grpc-web + a proxy); plain JSON/HTTP is the
-    boring, browser-native, LB/gateway-frontable surface `serve::dispatch` already serves.
-    Alongside the emitter: a container image + health/readiness + graceful shutdown, and the
-    **live-DB hardening** above (the standalone story isn't production-real until that lands).
+  - ~~**Gates the *container* door for non-Rust langs (orthogonal to the above) — via OpenAPI,
+    not per-language emitters (D23).**~~ ✅ **the emitter is done (`based gen openapi`, D24).**
+    A single OpenAPI 3.1 document off the same `CheckedSchema` — one `POST /q|m/<name>` path +
+    input/output `components.schemas` per callable, the `Page`/`{ id }`/error envelopes, and
+    `$ctx` modelled as the `X-Based-Context` header — so `openapi-generator` turns it into a
+    client in any language. gRPC was rejected for this (D23): its perf win is void here (D20 —
+    DB-bound, small args, unary CRUD, no streaming), it re-imports the async/heavy stack D20
+    avoided, and it penalizes the primary web/TS caller (needs grpc-web + a proxy); plain
+    JSON/HTTP is the boring, browser-native, LB/gateway-frontable surface `serve::dispatch`
+    already serves. *Still wanted for the standalone container story:* a container image +
+    health/readiness + graceful shutdown, and the **live-DB hardening** above (not
+    production-real until that lands).
 
 ## Conventions
 

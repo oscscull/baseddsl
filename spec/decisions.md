@@ -572,3 +572,40 @@ generates clients in ~10 languages, i.e. it also solves the N-emitters problem):
 - gRPC would only start to earn its cost as high-fanout internal service-to-service traffic wanting
   deadlines/mTLS/streaming by default — not the stated web/BFF audience. Recorded so it isn't
   re-litigated.
+
+## D24 — OpenAPI emitter shape (`based gen openapi`, delivers D23)
+The concrete form of the OpenAPI 3.1 document (`based-codegen::openapi`; CLI `based gen openapi
+[--out]`). D23 decided *to emit OpenAPI*; this records *what* the emitter produces. It reuses the
+client emitter's collection + type-resolution structure near-verbatim (same `Callable` walk over
+the AST, same reach-to-column resolver) so the spec and the Rust client can never disagree on
+routes or field shapes (principle 4) — only the leaf mapping differs (Rust types → JSON Schema).
+- **One `POST` operation per callable**, keyed by the identical route the wire serves and the
+  client emits: `/q/<name>` (query) / `/m/<name>` (mutation), `operationId = <name>`. The request
+  body references a generated `<Name>Input` schema (one property per signature param; a param is
+  `required` unless it has a `(default)` or an optional annotation — the engine fills the rest).
+- **Response schemas mirror the return wrapper** (calling.md, same as D13): a `get` → `oneOf[T,
+  null]` (a keyed lookup may miss), a `list`/many → an `array`, a paginated `list` → an inlined
+  `{ rows, cursor }` envelope (the `Page<T>` twin — inlined because JSON Schema has no generics),
+  a create-returning mutation → its declared shape `T` (D12), an `-> T[]` mutation → an array.
+- **Two fixed shared schemas.** `Error` = the `{ error: { code, message } }` envelope
+  `serve::dispatch` returns, referenced by the `400`/`404`/`503` responses every operation
+  carries (the same statuses D20's dispatch maps). `MutationResult` = the `{ id }` a **pure**
+  update/delete responds with — its declared-shape re-select is still deferred (D12), so its
+  `200` points here until it follows; a create/model-returning mutation advertises the real shape.
+- **Type mapping = D10/D13 re-projected to JSON Schema.** `text` → `string`; `int` → `{integer,
+  int64}`; `bool` → `boolean`; `uuid`/`Id`/a relation FK → `{string, format: uuid}` (the wire
+  carries the id, D1); `timestamp` → `{string, date-time}`; `date` → `{string, date}`; `json` /
+  a `sql`…`` field → JSON Schema `true` (any value). A to-many scalar → an `array`. `optional`
+  drops the property from `required` (never a nullable type — absence is the signal, matching the
+  client's `Option<T>`).
+- **`$ctx` is a header, never a body field** (D21, auth.md/D7). It rides a single reusable
+  `components.parameters.BasedContext` header (`X-Based-Context`, a JSON object an upstream auth
+  proxy sets) that every operation references. The per-callable `$ctx.<field>` requirements
+  (D4/D5, read off `RQuery`/`RMutation.ctx_requires`) are surfaced *descriptively* as an
+  `x-ctx-requires` vendor extension on each operation (`{ field, type }`, `type` = the primitive
+  name or `-> Model`) — documentation for the caller, not a wire-enforced input.
+- **OpenAPI 3.1** (JSON Schema 2020-12 aligned, so `true`-as-any and `oneOf` with `null` are
+  legal), emitted as pretty JSON with a trailing newline (readable > terse; matches the SQL/client
+  emitters). *Deferred, same as the client + SQL sides:* nested shape sub-objects (`field { … }`)
+  are skipped (need JSON aggregation); pure update/delete declared-shape responses ride the `{ id }`
+  fallback until D12's re-select extends to them; a YAML rendering (JSON is what generators accept).

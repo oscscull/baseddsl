@@ -2,7 +2,8 @@
 //!
 //! `based check`: discover `.bsl` files -> parse -> sema -> render diagnostics.
 //! `based gen sql`: the same front end, then emit SQL DDL from the checked schema.
-//! (`gen client` comes later.)
+//! `based gen client`: a typed Rust client module. `based gen openapi`: an OpenAPI 3.1
+//! spec over the same wire (polyglot clients via `openapi-generator`, D23).
 
 mod render;
 
@@ -92,6 +93,16 @@ enum GenTarget {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Emit an OpenAPI 3.1 spec for the wire — feed it to `openapi-generator` for a
+    /// client in any language (polyglot via one contract, not N emitters; D23).
+    Openapi {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Write to this file instead of stdout.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -101,6 +112,7 @@ fn main() -> anyhow::Result<()> {
         Command::Gen { target } => match target {
             GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
             GenTarget::Client { root, out } => cmd_gen_client(&root, out.as_deref()),
+            GenTarget::Openapi { root, out } => cmd_gen_openapi(&root, out.as_deref()),
         },
         Command::Facts { root, json } => cmd_facts(&root, json),
         Command::Serve {
@@ -174,6 +186,20 @@ fn cmd_gen_client(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
             eprintln!("wrote {} ({n} callable(s))", path.display());
         }
         None => print!("{code}"),
+    }
+    Ok(())
+}
+
+fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+    let (_project, schema, decls, _sources, _warnings) = load_checked(root)?;
+    let doc = based_codegen::openapi::openapi(&schema, &decls);
+    match out {
+        Some(path) => {
+            std::fs::write(path, &doc).with_context(|| format!("writing {}", path.display()))?;
+            let n = schema.queries.len() + schema.mutations.len();
+            eprintln!("wrote {} ({n} operation(s))", path.display());
+        }
+        None => print!("{doc}"),
     }
     Ok(())
 }

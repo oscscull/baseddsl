@@ -141,6 +141,7 @@ dependencies = [
  "based-diagnostics",
  "based-parser",
  "based-sema",
+ "serde_json",
 ]
 
 [[package]]

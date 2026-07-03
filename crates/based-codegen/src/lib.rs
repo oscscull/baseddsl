@@ -3,14 +3,17 @@
 //! SQL **DDL** ([`sql::ddl`]): `CheckedSchema` -> `CREATE TABLE` (M2). SQL **DML**:
 //! queries -> parameterized `SELECT`s ([`sql::dml`]) and mutations ->
 //! INSERT/UPDATE/DELETE ([`sql::mutations`]) (M3, read + write). The typed **client**
-//! ([`client`]): `CheckedSchema` -> a Rust client module (M4). Each is a module
-//! reading the same resolved IR.
+//! ([`client`]): `CheckedSchema` -> a Rust client module (M4). The **OpenAPI** spec
+//! ([`openapi`]): `CheckedSchema` -> one OpenAPI document over the same wire, so
+//! `openapi-generator` yields clients in any language (polyglot via one emitter, not
+//! N — D23). Each is a module reading the same resolved IR.
 //!
 //! The compiler seed is `based_sema::CheckedSchema`. Codegen never re-derives
 //! resolution facts (table names, FK columns, soft-delete mode) — those live on the
 //! IR. It only picks physical representations (SQL types, index names) per dialect.
 
 pub mod client;
+pub mod openapi;
 pub mod sql;
 
 /// The SQL compile target (manifest `dialect`). MariaDB is first and only for now
