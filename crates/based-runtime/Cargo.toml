@@ -37,3 +37,6 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 
 [dev-dependencies]
 based-parser.workspace = true
+# The embed example (`tests/embed.rs`) hosts a committed generated client, which
+# derives serde — the same dependency any consumer of `based gen client` pulls in.
+serde.workspace = true

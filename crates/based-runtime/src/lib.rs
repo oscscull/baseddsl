@@ -51,9 +51,17 @@
 //! here — the `Db` trait speaks positional SQL + [`value::SqlValue`], not a MariaDB
 //! protocol (multi-dialect readiness, D21).
 //!
+//! ## The in-process door (Tier 1)
+//! [`embed::Engine`] is the library twin of the HTTP edge: a [`Compiled`] schema over one
+//! [`run::Db`] and an [`id::IdGen`], run straight through the same [`serve::dispatch`] core
+//! with **no socket**. It backs the *same typed generated client* (`based gen client`) via a
+//! tiny `impl Transport` in the embedding crate — one binary, no sidecar. See `embed` for the
+//! bridge and `tests/embed.rs` for a worked end-to-end example over [`run::MockDb`].
+//!
 //! The write response is the created row's engine `id` today — the declared-shape
 //! re-select (RETURNING) is deferred (D12).
 
+pub mod embed;
 pub mod id;
 pub mod load;
 pub mod plan;
@@ -68,6 +76,7 @@ pub mod driver;
 #[cfg(feature = "serve")]
 pub mod http;
 
+pub use embed::Engine;
 pub use id::{IdGen, SeqIdGen};
 pub use load::Compiled;
 pub use plan::{

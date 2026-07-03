@@ -204,6 +204,7 @@ dependencies = [
  "based-parser",
  "based-sema",
  "mysql",
+ "serde",
  "serde_json",
  "tiny_http",
  "uuid",

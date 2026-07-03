@@ -486,3 +486,34 @@ carry it:
 - **Coherence rule:** one `Dialect` drives *both* codegen lowering and driver selection — you
   serve Postgres-lowered SQL only to a Postgres `Backend`. The pairing is a deployment invariant,
   not something the wire negotiates.
+
+## D22 — the in-process door (`based-runtime::embed`, Tier 1)
+The engine has two front doors over *one* core: run it as a container (`based serve`, D21) or
+embed it as a Rust library. `embed::Engine` is the library door — a `Compiled` schema over one
+`Db` + one `IdGen`, running a callable through the same `serve::dispatch` core as the HTTP edge,
+with **no socket**. An embedded call and an HTTP call take the identical plan → run → shape path
+and return the identical `WireResponse` (principle 4 — the doors can't drift). Decisions:
+- **Same typed client, no socket.** The generated client (`based gen client`) is generic over a
+  `Transport` trait it *defines itself*. By the orphan rule the `impl Transport` bridging it to an
+  `Engine` therefore lives in the *embedding* crate, not `based-runtime` — a ~10-line function
+  (serialize input → JSON args, `engine.call(route, args, ctx)`, decode the `200` body into `O`;
+  non-`200` → the client's `ClientError`). Documented in `embed`'s module docs and proven
+  end-to-end in `tests/embed.rs` (the verbatim generated client over a `MockDb`).
+- **`&self` via interior mutability.** `Transport::call` is `&self`, but `dispatch` needs `&mut`
+  on the connection + id-gen, so `Engine` holds them behind a `RefCell`. This makes an `Engine`
+  single-threaded by design (one embedded connection, one thread at a time). A pooled / multi-
+  threaded embed routes through the `Backend` seam instead — check out a connection per request
+  and build a short-lived `Engine` around it (the same seam `based serve` uses).
+- **`$ctx` supplied straight in.** In-process there is no header dance: the app passes the derived
+  `$ctx` to `Engine::call` directly (auth.md/D7 still holds — the *app*, not the caller, sets it),
+  which is cleaner than the `X-Based-Context` header the HTTP edge needs (D21).
+- **Why in-process at all (D20 cost model).** The per-call cost is the DB round-trip (0.2–5 ms);
+  over the wire it is *also* the loopback TCP + HTTP framing. Dropping the socket removes that
+  framing while keeping the typed client — one binary (no sidecar), steadier latency, `MockDb`
+  end-to-end tests, and the path toward **app-owned transactions** (several callables over one
+  connection — inexpressible on stateless HTTP RPC). Binding the input struct straight to
+  `SqlValue` (skipping JSON) is explicitly *not* pursued: its payoff is nanoseconds against a
+  millisecond DB call (PLAN Tier 3).
+- **Known residue (D12).** A mutation's wire response is still `{ id }`, so the typed client's
+  mutation method (which expects the declared shape) decodes clean only once the declared-shape
+  re-select / `RETURNING` lands. The example pins this so it isn't a surprise.

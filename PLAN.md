@@ -20,6 +20,7 @@ for *where the implementation stands*.
       ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read+write ✅)
       ──runtime::serve──────▶ WireResponse (dispatch core; PlanError→4xx, DbError→503)  (M6 ✅)
       ──runtime::http───────▶ `based serve`: tiny_http listener over dispatch  (M6 ✅ D21)
+      ──runtime::embed──────▶ in-process Engine (socket-free dispatch; typed client seam)  (M6 ✅ Tier 1)
 ```
 
 `based check` wires discover → parse → sema → render. `based gen sql [--out]` runs the
@@ -42,7 +43,7 @@ unless every file parses *and* checks clean (codegen assumes a clean schema).
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit`. `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **Live-DB integration + more dialects not started (architecture ready, D21).** |
+| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit`. `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Live-DB integration + more dialects + polyglot client not started (architecture ready, D21/D22).** |
 
 ## based-sema — what it does now
 
@@ -524,16 +525,22 @@ that orders the effort:** the per-call cost is the DB round-trip (0.2–5 ms, D2
 the wire, the loopback TCP + HTTP framing — JSON ser/deser of a small arg object is
 negligible next to those. So the win is *dropping the socket*, not *dropping JSON*; effort
 should chase the former.
-  - **Tier 1 — in-process `Transport` (recommended, ~zero engine change).** A
-    `based-runtime` impl of the client's `Transport` backed by `Compiled` + a `Db`:
-    serialize the typed input → JSON args, call `dispatch(.., "POST", route, args, ctx)`,
-    decode the `WireResponse` body into `O` (non-200 → `ClientError`). Gives Rust users the
-    *same typed generated client* with no socket, today. Ship a worked **embed example**
-    (the library twin of `based serve`) — `Compiled::from_checked` + building a `Db` are
-    already public. Advantages this unlocks: one binary (no sidecar), lower/steadier
-    latency, embed-with-`MockDb` tests, and the path toward **app-owned transactions**
-    (compose several callables in one unit-of-work over a shared connection — inexpressible
-    on stateless HTTP RPC; the real long-term prize).
+  - ~~**Tier 1 — in-process `Transport` (recommended, ~zero engine change).**~~ ✅ **done
+    (D22).** `based-runtime::embed::Engine` (`Compiled` + one `Db` + `IdGen`, held behind a
+    `RefCell` so a call needs only `&self`) runs a callable through `serve::dispatch` with no
+    socket, returning the identical `WireResponse` the HTTP edge does — same plan → run →
+    shape path (P4). The client's `Transport` trait is defined *by* the generated code, so
+    by the orphan rule the ~10-line bridge (`serialize → engine.call → decode 200 body; non-200
+    → ClientError`) lives in the embedding crate — shown in `Engine`'s docs and exercised by
+    the worked example `tests/embed.rs` (the *verbatim* `based gen client` output over a
+    `MockDb`: typed `order_by_id`/`orders_in_org`/`my_org_orders` round-trips, `$ctx` supplied
+    straight in — no header dance). `$ctx` note: the write response is still `{ id }` (the
+    typed mutation method decodes clean only once the declared-shape re-select / RETURNING
+    lands, D12 — the example pins this gap). Unlocks one binary (no sidecar), steadier latency,
+    `MockDb` end-to-end tests, and the path toward **app-owned transactions** (compose several
+    callables in one unit-of-work over a shared connection — inexpressible on stateless HTTP RPC;
+    the real long-term prize). Concurrency: one connection ⇒ one thread at a time; a pooled embed
+    routes through the `Backend` seam (build a short-lived `Engine` per checked-out connection).
   - **Tier 2 — embed ergonomics.** A small `Engine` convenience wrapper over
     `Compiled` + the caller's own `Db`/pool (the `Db` seam already lets an app plug an
     existing pool — a feature, not a gap); document the in-process `$ctx` path (supplied
