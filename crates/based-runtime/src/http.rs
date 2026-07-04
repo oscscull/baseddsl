@@ -29,6 +29,7 @@ use std::thread;
 use tiny_http::{Header, Request, Response, Server};
 
 use crate::id::UuidGen;
+use crate::idempotency::MemStore;
 use crate::load::Compiled;
 use crate::run::Backend;
 use crate::serve::{dispatch, preflight, WireResponse};
@@ -139,6 +140,11 @@ struct Shared {
     compiled: Compiled,
     backend: Box<dyn Backend>,
     ctx_source: Box<dyn ContextSource>,
+    /// The mutation idempotency store (D25), shared across all workers so a retry that
+    /// lands on any worker dedupes. `MemStore` dedupes within this one process; a
+    /// multi-instance deployment wants a shared/durable store behind the same seam
+    /// (deferred to the live-DB slice — the `IdempotencyStore` trait is identical).
+    idempotency: MemStore,
 }
 
 /// Failure to *start* serving (bind the socket). Once serving, per-request failures
@@ -170,6 +176,7 @@ pub fn serve(
         compiled,
         backend: Box::new(backend),
         ctx_source: Box::new(ctx_source),
+        idempotency: MemStore::new(),
     });
 
     let workers = config.workers.max(1);
@@ -237,10 +244,15 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
             )
         })
         .collect();
-    let context = match shared.ctx_source.derive(&HeaderView(&headers)) {
+    let header_view = HeaderView(&headers);
+    let context = match shared.ctx_source.derive(&header_view) {
         Ok(c) => c,
         Err(resp) => return resp,
     };
+
+    // The mutation idempotency key (D25) rides the standard `Idempotency-Key` header —
+    // out of band, never the body. Absent/blank → no dedupe; queries ignore it.
+    let idem_key = header_view.get("Idempotency-Key").map(str::to_string);
 
     // Decode the JSON argument object from the (size-capped) body.
     let args = match read_json_body(request) {
@@ -261,10 +273,12 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
         &shared.compiled,
         db.as_mut(),
         &mut id_gen,
+        &shared.idempotency,
         &method,
         &path,
         args,
         context.ctx,
+        idem_key,
     )
 }
 

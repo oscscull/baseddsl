@@ -15,7 +15,7 @@ use serde_json::json;
 
 use based_runtime::plan::PlanError;
 use based_runtime::value::SqlValue;
-use based_runtime::{plan_mutation, run_mutation, Compiled, MockDb, Request, SeqIdGen};
+use based_runtime::{plan_mutation, run_mutation, Compiled, MockDb, NoStore, Request, SeqIdGen};
 
 /// Compile a whole-schema snippet into a served `Compiled`, asserting it is clean.
 fn compile(src: &str) -> Compiled {
@@ -104,6 +104,7 @@ fn run_create_reselects_the_declared_shape_inside_the_tx() {
         &c,
         &mut db,
         &mut ids,
+        &NoStore,
         &req(
             "place_order",
             json!({ "org": "o-1", "buyer": "u-1", "total": 42 }),
@@ -221,6 +222,7 @@ fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
         &c,
         &mut db,
         &mut ids,
+        &NoStore,
         &req("remove", json!({ "id": "ord-1" })),
     )
     .unwrap();
@@ -296,6 +298,7 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
         &c,
         &mut db,
         &mut SeqIdGen::default(),
+        &NoStore,
         &req("signup", json!({ "email": "a@b.c", "city": "NYC" })),
     )
     .unwrap();

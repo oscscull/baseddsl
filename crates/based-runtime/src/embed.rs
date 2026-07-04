@@ -54,6 +54,7 @@
 use std::cell::RefCell;
 
 use crate::id::IdGen;
+use crate::idempotency::MemStore;
 use crate::load::Compiled;
 use crate::run::Db;
 use crate::serve::{dispatch, WireResponse};
@@ -69,6 +70,10 @@ pub struct Engine {
     // connection ⇒ one thread at a time — a pooled embed uses `Backend` instead.
     db: RefCell<Box<dyn Db>>,
     id_gen: RefCell<Box<dyn IdGen>>,
+    // An in-process idempotency store (D25) for keyed mutation retries via
+    // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
+    // `Engine::call` (no key) never consults it.
+    store: MemStore,
 }
 
 impl Engine {
@@ -81,6 +86,7 @@ impl Engine {
             compiled,
             db: RefCell::new(Box::new(db)),
             id_gen: RefCell::new(Box::new(id_gen)),
+            store: MemStore::new(),
         }
     }
 
@@ -96,14 +102,31 @@ impl Engine {
         args: serde_json::Value,
         ctx: serde_json::Value,
     ) -> WireResponse {
+        self.call_with_key(route, args, ctx, None)
+    }
+
+    /// Like [`Engine::call`], with a mutation idempotency key (D25). A retry of a
+    /// `/m/<name>` mutation with the same non-empty `idem_key` replays the first
+    /// attempt's response instead of writing again (queries ignore the key). This is the
+    /// in-process twin of the HTTP edge's `Idempotency-Key` header — supplied straight in,
+    /// no header dance.
+    pub fn call_with_key(
+        &self,
+        route: &str,
+        args: serde_json::Value,
+        ctx: serde_json::Value,
+        idem_key: Option<String>,
+    ) -> WireResponse {
         dispatch(
             &self.compiled,
             self.db.borrow_mut().as_mut(),
             self.id_gen.borrow_mut().as_mut(),
+            &self.store,
             "POST",
             route,
             args,
             ctx,
+            idem_key,
         )
     }
 

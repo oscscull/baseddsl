@@ -35,6 +35,12 @@ struct MockBackend {
     rows: Vec<Vec<Row>>,
 }
 
+impl MockBackend {
+    fn new(rows: Vec<Vec<Row>>) -> MockBackend {
+        MockBackend { rows }
+    }
+}
+
 impl Backend for MockBackend {
     fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
         Ok(Box::new(MockDb::new(self.rows.clone())))
@@ -125,9 +131,7 @@ fn post(addr: &str, path: &str, body: &str, headers: &[(&str, &str)]) -> Resp {
 
 #[test]
 fn get_query_over_the_socket() {
-    let backend = MockBackend {
-        rows: vec![vec![row(json!({ "status": "paid", "total": 42 }))]],
-    };
+    let backend = MockBackend::new(vec![vec![row(json!({ "status": "paid", "total": 42 }))]]);
     let addr = start(backend);
     let resp = post(&addr, "/q/order_by_id", r#"{"id":"o-1"}"#, &[]);
     assert_eq!(resp.status, 200);
@@ -136,12 +140,10 @@ fn get_query_over_the_socket() {
 
 #[test]
 fn list_query_returns_array() {
-    let backend = MockBackend {
-        rows: vec![vec![
-            row(json!({ "status": "paid", "total": 1 })),
-            row(json!({ "status": "open", "total": 2 })),
-        ]],
-    };
+    let backend = MockBackend::new(vec![vec![
+        row(json!({ "status": "paid", "total": 1 })),
+        row(json!({ "status": "open", "total": 2 })),
+    ]]);
     let addr = start(backend);
     let resp = post(&addr, "/q/orders_in_org", r#"{"org":"org-1"}"#, &[]);
     assert_eq!(resp.status, 200);
@@ -152,9 +154,7 @@ fn list_query_returns_array() {
 fn ctx_arrives_from_the_header_not_the_body() {
     // my_org_orders requires $ctx.org; supplied via the trusted header, the request
     // plans and runs. (Absent, it would 400 — see the next test.)
-    let backend = MockBackend {
-        rows: vec![vec![row(json!({ "status": "paid", "total": 9 }))]],
-    };
+    let backend = MockBackend::new(vec![vec![row(json!({ "status": "paid", "total": 9 }))]]);
     let addr = start(backend);
     let resp = post(
         &addr,
@@ -168,7 +168,7 @@ fn ctx_arrives_from_the_header_not_the_body() {
 
 #[test]
 fn missing_required_ctx_is_400() {
-    let backend = MockBackend { rows: vec![] };
+    let backend = MockBackend::new(vec![]);
     let addr = start(backend);
     let resp = post(&addr, "/q/my_org_orders", "{}", &[]);
     assert_eq!(resp.status, 400);
@@ -178,9 +178,7 @@ fn missing_required_ctx_is_400() {
 #[test]
 fn mutation_over_the_socket_returns_the_declared_shape() {
     // The backend answers the post-write re-select with the shaped row (D12).
-    let backend = MockBackend {
-        rows: vec![vec![row(json!({ "status": "open", "total": 5 }))]],
-    };
+    let backend = MockBackend::new(vec![vec![row(json!({ "status": "open", "total": 5 }))]]);
     let addr = start(backend);
     let resp = post(
         &addr,
@@ -194,8 +192,44 @@ fn mutation_over_the_socket_returns_the_declared_shape() {
 }
 
 #[test]
+fn idempotency_key_header_dedupes_a_write_over_the_socket() {
+    // A retry with the same `Idempotency-Key` header replays the first attempt's stored
+    // response instead of writing again (D25). The store is shared across the worker pool,
+    // so a retry that lands on any worker dedupes. Here both mocks would return the same
+    // shaped row, so the replay is proven rigorously by the pure `serve.rs` test
+    // (`db.calls.is_empty()` on the retry); over the socket we assert the header is honored
+    // end to end and yields the same 200 response — the `Backend` never sees a malformed
+    // second write.
+    let backend = MockBackend::new(vec![vec![row(json!({ "status": "open", "total": 5 }))]]);
+    let addr = start(backend);
+
+    let body = r#"{"org":"org-1","status":"open","total":5}"#;
+    let key = &[("Idempotency-Key", "req-100")];
+
+    let first = post(&addr, "/m/place_order", body, key);
+    assert_eq!(first.status, 200);
+    assert_eq!(first.body, json!({ "status": "open", "total": 5 }));
+
+    // The retry replays the recorded response (same body, still 200) — not a fresh write.
+    let retry = post(&addr, "/m/place_order", body, key);
+    assert_eq!(retry.status, 200);
+    assert_eq!(retry.body, json!({ "status": "open", "total": 5 }));
+
+    // A *different* key is a distinct request and runs the write path again (200 with the
+    // freshly re-selected row) — the key scopes dedup, it does not freeze the endpoint.
+    let other = post(
+        &addr,
+        "/m/place_order",
+        body,
+        &[("Idempotency-Key", "req-200")],
+    );
+    assert_eq!(other.status, 200);
+    assert_eq!(other.body, json!({ "status": "open", "total": 5 }));
+}
+
+#[test]
 fn bad_route_is_404_without_touching_the_db() {
-    let backend = MockBackend { rows: vec![] };
+    let backend = MockBackend::new(vec![]);
     let addr = start(backend);
     let resp = post(&addr, "/nope/whatever", "{}", &[]);
     assert_eq!(resp.status, 404);
@@ -203,7 +237,7 @@ fn bad_route_is_404_without_touching_the_db() {
 
 #[test]
 fn malformed_json_body_is_400() {
-    let backend = MockBackend { rows: vec![] };
+    let backend = MockBackend::new(vec![]);
     let addr = start(backend);
     let resp = post(&addr, "/q/order_by_id", "{not json", &[]);
     assert_eq!(resp.status, 400);

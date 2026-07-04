@@ -9,6 +9,7 @@
 //! it rides as `null` here).
 
 use crate::id::IdGen;
+use crate::idempotency::{IdempotencyStore, KeyState};
 use crate::load::Compiled;
 use crate::plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
@@ -37,12 +38,19 @@ impl DbError {
 }
 
 /// Why running a request failed: a boundary [`PlanError`] (bad/missing input, unknown
-/// callable — the caller can fix it) or a [`DbError`] (the database failed — an
-/// operational, retryable failure). The wire (`serve`) maps each to its HTTP status.
+/// callable — the caller can fix it), a [`DbError`] (the database failed — an
+/// operational, retryable failure), or an idempotency [`Conflict`](RunError::Conflict)
+/// (a concurrent attempt with the same key is still in flight — D25). The wire (`serve`)
+/// maps each to its HTTP status.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunError {
     Plan(PlanError),
     Db(DbError),
+    /// A mutation retry arrived while a prior attempt with the same idempotency key is
+    /// still running (D25). Running a second write would risk the double-insert the key
+    /// exists to prevent, so the retry is rejected as a retryable conflict (`409`): the
+    /// client retries once the first attempt settles.
+    Conflict(String),
 }
 
 impl From<PlanError> for RunError {
@@ -110,14 +118,49 @@ pub fn run_query(
 
 /// Plan and run a mutation request: id-gen + bind, then execute every write under one
 /// engine-owned transaction, returning the write response.
+///
+/// When the request carries an idempotency key (D25) the write body runs **at most once**
+/// per `(callable, key)`: a first attempt claims the key, runs, and records its response;
+/// a retry replays that recorded response with no writes (exactly-once), and a concurrent
+/// retry while the first is still in flight is a [`RunError::Conflict`]. Planning (arg /
+/// `$ctx` validation) happens *before* the store is consulted, so a malformed request is a
+/// clean `4xx` that never claims a key. Without a key this is the plain run-every-time path.
 pub fn run_mutation(
     compiled: &Compiled,
     db: &mut dyn Db,
     id_gen: &mut dyn IdGen,
+    store: &dyn IdempotencyStore,
     req: &Request,
 ) -> Result<serde_json::Value, RunError> {
+    // Plan first: a bad arg / missing `$ctx` is a boundary error that must not consume an
+    // idempotency slot (a client fixes the request and retries with the *same* key).
     let plan = plan_mutation(compiled, req, id_gen)?;
-    Ok(apply(db, &plan)?)
+
+    // No key → the plain path (run every time). This is also what `NoStore` yields, but
+    // short-circuiting here means a keyless request never touches the store at all.
+    let key = match &req.idempotency_key {
+        None => return Ok(apply(db, &plan)?),
+        Some(k) => k,
+    };
+
+    match store.begin(&req.callable, key) {
+        // A prior attempt already committed: replay its response, run no writes.
+        KeyState::Done(response) => Ok(response),
+        // A concurrent attempt is still running: don't run a second write.
+        KeyState::InFlight => Err(RunError::Conflict(key.clone())),
+        // Fresh: we hold the claim. Run the write, then record its response — or release
+        // the claim on failure so a later retry (same key) may try again.
+        KeyState::Fresh => match apply(db, &plan) {
+            Ok(response) => {
+                store.record(&req.callable, key, response.clone());
+                Ok(response)
+            }
+            Err(e) => {
+                store.abandon(&req.callable, key);
+                Err(e.into())
+            }
+        },
+    }
 }
 
 /// Execute a mutation plan's writes in order under one transaction, then assemble the

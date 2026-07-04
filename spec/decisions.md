@@ -609,3 +609,36 @@ routes or field shapes (principle 4) — only the leaf mapping differs (Rust typ
   emitters). *Deferred, same as the client + SQL sides:* nested shape sub-objects (`field { … }`)
   are skipped (need JSON aggregation); pure update/delete declared-shape responses ride the `{ id }`
   fallback until D12's re-select extends to them; a YAML rendering (JSON is what generators accept).
+
+## D25 — write-retry idempotency (`based-runtime::idempotency`)
+Closes the gap D20 flagged: app-side id-gen (D1) mints a *fresh* `id` per `create`, so a client that
+retries a mutation after a `503`/timeout — not knowing if the first attempt committed — would
+**double-insert**. An **idempotency key** makes a keyed mutation run its write body **at most once**
+per key; a retry replays the first attempt's stored response.
+- **Mutations only, opt-in.** A query is naturally idempotent (no writes) and never touches the store.
+  No key → the prior run-every-time behaviour. The key is *request metadata* carried out of band on
+  the `Idempotency-Key` header, **never the JSON body and never a `$ctx.<field>`** — it is engine
+  infrastructure, not application data, so the schema never reads it (same trusted-edge discipline as
+  `$ctx`, auth.md/D7). A blank/whitespace header is treated as absent (`Request::with_idempotency_key`).
+- **Keyed by `(callable, key)`.** The key is scoped to the callable it accompanies, so one request id
+  reused across a batch of different mutations does not collide.
+- **Store is a seam** (`IdempotencyStore`, the `Db`/`IdGen` twin). Lifecycle: `begin(callable, key)`
+  atomically claims the key or reports it — `Fresh` (claimed → run, then `record` the response, or
+  `abandon` on failure so a later retry may re-run), `Done(resp)` (a prior attempt committed → replay
+  `resp`, run no writes → exactly-once), `InFlight` (a concurrent attempt holds the key → don't run a
+  second write). `MemStore` (a `Mutex`-guarded map) is the in-process impl — correct for a single
+  instance and the whole request→response path is testable against it with no infra; `NoStore` is the
+  no-op "idempotency off" store so there is **one** dispatch path (P4), not a with/without fork.
+- **Wired through the one dispatch core.** `run_mutation` takes `&dyn IdempotencyStore`; **planning
+  (arg/`$ctx` validation) runs *before* the store**, so a malformed request is a clean `4xx` that never
+  consumes a key (the client fixes it and retries with the *same* key). `dispatch` grows a `store` +
+  `idem_key` parameter and maps `RunError::Conflict` (an in-flight duplicate) to a **retryable `409`**
+  `idempotency_conflict`. The HTTP edge reads the `Idempotency-Key` header and shares one `MemStore`
+  across the worker pool; `embed::Engine::call_with_key` is the in-process twin (key supplied straight
+  in, no header). A `Db` fault on a keyed write rolls back *and* abandons the key, so a genuine failure
+  stays retryable.
+- **Deferred (needs live infra):** a **shared/durable** store so a retry that lands on a *different* app
+  instance also dedupes (the `MemStore` dedupes within one process; the trait is identical — back it with
+  the DB or a cache in the driver/live-DB slice); **TTL/eviction** of stored keys (they accumulate today);
+  binding the key to a request-signature hash so a *replayed key with different args* is rejected rather
+  than silently replaying the first (today the key alone is authoritative, the Stripe default).

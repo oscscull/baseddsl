@@ -25,11 +25,18 @@ pub struct Request {
     pub callable: String,
     pub args: serde_json::Map<String, serde_json::Value>,
     pub ctx: serde_json::Map<String, serde_json::Value>,
+    /// An optional idempotency key for a **mutation retry** (D25): the caller attaches a
+    /// stable key so the engine runs the write body at most once per key. Request
+    /// metadata, supplied out of band (the `Idempotency-Key` header), never the JSON body
+    /// — the same trusted-edge discipline as `$ctx` (auth.md/D7), and never a schema
+    /// field. `None` → run every time (the default). Ignored by queries.
+    pub idempotency_key: Option<String>,
 }
 
 impl Request {
     /// Convenience: a request whose args/ctx come from JSON objects (a non-object
-    /// value is treated as empty — the wire layer will have rejected it already).
+    /// value is treated as empty — the wire layer will have rejected it already), with
+    /// no idempotency key. Use [`Request::with_idempotency_key`] to attach one.
     pub fn new(
         callable: impl Into<String>,
         args: serde_json::Value,
@@ -39,7 +46,16 @@ impl Request {
             callable: callable.into(),
             args: args.as_object().cloned().unwrap_or_default(),
             ctx: ctx.as_object().cloned().unwrap_or_default(),
+            idempotency_key: None,
         }
+    }
+
+    /// Attach a mutation idempotency key (D25). A blank/whitespace-only key is treated as
+    /// absent (a header set to `""` is not a real key), so an empty header never claims a
+    /// store slot.
+    pub fn with_idempotency_key(mut self, key: Option<String>) -> Self {
+        self.idempotency_key = key.filter(|k| !k.trim().is_empty());
+        self
     }
 }
 

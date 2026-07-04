@@ -28,6 +28,13 @@
 //! is the one lowering both `based gen sql` and the runtime read, so the executed
 //! writes can never drift from the emitted SQL either.
 //!
+//! A mutation may carry an **idempotency key** ([`idempotency`], D25): app-side id-gen
+//! (D1) means a naive client retry after a `503`/timeout would double-insert, so a keyed
+//! mutation runs its write body **at most once** per key — a retry replays the first
+//! attempt's stored response via the [`idempotency::IdempotencyStore`] seam. The key is
+//! out-of-band request metadata (the `Idempotency-Key` header), never the body or a
+//! schema field.
+//!
 //! ## Wire + driver
 //! [`serve::dispatch`] is the wire surface: it routes `POST /q|m/<name>` → the callable,
 //! runs it, and maps every outcome to a [`serve::WireResponse`] (HTTP status + JSON) —
@@ -63,6 +70,7 @@
 
 pub mod embed;
 pub mod id;
+pub mod idempotency;
 pub mod load;
 pub mod plan;
 pub mod run;
@@ -78,6 +86,7 @@ pub mod http;
 
 pub use embed::Engine;
 pub use id::{IdGen, SeqIdGen};
+pub use idempotency::{IdempotencyStore, KeyState, MemStore, NoStore};
 pub use load::Compiled;
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,

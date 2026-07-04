@@ -20,6 +20,7 @@
 //!   boundary failure ([`PlanError`]) → a `4xx`/`5xx` with `{ "error": { code, message } }`.
 
 use crate::id::IdGen;
+use crate::idempotency::IdempotencyStore;
 use crate::load::Compiled;
 use crate::plan::PlanError;
 use crate::run::{run_mutation, run_query, Db, RunError};
@@ -52,16 +53,24 @@ impl WireResponse {
 
 /// Route + run one request. `method`/`path` come straight off the request line; `args`
 /// is the decoded JSON body; `ctx` is the server-derived request context (never the
-/// body). Every failure is a `WireResponse`, so the listener never has to branch on
-/// error kinds — it writes `status` + `body` verbatim.
+/// body); `idem_key` is the out-of-band mutation idempotency key (D25 — the
+/// `Idempotency-Key` header, `None` when absent, ignored by queries) and `store` is the
+/// dedupe store it consults. Every failure is a `WireResponse`, so the listener never has
+/// to branch on error kinds — it writes `status` + `body` verbatim.
+///
+/// A caller that wants no idempotency passes a [`crate::idempotency::NoStore`] and a
+/// `None` key — one dispatch path, not a with/without-store fork (principle 4).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     compiled: &Compiled,
     db: &mut dyn Db,
     id_gen: &mut dyn IdGen,
+    store: &dyn IdempotencyStore,
     method: &str,
     path: &str,
     args: serde_json::Value,
     ctx: serde_json::Value,
+    idem_key: Option<String>,
 ) -> WireResponse {
     // The method + route checks are shared with `preflight` (the listener runs them
     // before borrowing a connection), so there is one source of truth for these errors.
@@ -70,10 +79,13 @@ pub fn dispatch(
     }
     let (kind, name) = parse_route(path).expect("preflight guaranteed a routable path");
 
-    let req = Request::new(name, args, ctx);
     let result = match kind {
-        Kind::Query => run_query(compiled, db, &req),
-        Kind::Mutation => run_mutation(compiled, db, id_gen, &req),
+        // A query is naturally idempotent (no writes) — the key/store never apply.
+        Kind::Query => run_query(compiled, db, &Request::new(name, args, ctx)),
+        Kind::Mutation => {
+            let req = Request::new(name, args, ctx).with_idempotency_key(idem_key);
+            run_mutation(compiled, db, id_gen, store, &req)
+        }
     };
     match result {
         Ok(body) => WireResponse::ok(body),
@@ -83,6 +95,14 @@ pub fn dispatch(
         // overwhelmingly operational, not a query bug → a retryable 503 (the client /
         // LB can retry, another shard's traffic is unaffected).
         Err(RunError::Db(e)) => WireResponse::error(503, "database_error", e.message),
+        // A concurrent mutation retry with the same idempotency key is still in flight
+        // (D25). Rejecting rather than running a second write is what makes the key safe;
+        // 409 is retryable once the first attempt settles.
+        Err(RunError::Conflict(key)) => WireResponse::error(
+            409,
+            "idempotency_conflict",
+            format!("a request with idempotency key `{key}` is already in progress"),
+        ),
     }
 }
 
