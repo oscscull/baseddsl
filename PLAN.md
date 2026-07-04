@@ -28,7 +28,8 @@ resumes it:
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
 Batch progress: D12 (`b7de7b3`) + D24 (`fe382a4`) + D25 (idempotency) done — 3/3, **batch
-complete**. Pause for the coordinator.
+complete**. Pause for the coordinator. *(Next batch started: D26 — container story:
+health/readiness probes + graceful shutdown, 1/3.)*
 
 ## Pipeline (data flow)
 
@@ -46,6 +47,7 @@ complete**. Pause for the coordinator.
       ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read+write ✅)
       ──runtime::serve──────▶ WireResponse (dispatch core; PlanError→4xx, DbError→503)  (M6 ✅)
       ──runtime::http───────▶ `based serve`: tiny_http listener over dispatch  (M6 ✅ D21)
+                              └─ /healthz + /readyz probes + graceful drain (M6 ✅ D26)
       ──runtime::embed──────▶ in-process Engine (socket-free dispatch; typed client seam)  (M6 ✅ Tier 1)
 ```
 
@@ -71,7 +73,7 @@ All bail unless every file parses *and* checks clean (codegen assumes a clean sc
 | **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client) + OpenAPI (D24)** | `sql::ddl` → `CREATE TABLE`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes); `openapi` → one OpenAPI 3.1 doc over the same wire (polyglot clients via `openapi-generator`, D23/D24). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` and re-selects a create's declared shape as the response (D12). `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Write-retry idempotency `idempotency` (D25)**: a keyed mutation runs its write body at most once per `(callable, key)` — a retry replays the recorded response instead of double-inserting; `IdempotencyStore` seam (`MemStore` in-process / `NoStore` no-op), key on the `Idempotency-Key` header (never body / `$ctx`), in-flight duplicate → retryable `409`; threaded through `dispatch` / HTTP edge / `Engine::call_with_key`. **Live-DB integration + more dialects + polyglot clients (via `based gen openapi`, not per-language emitters — D23; gRPC rejected) not started (architecture ready, D21/D22/D23); durable multi-instance idempotency store deferred to the live-DB slice (D25).** |
+| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` and re-selects a create's declared shape as the response (D12). `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Write-retry idempotency `idempotency` (D25)**: a keyed mutation runs its write body at most once per `(callable, key)` — a retry replays the recorded response instead of double-inserting; `IdempotencyStore` seam (`MemStore` in-process / `NoStore` no-op), key on the `Idempotency-Key` header (never body / `$ctx`), in-flight duplicate → retryable `409`; threaded through `dispatch` / HTTP edge / `Engine::call_with_key`. **Container story `serve` (D26):** operational probes `GET /healthz` (liveness, DB-free) + `GET /readyz` (readiness via the new defaulted `Backend::ping`; `ShardRouter` probes every shard with `SELECT 1`) answered ahead of routing, plus **graceful shutdown** — `serve_with_handle` returns a `Handle` whose `shutdown()` flips a *draining* flag (readiness fails first → LB drains) and lets in-flight requests finish before workers exit; the SIGTERM/SIGINT→drain wiring lives in the CLI (`ctrlc`), keeping the library signal-free. **Live-DB integration + more dialects (a SQLite backend would unlock real in-memory integration tests) + a container image/Dockerfile not started (architecture ready, D21/D22/D26); durable multi-instance idempotency store deferred to the live-DB slice (D25).** |
 
 ## based-sema — what it does now
 
@@ -548,13 +550,36 @@ a `MockDb`, no live DB.
     header-`$ctx`, body decode, uuid write response, 400/404 edges) + 5 `http` unit tests (header
     view + `TrustedHeaderContext`). The pure `serve.rs` dispatch tests (8) still cover the core.
 
+*Container story (`based serve` as a deployable container) — delivered (D26):*
+  - **Health/readiness probes** (`http`, feature `serve`): `GET /healthz` = liveness (always `200`
+    while serving, **touches no DB** — a DB outage drains, not restarts) and `GET /readyz` =
+    readiness (`200` only when not draining *and* `Backend::ping` succeeds; `503` `draining` /
+    `not_ready` otherwise). Both are unauthenticated GETs answered *before* routing, so the RPC wire's
+    POST-only rule is unchanged. `Backend::ping` is the readiness seam (defaulted; `ShardRouter` probes
+    **every** shard with `SELECT 1`).
+  - **Graceful shutdown** via `Handle::shutdown` (from the new `serve_with_handle`; `serve` is now a
+    thin no-handle wrapper): flips a shared *draining* flag so readiness fails **first** (the LB drains
+    this instance), then workers finish their **in-flight** request and exit (`recv_timeout` poll — no
+    request is ever cut off), and the serve call returns so the process exits cleanly. The
+    SIGTERM/SIGINT→drain wiring lives in the **CLI** (`based serve`, via the `ctrlc` crate — the runtime
+    library stays signal-free); `based serve` now also logs the probe routes on startup.
+  - Tests: 4 new in `based-runtime/tests/http.rs` (12 total) — `/healthz` OK & DB-free, `/readyz` OK,
+    `/readyz` 503 when the backend is down (liveness still OK), and end-to-end graceful drain (readiness
+    flips to 503, the serve thread returns after draining).
+
 *Not started (next slices):*
   - **Additional dialects (MySQL / Postgres / SQLite)** — architecture is ready (D21); each is a
     `Dialect` codegen variant + a `Db`/`Backend` driver impl. Postgres additionally needs the
-    named→positional scanner made dialect-aware (`?` → `$n`).
+    named→positional scanner made dialect-aware (`?` → `$n`). *(A SQLite backend is now especially
+    high-leverage: it needs no live infra, so it would unlock in-memory end-to-end integration tests
+    against a real engine — the `Backend::ping` + full read/write path exercised for real, not mocked.)*
   - **Live-DB integration** — exercise `MariaDb` against a real MariaDB (the connect/exec
     paths only compile-verified today): typed JSON reconstruction for `JSON` columns,
-    statement timeouts, deadlock-retry, pool-exhaustion → 503 under load.
+    statement timeouts, deadlock-retry, pool-exhaustion → 503 under load. `Backend::ping` (D26) is
+    compile-verified only until this lands.
+  - **Container packaging** — a Dockerfile / image is the last mile of the container story (the
+    health/readiness + graceful-shutdown *behaviour* is done, D26; packaging it is orthogonal). A
+    shutdown grace deadline (force-exit after N seconds) is deferred with it.
   - ~~**Idempotency for write retries**~~ ✅ **done (D25).** A keyed mutation runs its write body
     **at most once** per `(callable, key)`: a retry replays the first attempt's stored response
     instead of double-inserting (the app-side `id`-gen hazard, D1/D20). The key is out-of-band
@@ -611,9 +636,12 @@ should chase the former.
     DB-bound, small args, unary CRUD, no streaming), it re-imports the async/heavy stack D20
     avoided, and it penalizes the primary web/TS caller (needs grpc-web + a proxy); plain
     JSON/HTTP is the boring, browser-native, LB/gateway-frontable surface `serve::dispatch`
-    already serves. *Still wanted for the standalone container story:* a container image +
-    health/readiness + graceful shutdown, and the **live-DB hardening** above (not
-    production-real until that lands).
+    already serves. ~~*Still wanted for the standalone container story:* health/readiness +
+    graceful shutdown~~ ✅ **done (D26):** `GET /healthz` (liveness, DB-free) + `GET /readyz`
+    (readiness via `Backend::ping`) + graceful drain on SIGTERM/SIGINT (`Handle::shutdown` /
+    `serve_with_handle`, wired in the CLI via `ctrlc`; in-flight requests always finish).
+    *Still wanted:* a **container image / Dockerfile** (packaging, orthogonal to the behaviour)
+    and the **live-DB hardening** above (not production-real until that lands).
 
 ## Conventions
 

@@ -35,7 +35,9 @@ pub struct WireResponse {
 }
 
 impl WireResponse {
-    fn ok(body: serde_json::Value) -> WireResponse {
+    /// A `200` success envelope. `pub(crate)` so the listener edge (`http`) can build the
+    /// same-shaped body for the operational probes it answers before `dispatch`.
+    pub(crate) fn ok(body: serde_json::Value) -> WireResponse {
         WireResponse { status: 200, body }
     }
 

@@ -296,7 +296,7 @@ fn cmd_serve(
     shard_key_field: Option<String>,
 ) -> anyhow::Result<()> {
     use based_runtime::driver::{PoolConfig, ShardRouter};
-    use based_runtime::http::{serve, ServeConfig, TrustedHeaderContext};
+    use based_runtime::http::{serve_with_handle, ServeConfig, TrustedHeaderContext};
     use based_runtime::Compiled;
 
     // Shard URLs: the repeated flag wins; else BASED_DATABASE_URL (comma-separated).
@@ -336,7 +336,23 @@ fn cmd_serve(
         router.shard_count(),
         config.workers,
     );
-    serve(compiled, router, ctx_source, config).map_err(|e| anyhow::anyhow!("{e}"))
+    eprintln!("liveness: GET /healthz  readiness: GET /readyz");
+
+    // Graceful shutdown: on SIGTERM/SIGINT begin draining (readiness fails first, so a
+    // load balancer pulls this instance out of rotation) and let in-flight requests
+    // finish, then `serve_with_handle` returns. The handle is captured once the listener
+    // is up (`on_start`), so the signal handler can only fire after we're serving.
+    serve_with_handle(compiled, router, ctx_source, config, |handle| {
+        if let Err(e) = ctrlc::set_handler(move || {
+            eprintln!("based serve: shutdown signal received, draining…");
+            handle.shutdown();
+        }) {
+            // A missing signal handler is non-fatal — the server still runs, it just
+            // can't drain gracefully (a hard kill still stops it).
+            eprintln!("based serve: could not install shutdown handler: {e}");
+        }
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn count(diags: &[based_diagnostics::Diagnostic], errors: &mut usize, warnings: &mut usize) {

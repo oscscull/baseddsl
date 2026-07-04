@@ -37,6 +37,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 walkdir = "2"
+# Cross-platform SIGINT/SIGTERM handling for `based serve`'s graceful shutdown. A small,
+# hardened crate (principle 7 — don't hand-roll signal handling); the signal concern
+# lives in the CLI/process layer, so the runtime library stays signal-free.
+ctrlc = { version = "3", features = ["termination"] }
 
 [profile.release]
 lto = "thin"

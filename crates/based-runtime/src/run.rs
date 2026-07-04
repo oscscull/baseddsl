@@ -104,6 +104,20 @@ pub trait Backend: Send + Sync {
     /// Check out a connection for the shard the key routes to. A failure (pool
     /// exhausted, shard/host down) is a [`DbError`] → the wire's retryable `503`.
     fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError>;
+
+    /// Readiness probe: can the backend actually serve traffic *right now*? A
+    /// container orchestrator / load balancer calls the listener's `GET /readyz` (which
+    /// calls this) before routing traffic to this instance, and pulls it out of
+    /// rotation when it fails — so a failure here must mean "don't send me requests"
+    /// (every shard's pool is unreachable), not a transient blip.
+    ///
+    /// The default checks out and returns a connection on the empty shard key (the
+    /// common single-shard case): if the pool can hand one out, the backend is ready. A
+    /// multi-shard backend overrides this to probe every shard. A backend with no live
+    /// database (the mock) is trivially ready.
+    fn ping(&self) -> Result<(), DbError> {
+        self.checkout("").map(|_| ())
+    }
 }
 
 /// Plan and run a query request, returning the shaped JSON response.

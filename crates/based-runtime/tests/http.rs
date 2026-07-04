@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use based_ast::FileId;
 use based_parser::parse_file;
-use based_runtime::http::{serve, ServeConfig, TrustedHeaderContext};
+use based_runtime::http::{serve_with_handle, Handle, ServeConfig, TrustedHeaderContext};
 use based_runtime::{Backend, Compiled, Db, DbError, MockDb, Row};
 use serde_json::json;
 
@@ -30,20 +30,38 @@ const SCHEMA: &str = r#"
 "#;
 
 /// A `Backend` that hands every request a fresh `MockDb` preloaded with canned rows —
-/// the socket test's stand-in for a live shard pool.
+/// the socket test's stand-in for a live shard pool. `ready` drives the readiness probe
+/// (`Backend::ping`): `false` simulates an unreachable database.
 struct MockBackend {
     rows: Vec<Vec<Row>>,
+    ready: bool,
 }
 
 impl MockBackend {
     fn new(rows: Vec<Vec<Row>>) -> MockBackend {
-        MockBackend { rows }
+        MockBackend { rows, ready: true }
+    }
+
+    /// A backend whose readiness probe fails (the DB-down case).
+    fn not_ready() -> MockBackend {
+        MockBackend {
+            rows: vec![],
+            ready: false,
+        }
     }
 }
 
 impl Backend for MockBackend {
     fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
         Ok(Box::new(MockDb::new(self.rows.clone())))
+    }
+
+    fn ping(&self) -> Result<(), DbError> {
+        if self.ready {
+            Ok(())
+        } else {
+            Err(DbError::new("shard unreachable"))
+        }
     }
 }
 
@@ -66,6 +84,12 @@ fn compile() -> Compiled {
 /// Start a listener on a free loopback port and return its `host:port`. The server
 /// thread runs forever (killed on process exit) — fine for a test.
 fn start(backend: MockBackend) -> String {
+    start_with_handle(backend).0
+}
+
+/// Like [`start`] but also returns the [`Handle`] (for the graceful-shutdown test) and
+/// the server thread's `JoinHandle` (so the drain test can prove the call *returns*).
+fn start_with_handle(backend: MockBackend) -> (String, Handle, thread::JoinHandle<()>) {
     // Grab a free port, then hand the address to the server (a small, standard race —
     // acceptable for a loopback test).
     let addr = TcpListener::bind("127.0.0.1:0")
@@ -74,13 +98,22 @@ fn start(backend: MockBackend) -> String {
         .unwrap()
         .to_string();
     let listen = addr.clone();
-    thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel::<Handle>();
+    let server = thread::spawn(move || {
         let config = ServeConfig { listen, workers: 2 };
-        serve(compile(), backend, TrustedHeaderContext::default(), config).unwrap();
+        serve_with_handle(
+            compile(),
+            backend,
+            TrustedHeaderContext::default(),
+            config,
+            |handle| tx.send(handle).unwrap(),
+        )
+        .unwrap();
     });
-    // Give the listener a moment to bind before the first connect.
+    // The handle is sent once the listener is up; receiving it means we're serving.
+    let handle = rx.recv().unwrap();
     wait_until_up(&addr);
-    addr
+    (addr, handle, server)
 }
 
 fn wait_until_up(addr: &str) {
@@ -113,6 +146,29 @@ fn post(addr: &str, path: &str, body: &str, headers: &[(&str, &str)]) -> Resp {
     req.push_str(body);
     stream.write_all(req.as_bytes()).unwrap();
 
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (head, payload) = raw.split_once("\r\n\r\n").expect("response has a body");
+    let status: u16 = head
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+    Resp { status, body }
+}
+
+/// Send one raw HTTP/1.1 GET (no body) and read the whole response — for the `/healthz`
+/// and `/readyz` operational probes, which are GETs (calling.md's POST rule is for the
+/// RPC wire; the probes are outside it).
+fn get(addr: &str, path: &str) -> Resp {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).unwrap();
     let mut raw = String::new();
     stream.read_to_string(&mut raw).unwrap();
     let (head, payload) = raw.split_once("\r\n\r\n").expect("response has a body");
@@ -242,4 +298,74 @@ fn malformed_json_body_is_400() {
     let resp = post(&addr, "/q/order_by_id", "{not json", &[]);
     assert_eq!(resp.status, 400);
     assert_eq!(resp.body["error"]["code"], "bad_body");
+}
+
+#[test]
+fn healthz_is_ok_and_touches_no_db() {
+    // Liveness never consults the backend: an empty MockDb (no canned rows) still 200s.
+    let addr = start(MockBackend::new(vec![]));
+    let resp = get(&addr, "/healthz");
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, json!({ "status": "ok" }));
+}
+
+#[test]
+fn readyz_is_ok_when_the_backend_pings() {
+    let addr = start(MockBackend::new(vec![]));
+    let resp = get(&addr, "/readyz");
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, json!({ "status": "ready" }));
+}
+
+#[test]
+fn readyz_is_503_when_the_backend_is_down() {
+    // A backend whose ping fails (DB unreachable) reports not-ready — the load balancer
+    // pulls the instance out of rotation rather than restarting it (that's liveness).
+    let addr = start(MockBackend::not_ready());
+    let resp = get(&addr, "/readyz");
+    assert_eq!(resp.status, 503);
+    assert_eq!(resp.body["error"]["code"], "not_ready");
+    // But liveness still passes — the process is up; the DB is the transient problem.
+    assert_eq!(get(&addr, "/healthz").status, 200);
+}
+
+#[test]
+fn graceful_shutdown_drains_and_returns() {
+    // Handle::shutdown flips readiness to 503 (drain), lets in-flight requests finish,
+    // and makes the serve call return — the container-story shutdown contract.
+    let (addr, handle, server) = start_with_handle(MockBackend::new(vec![vec![row(
+        json!({ "status": "paid", "total": 1 }),
+    )]]));
+
+    // Before shutdown: ready.
+    assert_eq!(get(&addr, "/readyz").status, 200);
+
+    handle.shutdown();
+
+    // Readiness flips to draining. A worker still alive answers it (the drain window),
+    // so poll briefly for the 503 rather than assuming instantaneous propagation.
+    let mut saw_draining = false;
+    for _ in 0..50 {
+        if let Ok(mut s) = TcpStream::connect(&addr) {
+            let _ = s
+                .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let mut raw = String::new();
+            if s.read_to_string(&mut raw).is_ok() {
+                if let Some((head, _)) = raw.split_once("\r\n\r\n") {
+                    if head.contains(" 503 ") {
+                        saw_draining = true;
+                        break;
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(saw_draining, "readiness should report 503 while draining");
+
+    // The serve call returns once every worker has drained — the join proves the process
+    // can exit cleanly (a hung serve would deadlock this test).
+    server
+        .join()
+        .expect("serve thread should return after drain");
 }

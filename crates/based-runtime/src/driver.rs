@@ -273,6 +273,21 @@ impl Backend for ShardRouter {
     fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
         Ok(Box::new(ShardRouter::checkout(self, shard_key)?))
     }
+
+    /// Readiness = *every* physical shard's pool can hand out a connection. A single
+    /// down shard means this instance can't serve that shard's traffic, so the whole
+    /// instance reports not-ready and the load balancer drains it (a partial-outage
+    /// instance is worse than one fewer healthy instance). Each probe runs the driver's
+    /// lightweight `SELECT 1` so a stale pooled connection is caught, not just a checkout.
+    fn ping(&self) -> Result<(), DbError> {
+        for shard in 0..self.shard_count() {
+            let mut db = self.checkout_shard(shard)?;
+            // A trivial round-trip validates the connection end to end (the pool may hand
+            // out a socket the server has since closed); `fetch` surfaces that as a DbError.
+            db.fetch("SELECT 1", &[])?;
+        }
+        Ok(())
+    }
 }
 
 /// Build one shard's bounded connection pool from a `mysql://…` URL.

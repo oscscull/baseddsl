@@ -642,3 +642,46 @@ per key; a retry replays the first attempt's stored response.
   the DB or a cache in the driver/live-DB slice); **TTL/eviction** of stored keys (they accumulate today);
   binding the key to a request-signature hash so a *replayed key with different args* is rejected rather
   than silently replaying the first (today the key alone is authoritative, the Stripe default).
+
+## D26 — the container story: health/readiness probes + graceful shutdown
+Closes what D21/D22/D23 flagged as "still wanted for the standalone container story." `based serve`
+now answers the two operational endpoints an orchestrator (Kubernetes) / load balancer expects, and
+drains in-flight requests on a shutdown signal — the two pieces that make it a real container, not just
+a socket that runs until killed. All of it exercisable over a loopback socket with a mock backend (no
+live DB), matching the existing `tests/http.rs` harness.
+- **Two probes, answered before routing** (`http::build_response`). They are unauthenticated `GET`s,
+  intercepted ahead of `preflight` (which rejects non-POST), so the RPC wire's POST-only rule
+  (calling.md) is unchanged — the probes sit *outside* it.
+  - **`GET /healthz` = liveness** — "the process is up." Always `200` while a worker can answer; it
+    **never touches the backend**, because a DB outage must *drain* an app container (readiness), not
+    *restart* it (liveness). A container that fails liveness is killed and replaced.
+  - **`GET /readyz` = readiness** — "send me traffic now." `200` only when (a) not draining *and* (b)
+    the backend can serve (`Backend::ping`); else a `503` `{ error: { code, message } }`, on which the
+    LB pulls the instance out of rotation. Two distinct 503 codes: `draining` (shutdown) and
+    `not_ready` (a shard's pool unreachable). Distinct from liveness so a transient DB blip drains, not
+    restarts.
+- **`Backend::ping`** is the readiness seam (a defaulted trait method — a read-only/mock backend is
+  trivially ready). The `ShardRouter` override probes **every** physical shard with a lightweight
+  `SELECT 1` (catching a stale pooled connection, not just a checkout): a single down shard makes the
+  whole instance report not-ready, because a partial-outage instance is worse than one fewer healthy
+  instance — the LB drains it and its shard's traffic fails over with the instance out of the way.
+- **Graceful shutdown** via `Handle::shutdown` (returned by the new `serve_with_handle`; the old
+  `serve` is now a thin wrapper that discards the handle and runs until killed). It flips a shared
+  `AtomicBool` *draining* flag and `unblock()`s the server:
+  - Readiness fails **first** (the drain half of a zero-downtime rollout — the LB stops sending new
+    requests while in-flight ones finish).
+  - Workers poll the flag between requests via `recv_timeout(100ms)` (so a worker blocked on `recv`
+    still wakes to observe it), stop accepting new work, and exit **after** their current request
+    completes — **no in-flight request is ever cut off** (the drain guarantee). `serve_with_handle`
+    then returns once every worker has joined, so the process can exit cleanly.
+- **The signal→drain wiring lives in the CLI, not the runtime library** (separation of concerns —
+  the library stays signal-free and just exposes `Handle`). `based serve` installs a SIGTERM/SIGINT
+  handler (via `ctrlc`, a small hardened crate — principle 7, don't hand-roll signal handling) that
+  calls `handle.shutdown()`; a failure to install it is non-fatal (the server still runs, it just
+  can't drain — a hard kill still stops it).
+- *Deferred:* a container image / Dockerfile (a packaging concern, not code); a shutdown **grace
+  deadline** (force-exit after N seconds if a request hangs — today the drain waits indefinitely for
+  in-flight requests, correct for the short-request RPC workload, D20); readiness `ping` result caching
+  (each `/readyz` runs a live `SELECT 1` per shard — fine at probe frequency, but a high-frequency
+  probe against many shards would want a short TTL); the **live-DB hardening** (D20 gap) is still what
+  makes `Backend::ping` production-real, not just compile-verified.

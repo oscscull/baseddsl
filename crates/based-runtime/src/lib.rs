@@ -97,5 +97,6 @@ pub use value::SqlValue;
 
 #[cfg(feature = "serve")]
 pub use http::{
-    serve, Context, ContextSource, HeaderView, ServeConfig, ServeError, TrustedHeaderContext,
+    serve, serve_with_handle, Context, ContextSource, Handle, HeaderView, ServeConfig, ServeError,
+    TrustedHeaderContext,
 };
