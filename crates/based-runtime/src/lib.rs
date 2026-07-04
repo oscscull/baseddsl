@@ -54,9 +54,12 @@
 //! comes from headers via a pluggable [`http::ContextSource`], never the body
 //! (auth.md/D7); ids come from the production [`id::UuidGen`]. The edge depends only on
 //! the driver-neutral [`run::Backend`] seam (a connection source yielding a boxed
-//! [`run::Db`]), so a future Postgres / MySQL / SQLite backend drops in without a change
-//! here — the `Db` trait speaks positional SQL + [`value::SqlValue`], not a MariaDB
-//! protocol (multi-dialect readiness, D21).
+//! [`run::Db`]), so a second backend drops in without a change here — the `Db` trait
+//! speaks positional SQL + [`value::SqlValue`], not a MariaDB protocol (multi-dialect
+//! readiness, D21). [`sqlite::SqliteBackend`] (feature `sqlite`, D27) is that proof: an
+//! infra-free in-memory `Db`/`Backend` that runs the runtime's real read/write SQL,
+//! backing end-to-end integration tests against a genuine engine (a future Postgres /
+//! MySQL backend is the same shape).
 //!
 //! ## The in-process door (Tier 1)
 //! [`embed::Engine`] is the library twin of the HTTP edge: a [`Compiled`] schema over one
@@ -81,6 +84,9 @@ pub mod value;
 #[cfg(feature = "mariadb")]
 pub mod driver;
 
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+
 #[cfg(feature = "serve")]
 pub mod http;
 
@@ -100,3 +106,6 @@ pub use http::{
     serve, serve_with_handle, Context, ContextSource, Handle, HeaderView, ServeConfig, ServeError,
     TrustedHeaderContext,
 };
+
+#[cfg(feature = "sqlite")]
+pub use sqlite::{SqliteBackend, SqliteDb};

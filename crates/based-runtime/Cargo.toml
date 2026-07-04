@@ -14,6 +14,10 @@ mariadb = ["dep:mysql"]
 # in a hardened sync HTTP server + a production uuid id-gen, and requires the concrete
 # driver it routes to. Off by default so the core stays a plain library.
 serve = ["mariadb", "dep:tiny_http", "dep:uuid"]
+# The SQLite driver + backend (`SqliteDb` / `SqliteBackend`). Bundled SQLite (no system
+# dependency), so it needs no live infra — the infra-free `Db`/`Backend` impl that backs
+# real in-memory end-to-end integration tests (D27). Off by default; the core stays lean.
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 based-ast.workspace = true
@@ -34,6 +38,10 @@ mysql = { version = "26", optional = true, default-features = false, features = 
 tiny_http = { version = "0.12", optional = true }
 # Production id generation (D1): unpredictable, globally unique v4 uuids.
 uuid = { version = "1", optional = true, features = ["v4"] }
+# The SQLite driver: bundled SQLite compiled from source (no system dependency), a
+# hardened external engine (principle 7). Infra-free, so it backs in-memory integration
+# tests against a real `Db`/`Backend` rather than a `MockDb` (D27).
+rusqlite = { version = "0.37", optional = true, features = ["bundled"] }
 
 [dev-dependencies]
 based-parser.workspace = true

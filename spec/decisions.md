@@ -685,3 +685,38 @@ live DB), matching the existing `tests/http.rs` harness.
   (each `/readyz` runs a live `SELECT 1` per shard — fine at probe frequency, but a high-frequency
   probe against many shards would want a short TTL); the **live-DB hardening** (D20 gap) is still what
   makes `Backend::ping` production-real, not just compile-verified.
+
+## D27 — the SQLite backend (`based-runtime::sqlite`): infra-free real integration
+Every runtime test to now drives the plan → run → shape path against a `MockDb` (canned rows), so it
+proves *binding* but never that the emitted SQL *executes*. A **SQLite** backend closes that gap with
+**no live infra** — bundled in-memory SQLite (via `rusqlite`, feature `sqlite`) is the first concrete
+`Db`/`Backend` a test can run the runtime's real read/write SQL through. It is also the lowest-friction
+second dialect (D21): SQLite binds positional `?` exactly like MariaDB, so the `?`-vs-`$n` scanner
+coupling D21 flagged does **not** apply (that is Postgres-only).
+- **`SqliteDb` = `Db` over one shared connection.** `SqlValue`↔`rusqlite::Value` maps family-for-family
+  like the MariaDB driver (D20): `bool`→integer `0/1`, `json`→serialized text (SQLite has no JSON
+  type — stored as `TEXT`, read back as the wire string), a binary `BLOB`→lowercase hex (never a panic,
+  mirroring `from_mysql`). `fetch` builds each row from its column aliases (a row is already the response
+  object); `execute`/`begin`/`commit`/`rollback` run the write path. The mapping is pure + unit-tested.
+- **`SqliteBackend` = `Backend`, one shared connection, no shards.** SQLite doesn't shard, so it ignores
+  the shard key and hands every checkout the *same* connection (a clone of one `Arc<Mutex<Connection>>`).
+  Sharing one connection is load-bearing for an **in-memory** DB (it is per-connection — separate
+  connections would each see an empty DB), and it is what lets one request's write be visible to the
+  next: the property that makes it a genuine integration engine. The `Mutex` gives `Send + Sync` (the
+  worker-pool bound) by serializing checkouts — correct for SQLite (a file DB serializes writers anyway);
+  a throughput-hungry deployment uses MariaDB's scale-out (D20), not many SQLite connections. `ping`
+  runs `SELECT 1` (the D26 readiness seam, now exercised against a real engine, not compile-verified).
+- **Real end-to-end tests** (`tests/sqlite_integration.rs`): load the *actual* commerce schema
+  (`Compiled::load`) and dispatch real requests through `serve::dispatch` against a live `SqliteDb`,
+  running the **verbatim** codegen-lowered SQL (`based gen sql`). Covers a `get` (join + project) + its
+  miss → `null`, a `$ctx`-scoped `list` (the injected scope predicate actually filters other orgs out),
+  `place_order` (INSERT + declared-shape re-select under one tx, read-your-writes confirmed by a
+  follow-up read seeing the new row), a boundary `400`, and `Backend::ping`. No infra → runs in CI like
+  any unit test.
+- **Deferred: SQLite DDL codegen.** The runtime's *DML* runs on SQLite as-is (backtick identifiers,
+  `= TRUE`, `IS NULL`, joins, `LIMIT`, `?`), but `based gen sql`'s *DDL* still emits MariaDB inline
+  `KEY`/`UNIQUE KEY` index syntax SQLite rejects, so the integration test hand-shapes its setup schema
+  (test scaffolding, not the SQL under test). Making `based gen sql` target SQLite is a `Dialect::Sqlite`
+  codegen variant (indexes as separate `CREATE INDEX`, a SQLite type map) — the next dialect slice, and
+  the point at which the `Dialect` enum finally grows a second variant. The backend needs no shard
+  router (SQLite doesn't shard) and no separate live-DB hardening slice (it *is* the live DB, bundled).
