@@ -16,11 +16,15 @@ pub mod client;
 pub mod openapi;
 pub mod sql;
 
-/// The SQL compile target (manifest `dialect`). MariaDB is first and only for now
-/// (D5); the enum exists so `sql::ddl` can branch when a second dialect lands.
+/// The SQL compile target (manifest `dialect`). MariaDB is the default (D5).
+/// SQLite (D27) is the second variant — its *runtime* backend already exists, and
+/// this is what lets `sql::ddl` emit SQLite-shaped DDL to match it. The DML/mutation
+/// SQL is dialect-portable (backtick idents, `= TRUE`, `IS NULL`, positional `?` all
+/// run on both, D27), so only DDL — type map + index syntax — actually branches today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     MariaDb,
+    Sqlite,
 }
 
 impl Dialect {
@@ -29,8 +33,18 @@ impl Dialect {
     /// schema error.
     pub fn parse(s: &str) -> Dialect {
         match s {
+            "sqlite" => Dialect::Sqlite,
             "mariadb" | "mysql" => Dialect::MariaDb,
             _ => Dialect::MariaDb,
+        }
+    }
+
+    /// The dialect's manifest name — used in the generated-header comment so the
+    /// emitted artifact records which target it was compiled for.
+    pub fn name(self) -> &'static str {
+        match self {
+            Dialect::MariaDb => "mariadb",
+            Dialect::Sqlite => "sqlite",
         }
     }
 }

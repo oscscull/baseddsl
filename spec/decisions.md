@@ -713,10 +713,38 @@ coupling D21 flagged does **not** apply (that is Postgres-only).
   `place_order` (INSERT + declared-shape re-select under one tx, read-your-writes confirmed by a
   follow-up read seeing the new row), a boundary `400`, and `Backend::ping`. No infra → runs in CI like
   any unit test.
-- **Deferred: SQLite DDL codegen.** The runtime's *DML* runs on SQLite as-is (backtick identifiers,
-  `= TRUE`, `IS NULL`, joins, `LIMIT`, `?`), but `based gen sql`'s *DDL* still emits MariaDB inline
-  `KEY`/`UNIQUE KEY` index syntax SQLite rejects, so the integration test hand-shapes its setup schema
-  (test scaffolding, not the SQL under test). Making `based gen sql` target SQLite is a `Dialect::Sqlite`
-  codegen variant (indexes as separate `CREATE INDEX`, a SQLite type map) — the next dialect slice, and
-  the point at which the `Dialect` enum finally grows a second variant. The backend needs no shard
-  router (SQLite doesn't shard) and no separate live-DB hardening slice (it *is* the live DB, bundled).
+- ~~**Deferred: SQLite DDL codegen.**~~ ✅ **done (D28).** `based gen sql` now targets SQLite too —
+  the `Dialect` enum grows its **first second variant** (`Dialect::Sqlite`), and the SQLite integration
+  test creates its tables from the *generated* DDL rather than a hand-shaped copy.
+
+## D28 — SQLite DDL codegen (`Dialect::Sqlite`)
+`based gen sql` can now target SQLite, closing the gap D27 flagged: the SQLite *runtime* backend already
+existed, but the *DDL* only emitted MariaDB syntax, so the D27 integration test hand-shaped its setup
+schema. `Dialect::Sqlite` is the enum's first second variant (the seam D21 anticipated) and drives
+`sql::ddl`; only the DDL branches — the DML/mutation SQL is already dialect-portable (D27), so those
+emitters vary only their header comment via the new `Dialect::name()`.
+- **Manifest `dialect = "sqlite"`** parses to `Dialect::Sqlite` (`Dialect::parse`); unknown values still
+  fall back to MariaDB (the documented default, unchanged).
+- **Type map** (module table in `sql.rs`) mirrors the runtime `SqliteDb`↔`SqlValue` mapping (D27) so the
+  physical column shape matches what the driver reads/writes: `text`/`uuid`/`Id`/`timestamp`/`date`/`json`
+  → `TEXT` (SQLite has no VARCHAR-length/UUID/date/JSON types), `int`/`bool` → `INTEGER` (SQLite `INTEGER`
+  is 64-bit; a bool stores `0`/`1`). A to-many scalar → `TEXT` (a JSON string, SQLite having no JSON type).
+- **Indexes are separate `CREATE INDEX` statements**, not inline table clauses — SQLite has no inline
+  `KEY`/`UNIQUE KEY` syntax. Both the declared `@index`es and the sema-inferred join-key baseline (D15)
+  trail the `CREATE TABLE` as `CREATE INDEX` / `CREATE UNIQUE INDEX`, keyed by the *same* `inf_`/`idx_`/
+  `uq_` names and physical columns MariaDB uses inline (one `index_specs` helper feeds both dialects, so
+  the two can't drift). Column-level `(unique)` constraints stay inline in both (SQLite accepts
+  `CONSTRAINT … UNIQUE (…)`). The inferred index stays predicate-leading (soft-delete column first) —
+  SQLite has no partial indexes either.
+- **Bool defaults** render `1`/`0` on SQLite (integer storage) vs. `TRUE`/`FALSE` on MariaDB; string/int/
+  `now()`→`CURRENT_TIMESTAMP` defaults are identical. `PRIMARY KEY (\`id\`)` and the no-FK-constraint rule
+  (relations.md) are unchanged.
+- **Proof it runs.** `based-runtime/tests/sqlite_integration.rs` (D27) now creates its tables from
+  `sql::ddl(&schema, Dialect::Sqlite)` — the verbatim `based gen sql` DDL — instead of a hand-shaped copy,
+  so the whole `based gen sql` artifact (DDL *and* DML) is proven to execute end-to-end against a real
+  engine. Tests: 8 new SQLite cases in `based-codegen/tests/ddl.rs` (type map, `TEXT` id/FK, integer bool
+  default, inline `(unique)`, indexes-as-`CREATE INDEX` after the table, inferred join key).
+- *Deferred:* Postgres remains the outstanding dialect — it needs both a `Dialect::Postgres` codegen
+  variant *and* the named→positional scanner made dialect-aware (`?` → `$n`, D21), which SQLite did not
+  (it binds positional `?` like MariaDB). Per-field `text` length tuning is still unaddressed (no length
+  primitive; D10) but is moot on SQLite (untyped `TEXT`).
