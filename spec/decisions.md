@@ -1110,3 +1110,22 @@ feedback." The extension is deliberately **thin**: all intelligence stays in `ba
 - **Not done (server-side, deferred):** go-to-definition / completion / rename — the server doesn't
   serve them yet (needs the position→symbol layer M5 flags), so the client can't surface them. When the
   server grows them, the client picks them up for free (same capability-negotiation path).
+
+## D37 — migration generation (Track E, spec'd first)
+Pointer decision — the full design lives in **PLAN Track E** (settled 2026-07-06) and is now written
+up as prose in **`spec/syntax/migrations.md`** (E1). The two commitments worth pinning here (they are
+parser/AST/artifact shapes an implementer needs, not naturally prose):
+- **`@was("old_name")` is dual-form** (migrations.md): a field-level **`modifier`** (grammar
+  `was_directive`, after `modifiers`/`relation_opts`, before `@sort`) declaring a column's previous
+  physical name, *and* a model-level **decorator** (`@was("old_table")`, matches the generic
+  `decorator` rule) for a table rename. It is a **diff-time** directive — consumed by `based migrate
+  gen` to emit a clean `rename` step, then spent (a stale `@was` is a lint, E5). No `@was` ⇒ drop+add,
+  never an auto-guessed rename (principle 2). It is the *only* new authored `.bsl` surface migrations
+  add; the migration files (`up.mig`/`down.mig`/`schema.snap`) are generated artifacts, not authored,
+  so they get no `.bsl` grammar.
+- **Artifact layout is fixed:** `migrations/NNNN_slug/{up.mig, schema.snap[, down.mig]}`, zero-padded
+  gap-free sequential order, latest `schema.snap` = the diff baseline; the `_based_migrations` ledger
+  (id, content_hash, applied_at) with the edited-after-applied ⇒ hard-error tamper rule. Rationale +
+  the neutral-step vocabulary + the `raw(dialect)` "not offline-verifiable" contract are in the spec;
+  open sub-details (snapshot serialization grammar, raw-step structural-effect annotation, hash
+  canonicalization, down-invocation surface) are flagged as TODOs there for E2–E5.

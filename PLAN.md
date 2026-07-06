@@ -177,10 +177,18 @@ the user; see the decision block below. `spec/syntax/migrations.md` is written b
   - `based gen sql` stays as the from-scratch full snapshot; `0001_init`'s up == that.
 
   Track E items (top-down):
-  - E1. **`spec/syntax/migrations.md`** — the spec, written FIRST: the `up.mig`/`down.mig` neutral step
-    grammar + the `raw(dialect)` escape, the `@was` rename directive, the `schema.snap` format, the
-    `_based_migrations` ledger schema, the destructive-change policy, and the `based migrate` command
-    surface. Update `spec/grammar.ebnf` + the CLAUDE.md spec file map.
+  - E1. ✅ **done. `spec/syntax/migrations.md`** — the spec, written FIRST: the declarative-source /
+    versioned-artifacts model, the `migrations/NNNN_slug/` layout, the dialect-neutral `up.mig` step
+    vocabulary (add/drop/alter table/column/index/unique, rename-via-`@was`) rendered per-dialect over
+    the `Dialect` seam with a worked commerce example (nullable add + index, all three dialects), the
+    first-class `raw(dialect)` escape (marked "not offline-verifiable"), the `schema.snap` canonical
+    stable-ordered neutral serialization, the `@was("old")` rename directive, the destructive-change
+    policy (`--allow-destructive` / `unsafe("reason")`), roll-forward default + optional `down.mig`,
+    the `_based_migrations` ledger + tamper/hash rule, the offline LSP drift diagnostic, and the
+    `based migrate gen|apply|status|verify|render` surface. Extended `spec/grammar.ebnf` (`@was` as a
+    field `modifier`/model decorator) + the CLAUDE.md spec file map. Open sub-details flagged inline
+    as TODOs for E2–E5 (snapshot grammar pin, raw-step structural-effect annotation, hash algo/canon,
+    down-invocation surface). **E2 is next.**
   - E2. **Snapshot + diff engine** — serialize `CheckedSchema` → `schema.snap`; `diff(snap_prev,
     schema_now)` → a neutral step list; `based migrate gen [name]` writes `NNNN_slug/{up.mig,schema.snap}`.
   - E3. **Per-dialect renderer** — neutral steps → `ALTER`/`CREATE`/`DROP` SQL for each dialect over the

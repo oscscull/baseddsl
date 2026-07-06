@@ -30,6 +30,7 @@ Spec file map:
 - `spec/syntax/pagination.md` — keyset/offset
 - `spec/syntax/indexing.md` — index decl + lint
 - `spec/syntax/raw.md` — raw SQL escape hatch
+- `spec/syntax/migrations.md` — migration generation (snapshot diff, neutral steps, `@was`, ledger)
 - `spec/syntax/calling.md` — generated client + wire surface
 - `spec/syntax/auth.md` — scope/context/guard handles
 - `spec/examples/commerce/` — full worked reference, in the recommended by-domain layout

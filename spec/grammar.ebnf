@@ -36,13 +36,14 @@ member      = field | index_decl | soft_override ;
 
 (* Decorators stack above the model, one per line; never positional on header. *)
 decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
-deco_name   = ident ;                  (* soft_delete sort tenant scope index… *)
+deco_name   = ident ;                  (* soft_delete sort scope index was …    *)
 deco_args   = deco_arg { ',' deco_arg } ;
 deco_arg    = sort_term | predicate | ident | path | literal ;
 
 (* Field line: uniform for columns and relations — `name: Type (modifiers)` *)
 field       = field_name ':' type_expr [ inverse_ref ] [ modifiers ]
-                                       [ relation_opts ] [ field_sort ] ;
+                                       [ relation_opts ] [ was_directive ]
+                                       [ field_sort ] ;
 field_name  = lower_ident ;
 
 type_expr   = base_type { type_qualifier } ;
@@ -63,6 +64,13 @@ modifier    = 'unique'
             | 'default' default_val
             | 'column' STRING ;        (* legacy/reserved column-name override  *)
 default_val = literal | func_call ;
+
+(* Migration rename directive (migrations.md): declares this field's previous     *)
+(* physical column name so the diff emits a clean `rename column` instead of the   *)
+(* default drop+add. Sits after the modifiers, before any @sort. Model-level       *)
+(* renames use the decorator form `@was("old_table")` (matches `decorator` above). *)
+(* Renames are NEVER auto-guessed — no `@was` means drop+add (principle 2).         *)
+was_directive = '@was' '(' STRING ')' ;
 
 (* Relation options — custom join condition for legacy keys (relations.md).    *)
 relation_opts = '(' 'on' ':' predicate ')' ;
