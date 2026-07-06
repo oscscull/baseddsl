@@ -17,10 +17,12 @@ based-parser = { workspace = true }
 based-sema = { workspace = true }
 based-codegen = { workspace = true }
 based-facts = { workspace = true }
-# The runtime, with the HTTP listener + concrete MariaDB driver, so `based serve` can
-# stand the schema up as a live RPC service. (The `serve` feature pulls the driver +
-# HTTP server in; the front-end commands — check/gen/facts — don't touch them.)
-based-runtime = { path = "../based-runtime", features = ["serve"] }
+# The runtime, with the HTTP listener + all three concrete drivers, so `based serve` can
+# stand the schema up as a live RPC service and `based migrate apply` can apply migrations
+# against whichever dialect the manifest targets (MariaDB/SQLite/Postgres). (`serve` pulls the
+# MariaDB driver + HTTP server; the front-end commands — check/gen/facts/migrate gen|render —
+# don't touch any of them.)
+based-runtime = { path = "../based-runtime", features = ["serve", "sqlite", "postgres"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 # Graceful shutdown of `based serve`: catch SIGTERM/SIGINT and drain (principle 7 —

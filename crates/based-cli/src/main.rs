@@ -102,6 +102,48 @@ enum MigrateAction {
         #[arg(long)]
         dialect: Option<String>,
     },
+    /// Apply pending migrations to a live database, each under one transaction with a
+    /// `_based_migrations` ledger insert + tamper-hash check (E4). Destructive steps require
+    /// `--allow-destructive`. Applies to every `--database-url` (a sharded fleet migrates
+    /// each shard).
+    Apply {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// A database URL per physical shard (repeat for a sharded fleet). Falls back to
+        /// `BASED_DATABASE_URL` (comma-separated) when none is passed.
+        #[arg(long = "database-url")]
+        database_url: Vec<String>,
+        /// Vouch for destructive steps (drops / narrowing / new not-null-without-default /
+        /// new unique). Without it, apply stops before the first destructive migration.
+        #[arg(long)]
+        allow_destructive: bool,
+        /// Reconcile the applied set to exactly migrations `≤ N`: roll forward up to `N`,
+        /// roll back (via `down.mig`) anything applied above it. `--to 0` rolls back all.
+        #[arg(long)]
+        to: Option<u32>,
+        /// Roll back only the most-recently-applied migration (via its `down.mig`).
+        #[arg(long, conflicts_with = "to")]
+        down: bool,
+    },
+    /// Show applied vs. pending migrations, flagging any hash mismatch (an edited applied
+    /// migration). Reads the ledger from a live database (E4).
+    Status {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// The database to read the ledger from (first shard). Falls back to
+        /// `BASED_DATABASE_URL`.
+        #[arg(long = "database-url")]
+        database_url: Vec<String>,
+    },
+    /// Offline CI gate: confirm each `up.mig` still matches its `schema.snap` (no hand-edit
+    /// drift) and the latest snapshot matches the current `.bsl` (no uncaptured changes). E4.
+    Verify {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -152,6 +194,15 @@ fn main() -> anyhow::Result<()> {
                 number,
                 dialect,
             } => cmd_migrate_render(&root, number, dialect.as_deref()),
+            MigrateAction::Apply {
+                root,
+                database_url,
+                allow_destructive,
+                to,
+                down,
+            } => cmd_migrate_apply(&root, database_url, allow_destructive, to, down),
+            MigrateAction::Status { root, database_url } => cmd_migrate_status(&root, database_url),
+            MigrateAction::Verify { root } => cmd_migrate_verify(&root),
         },
         Command::Facts { root, json } => cmd_facts(&root, json),
         Command::Serve {
@@ -358,6 +409,252 @@ fn cmd_migrate_render(
         println!();
     }
     Ok(())
+}
+
+/// `based migrate apply`: apply pending migrations (or roll back) against a live database,
+/// reconciling the `_based_migrations` ledger (E4). Runs against every `--database-url` in
+/// turn — a sharded fleet migrates each shard (D20) with the same migration set.
+fn cmd_migrate_apply(
+    root: &Path,
+    database_url: Vec<String>,
+    allow_destructive: bool,
+    to: Option<u32>,
+    down: bool,
+) -> anyhow::Result<()> {
+    use based_runtime::migrate;
+
+    // Only the manifest dialect is needed to render each step to executable SQL; apply reads
+    // stored artifacts, not the schema, so it works even against an in-progress `.bsl`.
+    let project = discover_project(root)?;
+    let dialect = Dialect::parse(&project.manifest.dialect);
+    let migrations = migrate::load_migrations(root, dialect).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if migrations.is_empty() {
+        println!(
+            "no migrations under {}/migrations — run `based migrate gen` first",
+            root.display()
+        );
+        return Ok(());
+    }
+
+    let direction = match (down, to) {
+        (true, _) => migrate::Direction::Down,
+        (false, Some(n)) => migrate::Direction::To(n),
+        (false, None) => migrate::Direction::Up,
+    };
+    let opts = migrate::ApplyOpts {
+        allow_destructive,
+        direction,
+    };
+
+    let urls = shard_urls(database_url)?;
+    for url in &urls {
+        let mut db = connect(dialect, url)?;
+        let report = migrate::apply(&mut *db, dialect, &migrations, &opts)
+            .map_err(|e| anyhow::anyhow!("applying to {}: {e}", redact(url)))?;
+        report_apply(&report, &redact(url));
+    }
+    Ok(())
+}
+
+/// `based migrate status`: read the ledger and show applied vs. pending migrations, flagging
+/// any hash mismatch (an edited applied migration) or an applied row missing from disk (E4).
+fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> anyhow::Result<()> {
+    use based_runtime::migrate::{self, MigrationState};
+
+    let project = discover_project(root)?;
+    let dialect = Dialect::parse(&project.manifest.dialect);
+    let migrations = migrate::load_migrations(root, dialect).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Status is about applied-vs-pending, so it needs the ledger (first shard suffices).
+    let urls = shard_urls(database_url)?;
+    let mut db = connect(dialect, &urls[0])?;
+    migrate::ensure_ledger(&mut *db, dialect).map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    let ledger =
+        migrate::applied(&mut *db, dialect).map_err(|e| anyhow::anyhow!("{}", e.message))?;
+
+    let states = migrate::status(&migrations, &ledger);
+    let (mut applied, mut pending, mut mismatched) = (0, 0, 0);
+    for (id, state) in &states {
+        let tag = match state {
+            MigrationState::Applied => {
+                applied += 1;
+                "applied"
+            }
+            MigrationState::Pending => {
+                pending += 1;
+                "pending"
+            }
+            MigrationState::HashMismatch { .. } => {
+                mismatched += 1;
+                "HASH MISMATCH (edited after apply)"
+            }
+        };
+        println!("  {id}  {tag}");
+    }
+    // A ledger row with no on-disk migration = deleted history (loud).
+    for row in &ledger {
+        if !migrations.iter().any(|m| m.id == row.id) {
+            mismatched += 1;
+            println!("  {}  MISSING FROM DISK (in ledger, no directory)", row.id);
+        }
+    }
+    println!("{applied} applied, {pending} pending, {mismatched} problem(s)");
+    if mismatched > 0 {
+        bail!("migration ledger has {mismatched} problem(s)");
+    }
+    Ok(())
+}
+
+/// `based migrate verify`: the offline CI gate. Confirms each `up.mig` still matches the steps
+/// its `schema.snap` chain implies (no hand-edit drift) and the latest snapshot matches the
+/// current `.bsl` (no uncaptured schema changes). Never touches a database (E4).
+fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
+    use based_codegen::migrate;
+
+    let (_project, schema, _decls, _sources, _warnings) = load_checked(root)?;
+    let existing = existing_migrations(&root.join("migrations"))?;
+
+    let mut problems = 0usize;
+    let mut prev = migrate::Snapshot::default();
+    for (idx, (n, dir)) in existing.iter().enumerate() {
+        let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
+        let name = name.as_deref().unwrap_or("?");
+        if *n != (idx as u32) + 1 {
+            eprintln!("  {name}: number out of sequence (expected {:04})", idx + 1);
+            problems += 1;
+        }
+        let snap_text = std::fs::read_to_string(dir.join("schema.snap"))
+            .with_context(|| format!("reading {}/schema.snap", name))?;
+        let snap = match migrate::Snapshot::parse(&snap_text) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  {name}: {e}");
+                problems += 1;
+                continue;
+            }
+        };
+        // The up.mig the snapshots imply must still match the stored one (byte-canonical).
+        let steps = migrate::diff_snapshots(&prev, &snap);
+        let expected = migrate::render_up(&steps);
+        let stored = std::fs::read_to_string(dir.join("up.mig"))
+            .with_context(|| format!("reading {}/up.mig", name))?;
+        if migrate::content_hash(&expected) != migrate::content_hash(&stored) {
+            eprintln!("  {name}: up.mig has drifted from schema.snap (re-run `based migrate gen`)");
+            problems += 1;
+        }
+        prev = snap;
+    }
+
+    // The latest snapshot must equal the current schema — else there are uncaptured changes.
+    let current = migrate::Snapshot::from_schema(&schema);
+    if existing.is_empty() {
+        if !current.tables.is_empty() {
+            eprintln!("  no migrations yet — run `based migrate gen` to capture the schema");
+            problems += 1;
+        }
+    } else if prev != current {
+        eprintln!("  schema has uncaptured changes not in any migration — run `based migrate gen`");
+        problems += 1;
+    }
+
+    if problems > 0 {
+        bail!(
+            "verify failed: {problems} problem(s) across {} migration(s)",
+            existing.len()
+        );
+    }
+    println!("ok: {} migration(s) verified", existing.len());
+    Ok(())
+}
+
+/// The shard database URLs: the repeated `--database-url` flag wins, else `BASED_DATABASE_URL`
+/// (comma-separated). Errors when none is set (apply/status need a live database).
+fn shard_urls(database_url: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let urls: Vec<String> = if !database_url.is_empty() {
+        database_url
+    } else {
+        std::env::var("BASED_DATABASE_URL")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default()
+    };
+    if urls.is_empty() {
+        bail!("no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL");
+    }
+    Ok(urls)
+}
+
+/// Check out a single [`Db`] connection to `url` for the manifest dialect — the same driver
+/// stack `based serve` uses (MariaDB/Postgres via a single-shard router; SQLite over a file).
+/// The returned connection keeps its pool/connection alive on its own, so the local backend
+/// dropping at return is fine.
+fn connect(dialect: Dialect, url: &str) -> anyhow::Result<Box<dyn based_runtime::Db>> {
+    use based_runtime::driver::{PoolConfig, ShardRouter};
+    use based_runtime::run::Backend;
+
+    let db: Box<dyn based_runtime::Db> = match dialect {
+        Dialect::MariaDb => {
+            let router = ShardRouter::single(url, PoolConfig::default())
+                .map_err(|e| anyhow::anyhow!("connecting to {}: {}", redact(url), e.message))?;
+            Backend::checkout(&router, "").map_err(|e| anyhow::anyhow!("{}", e.message))?
+        }
+        Dialect::Postgres => {
+            let router = based_runtime::PgRouter::single(url, PoolConfig::default())
+                .map_err(|e| anyhow::anyhow!("connecting to {}: {}", redact(url), e.message))?;
+            Backend::checkout(&router, "").map_err(|e| anyhow::anyhow!("{}", e.message))?
+        }
+        // A SQLite `url` is a filesystem path (or `:memory:`, useless for a persisted apply).
+        Dialect::Sqlite => {
+            let backend = based_runtime::SqliteBackend::open(url)
+                .map_err(|e| anyhow::anyhow!("opening {url}: {}", e.message))?;
+            Backend::checkout(&backend, "").map_err(|e| anyhow::anyhow!("{}", e.message))?
+        }
+    };
+    Ok(db)
+}
+
+/// Discover the project (manifest + files) without running the full front end — apply/status
+/// only need the manifest dialect, and must work against an in-progress schema.
+fn discover_project(root: &Path) -> anyhow::Result<Project> {
+    match based_manifest::discover(root) {
+        Ok(p) => Ok(p),
+        Err(diags) => {
+            render::render(&diags, &[]);
+            bail!("could not load project at {}", root.display());
+        }
+    }
+}
+
+/// Print an apply/rollback report line.
+fn report_apply(report: &based_runtime::ApplyReport, target: &str) {
+    for id in &report.rolled_back {
+        println!("  rolled back {id}");
+    }
+    for id in &report.applied {
+        println!("  applied {id}");
+    }
+    if report.applied.is_empty() && report.rolled_back.is_empty() {
+        println!("{target}: already up to date");
+    } else {
+        println!(
+            "{target}: {} applied, {} rolled back",
+            report.applied.len(),
+            report.rolled_back.len()
+        );
+    }
+}
+
+/// Redact a database URL's password for logging (`mysql://user:pw@host` → `mysql://user@host`).
+fn redact(url: &str) -> String {
+    match (url.find("://"), url.find('@')) {
+        (Some(s), Some(at)) if at > s => {
+            let scheme = &url[..s + 3];
+            let creds = &url[s + 3..at];
+            let user = creds.split(':').next().unwrap_or(creds);
+            format!("{scheme}{user}@{}", &url[at + 1..])
+        }
+        _ => url.to_string(),
+    }
 }
 
 /// Existing `migrations/NNNN_slug/` directories, sorted by their `NNNN` number. A

@@ -75,6 +75,7 @@ pub mod embed;
 pub mod id;
 pub mod idempotency;
 pub mod load;
+pub mod migrate;
 pub mod plan;
 pub mod run;
 pub mod scan;
@@ -98,6 +99,11 @@ pub use embed::Engine;
 pub use id::{IdGen, SeqIdGen};
 pub use idempotency::{Fingerprint, IdempotencyStore, KeyState, MemStore, NoStore};
 pub use load::Compiled;
+pub use migrate::{
+    applied as applied_migrations, apply as apply_migrations, ensure_ledger, load_migrations,
+    status as migration_status, ApplyOpts, ApplyReport, Direction, LedgerRow, MigrateError,
+    MigrationState, PlannedMigration,
+};
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };

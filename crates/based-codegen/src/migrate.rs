@@ -1007,58 +1007,106 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
     );
     for step in steps {
         out.push('\n');
-        render_sql_step(&mut out, step, dialect);
+        if step.destructive() {
+            out.push_str(
+                "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
+            );
+        }
+        match step_statements(step, dialect) {
+            // Each bare statement is written `;`-terminated for the reviewer/psql/mysql.
+            Ok(stmts) => {
+                for s in stmts {
+                    let _ = writeln!(out, "{s};");
+                }
+            }
+            // A step with no in-place rendering for this dialect (SQLite `ALTER COLUMN`):
+            // a loud, greppable comment, never broken SQL (principle 6).
+            Err(msg) => {
+                let _ = writeln!(out, "-- {msg}");
+            }
+        }
     }
     out
 }
 
-fn render_sql_step(out: &mut String, step: &Step, dialect: Dialect) {
-    if step.destructive() {
-        out.push_str(
-            "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
-        );
+/// The executable statements for a step list, for `based migrate apply` — bare (no
+/// trailing `;`, no comments), so a driver can run each through `Db::execute`. `Err(msg)`
+/// = a step the dialect can't render in place (a SQLite `ALTER COLUMN` — the author must
+/// supply a `raw(sqlite)` rebuild); apply surfaces it loudly rather than emit broken SQL
+/// (principle 6). This is the execution twin of [`render_sql`]'s review text; both go
+/// through [`step_statements`], so the SQL applied is exactly the SQL reviewed.
+pub fn sql_statements(steps: &[Step], dialect: Dialect) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for step in steps {
+        out.extend(step_statements(step, dialect)?);
     }
-    match step {
-        Step::CreateTable(t) => render_sql_create_table(out, t, dialect),
-        Step::DropTable(name) => {
-            let _ = writeln!(out, "DROP TABLE {};", dialect.quote(name));
-        }
-        Step::AddColumn { table, column } => {
-            let _ = writeln!(
-                out,
-                "ALTER TABLE {} ADD COLUMN {};",
-                dialect.quote(table),
-                column_ddl(column, dialect),
-            );
-        }
-        Step::DropColumn { table, column } => {
-            let _ = writeln!(
-                out,
-                "ALTER TABLE {} DROP COLUMN {};",
-                dialect.quote(table),
-                dialect.quote(column),
-            );
-        }
+    Ok(out)
+}
+
+/// Bare executable statement(s) for one neutral step (no trailing `;`, no comment). A
+/// `CreateTable` yields several on SQLite/Postgres (the table + trailing `CREATE INDEX`es);
+/// most steps yield one.
+fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String> {
+    Ok(match step {
+        Step::CreateTable(t) => create_table_statements(t, dialect),
+        Step::DropTable(name) => vec![format!("DROP TABLE {}", dialect.quote(name))],
+        Step::AddColumn { table, column } => vec![format!(
+            "ALTER TABLE {} ADD COLUMN {}",
+            dialect.quote(table),
+            column_ddl(column, dialect),
+        )],
+        Step::DropColumn { table, column } => vec![format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            dialect.quote(table),
+            dialect.quote(column),
+        )],
         Step::AlterColumn {
             table,
             column,
             changes,
             after,
-        } => render_sql_alter_column(out, table, column, changes, after, dialect),
+        } => alter_column_statements(table, column, changes, after, dialect)?,
         Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
-            let _ = writeln!(out, "{}", create_index_sql(dialect, table, index));
+            vec![create_index_sql(dialect, table, index)]
         }
         Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
-            let _ = writeln!(out, "{}", drop_index_sql(dialect, table, name));
+            vec![drop_index_sql(dialect, table, name)]
         }
-    }
+    })
 }
 
-/// A full `CREATE TABLE` from a neutral snapshot table. Mirrors `sql::create_table`:
-/// the implicit `id` PK (D2) is re-synthesized (it is elided from the snapshot) unless
-/// the model declared its own; `(unique)` columns become `CONSTRAINT … UNIQUE`; indexes
-/// are inline `KEY`/`UNIQUE KEY` on MariaDB and trailing `CREATE INDEX` elsewhere.
-fn render_sql_create_table(out: &mut String, t: &TableSnap, dialect: Dialect) {
+/// A stable content hash of an `up.mig`'s canonical bytes — the `_based_migrations`
+/// ledger's tamper guard (migrations.md). Canonicalization drops comment (`#…`) and blank
+/// lines and trims each remaining line, so a cosmetic whitespace/comment edit doesn't trip
+/// the guard but any change to a step does. FNV-1a-64 (the same family the runtime uses for
+/// request fingerprints, D31), rendered as 16 lowercase hex digits — collision resistance
+/// is not security-critical here (it guards against an accidental post-apply edit, not an
+/// adversary), so a fast non-cryptographic hash is the right tool.
+pub fn content_hash(up_text: &str) -> String {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for line in up_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        mix(line.as_bytes());
+        mix(b"\n");
+    }
+    format!("{h:016x}")
+}
+
+/// The statement(s) for a full `CREATE TABLE` from a neutral snapshot table. Mirrors
+/// `sql::create_table`: the implicit `id` PK (D2) is re-synthesized (it is elided from the
+/// snapshot) unless the model declared its own; `(unique)` columns become `CONSTRAINT …
+/// UNIQUE`; indexes are inline `KEY`/`UNIQUE KEY` on MariaDB (one statement) and trailing
+/// standalone `CREATE INDEX` statements elsewhere.
+fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
     // Implicit `id` primary key (D2): synthesized as the default uuid when the snapshot
@@ -1101,27 +1149,30 @@ fn render_sql_create_table(out: &mut String, t: &TableSnap, dialect: Dialect) {
         .map(|l| format!("  {l}"))
         .collect::<Vec<_>>()
         .join(",\n");
-    let _ = writeln!(out, "CREATE TABLE {} (\n{body}\n);", dialect.quote(&t.name));
-
+    let mut stmts = vec![format!(
+        "CREATE TABLE {} (\n{body}\n)",
+        dialect.quote(&t.name)
+    )];
     if dialect != Dialect::MariaDb {
         for i in &t.indexes {
-            let _ = writeln!(out, "{}", create_index_sql(dialect, &t.name, i));
+            stmts.push(create_index_sql(dialect, &t.name, i));
         }
     }
+    stmts
 }
 
-fn render_sql_alter_column(
-    out: &mut String,
+fn alter_column_statements(
     table: &str,
     column: &str,
     changes: &[ColumnChange],
     after: &ColumnSnap,
     dialect: Dialect,
-) {
-    match dialect {
+) -> Result<Vec<String>, String> {
+    Ok(match dialect {
         // Postgres: one `ALTER COLUMN` sub-statement per change (it has them all).
-        Dialect::Postgres => {
-            for ch in changes {
+        Dialect::Postgres => changes
+            .iter()
+            .map(|ch| {
                 let clause = match ch {
                     ColumnChange::Type { to, .. } => {
                         format!("TYPE {}", neutral_sql_type(to, dialect))
@@ -1133,14 +1184,13 @@ fn render_sql_alter_column(
                     }
                     ColumnChange::DropDefault => "DROP DEFAULT".to_string(),
                 };
-                let _ = writeln!(
-                    out,
-                    "ALTER TABLE {} ALTER COLUMN {} {clause};",
+                format!(
+                    "ALTER TABLE {} ALTER COLUMN {} {clause}",
                     dialect.quote(table),
                     dialect.quote(column),
-                );
-            }
-        }
+                )
+            })
+            .collect(),
         // MariaDB: a type/null change needs a full `MODIFY COLUMN` (no piecemeal form);
         // a default-only change uses `ALTER COLUMN … SET/DROP DEFAULT`.
         Dialect::MariaDb => {
@@ -1153,51 +1203,45 @@ fn render_sql_alter_column(
                 )
             });
             if structural {
-                let _ = writeln!(
-                    out,
-                    "ALTER TABLE {} MODIFY COLUMN {};",
+                vec![format!(
+                    "ALTER TABLE {} MODIFY COLUMN {}",
                     dialect.quote(table),
                     column_ddl(after, dialect),
-                );
+                )]
             } else {
-                for ch in changes {
-                    match ch {
-                        ColumnChange::SetDefault(d) => {
-                            let _ = writeln!(
-                                out,
-                                "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {};",
-                                dialect.quote(table),
-                                dialect.quote(column),
-                                render_neutral_default(d, dialect),
-                            );
-                        }
-                        ColumnChange::DropDefault => {
-                            let _ = writeln!(
-                                out,
-                                "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT;",
-                                dialect.quote(table),
-                                dialect.quote(column),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
+                changes
+                    .iter()
+                    .filter_map(|ch| match ch {
+                        ColumnChange::SetDefault(d) => Some(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                            dialect.quote(table),
+                            dialect.quote(column),
+                            render_neutral_default(d, dialect),
+                        )),
+                        ColumnChange::DropDefault => Some(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                            dialect.quote(table),
+                            dialect.quote(column),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
             }
         }
         // SQLite has no in-place ALTER COLUMN — a type/null/default change requires the
         // 12-step table rebuild, which the neutral vocabulary can't safely auto-generate.
-        // Emit a loud, greppable comment pointing at a hand-authored raw(sqlite) step
+        // Surface a loud, greppable message pointing at a hand-authored raw(sqlite) step
         // (principle 6 — the escape hatch is never silent) rather than broken SQL.
         Dialect::Sqlite => {
-            let _ = writeln!(
-                out,
-                "-- SQLite cannot ALTER COLUMN {table}.{column} in place; author a raw(sqlite) table-rebuild migration.",
-            );
+            return Err(format!(
+                "SQLite cannot ALTER COLUMN {table}.{column} in place; author a raw(sqlite) table-rebuild migration."
+            ))
         }
-    }
+    })
 }
 
-/// A standalone `CREATE [UNIQUE] INDEX` (all dialects share this form for an add).
+/// A standalone `CREATE [UNIQUE] INDEX` (all dialects share this form for an add). Bare
+/// (no trailing `;`); `render_sql` terminates it, `apply` executes it as-is.
 fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String {
     let kind = if index.unique {
         "CREATE UNIQUE INDEX"
@@ -1205,7 +1249,7 @@ fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String 
         "CREATE INDEX"
     };
     format!(
-        "{kind} {} ON {} ({});",
+        "{kind} {} ON {} ({})",
         dialect.quote(&index.name),
         dialect.quote(table),
         quote_cols(dialect, &index.columns),
@@ -1213,15 +1257,15 @@ fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String 
 }
 
 /// `DROP INDEX` — MySQL/MariaDB require the `ON <table>` qualifier; SQLite/Postgres
-/// drop by index name alone.
+/// drop by index name alone. Bare (no trailing `;`).
 fn drop_index_sql(dialect: Dialect, table: &str, name: &str) -> String {
     match dialect {
         Dialect::MariaDb => format!(
-            "DROP INDEX {} ON {};",
+            "DROP INDEX {} ON {}",
             dialect.quote(name),
             dialect.quote(table)
         ),
-        Dialect::Sqlite | Dialect::Postgres => format!("DROP INDEX {};", dialect.quote(name)),
+        Dialect::Sqlite | Dialect::Postgres => format!("DROP INDEX {}", dialect.quote(name)),
     }
 }
 
@@ -1677,5 +1721,80 @@ mod tests {
         // MySQL/MariaDB need the `ON <table>` qualifier; Postgres/SQLite drop by name.
         assert!(render_sql(&drop, MariaDb).contains("DROP INDEX `idx_u_name` ON `u`;"));
         assert!(render_sql(&drop, Postgres).contains("DROP INDEX \"idx_u_name\";"));
+    }
+
+    // ---- E4: executable statements + content hash -----------------------
+
+    #[test]
+    fn sql_statements_are_bare_and_one_per_statement() {
+        // A create + an add-column → bare statements (no `;`, no comments), exactly what
+        // `apply` runs one at a time through `Db::execute`.
+        let mut t = table("thing", vec![col("name", "text", false)]);
+        t.indexes.push(IndexSnap {
+            name: "idx_thing_name".to_string(),
+            columns: vec!["name".to_string()],
+            unique: false,
+            inferred: false,
+        });
+        let steps = vec![
+            Step::CreateTable(t),
+            Step::AddColumn {
+                table: "thing".to_string(),
+                column: col("size", "int", true),
+            },
+        ];
+        let stmts = sql_statements(&steps, Postgres).unwrap();
+        // create table, its trailing create index, then the add column.
+        assert_eq!(stmts.len(), 3, "{stmts:#?}");
+        assert!(
+            stmts[0].starts_with("CREATE TABLE \"thing\" ("),
+            "{}",
+            stmts[0]
+        );
+        assert!(
+            stmts.iter().all(|s| !s.ends_with(';')),
+            "no trailing `;`: {stmts:#?}"
+        );
+        assert!(
+            stmts.iter().all(|s| !s.contains("--")),
+            "no comments: {stmts:#?}"
+        );
+        assert!(
+            stmts[1].contains("CREATE INDEX \"idx_thing_name\" ON \"thing\" (\"name\")"),
+            "{}",
+            stmts[1]
+        );
+        assert!(
+            stmts[2].contains("ALTER TABLE \"thing\" ADD COLUMN \"size\""),
+            "{}",
+            stmts[2]
+        );
+    }
+
+    #[test]
+    fn sql_statements_errs_on_sqlite_alter_column() {
+        // SQLite can't ALTER COLUMN in place — `apply` must fail loudly, not emit broken SQL.
+        let steps = vec![Step::AlterColumn {
+            table: "t".to_string(),
+            column: "v".to_string(),
+            changes: vec![ColumnChange::SetNotNull { has_default: false }],
+            after: col("v", "int", false),
+        }];
+        let err = sql_statements(&steps, Sqlite).unwrap_err();
+        assert!(err.contains("SQLite cannot ALTER COLUMN t.v"), "{err}");
+    }
+
+    #[test]
+    fn content_hash_ignores_comments_and_whitespace_but_not_steps() {
+        let a = "# generated header\nadd column product.barcode text null\n";
+        // Same step, different comment + blank lines + indentation → identical hash.
+        let b = "\n  add column product.barcode text null  \n# a different comment\n";
+        assert_eq!(content_hash(a), content_hash(b));
+        // A real change to the step → a different hash (the tamper guard fires).
+        let c = "add column product.barcode text not_null\n";
+        assert_ne!(content_hash(a), content_hash(c));
+        // 16 lowercase hex digits.
+        assert_eq!(content_hash(a).len(), 16);
+        assert!(content_hash(a).bytes().all(|b| b.is_ascii_hexdigit()));
     }
 }

@@ -1294,3 +1294,52 @@ E2 (D39) produces the dialect-neutral `up.mig` step list; E3 renders it to execu
   its comment). *Deferred:* the `raw(dialect)` passthrough step (the `Step` enum has no raw variant yet —
   migrations.md's raw-structural-effect TODO); rename steps (E5, `@was`); the `up.mig` parser for hand-edits
   (E4).
+
+## D42 — migration apply + `_based_migrations` ledger (E4)
+E4 carries a real database from one migration state to the next. Engine: `based-runtime::migrate`
+(`load_migrations` / `ensure_ledger` / `applied` / `apply` / `status`, dialect-generic over the `Db` seam),
+plus `based-codegen::migrate::{sql_statements, content_hash}` (the offline halves) and the CLI's
+`based migrate apply|status|verify`. Settling migrations.md's E4 TODOs:
+- **Execution is snapshot-authoritative, not up.mig-parsed.** A migration's executable steps are re-derived
+  as `diff_snapshots(snapshot[N-1], snapshot[N])` (the same model `render` uses, D41) and lowered by the new
+  `migrate::sql_statements` — the execution twin of `render_sql`, returning **bare** statements (no `;`, no
+  comments) so `Db::execute` runs them one at a time. Both go through one `step_statements` seam, so the SQL
+  *applied* is exactly the SQL *reviewed* (P4). This resolves D41's deferred "up.mig parser": there is none —
+  the neutral `up.mig`/`down.mig` text is **not** losslessly parseable back to `Step`s (render_up drops each
+  index step's table and each `alter column`'s resulting `after` state), and the snapshot chain is the honest
+  source of truth. Consequence (documented): a *hand-edited* `up.mig` still isn't honored on the up path — its
+  steps come from the snapshots; the edit is caught by `verify` (below) and the tamper hash.
+- **The `_based_migrations` ledger** (id text PK + content_hash + applied_at, dialect-typed) is created on
+  first use (`ensure_ledger`, `CREATE TABLE IF NOT EXISTS`). `apply` runs each migration's statements **plus
+  its ledger insert under one `begin`/`commit`** (principle 7); a failed statement rolls back. On MySQL/MariaDB
+  DDL implicitly commits, so the tx is best-effort there — the ledger row is still written in the same turn and
+  a re-`apply` skips completed migrations (matched by id), so a crash mid-apply retries cleanly.
+- **`content_hash` = FNV-1a-64 over the comment/blank-stripped, line-trimmed `up.mig` bytes**, 16 lowercase
+  hex (the D31 fingerprint family; not security-critical — it guards an accidental post-apply edit). Recorded
+  in the ledger; at every `apply`/`status` an applied migration's *current* up.mig hash is compared to the
+  stored one — a **mismatch is a hard error** (`MigrateError::Tamper`), never a silent re-apply (migrations.md:
+  applied history is immutable, fix forward). An applied row whose directory is gone, or a non-prefix/gapped
+  ledger, is likewise a loud `Order` error.
+- **Destructive gate.** A pending migration with any destructive step (drop / narrowing / new
+  not-null-without-default / new unique — `Step::destructive`, D39) refuses to apply without
+  `--allow-destructive`; the safe migrations before it still apply, then `apply` stops at the gate (principle 1).
+- **Rollback = raw-SQL `down.mig`, honored if present, never generated.** A `down.mig` is **raw per-dialect
+  SQL** (`;`-split), not neutral steps — because the neutral text isn't losslessly parseable (above) and a
+  hand-written reverse is naturally SQL (mirrors the `raw(dialect)` escape). `Direction::Down` rolls back the
+  latest applied; `Direction::To(N)` reconciles the applied set to `{≤ N}` (roll forward pending up to N, or
+  roll back — newest first — anything above it; `To(0)` = all), each rollback deleting its ledger row in the
+  same tx. A rollback with no `down.mig` is `MigrateError::NoDown` (roll-forward only), never a silent skip.
+- **`based migrate verify` = the offline CI gate.** For each migration it re-renders `render_up(diff(snap[N-1],
+  snap[N]))` and compares its `content_hash` to the stored `up.mig` (catching an up.mig hand-edited away from
+  its snapshots), checks the numbering is gap-free, and asserts the *latest* snapshot equals
+  `Snapshot::from_schema(current .bsl)` (catching uncaptured schema changes — the CLI twin of the offline LSP
+  drift diagnostic, E5). No database. Reads clean today; `raw`-carrying migrations would report `partial` once
+  raw steps land.
+- **Multi-dialect + multi-shard.** `apply`/`status` connect through the same driver stack `based serve` uses —
+  the CLI now links all three drivers (`ShardRouter`/`PgRouter`/`SqliteBackend`) and picks by manifest dialect;
+  `--database-url` is repeatable so a sharded fleet migrates every shard with the same set (D20). Proven live:
+  `tests/migrate_apply.rs` (SQLite in-memory, in the normal gate — fresh apply + ledger, re-apply no-op,
+  `status`, `down.mig` rollback, tamper, destructive gate) and `tests/migrate_apply_mariadb.rs` (the D35 Docker
+  harness — apply against a real `mariadb:11.4`, ledger + column verified, re-apply no-op, tamper), both ran
+  genuinely green. *Deferred:* multi-instance apply coordination (advisory lock for racing deployers, parallels
+  D25's durable-store deferral); `@was` renames + the LSP drift diagnostic (E5); the `raw(dialect)` up step.

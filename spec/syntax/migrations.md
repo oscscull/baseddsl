@@ -325,12 +325,18 @@ net is the worst quadrant of principle 1.
 - **No `down.mig` is ever auto-generated.** Silence here is honest: the tool will not pretend a
   reverse exists.
 - **An OPTIONAL author-written `down.mig` is honored if present.** When you *can* write a correct
-  reverse (a pure additive migration, a reversible rename), you may author `down.mig` by hand in the
-  same neutral vocabulary. `based migrate apply --down` (or `--to <NNNN>`) then runs it. Its absence
-  means "this migration is roll-forward only," which is stated in `status`, not hidden.
-
-**TODO (E4):** the exact down-invocation surface (`--down` one step vs. `--to <NNNN>` a target) —
-pick in E4; both are compatible with "honored if present, never generated."
+  reverse (a pure additive migration, a reversible rename), you author `down.mig` by hand as **raw
+  per-dialect SQL** (`;`-terminated statements — the honest form for a hand-written reverse, D42): a
+  neutral-vocabulary down would need a lossless neutral-step *text parser* the engine deliberately
+  doesn't have (the up path is snapshot-authoritative, not text-parsed — E3/E4), and someone writing a
+  reverse is writing SQL anyway (this mirrors the `raw(dialect)` escape). Its absence means "this
+  migration is roll-forward only," which is stated in `status`, not hidden.
+- **Down-invocation surface (resolved E4).** `based migrate apply --down` rolls back the single most-
+  recently-applied migration; `based migrate apply --to <NNNN>` reconciles the applied set to exactly
+  `{≤ NNNN}` — rolling *forward* pending migrations up to `NNNN`, or rolling *back* (newest first, each
+  via its `down.mig`) anything applied above it (`--to 0` rolls back everything). Each rollback runs in
+  a transaction that also deletes the migration's ledger row. A rollback of a migration with no
+  `down.mig` is a hard error, never a silent skip.
 
 ---
 
@@ -348,10 +354,13 @@ _based_migrations
 
 - **One row per applied migration**, inserted inside that migration's own transaction — so a
   half-applied migration (crash mid-apply) leaves no ledger row and re-`apply` retries it cleanly.
-- **`content_hash` = a stable hash of the canonical `up.mig`** (the neutral step bytes, whitespace-
-  normalized — **TODO E4:** pin the exact canonicalization + hash algo; reuse the FNV family already
-  in `based-runtime` (D31) or a stronger digest if collision-resistance matters here). This is the
-  tamper/drift guard.
+- **`content_hash` = a stable hash of the canonical `up.mig`** (resolved E4,
+  `based_codegen::migrate::content_hash`): canonicalization drops comment (`#…`) and blank lines and
+  trims each remaining line (so a cosmetic whitespace/comment edit doesn't trip the guard, but any
+  change to a step does), then FNV-1a-64 over those bytes, rendered as 16 lowercase hex digits — the
+  same FNV family the runtime uses for request fingerprints (D31); collision resistance is not
+  security-critical (this guards an accidental post-apply edit, not an adversary), so a fast
+  non-cryptographic hash is the right tool. This is the tamper/drift guard.
 - **Tamper rule (loud, principle 1):** at `apply`/`status`/`verify`, the ledger's stored hash for an
   already-applied migration is compared to the current file's hash. **A mismatch — the `up.mig` was
   edited after it was applied — is a hard error**, never a silent re-apply. An applied migration is
