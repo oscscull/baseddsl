@@ -801,3 +801,45 @@ this D is the *codegen* + scanner half, fully `cargo test`-verifiable.
   indexes for soft-delete, `INSERT … ON CONFLICT`, `RETURNING` — the D12 re-select is dialect-portable
   and kept). MySQL stays folded into `MariaDb` (a fork; the emitted SQL is MySQL-8-compatible), not a
   distinct variant.
+
+## D30 — typed per-callable `$ctx` in the generated Rust client (`based gen client`)
+Closes the D4/D13 residue "emitting the per-callable `Ctx` type in the client." Until now the generated
+Rust client had **no typed surface for `$ctx` at all**: `Transport::call(route, input)` couldn't carry
+context, so a caller couldn't see from the generated code what context each callable needs, and the
+in-process bridge (`tests/embed.rs`) was forced to smuggle `$ctx` on the side (held on the bridge
+struct, per unit-of-work). `$ctx` is per-request and inferred (D4/D5), and the client now mirrors that
+inference exactly.
+- **One typed `<Name>Ctx` struct per callable that reads context.** Its fields are the callable's
+  deduped `ctx_requires` bag (`RQuery`/`RMutation.ctx_requires`, read straight off the IR — no new
+  resolution), one field per required `$ctx.<field>`. A field's type follows the *same* inference the
+  input side uses (D13): a relation requirement (`CtxField::Relation`) carries the model's key `Uuid`
+  (D1); a scalar requirement (`CtxField::Scalar`) is that column's primitive (an `int`-compared
+  `$ctx.tier` → `i64`). A callable with **no** `$ctx` requirements emits **no** struct and takes
+  `ctx: ()`, so the common public case stays clean (principle 2 — the empty context has one safe
+  meaning, and deviation is the visible typed struct).
+- **The method carries `$ctx` as a typed argument.** `fn <name>(&self, input: <Name>Input, ctx:
+  <Name>Ctx | ())` — the context sits *next to* the input, never merged into it, because `$ctx` is
+  request context an upstream sets, not a caller-supplied body field (auth.md/D7). So the generated
+  signature is now the honest contract: reading it tells you both the arguments *and* the context the
+  callable requires.
+- **`Transport` carries the context generically.** `call<I, C, O>(route, input, ctx)` grows a
+  `C: Serialize` context parameter alongside `I: Serialize`. The concrete `Transport` serializes `ctx`
+  to the same JSON `$ctx` bag the engine already consumes (`Request` context, D18/D21); `&()`
+  serializes to JSON `null`, which the bridge maps to an empty bag. One trait shape serves both the
+  in-process door (D22 — `$ctx` supplied straight in) and the HTTP door (D21 — the bridge would set the
+  `X-Based-Context` header from the serialized context instead). The runtime still owns *how* the
+  context reaches the wire; codegen only types *what* it is.
+- **Reuses the existing type resolver** (`primitive`/`Uuid`), so the `<Name>Ctx` field types can't
+  drift from the input-side field types for the same column (principle 4). No client-side ctx logic
+  beyond reading `ctx_requires` + one struct-emission arm — the shape mirrors the sema/facts rendering
+  (D4/D5) and the OpenAPI `x-ctx-requires` extension (D24), all fed by the one IR bag.
+- **Tests:** 4 new in `based-codegen/tests/client.rs` (14 total) — the transport signature carries
+  `ctx`, a `$ctx.org` callable gets a `MyOrgOrdersCtx { org: Uuid }` the method takes, a public
+  callable takes `()` and emits no `Ctx` struct, and a scalar `$ctx.tier` types as `i64`. `tests/
+  embed.rs` (the verbatim generated client over `MockDb`) is regenerated to the new signature and its
+  `$ctx` round-trip now supplies a typed `MyOrgOrdersCtx` straight in (no side-channel bag), proving the
+  end-to-end typed path; the `embed` module doc's bridge example is updated to the new trait.
+- *Deferred:* the HTTP `Transport` bridge that maps the serialized context to the `X-Based-Context`
+  header (a runtime concern; the trait shape is ready); a non-Rust client's `$ctx` typing rides D24's
+  OpenAPI `x-ctx-requires` vendor extension (descriptive, not a generated struct) rather than this
+  Rust-only struct.

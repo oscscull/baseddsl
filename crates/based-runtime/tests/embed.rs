@@ -40,9 +40,10 @@ mod client {
     pub struct ClientError(pub String);
 
     pub trait Transport {
-        fn call<I, O>(&self, route: &str, input: &I) -> Result<O, ClientError>
+        fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
         where
             I: Serialize,
+            C: Serialize,
             O: serde::de::DeserializeOwned;
     }
 
@@ -74,6 +75,10 @@ mod client {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MyOrgOrdersInput;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MyOrgOrdersCtx {
+        pub org: Uuid,
+    }
     pub const MY_ORG_ORDERS_ROUTE: &str = "/q/my_org_orders";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,26 +93,36 @@ mod client {
 
     impl<T: Transport> Client<T> {
         /// `POST /q/order_by_id`
-        pub fn order_by_id(&self, input: OrderByIdInput) -> Result<Option<OrderCard>, ClientError> {
-            self.transport.call(ORDER_BY_ID_ROUTE, &input)
+        pub fn order_by_id(
+            &self,
+            input: OrderByIdInput,
+            ctx: (),
+        ) -> Result<Option<OrderCard>, ClientError> {
+            self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx)
         }
         /// `POST /q/orders_in_org`
         pub fn orders_in_org(
             &self,
             input: OrdersInOrgInput,
+            ctx: (),
         ) -> Result<Vec<OrderCard>, ClientError> {
-            self.transport.call(ORDERS_IN_ORG_ROUTE, &input)
+            self.transport.call(ORDERS_IN_ORG_ROUTE, &input, &ctx)
         }
         /// `POST /q/my_org_orders`
         pub fn my_org_orders(
             &self,
             input: MyOrgOrdersInput,
+            ctx: MyOrgOrdersCtx,
         ) -> Result<Vec<OrderCard>, ClientError> {
-            self.transport.call(MY_ORG_ORDERS_ROUTE, &input)
+            self.transport.call(MY_ORG_ORDERS_ROUTE, &input, &ctx)
         }
         /// `POST /m/place_order`
-        pub fn place_order(&self, input: PlaceOrderInput) -> Result<OrderCard, ClientError> {
-            self.transport.call(PLACE_ORDER_ROUTE, &input)
+        pub fn place_order(
+            &self,
+            input: PlaceOrderInput,
+            ctx: (),
+        ) -> Result<OrderCard, ClientError> {
+            self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx)
         }
     }
 }
@@ -139,22 +154,29 @@ const SCHEMA: &str = r#"
 "#;
 
 /// The bridge: a `Transport` backed by an in-process [`Engine`]. This is the whole of
-/// what an embedding app writes — serialize the typed input to JSON, run it through the
-/// engine, decode the `200` body into the output type (a non-`200` → `ClientError`).
-/// `$ctx` is held here (per unit-of-work), supplied straight in — no header dance.
+/// what an embedding app writes — serialize the typed input *and* the typed `$ctx` to
+/// JSON, run it through the engine, decode the `200` body into the output type (a
+/// non-`200` → `ClientError`). The generated method now carries `$ctx` as a typed
+/// argument (D30), so the bridge no longer holds it — it is supplied per call, still
+/// in-process with no header dance (auth.md/D7). A public callable passes `ctx: &()`,
+/// which serializes to JSON `null` → an empty context bag.
 struct InProcess<'a> {
     engine: &'a Engine,
-    ctx: serde_json::Value,
 }
 
 impl client::Transport for InProcess<'_> {
-    fn call<I, O>(&self, route: &str, input: &I) -> Result<O, client::ClientError>
+    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, client::ClientError>
     where
         I: Serialize,
+        C: Serialize,
         O: DeserializeOwned,
     {
         let args = serde_json::to_value(input).map_err(|e| client::ClientError(e.to_string()))?;
-        let resp = self.engine.call(route, args, self.ctx.clone());
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { json!({}) })
+            .map_err(|e| client::ClientError(e.to_string()))?;
+        let resp = self.engine.call(route, args, ctx);
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(|e| client::ClientError(e.to_string()))
         } else {
@@ -188,14 +210,11 @@ fn typed_get_round_trips_in_process() {
     let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 42 }))]]);
     let engine = Engine::new(compiled(), db, SeqIdGen::default());
     let api = client::Client {
-        transport: InProcess {
-            engine: &engine,
-            ctx: json!({}),
-        },
+        transport: InProcess { engine: &engine },
     };
 
     let got = api
-        .order_by_id(client::OrderByIdInput { id: "o-1".into() })
+        .order_by_id(client::OrderByIdInput { id: "o-1".into() }, ())
         .expect("call ok");
     let card = got.expect("a row");
     assert_eq!(card.status, "paid");
@@ -208,16 +227,16 @@ fn typed_get_missing_is_none() {
     let db = MockDb::new(vec![vec![]]);
     let engine = Engine::new(compiled(), db, SeqIdGen::default());
     let api = client::Client {
-        transport: InProcess {
-            engine: &engine,
-            ctx: json!({}),
-        },
+        transport: InProcess { engine: &engine },
     };
 
     let got = api
-        .order_by_id(client::OrderByIdInput {
-            id: "missing".into(),
-        })
+        .order_by_id(
+            client::OrderByIdInput {
+                id: "missing".into(),
+            },
+            (),
+        )
         .expect("call ok");
     assert!(got.is_none());
 }
@@ -231,57 +250,55 @@ fn typed_list_round_trips_in_process() {
     ]]);
     let engine = Engine::new(compiled(), db, SeqIdGen::default());
     let api = client::Client {
-        transport: InProcess {
-            engine: &engine,
-            ctx: json!({}),
-        },
+        transport: InProcess { engine: &engine },
     };
 
     let rows = api
-        .orders_in_org(client::OrdersInOrgInput {
-            org: "org-1".into(),
-        })
+        .orders_in_org(
+            client::OrdersInOrgInput {
+                org: "org-1".into(),
+            },
+            (),
+        )
         .expect("call ok");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].total, 9);
     assert_eq!(rows[1].status, "open");
 }
 
-/// `$ctx` is supplied straight in — no header dance (auth.md/D7). With the context the
-/// engine requires, a `$ctx`-scoped query runs; without it, the boundary `400` maps to
-/// the client's `ClientError` (the same non-200 an HTTP client would see).
+/// `$ctx` is now a **typed** argument on the generated method (D30): `my_org_orders`
+/// takes a `MyOrgOrdersCtx { org }`, supplied straight in — no header dance (auth.md/D7)
+/// and no untyped side-channel bag. With the required context the `$ctx`-scoped query
+/// runs; an empty context (the bridge maps `&()` → `{}`) makes the engine's boundary
+/// `400` surface as the client's `ClientError` (the same non-200 an HTTP client sees).
 #[test]
 fn ctx_supplied_in_process_and_required() {
-    let compiled = compiled();
-
-    // With ctx.org present → the query runs and decodes.
+    // With MyOrgOrdersCtx.org present → the query runs and decodes.
     let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 1 }))]]);
-    let engine = Engine::new(compiled, db, SeqIdGen::default());
+    let engine = Engine::new(compiled(), db, SeqIdGen::default());
     let api = client::Client {
-        transport: InProcess {
-            engine: &engine,
-            ctx: json!({ "org": "org-9" }),
-        },
+        transport: InProcess { engine: &engine },
     };
     let rows = api
-        .my_org_orders(client::MyOrgOrdersInput)
+        .my_org_orders(
+            client::MyOrgOrdersInput,
+            client::MyOrgOrdersCtx {
+                org: "org-9".into(),
+            },
+        )
         .expect("call ok");
     assert_eq!(rows.len(), 1);
 
-    // Without it → a boundary 400 surfaces as ClientError (the missing-ctx message).
-    let bare = client::Client {
-        transport: InProcess {
-            engine: &engine,
-            ctx: json!({}),
-        },
-    };
-    let err = bare
-        .my_org_orders(client::MyOrgOrdersInput)
-        .expect_err("missing ctx is an error");
+    // A route that requires `$ctx.org` but is reached with an empty context bag (the
+    // untyped raw path here, mirroring a missing header) → a boundary 400.
+    let err = engine.call("/q/my_org_orders", json!({}), json!({}));
+    assert_eq!(err.status, 400);
     assert!(
-        err.0.contains("ctx"),
+        err.body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("ctx")),
         "message names the missing ctx: {}",
-        err.0
+        err.body
     );
 }
 
@@ -315,17 +332,17 @@ fn mutation_response_is_the_created_rows_declared_shape() {
     // Typed: `place_order` returns `OrderCard`, and the shaped body decodes into it —
     // the same typed round-trip a `get` gets.
     let api = client::Client {
-        transport: InProcess {
-            engine: &engine,
-            ctx: json!({}),
-        },
+        transport: InProcess { engine: &engine },
     };
     let card = api
-        .place_order(client::PlaceOrderInput {
-            org: "o-2".into(),
-            status: "open".into(),
-            total: 7,
-        })
+        .place_order(
+            client::PlaceOrderInput {
+                org: "o-2".into(),
+                status: "open".into(),
+                total: 7,
+            },
+            (),
+        )
         .expect("write response decodes into the declared OrderCard (D12)");
     assert_eq!(card.status, "open");
     assert_eq!(card.total, 7);

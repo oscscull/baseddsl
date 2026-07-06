@@ -25,6 +25,16 @@
 //! is a `Uuid` — the wire carries the id, per D1. `optional` -> `Option<T>`, a
 //! to-many scalar -> `Vec<T>`.
 //!
+//! ## Per-callable `$ctx` (D4/D5, D30)
+//! `$ctx` is per-request and inferred, not a global type: each callable requires
+//! exactly the `$ctx.<field>`s it (plus its `@scope`/filters) reads, each typed by
+//! inference. The client mirrors that — a callable with context requirements gets a
+//! typed `<Name>Ctx` struct (one field per requirement) that the method takes
+//! alongside its input, and the `Transport` carries it as request context (never a
+//! body field, auth.md/D7). A callable needing *no* context takes `ctx: ()`, so the
+//! common public case stays clean. This makes the client honest about the context
+//! contract instead of smuggling `$ctx` on the side.
+//!
 //! ## Deferred (documented, not silently wrong)
 //! - Nested shape sub-objects (`field { … }`) are skipped in the output struct, same
 //!   as the read side (they need JSON aggregation; PLAN M3).
@@ -33,7 +43,7 @@
 //!   runtime concern (pagination.md).
 
 use based_ast::*;
-use based_sema::{CheckedSchema, MemberKind, RModel, RQuery};
+use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel, RQuery};
 
 /// The client compile target (manifest `client`). Rust is first and only for now;
 /// the enum exists so the entry point can branch when a second target lands.
@@ -76,6 +86,10 @@ struct Callable<'a> {
     output: String,
     /// the output *struct* to emit (name + fields), deduped across callables.
     out_struct: OutStruct,
+    /// the `$ctx.<field>`s this callable requires (D4/D5), inferred per callable.
+    /// Empty for a public callable (no context); non-empty callables get a typed
+    /// `<Name>Ctx` struct the method takes and the `Transport` carries.
+    ctx_requires: &'a [CtxReq],
 }
 
 /// A named output struct: a shape projection or a bare-model row.
@@ -108,12 +122,21 @@ mod rust {
             out.push_str(&render_struct(&c.out_struct.name, &c.out_struct.fields));
         }
 
-        // Input structs + routes, in declaration order.
+        // Input structs (+ the per-callable `Ctx` struct, when the callable needs
+        // context) + routes, in declaration order.
         out.push_str("\n// ---------- inputs + routes ----------\n");
         for c in &callables {
             out.push('\n');
             let fields = input_fields(schema, c);
             out.push_str(&render_struct(&input_name(c.name), &fields));
+            // A callable that reads `$ctx.<field>`s (D4/D5) gets a typed context
+            // struct the method takes; a public callable (no requirements) takes `()`.
+            if !c.ctx_requires.is_empty() {
+                out.push_str(&render_struct(
+                    &ctx_name(c.name),
+                    &ctx_fields(c.ctx_requires),
+                ));
+            }
             out.push_str(&format!(
                 "/// Wire route for `{}`.\npub const {}: &str = \"{}\";\n",
                 c.name,
@@ -139,6 +162,11 @@ mod rust {
             .iter()
             .map(|q| (q.name.as_str(), q))
             .collect();
+        let mutations: std::collections::HashMap<&str, &_> = schema
+            .mutations
+            .iter()
+            .map(|m| (m.name.as_str(), m))
+            .collect();
 
         let mut out = Vec::new();
         for decl in decls {
@@ -156,9 +184,13 @@ mod rust {
                         root,
                         output: query_output(rq, &os.name),
                         out_struct: os,
+                        ctx_requires: &rq.ctx_requires,
                     });
                 }
                 Decl::Mutation(m) => {
+                    let Some(rm) = mutations.get(m.name.node.as_str()) else {
+                        continue;
+                    };
                     let root = schema.model(&m.ret.ty.node).or_else(|| {
                         // A shape return: resolve the model it projects from.
                         schema
@@ -180,6 +212,7 @@ mod rust {
                         root,
                         output,
                         out_struct: os,
+                        ctx_requires: &rm.ctx_requires,
                     });
                 }
                 _ => {}
@@ -421,20 +454,49 @@ mod rust {
         s
     }
 
-    /// One typed client method: `POST` the input to the route, decode the output.
+    /// One typed client method: `POST` the input to the route, carry the typed
+    /// context, decode the output. A callable with `$ctx` requirements takes a
+    /// `<Name>Ctx`; one with none takes `ctx: ()` (the engine reads no context).
     fn render_method(c: &Callable) -> String {
+        let ctx_ty = if c.ctx_requires.is_empty() {
+            "()".to_string()
+        } else {
+            ctx_name(c.name)
+        };
         format!(
-            "    /// `POST {route}`\n    pub fn {name}(&self, input: {input}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input)\n    }}\n",
+            "    /// `POST {route}`\n    pub fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input, &ctx)\n    }}\n",
             route = c.route,
             name = field_ident(c.name),
             input = input_name(c.name),
+            ctx_ty = ctx_ty,
             output = c.output,
             konst = route_const(c.name),
         )
     }
 
+    /// The context fields for a callable: one per required `$ctx.<field>`, typed by
+    /// the inference (a relation requirement carries the model's key `Uuid`, D1).
+    fn ctx_fields(reqs: &[CtxReq]) -> Vec<(String, String)> {
+        reqs.iter()
+            .map(|r| (r.field.clone(), ctx_field_type(&r.ty)))
+            .collect()
+    }
+
+    /// A `$ctx` field's Rust type: a scalar by its alias, a relation as the `Uuid`
+    /// key the wire carries (D1) — the same mapping the input side uses.
+    fn ctx_field_type(ty: &CtxField) -> String {
+        match ty {
+            CtxField::Scalar(p) => primitive(*p).to_string(),
+            CtxField::Relation(_) => "Uuid".to_string(),
+        }
+    }
+
     fn input_name(name: &str) -> String {
         format!("{}Input", pascal(name))
+    }
+
+    fn ctx_name(name: &str) -> String {
+        format!("{}Ctx", pascal(name))
     }
 
     fn route_const(name: &str) -> String {
@@ -509,12 +571,15 @@ pub struct Page<T> {
 #[derive(Debug, Clone)]
 pub struct ClientError(pub String);
 
-/// Post a typed input to a route and decode the typed output. Implemented by the
+/// Post a typed input to a route, carry the typed request context (`$ctx`, D4/D5 —
+/// sent out of band, never a body field, auth.md/D7), and decode the typed output.
+/// A callable with no `$ctx` requirements passes `ctx: &()`. Implemented by the
 /// runtime's HTTP client; codegen only depends on this shape.
 pub trait Transport {
-    fn call<I, O>(&self, route: &str, input: &I) -> Result<O, ClientError>
+    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
         I: Serialize,
+        C: Serialize,
         O: serde::de::DeserializeOwned;
 }
 

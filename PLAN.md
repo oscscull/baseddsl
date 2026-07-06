@@ -28,7 +28,8 @@ resumes it:
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
 Batch progress: current batch — D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen +
-the dialect-aware `?`→`$n` scanner; the concrete driver deferred to the live-DB slice) done — 1/3.
+the dialect-aware `?`→`$n` scanner; the concrete driver deferred to the live-DB slice) +
+D30 (typed per-callable `$ctx` in the generated Rust client) done — 2/3.
 Prior batch: D26 (container probes + graceful shutdown) + D27 (SQLite backend + real integration) +
 D28 (SQLite DDL codegen) — 3/3.
 
@@ -57,8 +58,9 @@ D28 (SQLite DDL codegen) — 3/3.
 same front end (`load_checked` in based-cli), then lowers the `CheckedSchema` to DDL,
 then appends the query SELECT templates (`sql::dml`) and the mutation write templates
 (`sql::mutations`), both reading the AST alongside the IR. `based gen client [--out]`
-runs the same front end, then lowers to a typed Rust client module (`client`). `based gen
-openapi [--out]` runs the same front end, then emits one OpenAPI 3.1 document over the
+runs the same front end, then lowers to a typed Rust client module (`client`; each callable's
+`$ctx.<field>` bag is now a typed `<Name>Ctx` method argument, D30). `based gen openapi [--out]`
+runs the same front end, then emits one OpenAPI 3.1 document over the
 same wire (`openapi`, D24) — feed it to `openapi-generator` for a client in any language.
 All bail unless every file parses *and* checks clean (codegen assumes a clean schema).
 
@@ -220,8 +222,11 @@ Ordered by value. Each is a real gap with a known approach.
    *Deferred residue*: a `$ctx` field with no column to infer from — used only in a
    `guard` (Handle 3, which takes no args yet) or a raw block — is typed by a local
    annotation *at the use site* when `guard` grows args (decided direction, D4); it
-   contributes nothing to inference today. Also deferred: `$ctx` passed *as a filter
-   arg* (arg/usage typing, D14); emitting the per-callable `Ctx` type in the client.
+   contributes nothing to inference today. ~~Also deferred: emitting the per-callable
+   `Ctx` type in the client.~~ ✅ **done (D30)** — each callable's `ctx_requires` bag
+   is now a typed `<Name>Ctx` struct the generated Rust client method takes (a public
+   callable takes `()`); the `Transport` carries it as request context. Still deferred:
+   `$ctx` passed *as a filter arg* (arg/usage typing, D14).
 5. ~~**Relation `on:` custom joins.**~~ ✅ **done** (D17). A forward relation's
    `(on: order.user_ref = user.legacy_id)` predicate is now resolved in a *two-table*
    scope — the FK-holding model plus its target — in `model::resolve_exprs` (read
@@ -351,7 +356,9 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
     `Client<T: Transport>` method that posts the input struct and decodes the output.
   - **Input struct** per signature: explicit param annotations map through (model type → `Uuid` FK,
     D1); untyped params infer from the mapped column (`-> edge`/same-name relation → `Uuid`, `op col`/
-    same-name scalar → its type); defaulted/optional params → `Option<T>`. `$ctx` is never an input.
+    same-name scalar → its type); defaulted/optional params → `Option<T>`. `$ctx` is never an input —
+    it is a **separate typed `<Name>Ctx` method argument** (D30): a struct of the callable's
+    `ctx_requires` bag (relation → `Uuid`, scalar → its type), or `()` for a public callable.
   - **Output type** from `-> Output`: a shape → a struct projecting its body (relation reach terminal →
     `Uuid`); a bare model / `full` → every stored column (FKs as `Uuid`); shared shape → one struct.
     **Return wrapper**: paginated → `Page<T>` (`{ rows, cursor }` envelope), `list`/many → `Vec<T>`,
@@ -650,7 +657,8 @@ should chase the former.
     → ClientError`) lives in the embedding crate — shown in `Engine`'s docs and exercised by
     the worked example `tests/embed.rs` (the *verbatim* `based gen client` output over a
     `MockDb`: typed `order_by_id`/`orders_in_org`/`my_org_orders` round-trips, `$ctx` supplied
-    straight in — no header dance, and the write `place_order` now decodes into a typed
+    straight in as a **typed `<Name>Ctx` argument** (D30) — no header dance, no side-channel bag —
+    and the write `place_order` now decodes into a typed
     `OrderCard` via the declared-shape re-select, D12). Unlocks one binary (no sidecar), steadier latency,
     `MockDb` end-to-end tests, and the path toward **app-owned transactions** (compose several
     callables in one unit-of-work over a shared connection — inexpressible on stateless HTTP RPC;

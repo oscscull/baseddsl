@@ -49,7 +49,7 @@ fn get_query_returns_option_of_shape() {
     assert!(out.contains("pub total: i64,"), "\n{out}");
     // A `get` (single, unique key) -> Option<T>.
     assert!(
-        out.contains("pub fn order_by_id(&self, input: OrderByIdInput) -> Result<Option<OrderCard>, ClientError>"),
+        out.contains("pub fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"),
         "\n{out}"
     );
     assert!(
@@ -69,7 +69,7 @@ fn list_query_returns_vec() {
         query orders_in_org(org) -> OrderCard[];
         "#);
     assert!(
-        out.contains("pub fn orders_in_org(&self, input: OrdersInOrgInput) -> Result<Vec<OrderCard>, ClientError>"),
+        out.contains("pub fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError>"),
         "\n{out}"
     );
     // A relation same-name param is the FK id on the wire.
@@ -89,7 +89,7 @@ fn paginated_query_returns_page_envelope() {
         "#);
     assert!(
         out.contains(
-            "pub fn active(&self, input: ActiveInput) -> Result<Page<ProductCard>, ClientError>"
+            "pub fn active(&self, input: ActiveInput, ctx: ()) -> Result<Page<ProductCard>, ClientError>"
         ),
         "\n{out}"
     );
@@ -133,7 +133,7 @@ fn mutation_returns_single_shape_and_maps_to_m_route() {
     );
     assert!(
         out.contains(
-            "pub fn place_order(&self, input: PlaceOrderInput) -> Result<OrderCard, ClientError>"
+            "pub fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError>"
         ),
         "\n{out}"
     );
@@ -195,4 +195,79 @@ fn keyword_field_is_raw_escaped() {
         "#);
     // A DSL field named `type` collides with a Rust keyword -> `r#type`.
     assert!(out.contains("pub r#type: String,"), "\n{out}");
+}
+
+#[test]
+fn ctx_transport_carries_typed_context() {
+    // The abstract transport threads a typed context alongside the input (D30).
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        out.contains(
+            "fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>"
+        ),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn callable_reading_ctx_gets_typed_ctx_struct() {
+    // A `$ctx.<field>` requirement (D4/D5) surfaces as a per-callable `<Name>Ctx`
+    // struct the method takes; a relation field carries the model's key (Uuid, D1).
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Org { deleted_at: timestamp?, name: text }
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, org: Org, status: text }
+        shape OrderCard from Order { status }
+        query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
+        "#);
+    // The typed context struct exists, `org` typed as the relation key.
+    assert!(out.contains("pub struct MyOrgOrdersCtx {"), "\n{out}");
+    assert!(out.contains("pub org: Uuid,"), "\n{out}");
+    // The method takes it (not `()`) and forwards it to the transport.
+    assert!(
+        out.contains("pub fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError>"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("self.transport.call(MY_ORG_ORDERS_ROUTE, &input, &ctx)"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn public_callable_takes_unit_ctx_and_emits_no_ctx_struct() {
+    // A callable that reads no `$ctx` stays clean: `ctx: ()`, no `<Name>Ctx` struct.
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(!out.contains("OrderByIdCtx"), "\n{out}");
+    assert!(
+        out.contains(
+            "pub fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"
+        ),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn ctx_scalar_field_typed_by_inference() {
+    // A `$ctx` field compared against a scalar column infers that column's type
+    // (here `int`), not a Uuid — the same inference untyped params use.
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, status: text, tier: int }
+        shape OrderCard from Order { status }
+        query my_tier() -> OrderCard[] { list Order where (tier = $ctx.tier); }
+        "#);
+    assert!(out.contains("pub struct MyTierCtx {"), "\n{out}");
+    assert!(out.contains("pub tier: i64,"), "\n{out}");
 }
