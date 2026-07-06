@@ -1,10 +1,17 @@
 //! Compiling an in-editor snapshot.
 //!
-//! The server runs the same front end as `based check` — discover the project's
+//! The server runs the same front end as `based check` — discover a project's
 //! `.bsl` set, overlay any unsaved editor buffers, parse + check — then keeps the
 //! result (facts + diagnostics + a line index per file) so inlay-hint / hover /
 //! diagnostic requests are served without recompiling. The `FileId` a span carries
 //! is the index into `sources`, exactly as the CLI builds it.
+//!
+//! A workspace holds *many* projects: `.bsl` rides along inside a host repo, so the
+//! opened folder is rarely the schema's `based.toml` dir (D5/D9). Each open file is
+//! resolved to its owning project by walking up to the nearest `based.toml`
+//! ([`find_manifest_root`]) and one snapshot is compiled per project — so cross-file
+//! references inside a manifest resolve, and multiple embedded schemas in one
+//! workspace stay independent. A file under no manifest keeps a single-file fallback.
 
 use based_ast::{Decl, FileId};
 use based_diagnostics::Diagnostic;
@@ -35,23 +42,61 @@ impl Snapshot {
     }
 }
 
-/// Compile a snapshot rooted at `root`, with `overlays` (canonical path -> unsaved
-/// buffer text) taking precedence over on-disk contents.
-pub fn compile(root: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
-    let mut project_diagnostics = Vec::new();
-
-    // The file set: the project's closed `.bsl` glob when there is a manifest,
-    // else just the open buffers (so a lone file still gets facts + diagnostics).
-    let paths: Vec<PathBuf> = match based_manifest::discover(root) {
-        Ok(project) => project.files.into_iter().map(|f| f.path).collect(),
-        Err(diags) => {
-            project_diagnostics.extend(diags);
-            let mut ps: Vec<PathBuf> = overlays.keys().cloned().collect();
-            ps.sort();
-            ps
+/// Walk up `file`'s ancestor directories to the nearest one holding a `based.toml`,
+/// returning that directory — the manifest root that *owns* the file (the
+/// rust-analyzer / tsserver project-marker model). `None` when no ancestor has a
+/// manifest, i.e. the file rides under no project (single-file fallback).
+pub fn find_manifest_root(file: &Path) -> Option<PathBuf> {
+    // Canonicalize so the walk is over real ancestors; a not-yet-saved buffer
+    // falls back to its raw path, whose parents are still meaningful.
+    let start = canon(file);
+    let mut dir = start.parent();
+    while let Some(d) = dir {
+        if d.join(based_manifest::MANIFEST_NAME).is_file() {
+            return Some(d.to_path_buf());
         }
-    };
+        dir = d.parent();
+    }
+    None
+}
 
+/// Compile the manifest project rooted at `root` (the dir holding `based.toml`),
+/// with `overlays` (canonical path -> unsaved buffer text) taking precedence over
+/// on-disk contents. Overlays for files outside this project are simply ignored.
+pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
+    match based_manifest::discover(root) {
+        Ok(project) => {
+            let paths = project.files.into_iter().map(|f| f.path).collect();
+            compile_paths(paths, overlays, Vec::new())
+        }
+        // Manifest present but unreadable/malformed: surface it as a project-level
+        // diagnostic and still compile this project's open buffers so the editor
+        // keeps giving single-file feedback.
+        Err(diags) => {
+            let mut ps: Vec<PathBuf> = overlays
+                .keys()
+                .filter(|p| find_manifest_root(p).as_deref() == Some(root))
+                .cloned()
+                .collect();
+            ps.sort();
+            compile_paths(ps, overlays, diags)
+        }
+    }
+}
+
+/// Compile a single `.bsl` file under no manifest in isolation (the fallback for a
+/// file that belongs to no project — cross-file references cannot resolve here).
+pub fn compile_loose(file: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
+    compile_paths(vec![file.to_path_buf()], overlays, Vec::new())
+}
+
+/// Read + parse + check a fixed file set, preferring open buffers over disk, into a
+/// snapshot. `project_diagnostics` carries any spanless project-level issues.
+fn compile_paths(
+    paths: Vec<PathBuf>,
+    overlays: &HashMap<PathBuf, String>,
+    project_diagnostics: Vec<Diagnostic>,
+) -> Snapshot {
     // Read every file, preferring an open buffer over disk.
     let mut sources: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     for path in paths {
@@ -96,7 +141,7 @@ pub fn compile(root: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
 
 /// Canonicalize for path comparison; fall back to the raw path if the file does
 /// not resolve (e.g. an unsaved buffer whose path may not exist on disk yet).
-fn canon(path: &Path) -> PathBuf {
+pub fn canon(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -215,7 +260,7 @@ mod tests {
     #[test]
     fn compile_commerce_has_facts_and_no_diagnostics() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
-        let snap = compile(&root, &HashMap::new());
+        let snap = compile_manifest(&root, &HashMap::new());
         assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
         assert!(snap.project_diagnostics.is_empty());
         assert!(!snap.sources.is_empty());
@@ -225,5 +270,89 @@ mod tests {
             "{:?}",
             snap.facts
         );
+    }
+
+    /// A file embedded in a host repo resolves to its own schema's `based.toml`,
+    /// not the opened workspace root — this is the C3 fix's core.
+    #[test]
+    fn find_manifest_root_walks_up_to_nearest_manifest() {
+        let ws = TempWorkspace::new("walkup");
+        ws.write("based.toml", "");
+        ws.write("order/model.bsl", "Order { name: text }\n");
+        let file = ws.path("order/model.bsl");
+
+        let root = find_manifest_root(&file).expect("manifest above the file");
+        assert_eq!(root, canon(&ws.root));
+
+        // A file with no manifest anywhere above it has no project.
+        let orphan = TempWorkspace::new("orphan");
+        orphan.write("loose.bsl", "Order { name: text }\n");
+        assert_eq!(find_manifest_root(&orphan.path("loose.bsl")), None);
+    }
+
+    /// Opening the repo root (no `based.toml` there) and editing a file whose model
+    /// references a *sibling* file must resolve the whole manifest project — no
+    /// spurious `E0110`, unlike the single-file fallback.
+    #[test]
+    fn two_manifest_workspace_resolves_each_project_independently() {
+        let ws = TempWorkspace::new("two_manifest");
+        // Project A: a two-file schema with a cross-file relation.
+        ws.write("a/based.toml", "");
+        ws.write("a/org.bsl", "Org { name: text }\n");
+        ws.write("a/user.bsl", "User {\n  org: Org\n  name: text\n}\n");
+        // Project B: an independent, unrelated schema.
+        ws.write("b/based.toml", "");
+        ws.write("b/widget.bsl", "Widget { label: text }\n");
+
+        // Each project compiles clean on its own manifest.
+        let a = compile_manifest(&ws.path("a"), &HashMap::new());
+        assert!(a.diagnostics.is_empty(), "project A: {:?}", a.diagnostics);
+        assert!(a.project_diagnostics.is_empty());
+        let b = compile_manifest(&ws.path("b"), &HashMap::new());
+        assert!(b.diagnostics.is_empty(), "project B: {:?}", b.diagnostics);
+
+        // The two projects are disjoint: B never sees A's models.
+        assert!(b.sources.iter().all(|(p, _)| !p.ends_with("user.bsl")));
+
+        // The cross-file reference (`User.org -> Org`) is what the manifest scope
+        // buys: compiling `user.bsl` in isolation cannot see `Org` -> E0110.
+        let loose = compile_loose(&ws.path("a/user.bsl"), &HashMap::new());
+        assert!(
+            loose.diagnostics.iter().any(|d| d.code == "E0110"),
+            "single-file fallback should not resolve the sibling model: {:?}",
+            loose.diagnostics
+        );
+    }
+
+    /// A throwaway workspace dir under the system temp, removed on drop.
+    struct TempWorkspace {
+        root: PathBuf,
+    }
+
+    impl TempWorkspace {
+        fn new(tag: &str) -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root =
+                std::env::temp_dir().join(format!("based-lsp-{tag}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap();
+            TempWorkspace { root }
+        }
+
+        fn path(&self, rel: &str) -> PathBuf {
+            self.root.join(rel)
+        }
+
+        fn write(&self, rel: &str, contents: &str) {
+            let p = self.path(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, contents).unwrap();
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }

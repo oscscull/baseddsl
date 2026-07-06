@@ -1229,3 +1229,28 @@ shape as E2's TODOs).
   the destructive **gate** + `verify`/`status` (E4); the `@was` RENAME step + the offline LSP drift
   diagnostic (E5). The raw-step structural-effect annotation (migrations.md's other open TODO) is
   untouched — E2 emits no `raw` steps.
+
+## D40 — LSP per-file manifest resolution (embedded schemas; Track C3)
+The editor server must find a `.bsl` file's project *the way rust-analyzer/tsserver do* — by the nearest
+project marker above it — not by assuming the opened workspace folder is the schema root. The designed
+layout (D9) has `.bsl` riding along **inside a host repo**, so the opened folder is almost never the
+schema's `based.toml` dir; the old "root at one folder, `discover(root)`, else overlays-only" model
+compiled each buffer in isolation and reported spurious `E0110 unknown model` on valid cross-file refs
+(the language has no imports — the manifest glob *is* the namespace, D5/D9).
+- **Project marker = the nearest ancestor `based.toml`.** `compile::find_manifest_root(file)` canonicalizes
+  the file, then walks parent dirs until one holds a `based.toml`; that dir is the project root. `None` ⇒
+  the file rides under no project. An unsaved buffer with no on-disk path falls back to its raw path's
+  ancestors (still meaningful).
+- **One snapshot per project, keyed by owner.** `ProjectKey` = `Manifest(root_dir)` | `Loose(file)`. Each
+  open buffer resolves to exactly one key; `refresh` compiles a snapshot per **distinct** key —
+  `compile_manifest(root)` runs the D5 `**/*.bsl` glob (so sibling models resolve), `compile_loose(file)`
+  keeps the single-file fallback for a file under no manifest. Multiple embedded schemas in one workspace
+  are therefore compiled **independently**; a request (`hover`/`inlay`/diagnostics) routes to
+  `snapshots.get(&project_key(path))`. `State` dropped the single `root`/`snapshot`.
+- **A file is published from its owning project only.** A nested manifest's file also matches an outer
+  project's glob, so on publish each file is emitted from the snapshot whose key equals *its* nearest
+  manifest — the nearest owns it, no double-publish. A `published: Vec<Url>` records last-published files so
+  a project dropping out of the open set (its last buffer closed) has its squiggles explicitly cleared.
+- **Lazy, per-file.** No proactive whole-workspace scan on `initialize`; projects compile as their files
+  open (an editor surfaces diagnostics per open file anyway). *Deferred:* a brand-new unsaved file isn't in
+  its manifest's on-disk glob, so it compiles loose until first save (pre-existing edge).

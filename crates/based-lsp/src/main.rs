@@ -15,9 +15,9 @@ mod compile;
 
 use based_diagnostics::Severity;
 use based_facts::FactKind;
-use compile::{compile, Snapshot};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use compile::{canon, compile_loose, compile_manifest, find_manifest_root, Snapshot};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -30,53 +30,106 @@ struct Backend {
 
 #[derive(Default)]
 struct State {
-    /// Workspace root (holds `based.toml`).
-    root: Option<PathBuf>,
     /// Unsaved editor buffers, keyed by canonical path, overlaid on disk at compile.
     overlays: HashMap<PathBuf, String>,
-    /// The latest compiled snapshot; requests are served from it.
-    snapshot: Option<Snapshot>,
+    /// One compiled snapshot per open project (nearest-manifest dir, or a lone file
+    /// under no manifest); requests route to the snapshot owning the requested file.
+    snapshots: HashMap<ProjectKey, Snapshot>,
+    /// URIs we last published diagnostics to, so a project dropping out of the open
+    /// set has its files cleared rather than left with stale squiggles.
+    published: Vec<Url>,
+}
+
+/// The project an open file belongs to. Every file resolves to exactly one: the
+/// nearest ancestor `based.toml` if there is one, else the file itself.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum ProjectKey {
+    /// A manifest project, keyed by the dir holding `based.toml`.
+    Manifest(PathBuf),
+    /// A single `.bsl` file under no manifest (single-file fallback).
+    Loose(PathBuf),
+}
+
+/// Resolve a file to its owning project (walk up to the nearest `based.toml`).
+fn project_key(path: &Path) -> ProjectKey {
+    match find_manifest_root(path) {
+        Some(root) => ProjectKey::Manifest(root),
+        None => ProjectKey::Loose(canon(path)),
+    }
 }
 
 impl Backend {
-    /// Recompile the project from disk + overlays, store the snapshot, and republish
-    /// diagnostics for every file (empty vectors clear ones that were fixed).
+    /// Recompile every open project from disk + overlays, store the snapshots, and
+    /// republish diagnostics. Each open buffer belongs to exactly one project (its
+    /// nearest manifest, or itself); we compile one snapshot per distinct project so
+    /// cross-file references resolve and embedded schemas stay independent. A file is
+    /// published from the snapshot of its *owning* project only, so nested manifests
+    /// never double-publish; files dropped since last time are cleared.
     async fn refresh(&self) {
-        let (root, overlays) = {
-            let st = self.state.lock().unwrap();
-            (st.root.clone(), st.overlays.clone())
-        };
-        let Some(root) = root else { return };
-        let snapshot = compile(&root, &overlays);
+        let overlays = self.state.lock().unwrap().overlays.clone();
 
-        // Group span-carrying diagnostics by their file.
-        let mut per_file: Vec<Vec<Diagnostic>> = vec![Vec::new(); snapshot.sources.len()];
-        for d in &snapshot.diagnostics {
-            if let Some(span) = d.span {
-                let fid = span.file.0 as usize;
-                if let (Some(bucket), Some(idx)) = (per_file.get_mut(fid), snapshot.lines.get(fid))
-                {
-                    bucket.push(to_lsp_diagnostic(d, idx));
+        let keys: HashSet<ProjectKey> = overlays.keys().map(|p| project_key(p)).collect();
+        let mut snapshots: HashMap<ProjectKey, Snapshot> = HashMap::new();
+        for key in keys {
+            let snap = match &key {
+                ProjectKey::Manifest(root) => compile_manifest(root, &overlays),
+                ProjectKey::Loose(file) => compile_loose(file, &overlays),
+            };
+            snapshots.insert(key, snap);
+        }
+
+        // Collect the publishes (and project-level messages) while holding no lock
+        // across the awaits below.
+        let mut publishes: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
+        let mut project_msgs: Vec<String> = Vec::new();
+        for (key, snapshot) in &snapshots {
+            // Group span-carrying diagnostics by their file.
+            let mut per_file: Vec<Vec<Diagnostic>> = vec![Vec::new(); snapshot.sources.len()];
+            for d in &snapshot.diagnostics {
+                if let Some(span) = d.span {
+                    let fid = span.file.0 as usize;
+                    if let (Some(bucket), Some(idx)) =
+                        (per_file.get_mut(fid), snapshot.lines.get(fid))
+                    {
+                        bucket.push(to_lsp_diagnostic(d, idx));
+                    }
                 }
             }
-        }
-        // Collect the publishes while holding no lock across the awaits below.
-        let mut publishes = Vec::new();
-        for (i, (path, _)) in snapshot.sources.iter().enumerate() {
-            if let Ok(uri) = Url::from_file_path(path) {
-                publishes.push((uri, std::mem::take(&mut per_file[i])));
+            for (i, (path, _)) in snapshot.sources.iter().enumerate() {
+                // Publish a file only from its owning project (a nested manifest's
+                // file also appears in an outer project's glob — the nearest owns it).
+                if project_key(path) != *key {
+                    continue;
+                }
+                if let Ok(uri) = Url::from_file_path(path) {
+                    publishes.push((uri, std::mem::take(&mut per_file[i])));
+                }
+            }
+            for d in &snapshot.project_diagnostics {
+                project_msgs.push(format!("[{}] {}", d.code, d.message));
             }
         }
-        let project_msgs: Vec<String> = snapshot
-            .project_diagnostics
-            .iter()
-            .map(|d| format!("[{}] {}", d.code, d.message))
-            .collect();
 
-        self.state.lock().unwrap().snapshot = Some(snapshot);
+        // Files no longer under any open project get an explicit clear.
+        let now: HashSet<Url> = publishes.iter().map(|(u, _)| u.clone()).collect();
+        let stale: Vec<Url> = {
+            let mut st = self.state.lock().unwrap();
+            let stale = st
+                .published
+                .iter()
+                .filter(|u| !now.contains(u))
+                .cloned()
+                .collect();
+            st.snapshots = snapshots;
+            st.published = now.into_iter().collect();
+            stale
+        };
 
         for (uri, diags) in publishes {
             self.client.publish_diagnostics(uri, diags, None).await;
+        }
+        for uri in stale {
+            self.client.publish_diagnostics(uri, Vec::new(), None).await;
         }
         for msg in project_msgs {
             self.client.show_message(MessageType::ERROR, msg).await;
@@ -95,16 +148,11 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Prefer a workspace folder; fall back to the (deprecated) root_uri.
-        let root = params
-            .workspace_folders
-            .and_then(|fs| fs.into_iter().next())
-            .map(|f| f.uri)
-            .or(params.root_uri)
-            .and_then(|u| u.to_file_path().ok());
-        self.state.lock().unwrap().root = root;
-
+    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
+        // No single workspace root: each open file resolves to its own project by
+        // walking up to the nearest `based.toml` (see `project_key`), so a `.bsl`
+        // schema embedded anywhere in the opened folder is found regardless of where
+        // the folder is rooted.
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "based-lsp".into(),
@@ -160,10 +208,10 @@ impl LanguageServer for Backend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let st = self.state.lock().unwrap();
-        let Some(snapshot) = &st.snapshot else {
+        let Ok(path) = params.text_document.uri.to_file_path() else {
             return Ok(None);
         };
-        let Ok(path) = params.text_document.uri.to_file_path() else {
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
             return Ok(None);
         };
         let Some(fid) = snapshot.file_id_of(&path) else {
@@ -204,11 +252,11 @@ impl LanguageServer for Backend {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let st = self.state.lock().unwrap();
-        let Some(snapshot) = &st.snapshot else {
-            return Ok(None);
-        };
         let pos = params.text_document_position_params;
         let Ok(path) = pos.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
             return Ok(None);
         };
         let Some(fid) = snapshot.file_id_of(&path) else {
