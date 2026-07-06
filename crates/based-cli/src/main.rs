@@ -87,6 +87,21 @@ enum MigrateAction {
         /// is derived from the change (`init` for the first, else `schema_update`).
         name: Option<String>,
     },
+    /// Render migrations' neutral `up.mig` steps to per-dialect SQL and print it — the
+    /// review-the-SQL step (E3). Offline: reads the stored `schema.snap`s, never a DB.
+    Render {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// A specific migration number (`NNNN`) to render. When omitted, renders every
+        /// migration in order.
+        #[arg(long)]
+        number: Option<u32>,
+        /// Override the target dialect (`mariadb`/`sqlite`/`postgres`). Defaults to the
+        /// manifest dialect.
+        #[arg(long)]
+        dialect: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +147,11 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Migrate { action } => match action {
             MigrateAction::Gen { root, name } => cmd_migrate_gen(&root, name.as_deref()),
+            MigrateAction::Render {
+                root,
+                number,
+                dialect,
+            } => cmd_migrate_render(&root, number, dialect.as_deref()),
         },
         Command::Facts { root, json } => cmd_facts(&root, json),
         Command::Serve {
@@ -265,6 +285,78 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> anyhow::Result<()> {
             String::new()
         }
     );
+    Ok(())
+}
+
+/// `based migrate render [--number NNNN] [--dialect D]`: render stored migrations' neutral
+/// steps to per-dialect SQL and print it — the review-the-SQL step (E3). Fully offline: the
+/// steps for migration NNNN are re-derived as `diff(snapshot[NNNN-1], snapshot[NNNN])` from
+/// the stored `schema.snap`s (the snapshot-authoritative model migrations.md defines, which
+/// `based migrate verify` asserts equals the `up.mig`), so no `up.mig` parser is needed here.
+/// The dialect defaults to the manifest's; `--dialect` overrides for a cross-target review.
+fn cmd_migrate_render(
+    root: &Path,
+    number: Option<u32>,
+    dialect: Option<&str>,
+) -> anyhow::Result<()> {
+    use based_codegen::migrate;
+
+    // Only the manifest dialect is needed — render reads stored artifacts, not the schema,
+    // so it does not run the full front end (it works even against an in-progress schema).
+    let project = match based_manifest::discover(root) {
+        Ok(p) => p,
+        Err(diags) => {
+            render::render(&diags, &[]);
+            bail!("could not load project at {}", root.display());
+        }
+    };
+    let dialect = match dialect {
+        Some(d) => Dialect::parse(d),
+        None => Dialect::parse(&project.manifest.dialect),
+    };
+
+    let migrations_dir = root.join("migrations");
+    let existing = existing_migrations(&migrations_dir)?;
+    if existing.is_empty() {
+        bail!("no migrations found under {}", migrations_dir.display());
+    }
+    if let Some(n) = number {
+        if !existing.iter().any(|(m, _)| *m == n) {
+            bail!(
+                "migration {n:04} not found under {}",
+                migrations_dir.display()
+            );
+        }
+    }
+
+    let read_snap = |dir: &Path| -> anyhow::Result<migrate::Snapshot> {
+        let path = dir.join("schema.snap");
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        migrate::Snapshot::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    };
+
+    for (idx, (n, dir)) in existing.iter().enumerate() {
+        if let Some(want) = number {
+            if *n != want {
+                continue;
+            }
+        }
+        // The predecessor snapshot (empty for the first migration) is this migration's
+        // diff baseline; the delta between the two is exactly this migration's steps.
+        let prev = if idx == 0 {
+            migrate::Snapshot::default()
+        } else {
+            read_snap(&existing[idx - 1].1)?
+        };
+        let now = read_snap(dir)?;
+        let steps = migrate::diff_snapshots(&prev, &now);
+
+        let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
+        println!("-- migrations/{}/up.mig", name.as_deref().unwrap_or("?"));
+        print!("{}", migrate::render_sql(&steps, dialect));
+        println!();
+    }
     Ok(())
 }
 

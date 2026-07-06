@@ -214,7 +214,7 @@ required to apply. `based migrate render` shows the per-dialect SQL:
 
 **SQLite** (`text`→`TEXT`; indexes are separate `CREATE INDEX`, D28):
 ```sql
-ALTER TABLE `product` ADD COLUMN `barcode` TEXT;
+ALTER TABLE `product` ADD COLUMN `barcode` TEXT NULL;
 CREATE INDEX `idx_product_barcode` ON `product` (`barcode`);
 ```
 
@@ -226,11 +226,19 @@ CREATE INDEX `idx_product_barcode` ON `product` (`barcode`);
 
 **Postgres** (`text`→`TEXT`, double-quote quoting, separate `CREATE INDEX`, D29):
 ```sql
-ALTER TABLE "product" ADD COLUMN "barcode" TEXT;
+ALTER TABLE "product" ADD COLUMN "barcode" TEXT NULL;
 CREATE INDEX "idx_product_barcode" ON "product" ("barcode");
 ```
 
-The neutral step is written once; three renders fall out of the `Dialect` seam. `0002`'s
+The neutral step is written once; three renders fall out of the `Dialect` seam (the
+column's `NULL`/`NOT NULL` is stated explicitly in all three — valid on each, verified
+against real servers). An `alter column` step diverges more sharply, because the dialects
+differ on in-place column change: **Postgres** emits one `ALTER COLUMN … TYPE/SET NOT
+NULL/DROP NOT NULL/SET DEFAULT/DROP DEFAULT` per change; **MariaDB** restates the whole
+column via `MODIFY COLUMN` (it has no piecemeal form); **SQLite** has *no* in-place
+`ALTER COLUMN` at all, so the renderer emits a loud comment pointing at a hand-authored
+`raw(sqlite)` table-rebuild rather than broken SQL (principle 6 — the escape is never
+silent). `0002`'s
 `schema.snap` is `0001`'s snapshot plus the `barcode` column and `idx_product_barcode` index.
 
 ---
@@ -380,7 +388,7 @@ offline LSP path.
 | Command | What it does |
 |---------|--------------|
 | `based migrate gen [name]` | Diff current `.bsl` vs. the latest `schema.snap`; write the next `migrations/NNNN_slug/{up.mig, schema.snap}`. No-op (exits clean, writes nothing) if the diff is empty. Offline. |
-| `based migrate render [NNNN] [--dialect D]` | Render a migration's `up.mig` (default: all pending) to per-dialect SQL and print it — the review-the-SQL step. Offline. Does not touch a DB. |
+| `based migrate render [--number NNNN] [--dialect D]` | Render migrations' steps to per-dialect SQL and print it — the review-the-SQL step (E3, done). `--number` picks one migration, else all in order; `--dialect` overrides the manifest target. Offline: re-derives each migration's steps as `diff(snapshot[N-1], snapshot[N])` from the stored `schema.snap`s (the snapshot-authoritative model, which `verify` asserts equals the `up.mig`), so no `up.mig` parser is needed yet. Does not touch a DB. |
 | `based migrate apply [--allow-destructive] [--to NNNN] [--down]` | Apply pending migrations in order, each in one transaction, inserting the ledger row. Checks the tamper hash first; gates destructive steps on the ack. Honors a `down.mig` for `--down`. Live DB. |
 | `based migrate status` | Show applied vs. pending migrations, flag any hash mismatch, any gap/out-of-order, and (if a DB is reachable) the ledger state. |
 | `based migrate verify` | Offline: confirm each `schema.snap` equals its predecessor + its `up.mig` steps applied, and that the latest snapshot matches the current `.bsl` (no uncaptured drift). Reports raw-carrying migrations as `partial`. The CI gate. |

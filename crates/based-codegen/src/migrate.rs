@@ -13,8 +13,14 @@
 //!   `@was`-driven rename step is E5). Data-losing steps are *marked* destructive so
 //!   apply (E4) can gate on the acknowledgement — this engine only marks, never applies.
 //!
-//! The snapshot text is decoupled from SQL: E3 renders the neutral [`Step`]s to
-//! per-dialect DDL over the existing `Dialect` seam. This module names no dialect.
+//! - [`render_sql`] (E3) renders the neutral [`Step`] list to per-dialect
+//!   `CREATE`/`ALTER`/`DROP` SQL over the existing `Dialect` seam — reusing the DDL
+//!   type map (`sql::sql_type`) so a migration's SQL can never drift from `based gen
+//!   sql` (principle 4). `0001_init`'s create steps render to the same schema `based
+//!   gen sql` builds from scratch.
+//!
+//! The snapshot text and step list stay decoupled from SQL: everything above
+//! [`render_sql`] names no dialect.
 //!
 //! ## `schema.snap` grammar (finalizing migrations.md's TODO)
 //! ```text
@@ -29,6 +35,7 @@
 //! is the default (`uuid`, not-null, not-unique) — a universally implicit invariant
 //! (D2); a model that declares a non-default `id` records it explicitly.
 
+use crate::Dialect;
 use based_ast::{DefaultVal, Literal, Primitive, SortDir, SortTerm};
 use based_sema::{CheckedSchema, MemberKind, RModel, SoftDelete, SoftMode};
 use std::fmt::Write as _;
@@ -648,6 +655,11 @@ pub enum Step {
         table: String,
         column: String,
         changes: Vec<ColumnChange>,
+        /// The resulting column state. Carried because MariaDB alters a column via a
+        /// full `MODIFY COLUMN <full definition>` — it cannot express a piecemeal
+        /// null/type change — so the renderer (E3) needs the whole target column, not
+        /// just the deltas. Postgres/SQLite render from the `changes` alone.
+        after: ColumnSnap,
     },
     /// `add index <name> (<cols>)`.
     AddIndex { table: String, index: IndexSnap },
@@ -763,6 +775,7 @@ fn diff_table(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
                     table: now.name.clone(),
                     column: c.name.clone(),
                     changes,
+                    after: c.clone(),
                 });
             }
         }
@@ -894,6 +907,7 @@ fn render_step(out: &mut String, step: &Step) {
             table,
             column,
             changes,
+            ..
         } => {
             let parts = changes
                 .iter()
@@ -969,6 +983,311 @@ fn render_change(c: &ColumnChange) -> String {
         ColumnChange::SetDefault(d) => format!("default={d}"),
         ColumnChange::DropDefault => "drop default".to_string(),
     }
+}
+
+// ---------- per-dialect SQL rendering (E3) --------------------------------
+
+/// Render a neutral step list to executable per-dialect SQL over the `Dialect` seam
+/// (migrations.md, E3). This is the "review the SQL" surface (`based migrate render`):
+/// `0001_init`'s create steps render to the same DDL `based gen sql` builds from scratch
+/// (the neutral type map goes through `sql::sql_type`, so the two can't drift, P4).
+/// A destructive step is preceded by a loud `-- DESTRUCTIVE` comment (principle 1).
+///
+/// Deliberate dialect divergences: MariaDB alters a column with a full `MODIFY COLUMN`
+/// (it has no piecemeal `SET NOT NULL`); Postgres emits one `ALTER COLUMN` per change;
+/// SQLite has no in-place `ALTER COLUMN` at all, so such a step renders as a loud comment
+/// pointing at a hand-authored `raw(sqlite)` table-rebuild (the neutral vocabulary's edge,
+/// principle 6). `DROP INDEX` also differs (MySQL/MariaDB need `ON <table>`).
+pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "-- Rendered by `based migrate render` (dialect: {}). Review before apply.",
+        dialect.name()
+    );
+    for step in steps {
+        out.push('\n');
+        render_sql_step(&mut out, step, dialect);
+    }
+    out
+}
+
+fn render_sql_step(out: &mut String, step: &Step, dialect: Dialect) {
+    if step.destructive() {
+        out.push_str(
+            "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
+        );
+    }
+    match step {
+        Step::CreateTable(t) => render_sql_create_table(out, t, dialect),
+        Step::DropTable(name) => {
+            let _ = writeln!(out, "DROP TABLE {};", dialect.quote(name));
+        }
+        Step::AddColumn { table, column } => {
+            let _ = writeln!(
+                out,
+                "ALTER TABLE {} ADD COLUMN {};",
+                dialect.quote(table),
+                column_ddl(column, dialect),
+            );
+        }
+        Step::DropColumn { table, column } => {
+            let _ = writeln!(
+                out,
+                "ALTER TABLE {} DROP COLUMN {};",
+                dialect.quote(table),
+                dialect.quote(column),
+            );
+        }
+        Step::AlterColumn {
+            table,
+            column,
+            changes,
+            after,
+        } => render_sql_alter_column(out, table, column, changes, after, dialect),
+        Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
+            let _ = writeln!(out, "{}", create_index_sql(dialect, table, index));
+        }
+        Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
+            let _ = writeln!(out, "{}", drop_index_sql(dialect, table, name));
+        }
+    }
+}
+
+/// A full `CREATE TABLE` from a neutral snapshot table. Mirrors `sql::create_table`:
+/// the implicit `id` PK (D2) is re-synthesized (it is elided from the snapshot) unless
+/// the model declared its own; `(unique)` columns become `CONSTRAINT … UNIQUE`; indexes
+/// are inline `KEY`/`UNIQUE KEY` on MariaDB and trailing `CREATE INDEX` elsewhere.
+fn render_sql_create_table(out: &mut String, t: &TableSnap, dialect: Dialect) {
+    let mut lines: Vec<String> = Vec::new();
+
+    // Implicit `id` primary key (D2): synthesized as the default uuid when the snapshot
+    // elided it; a declared non-default `id` rides in the column list instead.
+    if t.column("id").is_none() {
+        lines.push(format!(
+            "{} {} NOT NULL",
+            dialect.quote("id"),
+            crate::sql::sql_type(Primitive::Uuid, false, dialect),
+        ));
+    }
+    for c in &t.columns {
+        lines.push(column_ddl(c, dialect));
+    }
+    lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+
+    // Column-level `(unique)` constraints (a declared `@index (unique)` is an IndexSnap
+    // instead — handled below — so there is no double-emit).
+    for c in &t.columns {
+        if c.unique {
+            lines.push(format!(
+                "CONSTRAINT {} UNIQUE ({})",
+                dialect.quote(&index_name("uq", &t.name, std::slice::from_ref(&c.name))),
+                dialect.quote(&c.name),
+            ));
+        }
+    }
+
+    // MariaDB inlines indexes as table clauses; SQLite/Postgres trail them as statements.
+    if dialect == Dialect::MariaDb {
+        for i in &t.indexes {
+            let cols = quote_cols(dialect, &i.columns);
+            let kind = if i.unique { "UNIQUE KEY" } else { "KEY" };
+            lines.push(format!("{kind} {} ({cols})", dialect.quote(&i.name)));
+        }
+    }
+
+    let body = lines
+        .iter()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let _ = writeln!(out, "CREATE TABLE {} (\n{body}\n);", dialect.quote(&t.name));
+
+    if dialect != Dialect::MariaDb {
+        for i in &t.indexes {
+            let _ = writeln!(out, "{}", create_index_sql(dialect, &t.name, i));
+        }
+    }
+}
+
+fn render_sql_alter_column(
+    out: &mut String,
+    table: &str,
+    column: &str,
+    changes: &[ColumnChange],
+    after: &ColumnSnap,
+    dialect: Dialect,
+) {
+    match dialect {
+        // Postgres: one `ALTER COLUMN` sub-statement per change (it has them all).
+        Dialect::Postgres => {
+            for ch in changes {
+                let clause = match ch {
+                    ColumnChange::Type { to, .. } => {
+                        format!("TYPE {}", neutral_sql_type(to, dialect))
+                    }
+                    ColumnChange::SetNull => "DROP NOT NULL".to_string(),
+                    ColumnChange::SetNotNull { .. } => "SET NOT NULL".to_string(),
+                    ColumnChange::SetDefault(d) => {
+                        format!("SET DEFAULT {}", render_neutral_default(d, dialect))
+                    }
+                    ColumnChange::DropDefault => "DROP DEFAULT".to_string(),
+                };
+                let _ = writeln!(
+                    out,
+                    "ALTER TABLE {} ALTER COLUMN {} {clause};",
+                    dialect.quote(table),
+                    dialect.quote(column),
+                );
+            }
+        }
+        // MariaDB: a type/null change needs a full `MODIFY COLUMN` (no piecemeal form);
+        // a default-only change uses `ALTER COLUMN … SET/DROP DEFAULT`.
+        Dialect::MariaDb => {
+            let structural = changes.iter().any(|c| {
+                matches!(
+                    c,
+                    ColumnChange::Type { .. }
+                        | ColumnChange::SetNull
+                        | ColumnChange::SetNotNull { .. }
+                )
+            });
+            if structural {
+                let _ = writeln!(
+                    out,
+                    "ALTER TABLE {} MODIFY COLUMN {};",
+                    dialect.quote(table),
+                    column_ddl(after, dialect),
+                );
+            } else {
+                for ch in changes {
+                    match ch {
+                        ColumnChange::SetDefault(d) => {
+                            let _ = writeln!(
+                                out,
+                                "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {};",
+                                dialect.quote(table),
+                                dialect.quote(column),
+                                render_neutral_default(d, dialect),
+                            );
+                        }
+                        ColumnChange::DropDefault => {
+                            let _ = writeln!(
+                                out,
+                                "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT;",
+                                dialect.quote(table),
+                                dialect.quote(column),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // SQLite has no in-place ALTER COLUMN — a type/null/default change requires the
+        // 12-step table rebuild, which the neutral vocabulary can't safely auto-generate.
+        // Emit a loud, greppable comment pointing at a hand-authored raw(sqlite) step
+        // (principle 6 — the escape hatch is never silent) rather than broken SQL.
+        Dialect::Sqlite => {
+            let _ = writeln!(
+                out,
+                "-- SQLite cannot ALTER COLUMN {table}.{column} in place; author a raw(sqlite) table-rebuild migration.",
+            );
+        }
+    }
+}
+
+/// A standalone `CREATE [UNIQUE] INDEX` (all dialects share this form for an add).
+fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String {
+    let kind = if index.unique {
+        "CREATE UNIQUE INDEX"
+    } else {
+        "CREATE INDEX"
+    };
+    format!(
+        "{kind} {} ON {} ({});",
+        dialect.quote(&index.name),
+        dialect.quote(table),
+        quote_cols(dialect, &index.columns),
+    )
+}
+
+/// `DROP INDEX` — MySQL/MariaDB require the `ON <table>` qualifier; SQLite/Postgres
+/// drop by index name alone.
+fn drop_index_sql(dialect: Dialect, table: &str, name: &str) -> String {
+    match dialect {
+        Dialect::MariaDb => format!(
+            "DROP INDEX {} ON {};",
+            dialect.quote(name),
+            dialect.quote(table)
+        ),
+        Dialect::Sqlite | Dialect::Postgres => format!("DROP INDEX {};", dialect.quote(name)),
+    }
+}
+
+/// A column definition `<name> <type> NULL|NOT NULL [DEFAULT <lit>]`, shared by
+/// `CREATE TABLE` bodies, `ADD COLUMN`, and MariaDB's `MODIFY COLUMN`. Matches
+/// `sql::column_line` so an `add column` reads identically to a `create table` column.
+fn column_ddl(c: &ColumnSnap, dialect: Dialect) -> String {
+    let mut s = format!(
+        "{} {} {}",
+        dialect.quote(&c.name),
+        neutral_sql_type(&c.ty, dialect),
+        if c.nullable { "NULL" } else { "NOT NULL" },
+    );
+    if let Some(d) = &c.default {
+        let _ = write!(s, " DEFAULT {}", render_neutral_default(d, dialect));
+    }
+    s
+}
+
+/// Map a neutral snapshot type (`int`/`text`/`uuid`/…, `[]` for a to-many scalar) to the
+/// dialect's SQL type — through `sql::sql_type`, the *same* map `based gen sql` uses (P4).
+fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
+    let (base, many) = match neutral.strip_suffix("[]") {
+        Some(b) => (b, true),
+        None => (neutral, false),
+    };
+    let prim = match base {
+        "text" => Primitive::Text,
+        "int" => Primitive::Int,
+        "bool" => Primitive::Bool,
+        "timestamp" => Primitive::Timestamp,
+        "date" => Primitive::Date,
+        "json" => Primitive::Json,
+        "uuid" => Primitive::Uuid,
+        // A corrupt/hand-edited snapshot type; parse/verify guards this upstream.
+        _ => Primitive::Text,
+    };
+    crate::sql::sql_type(prim, many, dialect).to_string()
+}
+
+/// Render a neutral snapshot default (`render_default`'s output — a quoted string,
+/// number, `true`/`false`, `null`, or `now()`) to a dialect SQL literal/expression.
+/// The inverse of `render_default`, over the same value forms.
+fn render_neutral_default(d: &str, dialect: Dialect) -> String {
+    // A quoted string default → a SQL string literal (unescape `\"`, then `'`-quote).
+    if let Some(inner) = d.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        let unescaped = inner.replace("\\\"", "\"");
+        return format!("'{}'", unescaped.replace('\'', "''"));
+    }
+    match d {
+        "true" => dialect.bool_lit(true).to_string(),
+        "false" => dialect.bool_lit(false).to_string(),
+        "null" => "NULL".to_string(),
+        // `now()` is the only value-position function (ir::KNOWN_FUNCS).
+        _ if d.ends_with("()") => "CURRENT_TIMESTAMP".to_string(),
+        // A numeric literal rides through verbatim.
+        _ => d.to_string(),
+    }
+}
+
+/// Quote a physical column list for the dialect, comma-joined.
+fn quote_cols(dialect: Dialect, cols: &[String]) -> String {
+    cols.iter()
+        .map(|c| dialect.quote(c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -1168,5 +1487,195 @@ mod tests {
             tables: vec![table("t", vec![col("a", "int", false)])],
         };
         assert!(diff_snapshots(&snap, &snap).is_empty());
+    }
+
+    // ---- E3: per-dialect SQL rendering ----------------------------------
+
+    use crate::Dialect::{MariaDb, Postgres, Sqlite};
+
+    #[test]
+    fn create_table_renders_id_pk_and_types_per_dialect() {
+        // A nullable column, a not-null column, and a unique column exercise the type
+        // map, nullability, and the `(unique)` constraint across all three dialects.
+        let mut email = col("email", "text", false);
+        email.unique = true;
+        let t = table("account", vec![email, col("age", "int", true)]);
+        let steps = vec![Step::CreateTable(t)];
+
+        let maria = render_sql(&steps, MariaDb);
+        assert!(maria.contains("CREATE TABLE `account` ("), "\n{maria}");
+        assert!(maria.contains("`id` UUID NOT NULL"), "\n{maria}");
+        assert!(maria.contains("`email` VARCHAR(255) NOT NULL"), "\n{maria}");
+        assert!(maria.contains("`age` BIGINT NULL"), "\n{maria}");
+        assert!(maria.contains("PRIMARY KEY (`id`)"), "\n{maria}");
+        assert!(
+            maria.contains("CONSTRAINT `uq_account_email` UNIQUE (`email`)"),
+            "\n{maria}"
+        );
+
+        let pg = render_sql(&steps, Postgres);
+        assert!(pg.contains("CREATE TABLE \"account\" ("), "\n{pg}");
+        assert!(pg.contains("\"id\" UUID NOT NULL"), "\n{pg}");
+        assert!(pg.contains("\"email\" TEXT NOT NULL"), "\n{pg}");
+        assert!(pg.contains("\"age\" BIGINT NULL"), "\n{pg}");
+
+        let sqlite = render_sql(&steps, Sqlite);
+        assert!(sqlite.contains("`id` TEXT NOT NULL"), "\n{sqlite}");
+        assert!(sqlite.contains("`age` INTEGER NULL"), "\n{sqlite}");
+    }
+
+    #[test]
+    fn create_table_indexes_inline_on_mariadb_standalone_elsewhere() {
+        let mut t = table("item", vec![col("sku", "text", false)]);
+        t.indexes.push(IndexSnap {
+            name: "idx_item_sku".to_string(),
+            columns: vec!["sku".to_string()],
+            unique: false,
+            inferred: false,
+        });
+        let steps = vec![Step::CreateTable(t)];
+
+        // MariaDB carries the index inline as a `KEY` clause inside the CREATE TABLE.
+        let maria = render_sql(&steps, MariaDb);
+        assert!(maria.contains("KEY `idx_item_sku` (`sku`)"), "\n{maria}");
+        assert!(!maria.contains("CREATE INDEX"), "\n{maria}");
+
+        // Postgres/SQLite trail it as a separate CREATE INDEX statement.
+        let pg = render_sql(&steps, Postgres);
+        assert!(
+            pg.contains("CREATE INDEX \"idx_item_sku\" ON \"item\" (\"sku\");"),
+            "\n{pg}"
+        );
+    }
+
+    #[test]
+    fn add_column_and_string_default_render() {
+        let mut c = col("status", "text", false);
+        c.default = Some("\"pending\"".to_string());
+        let steps = vec![Step::AddColumn {
+            table: "order".to_string(),
+            column: c,
+        }];
+        let maria = render_sql(&steps, MariaDb);
+        assert!(
+            maria.contains(
+                "ALTER TABLE `order` ADD COLUMN `status` VARCHAR(255) NOT NULL DEFAULT 'pending';"
+            ),
+            "\n{maria}"
+        );
+    }
+
+    #[test]
+    fn drop_column_and_drop_table_carry_destructive_markers() {
+        let steps = vec![
+            Step::DropColumn {
+                table: "product".to_string(),
+                column: "legacy".to_string(),
+            },
+            Step::DropTable("gone".to_string()),
+        ];
+        let out = render_sql(&steps, Postgres);
+        assert!(
+            out.contains("-- DESTRUCTIVE"),
+            "destructive marker missing\n{out}"
+        );
+        assert!(
+            out.contains("ALTER TABLE \"product\" DROP COLUMN \"legacy\";"),
+            "\n{out}"
+        );
+        assert!(out.contains("DROP TABLE \"gone\";"), "\n{out}");
+    }
+
+    #[test]
+    fn alter_column_diverges_per_dialect() {
+        // null -> not_null AND type text -> int on the same column.
+        let after = col("v", "int", false);
+        let changes = vec![
+            ColumnChange::Type {
+                from: "text".to_string(),
+                to: "int".to_string(),
+            },
+            ColumnChange::SetNotNull { has_default: false },
+        ];
+        let steps = vec![Step::AlterColumn {
+            table: "t".to_string(),
+            column: "v".to_string(),
+            changes,
+            after,
+        }];
+
+        // Postgres: one ALTER COLUMN sub-statement per change.
+        let pg = render_sql(&steps, Postgres);
+        assert!(
+            pg.contains("ALTER TABLE \"t\" ALTER COLUMN \"v\" TYPE BIGINT;"),
+            "\n{pg}"
+        );
+        assert!(
+            pg.contains("ALTER TABLE \"t\" ALTER COLUMN \"v\" SET NOT NULL;"),
+            "\n{pg}"
+        );
+
+        // MariaDB: a single full MODIFY COLUMN restating the resulting definition.
+        let maria = render_sql(&steps, MariaDb);
+        assert!(
+            maria.contains("ALTER TABLE `t` MODIFY COLUMN `v` BIGINT NOT NULL;"),
+            "\n{maria}"
+        );
+
+        // SQLite: a loud comment (no in-place ALTER COLUMN) — never broken SQL.
+        let sqlite = render_sql(&steps, Sqlite);
+        assert!(
+            sqlite.contains("-- SQLite cannot ALTER COLUMN t.v in place"),
+            "\n{sqlite}"
+        );
+
+        // Both narrowing and a new not-null-without-default are destructive.
+        assert!(steps[0].destructive());
+        assert!(render_sql(&steps, Postgres).contains("-- DESTRUCTIVE"));
+    }
+
+    #[test]
+    fn mariadb_default_only_alter_avoids_modify() {
+        let after = col("v", "int", false);
+        let steps = vec![Step::AlterColumn {
+            table: "t".to_string(),
+            column: "v".to_string(),
+            changes: vec![ColumnChange::SetDefault("0".to_string())],
+            after,
+        }];
+        let maria = render_sql(&steps, MariaDb);
+        assert!(
+            maria.contains("ALTER TABLE `t` ALTER COLUMN `v` SET DEFAULT 0;"),
+            "\n{maria}"
+        );
+        assert!(!maria.contains("MODIFY COLUMN"), "\n{maria}");
+    }
+
+    #[test]
+    fn index_add_and_drop_render_per_dialect() {
+        let uq = IndexSnap {
+            name: "uq_u_email".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            inferred: false,
+        };
+        let add = vec![Step::AddUnique {
+            table: "u".to_string(),
+            index: uq,
+        }];
+        let out = render_sql(&add, Postgres);
+        assert!(out.contains("-- DESTRUCTIVE"), "\n{out}"); // unique over existing data
+        assert!(
+            out.contains("CREATE UNIQUE INDEX \"uq_u_email\" ON \"u\" (\"email\");"),
+            "\n{out}"
+        );
+
+        let drop = vec![Step::DropIndex {
+            table: "u".to_string(),
+            name: "idx_u_name".to_string(),
+        }];
+        // MySQL/MariaDB need the `ON <table>` qualifier; Postgres/SQLite drop by name.
+        assert!(render_sql(&drop, MariaDb).contains("DROP INDEX `idx_u_name` ON `u`;"));
+        assert!(render_sql(&drop, Postgres).contains("DROP INDEX \"idx_u_name\";"));
     }
 }

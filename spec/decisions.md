@@ -1254,3 +1254,43 @@ compiled each buffer in isolation and reported spurious `E0110 unknown model` on
 - **Lazy, per-file.** No proactive whole-workspace scan on `initialize`; projects compile as their files
   open (an editor surfaces diagnostics per open file anyway). *Deferred:* a brand-new unsaved file isn't in
   its manifest's on-disk glob, so it compiles loose until first save (pre-existing edge).
+
+## D41 — per-dialect migration renderer (`migrate::render_sql`, E3)
+E2 (D39) produces the dialect-neutral `up.mig` step list; E3 renders it to executable SQL per dialect. How
+(`based-codegen::migrate::render_sql`; CLI `based migrate render`), settling migrations.md's E3 details:
+- **One type map, no drift.** The renderer maps neutral snapshot types (`int`/`text`/`uuid`/…) through the
+  *same* `sql::sql_type` the DDL uses (now `pub(crate)`) and quotes via `Dialect::quote`, so a migration's
+  SQL cannot diverge from `based gen sql` (P4). `0001_init`'s `create table` steps render to exactly the
+  from-scratch DDL (verified: one `CREATE TABLE` + `PRIMARY KEY` per model per dialect). `CreateTable`
+  re-synthesizes the implicit `id` PK the snapshot elides (D2); `(unique)` columns → `CONSTRAINT … UNIQUE`;
+  indexes are inline `KEY`/`UNIQUE KEY` on MariaDB, trailing `CREATE INDEX` on SQLite/Postgres (mirroring
+  `sql::create_table`). Column `NULL`/`NOT NULL` is stated explicitly in all three (valid on each — SQLite
+  accepts a bare `NULL` constraint, verified against a real server; the migrations.md examples were updated
+  to match).
+- **`alter column` diverges by dialect — the one place the neutral vocabulary can't be uniform.** Postgres
+  has piecemeal `ALTER COLUMN … TYPE/SET NOT NULL/DROP NOT NULL/SET DEFAULT/DROP DEFAULT`, one sub-statement
+  per change. MariaDB/MySQL have no piecemeal null/type change — a structural change needs a full
+  `MODIFY COLUMN <whole definition>`, so `Step::AlterColumn` grew an `after: ColumnSnap` (the resulting
+  column) for the renderer to restate; a default-only change still uses `ALTER COLUMN … SET/DROP DEFAULT`
+  (no MODIFY). **SQLite has *no* in-place `ALTER COLUMN`** (a type/null/default change needs the 12-step
+  table rebuild), which the neutral vocabulary can't safely auto-generate — so it renders a loud, greppable
+  comment pointing at a hand-authored `raw(sqlite)` step rather than broken SQL (principle 6 — the escape
+  hatch is never silent). `DROP INDEX` also branches (MySQL/MariaDB require `ON <table>`). Destructive steps
+  carry a loud `-- DESTRUCTIVE` marker (principle 1).
+- **`render` re-derives steps from the stored snapshots, not an `up.mig` parser.** `based migrate render
+  [--number NNNN] [--dialect D]` computes migration N's steps as `diff_snapshots(snapshot[N-1], snapshot[N])`
+  from the stored `schema.snap`s — the snapshot-authoritative model migrations.md defines, and exactly what
+  `verify` asserts equals the `up.mig`. So no `up.mig` text parser is needed for render; that parser lands
+  with **E4 (apply)**, which must parse *and* content-hash `up.mig` for the ledger. Consequence (documented,
+  deferred): render reflects the canonical snapshot delta, so a *hand-edited* `up.mig` isn't honored until
+  the E4 parser exists — fine for generated migrations, which are the norm. `--dialect` overrides the
+  manifest target for a cross-target review; the default is the manifest dialect. Render is fully offline
+  (reads stored artifacts, never a DB) and does not run the front end, so it works against an in-progress
+  schema.
+- **Proven executable, not compile-verified.** The commerce `0001_init` + an incremental `0002` (add nullable
+  column + a nullable-alter + an index) render was applied end to end against real `sqlite3`, `postgres:16`,
+  and `mariadb:11.4` (Docker/OrbStack): every dialect's create, add-column, alter-column, and index SQL
+  runs cleanly (the `MODIFY COLUMN`/`ALTER COLUMN` paths flip `name` to nullable; SQLite skips the alter with
+  its comment). *Deferred:* the `raw(dialect)` passthrough step (the `Step` enum has no raw variant yet —
+  migrations.md's raw-structural-effect TODO); rename steps (E5, `@was`); the `up.mig` parser for hand-edits
+  (E4).

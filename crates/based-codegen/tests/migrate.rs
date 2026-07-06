@@ -160,6 +160,50 @@ fn dropping_a_model_is_a_marked_drop_table() {
 }
 
 #[test]
+fn init_render_produces_one_create_table_per_model_per_dialect() {
+    // E3: 0001_init's create steps render to real per-dialect DDL. Cross-check each
+    // dialect against `based gen sql`'s own DDL — same tables, same PKs, dialect quoting.
+    let schema = commerce();
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+
+    for dialect in [Dialect::MariaDb, Dialect::Sqlite, Dialect::Postgres] {
+        let sql = migrate::render_sql(&steps, dialect);
+        let creates = sql.matches("CREATE TABLE ").count();
+        assert_eq!(
+            creates,
+            schema.models.len(),
+            "one CREATE TABLE per model ({dialect:?})\n{sql}"
+        );
+        // Every model's table appears, and an `id` PK is (re)synthesized for each (D2).
+        assert_eq!(
+            sql.matches("PRIMARY KEY (").count(),
+            schema.models.len(),
+            "one PK per table ({dialect:?})\n{sql}"
+        );
+        for m in &schema.models {
+            assert!(
+                sql.contains(&dialect.quote(&m.table)),
+                "render missing table {} ({dialect:?})",
+                m.table
+            );
+        }
+        // The init render is create-only — no stray ALTER/DROP and no SQLite alter-comment.
+        assert!(!sql.contains("ALTER TABLE"), "init is create-only\n{sql}");
+        assert!(!sql.contains("DROP "), "init is create-only\n{sql}");
+        assert!(!sql.contains("-- SQLite cannot"), "\n{sql}");
+    }
+
+    // The MariaDB render carries the same column types `based gen sql` emits (one type
+    // map, P4): e.g. `int` -> BIGINT, `text` -> VARCHAR(255).
+    let maria = migrate::render_sql(&steps, Dialect::MariaDb);
+    assert!(maria.contains("BIGINT"), "\n{maria}");
+    assert!(maria.contains("VARCHAR(255)"), "\n{maria}");
+    // Postgres uses its native spellings.
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(pg.contains("TIMESTAMPTZ") || pg.contains("JSONB"), "\n{pg}");
+}
+
+#[test]
 fn renamed_column_is_a_drop_add_pair_not_a_rename() {
     // Renames are never auto-guessed (the @was rename step is E5): a changed name reads
     // as a drop of the old column + an add of the new one.
