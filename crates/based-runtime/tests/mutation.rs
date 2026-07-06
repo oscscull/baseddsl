@@ -27,7 +27,7 @@ fn compile(src: &str) -> Compiled {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    Compiled::from_checked(schema, sf.decls)
+    Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
 }
 
 fn req(name: &str, args: serde_json::Value) -> Request {

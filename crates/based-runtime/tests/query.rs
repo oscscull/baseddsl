@@ -27,7 +27,21 @@ fn compile(src: &str) -> Compiled {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    Compiled::from_checked(schema, sf.decls)
+    Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
+}
+
+/// Same, but for the Postgres target — the emitted SQL is double-quoted and the runtime
+/// binds ordinal `$n` placeholders (D29). Used to prove the dialect threads end-to-end.
+fn compile_pg(src: &str) -> Compiled {
+    let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
+    let (schema, diags) = check(&sf.decls);
+    let errs: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .map(|d| d.code)
+        .collect();
+    assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
+    Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::Postgres)
 }
 
 fn req(name: &str, args: serde_json::Value) -> Request {
@@ -76,6 +90,57 @@ fn get_binds_param_positionally() {
     assert_eq!(plan.main.params, vec![SqlValue::Text("o-1".into())]);
     assert_eq!(plan.envelope, Envelope::One);
     assert!(plan.count.is_none());
+}
+
+#[test]
+fn postgres_binds_ordinal_dollar_placeholders() {
+    // A Postgres `Compiled` lowers double-quoted SQL and the runtime scanner rewrites
+    // `:name` -> `$n` in bind order (D29). This one query has a param *and* a `$ctx`
+    // field, so both ordinals must appear in the right order.
+    let c = compile_pg(SCHEMA);
+    let req = Request::new("orders_in_org", json!({ "org": "org-1" }), json!({}));
+    let plan = plan_query(&c, &req).unwrap();
+    assert!(
+        plan.main.sql.contains("WHERE \"order\".\"org_id\" = $1"),
+        "{}",
+        plan.main.sql
+    );
+    // no anonymous `?` and no leftover named binds on Postgres.
+    assert!(!plan.main.sql.contains('?'), "{}", plan.main.sql);
+    assert!(!plan.main.sql.contains(':'), "{}", plan.main.sql);
+    assert_eq!(plan.main.params, vec![SqlValue::Text("org-1".into())]);
+}
+
+#[test]
+fn postgres_offset_pagination_orders_placeholders() {
+    // Two binds — the `$ctx.org` scope and the `:offset` — must be `$1` then `$2` in
+    // the order they appear in the SQL.
+    let c = compile_pg(
+        r#"
+        @scope(org = $ctx.org)
+        @sort(id asc)
+        Order { org: Org, total: int }
+        Org { name: text }
+        shape OrderCard from Order { total }
+        query orders() -> OrderCard[] { list Order order (id asc) page (20) offset; }
+        "#,
+    );
+    let req = Request::new("orders", json!({ "offset": 40 }), json!({ "org": "org-1" }));
+    let plan = plan_query(&c, &req).unwrap();
+    assert!(
+        plan.main.sql.contains("\"order\".\"org_id\" = $1"),
+        "{}",
+        plan.main.sql
+    );
+    assert!(
+        plan.main.sql.contains("LIMIT 20 OFFSET $2"),
+        "{}",
+        plan.main.sql
+    );
+    assert_eq!(
+        plan.main.params,
+        vec![SqlValue::Text("org-1".into()), SqlValue::Int(40)]
+    );
 }
 
 #[test]

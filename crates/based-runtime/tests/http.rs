@@ -78,7 +78,7 @@ fn compile() -> Compiled {
             .any(|d| d.severity == based_diagnostics::Severity::Error),
         "schema should check clean"
     );
-    Compiled::from_checked(schema, sf.decls)
+    Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
 }
 
 /// Start a listener on a free loopback port and return its `host:port`. The server

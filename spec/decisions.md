@@ -744,7 +744,60 @@ emitters vary only their header comment via the new `Dialect::name()`.
   so the whole `based gen sql` artifact (DDL *and* DML) is proven to execute end-to-end against a real
   engine. Tests: 8 new SQLite cases in `based-codegen/tests/ddl.rs` (type map, `TEXT` id/FK, integer bool
   default, inline `(unique)`, indexes-as-`CREATE INDEX` after the table, inferred join key).
-- *Deferred:* Postgres remains the outstanding dialect — it needs both a `Dialect::Postgres` codegen
-  variant *and* the named→positional scanner made dialect-aware (`?` → `$n`, D21), which SQLite did not
-  (it binds positional `?` like MariaDB). Per-field `text` length tuning is still unaddressed (no length
-  primitive; D10) but is moot on SQLite (untyped `TEXT`).
+- ~~*Deferred:* Postgres remains the outstanding dialect~~ ✅ **done (D29).** `Dialect::Postgres` is the
+  enum's third variant — DDL + DML + mutation codegen *and* the dialect-aware named→positional scanner
+  (`?` → `$n`, the one coupling D21 flagged). Per-field `text` length tuning is still unaddressed (no
+  length primitive; D10) but is moot on SQLite/Postgres (untyped/unbounded `TEXT`).
+
+## D29 — Postgres dialect (`Dialect::Postgres`): codegen + the `$n` scanner
+`based gen sql` can now target PostgreSQL, and the runtime binds it. This is the dialect that actually
+*exercises* the multi-dialect seam D21 built for — Postgres diverges from MySQL/MariaDB the most, so it
+forced the codegen quoting/operator differences and the one runtime coupling (`?` → `$n`) that SQLite
+(D27/D28) did not. The concrete `postgres` `Db`/`Backend` **driver** is deferred to the live-DB slice
+(needs a real server to be meaningful, like `MariaDb`'s connect/exec, which is compile-verified only);
+this D is the *codegen* + scanner half, fully `cargo test`-verifiable.
+- **Identifier quoting is the pervasive difference.** MySQL/MariaDB and SQLite backtick-quote
+  identifiers; Postgres uses ANSI double quotes (`"order"` — and `order` is a reserved word, so quoting
+  is load-bearing). Rather than hardcode the quote char at ~40 `format!` sites, it is routed through
+  `Dialect::quote`/`qcol` (and a `Select::q`/`qcol` for the DML/mutation hub). The DDL emitters thread
+  the same helper. So "dialect-portable" (the old D27 claim for DML) is now false — the DML/mutation SQL
+  *does* branch, just through one quoting seam plus a few operator/literal spellings.
+- **Type map** (`sql::sql_type`): `int`→`BIGINT`, `bool`→`BOOLEAN`, `timestamp`→`TIMESTAMPTZ` (a real
+  tz-aware type — no `DATETIME` 2038/ON-UPDATE dodge needed), `date`→`DATE`, `text`→`TEXT` (unbounded,
+  no VARCHAR cap), `uuid`/`Id`→`UUID` (native), `json`/a to-many scalar→`JSONB` (the indexable,
+  `@>`-queryable form — matching the DML `has` lowering). Bool defaults use the `TRUE`/`FALSE` keyword
+  (like MariaDB, unlike SQLite's `1`/`0`).
+- **Indexes as separate `CREATE INDEX`** (like SQLite — Postgres has no inline `KEY`/`UNIQUE KEY`
+  clause). The declared `@index`es and the sema-inferred join-key baseline (D15) trail the `CREATE
+  TABLE`, keyed by the same `inf_`/`idx_`/`uq_` names + physical columns MariaDB inlines (one
+  `index_specs` helper feeds all three dialects). `(unique)` stays an inline `CONSTRAINT … UNIQUE` in
+  all three. Inferred indexes stay predicate-leading (soft-delete column first — Postgres partial
+  indexes exist but are not used here, keeping the DDL uniform with the other dialects).
+- **Operators.** `has` (JSON-array containment) → Postgres's `arr @> value` (JSONB containment), not
+  MySQL's `value MEMBER OF(arr)`. `= TRUE` for a bare bool (Postgres has the keyword). `IS NULL`,
+  `LIKE`, comparison ops, `IN (…)` are shared.
+- **Multi-table UPDATE/DELETE restructure.** MySQL puts joins inline (`UPDATE t JOIN j ON … SET …`;
+  `DELETE t FROM t JOIN j …`). Postgres has no inline join in a write: the joined tables move to a
+  `FROM` (UPDATE) / `USING` (DELETE) list and each join `ON` folds into the `WHERE` ahead of the user
+  predicate (`push_from_using`). A `LEFT JOIN`'s outer semantics are lost in this fold, but a mutation
+  `where` only *narrows* the target set (it never projects the joined row), so an inner join is the
+  correct — and only expressible — shape. Postgres also **forbids the target alias in `SET`**, so a SET
+  column is emitted bare (`"col" = …`, via `set_lhs`) there while MySQL/SQLite qualify it.
+- **The scanner is now dialect-aware** (`based-runtime::scan::to_positional`, the D21 coupling):
+  `:name` → `?` for MySQL/MariaDB/SQLite, `:name` → ordinal `$1, $2, …` for Postgres (the running
+  parameter count, so it matches bind order). `::` is skipped whole (Postgres's cast operator, not a
+  placeholder). `Compiled` now carries the `Dialect` (read from the manifest in `load`, passed to
+  `from_checked`) and threads it to the `Env` that binds — so a Postgres `Compiled` lowers double-quoted
+  SQL *and* binds `$n`, and the pairing "Postgres-lowered SQL served only to a Postgres backend" (D21's
+  coherence rule) is one field, not a negotiation.
+- **Tests** (all `cargo test`, no infra): 2 new in `Dialect` unit (`parse`/`quote`/`bool_lit`), 4 DDL
+  (double-quoting + native types, UUID FK, keyword bool default, separate `CREATE INDEX`), 4 DML
+  (double-quoted SELECT + `:name` retained, bare-bool `= TRUE`, `has` → `@>`, join `ON`), 4 mutation
+  (double-quoted INSERT + re-select, bare-column tombstone SET, `FROM`-clause update, `USING`-clause
+  hard delete), 2 scanner (`$n` ordinals, `::` cast untouched), 2 runtime plan (`$1`/`$2` end-to-end
+  binding, incl. offset ordering). The commerce example emits clean Postgres DDL + DML.
+- *Deferred:* the concrete `postgres` driver (`Db`/`Backend`) + live-DB integration (needs a real
+  server — the D20 gap, same status as `MariaDb`); Postgres-specific niceties not used here (partial
+  indexes for soft-delete, `INSERT … ON CONFLICT`, `RETURNING` — the D12 re-select is dialect-portable
+  and kept). MySQL stays folded into `MariaDb` (a fork; the emitted SQL is MySQL-8-compatible), not a
+  distinct variant.

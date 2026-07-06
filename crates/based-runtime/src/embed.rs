@@ -168,7 +168,7 @@ mod tests {
         assert!(!diags
             .iter()
             .any(|d| d.severity == based_diagnostics::Severity::Error));
-        Compiled::from_checked(schema, sf.decls)
+        Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
     }
 
     /// A read call over the engine returns the same shaped `200` a `dispatch` would.

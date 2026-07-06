@@ -175,7 +175,7 @@ fn compiled() -> Compiled {
             .any(|d| d.severity == based_diagnostics::Severity::Error),
         "schema should check clean"
     );
-    Compiled::from_checked(schema, sf.decls)
+    Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
 }
 
 fn row(v: serde_json::Value) -> Row {

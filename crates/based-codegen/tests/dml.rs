@@ -8,6 +8,14 @@ use based_parser::parse_file;
 use based_sema::check;
 
 fn gen(src: &str) -> String {
+    gen_for(src, Dialect::MariaDb)
+}
+
+fn gen_pg(src: &str) -> String {
+    gen_for(src, Dialect::Postgres)
+}
+
+fn gen_for(src: &str, dialect: Dialect) -> String {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
@@ -16,7 +24,7 @@ fn gen(src: &str) -> String {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    sql::dml::dml(&schema, &sf.decls, Dialect::MariaDb)
+    sql::dml::dml(&schema, &sf.decls, dialect)
 }
 
 #[test]
@@ -254,4 +262,81 @@ fn multi_hop_path_chains_joins() {
         "\n{ddl}"
     );
     assert!(ddl.contains("`j_address_city`.`name` AS `city`"), "\n{ddl}");
+}
+
+// ---------- Postgres (D29) -------------------------------------------------
+
+#[test]
+fn pg_select_double_quotes_identifiers_and_keeps_named_placeholders() {
+    // Postgres double-quotes idents; the emitted template still carries `:name`
+    // placeholders (the runtime rewrites them to `$n`), and the injected tombstone
+    // uses the same `IS NULL` predicate.
+    let sql = gen_pg(
+        r#"
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, status: text, total: int }
+        shape OrderCard from Order { status, total }
+        query order_by_id(id) -> OrderCard;
+        "#,
+    );
+    assert!(sql.contains("FROM \"order\""), "\n{sql}");
+    assert!(
+        sql.contains("\"order\".\"status\" AS \"status\""),
+        "\n{sql}"
+    );
+    assert!(
+        sql.contains("WHERE \"order\".\"id\" = :id AND \"order\".\"deleted_at\" IS NULL"),
+        "\n{sql}"
+    );
+    // no backtick-quoted identifiers in the statement body (the header has backticks).
+    let body = &sql[sql.find("SELECT").unwrap()..];
+    assert!(!body.contains('`'), "\n{sql}");
+}
+
+#[test]
+fn pg_bare_bool_uses_true_keyword() {
+    let sql = gen_pg(
+        r#"
+        @sort(id asc)
+        Order { active: bool, total: int }
+        shape O from Order { total }
+        query live() -> O[] { list Order where (active); }
+        "#,
+    );
+    assert!(sql.contains("\"order\".\"active\" = TRUE"), "\n{sql}");
+}
+
+#[test]
+fn pg_has_uses_jsonb_containment_operator() {
+    // `has` is JSON-array containment: Postgres's `arr @> value`, not MySQL's
+    // `value MEMBER OF(arr)`.
+    let sql = gen_pg(
+        r#"
+        @sort(id asc)
+        Order { tags: text[], total: int }
+        shape O from Order { total }
+        query tagged(tag: text) -> O[] { list Order where (tags has $tag); }
+        "#,
+    );
+    assert!(sql.contains("\"order\".\"tags\" @> :tag"), "\n{sql}");
+    assert!(!sql.contains("MEMBER OF"), "\n{sql}");
+}
+
+#[test]
+fn pg_join_double_quotes_alias_and_on() {
+    let sql = gen_pg(
+        r#"
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text }
+        Order { placed_by: User, total: int }
+        shape OrderCard from Order { who = placed_by.name }
+        query order_by_id(id) -> OrderCard;
+        "#,
+    );
+    assert!(
+        sql.contains(
+            "JOIN \"user\" AS \"j_placed_by\" ON \"j_placed_by\".\"id\" = \"order\".\"placed_by_id\" AND \"j_placed_by\".\"deleted_at\" IS NULL"
+        ),
+        "\n{sql}"
+    );
 }

@@ -11,6 +11,7 @@ use std::path::Path;
 
 use based_ast::{Decl, FileId};
 use based_codegen::sql::{lower_mutations, lower_queries, LoweredMutation, LoweredQuery};
+use based_codegen::Dialect;
 use based_diagnostics::{Diagnostic, Severity};
 use based_parser::parse_file;
 use based_sema::{check, CheckedSchema};
@@ -20,6 +21,10 @@ use based_sema::{check, CheckedSchema};
 pub struct Compiled {
     pub schema: CheckedSchema,
     pub decls: Vec<Decl>,
+    /// The compile target the SQL was lowered for. The runtime's named→positional
+    /// scanner also branches on it (`?` vs `$n`, D21/D29), so it must equal the
+    /// dialect the driver/`Backend` in use actually speaks (a deployment invariant).
+    pub dialect: Dialect,
     /// Lowered query SQL, keyed by callable name for O(1) request dispatch.
     pub queries: HashMap<String, LoweredQuery>,
     /// Lowered mutation write statements, keyed by callable name (write dispatch).
@@ -42,6 +47,7 @@ impl Compiled {
     /// never reach codegen). Warnings are tolerated — they do not affect execution.
     pub fn load(root: &Path) -> Result<Compiled, LoadError> {
         let project = based_manifest::discover(root).map_err(LoadError::Check)?;
+        let dialect = Dialect::parse(&project.manifest.dialect);
 
         let mut decls = Vec::new();
         let mut diags = Vec::new();
@@ -62,23 +68,26 @@ impl Compiled {
             return Err(LoadError::Check(sema_diags));
         }
 
-        Ok(Compiled::from_checked(schema, decls))
+        Ok(Compiled::from_checked(schema, decls, dialect))
     }
 
-    /// Build the served artifact from an already-checked schema + AST (the loader's
-    /// tail; also the seam tests use to skip disk I/O).
-    pub fn from_checked(schema: CheckedSchema, decls: Vec<Decl>) -> Compiled {
-        let queries = lower_queries(&schema, &decls)
+    /// Build the served artifact from an already-checked schema + AST for a target
+    /// `dialect` (the loader's tail; also the seam tests use to skip disk I/O). The
+    /// SQL is lowered *and* later bound (`?` vs `$n`) for this dialect, so it must be
+    /// the one the serving `Backend` speaks.
+    pub fn from_checked(schema: CheckedSchema, decls: Vec<Decl>, dialect: Dialect) -> Compiled {
+        let queries = lower_queries(&schema, &decls, dialect)
             .into_iter()
             .map(|q| (q.name.clone(), q))
             .collect();
-        let mutations = lower_mutations(&schema, &decls)
+        let mutations = lower_mutations(&schema, &decls, dialect)
             .into_iter()
             .map(|m| (m.name.clone(), m))
             .collect();
         Compiled {
             schema,
             decls,
+            dialect,
             queries,
             mutations,
         }

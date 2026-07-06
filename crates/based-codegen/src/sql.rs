@@ -13,24 +13,25 @@
 //! indexes are *not* auto-created; they surface as the W0103 lint instead.
 //!
 //! ## Type mapping
-//! | primitive   | MariaDB        | SQLite    | note |
-//! |-------------|----------------|-----------|------|
-//! | `text`      | `VARCHAR(255)` | `TEXT`    | MariaDB bounds it so it is index/unique-able; SQLite has no length cap |
-//! | `int`       | `BIGINT`       | `INTEGER` | avoids silent overflow on money/counts (SQLite `INTEGER` is 64-bit) |
-//! | `bool`      | `BOOLEAN`      | `INTEGER` | SQLite has no bool type — stored as `0`/`1` (matches the runtime `SqliteDb` mapping, D27) |
-//! | `timestamp` | `DATETIME`     | `TEXT`    | MariaDB dodges `TIMESTAMP`'s implicit ON UPDATE + 2038; SQLite has no date type |
-//! | `date`      | `DATE`         | `TEXT`    | |
-//! | `json`      | `JSON`         | `TEXT`    | SQLite stores JSON as text (D27) |
-//! | `uuid`/`Id` | `UUID`         | `TEXT`    | native MariaDB type (D1); app-generated, no default. SQLite has no UUID type |
+//! | primitive   | MariaDB        | SQLite    | Postgres      | note |
+//! |-------------|----------------|-----------|---------------|------|
+//! | `text`      | `VARCHAR(255)` | `TEXT`    | `TEXT`        | MariaDB bounds it so it is index/unique-able; SQLite/Postgres have no length cap |
+//! | `int`       | `BIGINT`       | `INTEGER` | `BIGINT`      | avoids silent overflow on money/counts (SQLite `INTEGER` is 64-bit) |
+//! | `bool`      | `BOOLEAN`      | `INTEGER` | `BOOLEAN`     | SQLite has no bool type — stored as `0`/`1` (matches the runtime `SqliteDb` mapping, D27) |
+//! | `timestamp` | `DATETIME`     | `TEXT`    | `TIMESTAMPTZ` | MariaDB dodges `TIMESTAMP`'s implicit ON UPDATE + 2038; Postgres has a real tz-aware type |
+//! | `date`      | `DATE`         | `TEXT`    | `DATE`        | |
+//! | `json`      | `JSON`         | `TEXT`    | `JSONB`       | Postgres `JSONB` is the indexable/`@>`-queryable form (matches the DML `has` -> `@>`) |
+//! | `uuid`/`Id` | `UUID`         | `TEXT`    | `UUID`        | native on MariaDB + Postgres (D1); app-generated, no default. SQLite has no UUID type |
 //!
 //! A to-many scalar (`text[]`) has no columnar form; it maps to the dialect's JSON
-//! type (a JSON array) — `JSON` on MariaDB, `TEXT` on SQLite.
+//! type (a JSON array) — `JSON` on MariaDB, `TEXT` on SQLite, `JSONB` on Postgres.
 //!
-//! ## Index syntax (dialect-specific)
+//! ## Index + quoting syntax (dialect-specific)
 //! MariaDB emits declared + inferred indexes *inline* as `KEY` / `UNIQUE KEY` table
-//! clauses. SQLite has no inline index clause, so they are emitted as separate
+//! clauses. SQLite and Postgres have no inline index clause, so they emit separate
 //! `CREATE INDEX` / `CREATE UNIQUE INDEX` statements after the table. Column-level
-//! `(unique)` constraints stay inline in both (SQLite supports `CONSTRAINT … UNIQUE`).
+//! `(unique)` constraints stay inline in all three. Identifiers are backtick-quoted on
+//! MariaDB/SQLite and double-quoted on Postgres ([`Dialect::quote`]).
 
 use based_ast::{DefaultVal, Literal, Primitive};
 use based_sema::{CheckedSchema, MemberKind, RModel};
@@ -143,9 +144,9 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
     }
 
     // Primary key — always `id` (D2). It is the first member `skeleton` inserts.
-    lines.push("PRIMARY KEY (`id`)".to_string());
+    lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
 
-    // Column-level `(unique)` constraints, in member order. Both dialects accept the
+    // Column-level `(unique)` constraints, in member order. All dialects accept the
     // inline `CONSTRAINT … UNIQUE (…)` table clause.
     for mem in &model.members {
         if let MemberKind::Scalar {
@@ -155,19 +156,24 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
         } = &mem.kind
         {
             lines.push(format!(
-                "CONSTRAINT `{name}` UNIQUE (`{column}`)",
-                name = constraint_name("uq", &model.table, std::slice::from_ref(column)),
+                "CONSTRAINT {name} UNIQUE ({col})",
+                name = dialect.quote(&constraint_name(
+                    "uq",
+                    &model.table,
+                    std::slice::from_ref(column)
+                )),
+                col = dialect.quote(column),
             ));
         }
     }
 
     let specs = index_specs(model);
 
-    // MariaDB inlines the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite has no
-    // inline form, so they trail the table as `CREATE INDEX` statements.
+    // MariaDB inlines the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
+    // have no inline form, so they trail the table as `CREATE INDEX` statements.
     if dialect == Dialect::MariaDb {
         for spec in &specs {
-            lines.push(inline_index_clause(spec));
+            lines.push(inline_index_clause(dialect, spec));
         }
     }
 
@@ -176,11 +182,14 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
         .map(|l| format!("  {l}"))
         .collect::<Vec<_>>()
         .join(",\n");
-    let mut out = format!("CREATE TABLE `{}` (\n{body}\n);\n", model.table);
+    let mut out = format!(
+        "CREATE TABLE {} (\n{body}\n);\n",
+        dialect.quote(&model.table)
+    );
 
-    if dialect == Dialect::Sqlite {
+    if dialect != Dialect::MariaDb {
         for spec in &specs {
-            out.push_str(&create_index_stmt(&model.table, spec));
+            out.push_str(&create_index_stmt(dialect, &model.table, spec));
         }
     }
     out
@@ -195,7 +204,8 @@ fn column_line(
     dialect: Dialect,
 ) -> String {
     let mut s = format!(
-        "`{column}` {ty} {}",
+        "{} {ty} {}",
+        dialect.quote(column),
         if optional { "NULL" } else { "NOT NULL" }
     );
     if let Some(dv) = default {
@@ -208,24 +218,25 @@ fn column_line(
 /// A declared/inferred index as an inline MariaDB table clause. A unique index
 /// becomes `UNIQUE KEY`, otherwise `KEY`. The name keeps field-derived readability;
 /// the column list is physical (a relation field is its FK column, resolved upstream).
-fn inline_index_clause(spec: &IndexSpec) -> String {
+fn inline_index_clause(dialect: Dialect, spec: &IndexSpec) -> String {
     let cols = spec
         .columns
         .iter()
-        .map(|c| format!("`{c}`"))
+        .map(|c| dialect.quote(c))
         .collect::<Vec<_>>()
         .join(", ");
     let kind = if spec.unique { "UNIQUE KEY" } else { "KEY" };
-    format!("{kind} `{name}` ({cols})", name = spec.name)
+    format!("{kind} {name} ({cols})", name = dialect.quote(&spec.name))
 }
 
-/// A declared/inferred index as a standalone SQLite `CREATE INDEX` statement (SQLite
-/// has no inline table-index clause). A unique index becomes `CREATE UNIQUE INDEX`.
-fn create_index_stmt(table: &str, spec: &IndexSpec) -> String {
+/// A declared/inferred index as a standalone `CREATE INDEX` statement (SQLite and
+/// Postgres have no inline table-index clause). A unique index becomes `CREATE UNIQUE
+/// INDEX`.
+fn create_index_stmt(dialect: Dialect, table: &str, spec: &IndexSpec) -> String {
     let cols = spec
         .columns
         .iter()
-        .map(|c| format!("`{c}`"))
+        .map(|c| dialect.quote(c))
         .collect::<Vec<_>>()
         .join(", ");
     let kind = if spec.unique {
@@ -233,7 +244,11 @@ fn create_index_stmt(table: &str, spec: &IndexSpec) -> String {
     } else {
         "CREATE INDEX"
     };
-    format!("{kind} `{name}` ON `{table}` ({cols});\n", name = spec.name)
+    format!(
+        "{kind} {name} ON {table} ({cols});\n",
+        name = dialect.quote(&spec.name),
+        table = dialect.quote(table),
+    )
 }
 
 /// Physical column backing a field: a scalar's column, or a forward relation's FK.
@@ -291,6 +306,23 @@ fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static str {
                 Primitive::Uuid | Primitive::Id => "TEXT",
             }
         }
+        // Postgres has a rich, standards-track type set: real `BOOLEAN`, native `UUID`,
+        // tz-aware `TIMESTAMPTZ`, and `JSONB` (the indexable/`@>`-queryable JSON form —
+        // matching the DML `has` -> `@>` lowering). `text` is unbounded (no VARCHAR cap).
+        Dialect::Postgres => {
+            if many {
+                return "JSONB";
+            }
+            match ty {
+                Primitive::Text => "TEXT",
+                Primitive::Int => "BIGINT",
+                Primitive::Bool => "BOOLEAN",
+                Primitive::Timestamp => "TIMESTAMPTZ",
+                Primitive::Date => "DATE",
+                Primitive::Json => "JSONB",
+                Primitive::Uuid | Primitive::Id => "UUID",
+            }
+        }
     }
 }
 
@@ -316,10 +348,7 @@ fn render_default(dv: &DefaultVal, dialect: Dialect) -> String {
         DefaultVal::Lit(Literal::Str(s)) => format!("'{}'", s.replace('\'', "''")),
         DefaultVal::Lit(Literal::Int(i)) => i.to_string(),
         DefaultVal::Lit(Literal::Float(f)) => f.to_string(),
-        DefaultVal::Lit(Literal::Bool(b)) => match dialect {
-            Dialect::MariaDb => if *b { "TRUE" } else { "FALSE" }.to_string(),
-            Dialect::Sqlite => if *b { "1" } else { "0" }.to_string(),
-        },
+        DefaultVal::Lit(Literal::Bool(b)) => dialect.bool_lit(*b).to_string(),
         DefaultVal::Lit(Literal::Null) => "NULL".to_string(),
         // `now()` is the only value-position function (ir::KNOWN_FUNCS).
         DefaultVal::Func(_) => "CURRENT_TIMESTAMP".to_string(),

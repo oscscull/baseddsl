@@ -27,6 +27,10 @@ fn gen_sqlite(src: &str) -> String {
     gen_for(src, Dialect::Sqlite)
 }
 
+fn gen_pg(src: &str) -> String {
+    gen_for(src, Dialect::Postgres)
+}
+
 #[test]
 fn implicit_id_is_uuid_primary_key() {
     let ddl = gen("Org { name: text }");
@@ -344,6 +348,123 @@ fn sqlite_inferred_join_key_is_a_create_index() {
         ddl.contains(
             "CREATE INDEX `inf_order_item_deleted_at_order` ON `order_item` (`deleted_at`, `order_id`);"
         ),
+        "\n{ddl}"
+    );
+}
+
+// ---------- Postgres (D29) -------------------------------------------------
+
+#[test]
+fn pg_uses_double_quoted_identifiers_and_native_types() {
+    // Postgres double-quotes identifiers (`"order"`, a reserved word — the reason
+    // quoting matters) and has native BIGINT / BOOLEAN / TIMESTAMPTZ / UUID types.
+    let ddl = gen_pg(
+        r#"
+        @created(created_at)
+        Order {
+          created_at: timestamp
+          status:     text
+          total:      int
+          live:       bool
+          tags:       text[]
+          meta:       json
+        }
+        "#,
+    );
+    assert!(ddl.contains("CREATE TABLE \"order\" ("), "\n{ddl}");
+    assert!(ddl.contains("\"id\" UUID NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("PRIMARY KEY (\"id\")"), "\n{ddl}");
+    assert!(ddl.contains("\"status\" TEXT NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("\"total\" BIGINT NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("\"live\" BOOLEAN NOT NULL"), "\n{ddl}");
+    assert!(
+        ddl.contains("\"created_at\" TIMESTAMPTZ NOT NULL"),
+        "\n{ddl}"
+    );
+    // json -> JSONB (the indexable/`@>`-queryable form); a to-many scalar -> JSONB too.
+    assert!(ddl.contains("\"meta\" JSONB NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("\"tags\" JSONB NOT NULL"), "\n{ddl}");
+    // no backtick-quoted identifiers in a Postgres artifact (the `based gen sql`
+    // header comment has backticks in its prose, so check the statement body only).
+    let body = &ddl[ddl.find("CREATE TABLE").unwrap()..];
+    assert!(!body.contains('`'), "\n{ddl}");
+}
+
+#[test]
+fn pg_fk_column_is_uuid() {
+    let ddl = gen_pg(
+        r#"
+        Org { name: text }
+        Order { org: Org, buyer: Org? }
+        "#,
+    );
+    assert!(ddl.contains("\"org_id\" UUID NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("\"buyer_id\" UUID NULL"), "\n{ddl}");
+    assert!(!ddl.contains("FOREIGN KEY"), "\n{ddl}");
+}
+
+#[test]
+fn pg_bool_default_uses_keyword() {
+    // Unlike SQLite, Postgres has TRUE/FALSE keywords (like MariaDB).
+    let ddl = gen_pg(
+        r#"
+        Order {
+          status: text (default "pending")
+          live:   bool (default true)
+          off:    bool (default false)
+          at:     timestamp (default now())
+        }
+        "#,
+    );
+    assert!(
+        ddl.contains("\"status\" TEXT NOT NULL DEFAULT 'pending'"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("\"live\" BOOLEAN NOT NULL DEFAULT TRUE"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("\"off\" BOOLEAN NOT NULL DEFAULT FALSE"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("\"at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn pg_indexes_are_separate_create_index_statements() {
+    // Like SQLite, Postgres has no inline KEY / UNIQUE KEY clause: indexes trail the
+    // table as CREATE [UNIQUE] INDEX statements. `(unique)` stays an inline constraint.
+    let ddl = gen_pg(
+        r#"
+        Org { slug: text (unique) }
+        User { name: text }
+        Membership {
+          org:  Org
+          user: User
+          role: text
+          @index(org, user) unique
+          @index role
+        }
+        "#,
+    );
+    assert!(!ddl.contains("UNIQUE KEY"), "\n{ddl}");
+    assert!(!ddl.contains("  KEY \""), "\n{ddl}");
+    assert!(
+        ddl.contains("CONSTRAINT \"uq_org_slug\" UNIQUE (\"slug\")"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains(
+            "CREATE UNIQUE INDEX \"uq_membership_org_user\" ON \"membership\" (\"org_id\", \"user_id\");"
+        ),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CREATE INDEX \"idx_membership_role\" ON \"membership\" (\"role\");"),
         "\n{ddl}"
     );
 }

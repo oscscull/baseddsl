@@ -22,9 +22,14 @@
 //!
 //! ## Parameter placeholders
 //! Signature inputs render as `:name` named placeholders (`$ctx.org` -> `:ctx_org`).
-//! The generated client (M4) binds them; MariaDB's native positional `?` is a
-//! client-layer translation. Named placeholders keep the emitted SQL legible —
-//! readable over terse (CLAUDE.md).
+//! The runtime binds them to the driver's positional form (`?` on MySQL/MariaDB/SQLite,
+//! `$n` on Postgres — D29). Named placeholders keep the emitted SQL legible — readable
+//! over terse (CLAUDE.md).
+//!
+//! ## Dialects
+//! The SELECT text branches on the [`crate::Dialect`]: identifier quoting (`` `x` `` vs
+//! `"x"`), the bare-bool literal (`= TRUE` vs SQLite's `= 1`), and JSON containment
+//! (`has` -> MySQL's `MEMBER OF` vs Postgres's `@>`). Everything else is portable.
 //!
 //! ## Deferred (documented, not silently wrong)
 //! - Nested shape sub-objects (`field { ... }`): need JSON aggregation / a second
@@ -42,9 +47,10 @@ use crate::Dialect;
 /// Render every query in the schema as a parameterized SELECT (mutations join in a
 /// later increment). Statements are separated by blank lines, in declaration order.
 pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
-    // The query SQL is dialect-portable (backtick idents, `= TRUE`, `IS NULL`,
-    // positional `?` run on MariaDB and SQLite alike, D27), so only the header
-    // records the target — the SELECT text itself does not branch.
+    // The SELECT text now branches on the dialect: identifier quoting (`` `x` `` vs
+    // `"x"`), the bare-bool literal, and JSON containment (`MEMBER OF` vs `@>`). The
+    // one lowering below is shared with the runtime, so the emitted and executed SQL
+    // can never disagree per dialect (principle 4).
     let queries: HashMap<&str, &RQuery> = schema
         .queries
         .iter()
@@ -61,7 +67,7 @@ pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
         if let Decl::Query(q) = decl {
             if let Some(rq) = queries.get(q.name.node.as_str()) {
                 out.push('\n');
-                out.push_str(&render_query(schema, decls, q, rq));
+                out.push_str(&render_query(schema, decls, q, rq, dialect));
             }
         }
     }
@@ -86,7 +92,11 @@ pub struct LoweredQuery {
 
 /// Lower every query in the schema to its structured SQL, in declaration order.
 /// The in-process runtime consumes this directly (no serialized artifact).
-pub fn lower_queries(schema: &CheckedSchema, decls: &[Decl]) -> Vec<LoweredQuery> {
+pub fn lower_queries(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    dialect: Dialect,
+) -> Vec<LoweredQuery> {
     let queries: HashMap<&str, &RQuery> = schema
         .queries
         .iter()
@@ -96,7 +106,7 @@ pub fn lower_queries(schema: &CheckedSchema, decls: &[Decl]) -> Vec<LoweredQuery
     for decl in decls {
         if let Decl::Query(q) = decl {
             if let Some(rq) = queries.get(q.name.node.as_str()) {
-                out.push(lower_query(schema, decls, q, rq));
+                out.push(lower_query(schema, decls, q, rq, dialect));
             }
         }
     }
@@ -105,8 +115,14 @@ pub fn lower_queries(schema: &CheckedSchema, decls: &[Decl]) -> Vec<LoweredQuery
 
 /// Text emitter for one query: the SQL body framed with `-- query` comment
 /// headers (the `based gen sql` surface). Delegates the SQL to `lower_query`.
-fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -> String {
-    let low = lower_query(schema, decls, q, rq);
+fn render_query(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    q: &Query,
+    rq: &RQuery,
+    dialect: Dialect,
+) -> String {
+    let low = lower_query(schema, decls, q, rq, dialect);
     let mut out = format!("-- query {}\n{}", low.name, low.sql);
     if let Some(count) = &low.count_sql {
         out.push('\n');
@@ -117,9 +133,15 @@ fn render_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) 
 
 /// The single query lowering: builds the primary SELECT (and count SELECT) as
 /// header-free SQL. Both `render_query` (text) and the runtime read this.
-fn lower_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -> LoweredQuery {
+fn lower_query(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    q: &Query,
+    rq: &RQuery,
+    dialect: Dialect,
+) -> LoweredQuery {
     let root = schema.model(&rq.target).expect("target resolved by sema");
-    let mut sel = Select::new(schema, decls, root);
+    let mut sel = Select::new(schema, decls, root, dialect);
 
     // 1. Projection (drives the SELECT list; also seeds joins for reached columns).
     let projection = build_projection(&mut sel, decls, rq, root);
@@ -128,7 +150,7 @@ fn lower_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -
     let mut wheres: Vec<String> = Vec::new();
     collect_filter(&mut sel, q, root, &mut wheres);
     if let Some(sd) = &root.soft_delete {
-        wheres.push(soft_pred(&sel.root_alias, root, sd));
+        wheres.push(soft_pred(dialect, &sel.root_alias, root, sd));
     }
     if let Some(scope) = &root.scope {
         wheres.push(sel.predicate(scope, root));
@@ -138,13 +160,8 @@ fn lower_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -
     let order = build_order(&mut sel, q, root);
 
     // Assemble. Joins were accumulated by every resolve above, so emit them now.
-    let mut sql = format!("SELECT\n{}\nFROM `{}`", projection, root.table);
-    for j in &sel.joins {
-        sql.push_str(&format!(
-            "\n{} `{}` AS `{}` ON {}",
-            j.kind, j.table, j.alias, j.on
-        ));
-    }
+    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&root.table));
+    push_joins(&mut sql, sel.dialect, &sel.joins);
     if !wheres.is_empty() {
         sql.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
     }
@@ -162,13 +179,12 @@ fn lower_query(schema: &CheckedSchema, decls: &[Decl], q: &Query, rq: &RQuery) -
     // `with count`: a second query for the live-row total (soft-delete applied, no
     // LIMIT). Meaningless for keyset, hence opt-in (pagination.md).
     let count_sql = if query_page(q).is_some_and(|p| p.with_count) {
-        let mut cnt = format!("SELECT COUNT(*) AS `count`\nFROM `{}`", root.table);
-        for j in &sel.joins {
-            cnt.push_str(&format!(
-                "\n{} `{}` AS `{}` ON {}",
-                j.kind, j.table, j.alias, j.on
-            ));
-        }
+        let mut cnt = format!(
+            "SELECT COUNT(*) AS {}\nFROM {}",
+            sel.q("count"),
+            sel.q(&root.table)
+        );
+        push_joins(&mut cnt, sel.dialect, &sel.joins);
         if !wheres.is_empty() {
             cnt.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
         }
@@ -217,14 +233,16 @@ pub(crate) fn project_return(
                 match &mem.kind {
                     MemberKind::Scalar { column, .. } => {
                         cols.push(format!(
-                            "`{}`.`{}` AS `{}`",
-                            sel.root_alias, column, mem.name
+                            "{} AS {}",
+                            sel.qcol(&sel.root_alias, column),
+                            sel.q(&mem.name)
                         ));
                     }
                     MemberKind::Forward { fk_col, .. } => {
                         cols.push(format!(
-                            "`{}`.`{}` AS `{}`",
-                            sel.root_alias, fk_col, mem.name
+                            "{} AS {}",
+                            sel.qcol(&sel.root_alias, fk_col),
+                            sel.q(&mem.name)
                         ));
                     }
                     MemberKind::Inverse { .. } => {}
@@ -244,18 +262,22 @@ fn project_body(sel: &mut Select, fields: &[ShapeField], model: &RModel, cols: &
         match f {
             ShapeField::Bare(id) => {
                 let (alias, col) = sel.resolve(&single(&id.node), model);
-                cols.push(format!("`{alias}`.`{col}` AS `{}`", id.node));
+                cols.push(format!("{} AS {}", sel.qcol(&alias, &col), sel.q(&id.node)));
             }
             ShapeField::Rename { out, value } => match value {
                 ShapeValue::Path(p) => {
                     let (alias, col) = sel.resolve(p, model);
-                    cols.push(format!("`{alias}`.`{col}` AS `{}`", out.node));
+                    cols.push(format!(
+                        "{} AS {}",
+                        sel.qcol(&alias, &col),
+                        sel.q(&out.node)
+                    ));
                 }
                 ShapeValue::Raw(raw) => {
                     cols.push(format!(
-                        "({}) AS `{}`",
-                        render_raw(raw, &sel.root_alias, &model.table),
-                        out.node
+                        "({}) AS {}",
+                        render_raw(sel.dialect, raw, &sel.root_alias, &model.table),
+                        sel.q(&out.node)
                     ));
                 }
             },
@@ -297,17 +319,17 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
         // `user -> author`: equality on the named relation's FK column.
         Some(ParamBinding::Edge(edge)) => {
             let (alias, col) = sel.resolve(&single(&edge.node), root);
-            format!("`{alias}`.`{col}` = {ph}")
+            format!("{} = {ph}", sel.qcol(&alias, &col))
         }
         // `since: timestamp > created_at`: explicit column + operator.
         Some(ParamBinding::ColOp { op, col }) => {
             let (alias, c) = sel.resolve(&single(&col.node), root);
-            format!("`{alias}`.`{c}` {} {ph}", sql_op(*op))
+            format!("{} {} {ph}", sel.qcol(&alias, &c), sql_op(*op))
         }
         // same-name equality on the mapped column (a relation field maps to its FK).
         None => {
             let (alias, col) = sel.resolve(&single(&p.name.node), root);
-            format!("`{alias}`.`{col}` = {ph}")
+            format!("{} = {ph}", sel.qcol(&alias, &col))
         }
     }
 }
@@ -329,11 +351,11 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<String> {
     for t in terms {
         let (alias, col) = sel.resolve(&t.path, root);
         last_is_id = alias == sel.root_alias && col == "id";
-        out.push(format!("`{alias}`.`{col}` {}", dir(t.dir)));
+        out.push(format!("{} {}", sel.qcol(&alias, &col), dir(t.dir)));
     }
     if let Some(page) = query_page(q) {
         if !page.offset && !last_is_id && !out.is_empty() {
-            out.push(format!("`{}`.`id` ASC", sel.root_alias));
+            out.push(format!("{} ASC", sel.qcol(&sel.root_alias, "id")));
         }
     }
     out
@@ -350,12 +372,30 @@ pub(crate) struct Join {
     pub(crate) on: String,
 }
 
+/// Append each accumulated join to a statement (`<kind> <table> AS <alias> ON <on>`),
+/// identifiers quoted for the dialect. Shared by the read side (SELECT/COUNT) and the
+/// write side (`mutations`'s multi-table UPDATE/DELETE) so the two can't drift.
+pub(crate) fn push_joins(s: &mut String, dialect: Dialect, joins: &[Join]) {
+    for j in joins {
+        s.push_str(&format!(
+            "\n{} {} AS {} ON {}",
+            j.kind,
+            dialect.quote(&j.table),
+            dialect.quote(&j.alias),
+            j.on
+        ));
+    }
+}
+
 /// Accumulates joins as paths are resolved, so the final FROM/JOIN block reflects
 /// every column any clause reached across. Shared by the read side (this module)
 /// and the write side (`mutations`), which reuses `predicate`/`value` so a
 /// mutation `where` lowers identically to a query `where`.
 pub(crate) struct Select<'a> {
     schema: &'a CheckedSchema,
+    /// The compile target. Drives identifier quoting (`` `x` `` vs `"x"`) and a few
+    /// operator/literal spellings; everything else is portable across dialects.
+    pub(crate) dialect: Dialect,
     pub(crate) root_alias: String,
     pub(crate) joins: Vec<Join>,
     /// path-prefix key (e.g. "placed_by", "address.city") -> join alias.
@@ -382,7 +422,12 @@ pub(crate) struct BackCtx<'a> {
 }
 
 impl<'a> Select<'a> {
-    pub(crate) fn new(schema: &'a CheckedSchema, decls: &'a [Decl], root: &RModel) -> Self {
+    pub(crate) fn new(
+        schema: &'a CheckedSchema,
+        decls: &'a [Decl],
+        root: &RModel,
+        dialect: Dialect,
+    ) -> Self {
         let filters = decls
             .iter()
             .filter_map(|d| match d {
@@ -392,6 +437,7 @@ impl<'a> Select<'a> {
             .collect();
         Select {
             schema,
+            dialect,
             root_alias: root.table.clone(),
             joins: Vec::new(),
             seen: HashMap::new(),
@@ -399,6 +445,16 @@ impl<'a> Select<'a> {
             filter_stack: Vec::new(),
             back: None,
         }
+    }
+
+    /// Quote one identifier for the target dialect (`` `x` `` / `"x"`).
+    pub(crate) fn q(&self, ident: &str) -> String {
+        self.dialect.quote(ident)
+    }
+
+    /// A `table`.`column` qualified reference, quoted for the dialect.
+    pub(crate) fn qcol(&self, table: &str, column: &str) -> String {
+        self.dialect.qcol(table, column)
     }
 
     /// Attach a tx back-reference context so a `^.field` in this statement's assigns
@@ -472,9 +528,16 @@ impl<'a> Select<'a> {
         }
         let alias = format!("j_{}", prefix.replace('.', "_"));
         let kind = if optional { "LEFT JOIN" } else { "JOIN" };
-        let mut on = format!("`{alias}`.`id` = `{cur_alias}`.`{fk_col}`");
+        let mut on = format!(
+            "{} = {}",
+            self.qcol(&alias, "id"),
+            self.qcol(cur_alias, fk_col)
+        );
         if let Some(sd) = &tmodel.soft_delete {
-            on.push_str(&format!(" AND {}", soft_pred(&alias, tmodel, sd)));
+            on.push_str(&format!(
+                " AND {}",
+                soft_pred(self.dialect, &alias, tmodel, sd)
+            ));
         }
         self.record(kind, tmodel.table.clone(), alias.clone(), on, prefix);
         (alias, tmodel)
@@ -500,9 +563,16 @@ impl<'a> Select<'a> {
             Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
             _ => format!("{via}_id"),
         };
-        let mut on = format!("`{alias}`.`{via_fk}` = `{cur_alias}`.`id`");
+        let mut on = format!(
+            "{} = {}",
+            self.qcol(&alias, &via_fk),
+            self.qcol(cur_alias, "id")
+        );
         if let Some(sd) = &tmodel.soft_delete {
-            on.push_str(&format!(" AND {}", soft_pred(&alias, tmodel, sd)));
+            on.push_str(&format!(
+                " AND {}",
+                soft_pred(self.dialect, &alias, tmodel, sd)
+            ));
         }
         self.record("LEFT JOIN", tmodel.table.clone(), alias.clone(), on, prefix);
         (alias, tmodel)
@@ -546,13 +616,17 @@ impl<'a> Select<'a> {
             Predicate::Not(inner) => format!("NOT ({})", self.predicate(inner, model)),
             Predicate::Cmp { path, op, value } => {
                 let (alias, col) = self.resolve(path, model);
-                let lhs = format!("`{alias}`.`{col}`");
+                let lhs = self.qcol(&alias, &col);
                 let rhs = self.value(value, model);
                 match op {
                     // Collection ops don't fit plain infix: `in` needs a value list,
-                    // `has` is MariaDB's `value MEMBER OF(json_array)`.
+                    // `has` is JSON-array containment — MySQL's `value MEMBER OF(arr)`
+                    // vs. Postgres's `arr @> value` (the JSONB containment operator).
                     Op::In => format!("{lhs} IN ({rhs})"),
-                    Op::Has => format!("{rhs} MEMBER OF({lhs})"),
+                    Op::Has => match self.dialect {
+                        Dialect::Postgres => format!("{lhs} @> {rhs}"),
+                        _ => format!("{rhs} MEMBER OF({lhs})"),
+                    },
                     _ => format!("{lhs} {} {rhs}", sql_op(*op)),
                 }
             }
@@ -564,7 +638,11 @@ impl<'a> Select<'a> {
                     }
                 }
                 let (alias, col) = self.resolve(path, model);
-                format!("`{alias}`.`{col}` = TRUE")
+                format!(
+                    "{} = {}",
+                    self.qcol(&alias, &col),
+                    self.dialect.bool_lit(true)
+                )
             }
             // Inline the filter's body, substituting args for its params, resolved
             // against the call-site model (sema D14 guarantees the body resolves).
@@ -572,7 +650,10 @@ impl<'a> Select<'a> {
                 Some(f) => self.filter_call(f, args, model),
                 None => format!("TRUE /* filter {} unresolved */", name.node),
             },
-            Predicate::Raw(raw) => format!("({})", render_raw(raw, &self.root_alias, &model.table)),
+            Predicate::Raw(raw) => format!(
+                "({})",
+                render_raw(self.dialect, raw, &self.root_alias, &model.table)
+            ),
         }
     }
 
@@ -581,9 +662,9 @@ impl<'a> Select<'a> {
             Value::Param(pr) => format!(":{}", param_key(pr)),
             Value::Path(p) => {
                 let (alias, col) = self.resolve(p, model);
-                format!("`{alias}`.`{col}`")
+                self.qcol(&alias, &col)
             }
-            Value::Lit(l) => render_lit(l),
+            Value::Lit(l) => render_lit(self.dialect, l),
             Value::Func(f) => render_func(f),
             Value::Back(b) => self.back_value(b),
         }
@@ -602,7 +683,7 @@ impl<'a> Select<'a> {
         if let Some(a) = back.assigns.iter().find(|a| a.col.node == b.field.node) {
             return match &a.value {
                 Value::Param(pr) => format!(":{}", param_key(pr)),
-                Value::Lit(l) => render_lit(l),
+                Value::Lit(l) => render_lit(self.dialect, l),
                 Value::Func(f) => render_func(f),
                 // A path or nested back-ref in the prior create is not a plain bind;
                 // leave a visible marker rather than emit something unbindable.
@@ -692,11 +773,15 @@ fn subst_value(v: &Value, binds: &HashMap<&str, &Value>) -> Value {
 // ---------- small helpers --------------------------------------------------
 
 /// Soft-delete predicate for a table alias (soft-delete.md covered subset).
-pub(crate) fn soft_pred(alias: &str, model: &RModel, sd: &SoftDelete) -> String {
+pub(crate) fn soft_pred(dialect: Dialect, alias: &str, model: &RModel, sd: &SoftDelete) -> String {
     let col = column_of(model, &sd.field);
     match sd.mode {
-        SoftMode::Timestamp => format!("`{alias}`.`{col}` IS NULL"),
-        SoftMode::Bool => format!("`{alias}`.`{col}` = FALSE"),
+        SoftMode::Timestamp => format!("{} IS NULL", dialect.qcol(alias, &col)),
+        SoftMode::Bool => format!(
+            "{} = {}",
+            dialect.qcol(alias, &col),
+            dialect.bool_lit(false)
+        ),
     }
 }
 
@@ -802,12 +887,12 @@ fn dir(d: SortDir) -> &'static str {
     }
 }
 
-pub(crate) fn render_lit(l: &Literal) -> String {
+pub(crate) fn render_lit(dialect: Dialect, l: &Literal) -> String {
     match l {
         Literal::Str(s) => format!("'{}'", s.replace('\'', "''")),
         Literal::Int(i) => i.to_string(),
         Literal::Float(f) => f.to_string(),
-        Literal::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        Literal::Bool(b) => dialect.bool_lit(*b).to_string(),
         Literal::Null => "NULL".to_string(),
     }
 }
@@ -821,17 +906,19 @@ pub(crate) fn render_func(f: &FuncCall) -> String {
 }
 
 /// Render a raw-SQL fragment (raw.md): text verbatim, `${param}` -> `:param`,
-/// `{table}`/`{id}` -> safe engine interpolation (root table / its `id`).
-pub(crate) fn render_raw(raw: &RawSql, root_alias: &str, table: &str) -> String {
+/// `{table}`/`{id}` -> safe engine interpolation (root table / its `id`). Only the
+/// engine-interpolated identifiers are dialect-quoted; the raw text is the user's and
+/// is emitted verbatim (an escape hatch, principle 6 — they own its portability).
+pub(crate) fn render_raw(dialect: Dialect, raw: &RawSql, root_alias: &str, table: &str) -> String {
     let mut s = String::new();
     for part in &raw.parts {
         match part {
             RawPart::Text(t) => s.push_str(t),
             RawPart::Param(pr) => s.push_str(&format!(":{}", param_key(pr))),
             RawPart::Engine(id) => match id.node.as_str() {
-                "table" => s.push_str(&format!("`{table}`")),
-                "id" => s.push_str(&format!("`{root_alias}`.`id`")),
-                other => s.push_str(&format!("`{other}`")),
+                "table" => s.push_str(&dialect.quote(table)),
+                "id" => s.push_str(&dialect.qcol(root_alias, "id")),
+                other => s.push_str(&dialect.quote(other)),
             },
         }
     }

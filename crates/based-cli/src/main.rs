@@ -314,8 +314,9 @@ fn cmd_serve(
 
     // Reuse the shared front end so diagnostics render exactly as `based check` does,
     // then build the served artifact from the clean schema (no second parse/check).
-    let (_project, schema, decls, _sources, _warnings) = load_checked(root)?;
-    let compiled = Compiled::from_checked(schema, decls);
+    let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
+    let dialect = Dialect::parse(&project.manifest.dialect);
+    let compiled = Compiled::from_checked(schema, decls, dialect);
 
     let pool = PoolConfig {
         min: pool_min,

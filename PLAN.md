@@ -27,9 +27,10 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-Batch progress: current batch — D26 (container story: probes + graceful shutdown) +
-D27 (SQLite backend + real in-memory integration tests) + D28 (SQLite DDL codegen —
-`based gen sql` targets SQLite; the integration test now runs the *generated* DDL) done — 3/3.
+Batch progress: current batch — D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen +
+the dialect-aware `?`→`$n` scanner; the concrete driver deferred to the live-DB slice) done — 1/3.
+Prior batch: D26 (container probes + graceful shutdown) + D27 (SQLite backend + real integration) +
+D28 (SQLite DDL codegen) — 3/3.
 
 ## Pipeline (data flow)
 
@@ -37,7 +38,7 @@ D27 (SQLite backend + real in-memory integration tests) + D28 (SQLite DDL codege
 *.bsl ──manifest::discover──▶ files
       ──parser::parse_file──▶ [Decl]           (per file; recovers at decl boundary)
       ──sema::check─────────▶ CheckedSchema + [Diagnostic]
-      ──codegen::sql::ddl───▶ SQL DDL          (M2 ✅; dialect-aware: MariaDB + SQLite, D28)
+      ──codegen::sql::ddl───▶ SQL DDL          (M2 ✅; dialect-aware: MariaDB + SQLite + Postgres, D28/D29)
       ──codegen::sql::dml───▶ query SELECTs    (M3 read side ✅)
       ──codegen::sql::mutations─▶ INSERT/UPDATE/DELETE  (M3 write side ✅)
       ──codegen::client─────▶ typed Rust client (M4 ✅)
@@ -71,10 +72,10 @@ All bail unless every file parses *and* checks clean (codegen assumes a clean sc
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | **based-sema** | ✅ **this milestone** | resolution + checks + lints + `CheckedSchema` IR. Details below. |
 | based-cli | ✅ works | `based check` + `based gen sql` (DDL + query SELECTs + mutations) + `based gen client` (typed Rust) + `based gen openapi` (OpenAPI 3.1, D24) + `based facts [--json]` (derived facts, M5) + `based serve` (HTTP listener, D21). |
-| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client) + OpenAPI (D24)** | `sql::ddl` → `CREATE TABLE`, **dialect-aware (MariaDB + SQLite, D28)** — SQLite type map + indexes as separate `CREATE INDEX`; `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes); `openapi` → one OpenAPI 3.1 doc over the same wire (polyglot clients via `openapi-generator`, D23/D24). The `Dialect` enum now has two variants; DML/mutation SQL is dialect-portable (only the header varies). |
+| **based-codegen** | ✅ **M2 (DDL) + M3 (read+write) + M4 (client) + OpenAPI (D24)** | `sql::ddl` → `CREATE TABLE`, **dialect-aware (MariaDB + SQLite + Postgres, D28/D29)** — per-dialect type map + inline (MariaDB) vs. separate `CREATE INDEX` (SQLite/Postgres); `sql::dml` → query SELECTs (`lower_queries` seam); `sql::mutations` → INSERT/UPDATE/DELETE (soft-delete rewrite + scope injection; `lower_mutations` seam feeds both the text emitter and the runtime); `client` → typed Rust client (inputs/outputs/routes); `openapi` → one OpenAPI 3.1 doc over the same wire (polyglot clients via `openapi-generator`, D23/D24). The `Dialect` enum now has **three** variants; the DML/mutation SQL branches through one `Dialect::quote`/`qcol` quoting seam + a few operator/literal spellings (`= TRUE`, `MEMBER OF` vs `@>`) + Postgres's `FROM`/`USING` multi-table write restructure (D29). |
 | **based-facts** | ✅ **M5** | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>`: the "show, don't write" facts — inferred inverse pairings, join-key indexes, per-callable `$ctx` requirement bags, and each query's resolved shape (verb/target/cardinality/pagination) — span-anchored. Golden/unit-tested; consumed by the CLI + LSP. |
 | **based-lsp** | ✅ **M5** | tower-lsp server. Recompiles on edit (discover→parse→check, unsaved buffers overlaid on disk), publishes diagnostics + inlay hints + hover from `based-facts`. |
-| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→positional `?`, pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` and re-selects a create's declared shape as the response (D12). `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Write-retry idempotency `idempotency` (D25)**: a keyed mutation runs its write body at most once per `(callable, key)` — a retry replays the recorded response instead of double-inserting; `IdempotencyStore` seam (`MemStore` in-process / `NoStore` no-op), key on the `Idempotency-Key` header (never body / `$ctx`), in-flight duplicate → retryable `409`; threaded through `dispatch` / HTTP edge / `Engine::call_with_key`. **Container story `serve` (D26):** operational probes `GET /healthz` (liveness, DB-free) + `GET /readyz` (readiness via the new defaulted `Backend::ping`; `ShardRouter` probes every shard with `SELECT 1`) answered ahead of routing, plus **graceful shutdown** — `serve_with_handle` returns a `Handle` whose `shutdown()` flips a *draining* flag (readiness fails first → LB drains) and lets in-flight requests finish before workers exit; the SIGTERM/SIGINT→drain wiring lives in the CLI (`ctrlc`), keeping the library signal-free. **SQLite backend `sqlite` (D27):** `SqliteDb`/`SqliteBackend` over bundled `rusqlite` — the infra-free concrete `Db`/`Backend` (shared in-memory connection, no shards, `ping`=`SELECT 1`), backing the first **real** end-to-end integration tests (`tests/sqlite_integration.rs`): the actual commerce schema's *verbatim* lowered SQL run through `dispatch` against a live engine (get/list/`$ctx`/write+re-select/`ping`), no `MockDb`. **SQLite DDL codegen + Live-DB (MariaDB) integration + more dialects (MySQL/Postgres) + a container image/Dockerfile not started (architecture ready, D21/D22/D26/D27); durable multi-instance idempotency store deferred to the live-DB slice (D25).** |
+| **based-runtime** | 🚧 **M6 (read + write + dispatch + driver core + HTTP listener)** | in-process engine (D18). `Compiled::load` reuses the front end + codegen's query *and* mutation lowering; `plan_query`/`plan_mutation` validate args/`$ctx`, bind `:name`→the dialect's positional form (`?` on MySQL/MariaDB/SQLite, `$n` on Postgres — D29, via the `Compiled.dialect` carried from the manifest), pick the response envelope (reads) / generate engine ids + thread `^` back-refs (writes); `run_query` shapes rows, `run_mutation` executes writes under one `begin`/`commit` and re-selects a create's declared shape as the response (D12). `serve::dispatch` is the wire core (`POST /q\|m/<name>` → `WireResponse`; PlanError→4xx, DbError→503), mock-tested. `Db` is now **fallible** (rollback-on-failure). Concrete `MariaDb` driver + bounded-pool `ShardRouter` behind feature `mariadb` (D20). **HTTP listener `http` (feature `serve`, D21)**: sync bounded worker pool over `tiny_http`, `ContextSource` (`$ctx` from headers), production `UuidGen`, driver-neutral via the `Backend` seam; `based serve` CLI. **In-process door `embed` (Tier 1, D22)**: `Engine` (`Compiled` + one `Db` + `IdGen`) runs a callable through `serve::dispatch` with no socket, backing the *same* typed generated client via a tiny `impl Transport`; worked end-to-end example in `tests/embed.rs`. **Write-retry idempotency `idempotency` (D25)**: a keyed mutation runs its write body at most once per `(callable, key)` — a retry replays the recorded response instead of double-inserting; `IdempotencyStore` seam (`MemStore` in-process / `NoStore` no-op), key on the `Idempotency-Key` header (never body / `$ctx`), in-flight duplicate → retryable `409`; threaded through `dispatch` / HTTP edge / `Engine::call_with_key`. **Container story `serve` (D26):** operational probes `GET /healthz` (liveness, DB-free) + `GET /readyz` (readiness via the new defaulted `Backend::ping`; `ShardRouter` probes every shard with `SELECT 1`) answered ahead of routing, plus **graceful shutdown** — `serve_with_handle` returns a `Handle` whose `shutdown()` flips a *draining* flag (readiness fails first → LB drains) and lets in-flight requests finish before workers exit; the SIGTERM/SIGINT→drain wiring lives in the CLI (`ctrlc`), keeping the library signal-free. **SQLite backend `sqlite` (D27):** `SqliteDb`/`SqliteBackend` over bundled `rusqlite` — the infra-free concrete `Db`/`Backend` (shared in-memory connection, no shards, `ping`=`SELECT 1`), backing the first **real** end-to-end integration tests (`tests/sqlite_integration.rs`): the actual commerce schema's *verbatim* lowered SQL run through `dispatch` against a live engine (get/list/`$ctx`/write+re-select/`ping`), no `MockDb`. **Postgres codegen + `$n` scanner done (D29) — the concrete `postgres` driver is deferred to the live-DB slice; Live-DB (MariaDB/Postgres) integration + a container image/Dockerfile not started (architecture ready, D21/D22/D26/D27/D29); durable multi-instance idempotency store deferred to the live-DB slice (D25).** |
 
 ## based-sema — what it does now
 
@@ -595,16 +596,24 @@ a `MockDb`, no live DB.
     a hand-shaped copy. A `SqliteBackend` *shard router* is unneeded (SQLite doesn't shard).
 
 *Not started (next slices):*
-  - **Additional dialects (Postgres / MySQL)** — SQLite is now fully done on both sides (runtime backend
-    D27 + DDL codegen D28). What remains is Postgres (and MySQL, near-identical to MariaDB). Each is a
-    `Dialect` variant (`ddl`/`dml`/`mutations` branches: placeholder style, quoting, type map, index
-    syntax) + (for a new engine) a `Db`/`Backend` impl. **Postgres** additionally needs the
-    named→positional scanner made dialect-aware (`?` → `$n`, D21) — SQLite did not, since it binds `?`
-    like MariaDB. The `Dialect` enum now has two variants (D28), so the branching pattern is established.
-  - **Live-DB integration** — exercise `MariaDb` against a real MariaDB (the connect/exec
-    paths only compile-verified today): typed JSON reconstruction for `JSON` columns,
+  - ~~**Additional dialects (Postgres / MySQL)**~~ **Postgres codegen + scanner ✅ done (D29).**
+    `Dialect::Postgres` is the enum's third variant: `ddl`/`dml`/`mutations` all branch (double-quoted
+    identifiers via one `Dialect::quote`/`qcol` seam, native type map incl. `TIMESTAMPTZ`/`JSONB`,
+    `CREATE INDEX` indexes, `has` → `@>`, and the `FROM`/`USING` multi-table UPDATE/DELETE restructure +
+    bare-column `SET`), and the named→positional scanner is now dialect-aware (`?` for
+    MySQL/MariaDB/SQLite, `$n` for Postgres — the one coupling D21 flagged). `Compiled` carries the
+    `Dialect` (from the manifest) and threads it through binding, so a Postgres schema lowers *and* binds
+    for Postgres. Commerce emits clean Postgres SQL. **Still outstanding on the dialect line:** the
+    concrete `postgres` `Db`/`Backend` **driver** (deferred to the live-DB slice — needs a real server,
+    same status as `MariaDb`'s compile-verified connect/exec). MySQL stays folded into `MariaDb` (a fork;
+    the emitted SQL is MySQL-8-compatible), so no separate variant is warranted.
+  - **Live-DB integration + the Postgres driver** — exercise `MariaDb` against a real MariaDB (the
+    connect/exec paths only compile-verified today): typed JSON reconstruction for `JSON` columns,
     statement timeouts, deadlock-retry, pool-exhaustion → 503 under load. `Backend::ping` (D26) is
-    compile-verified only until this lands.
+    compile-verified only until this lands. **The concrete `postgres` `Db`/`Backend` driver belongs
+    here too** — Postgres *codegen* + the `$n` scanner are done (D29), but running the emitted SQL
+    needs a real server (an infra-free SQLite-style in-memory test isn't available for Postgres), so
+    the driver is the live-DB slice's job, over the same `Db`/`Backend` seam the HTTP edge already uses.
   - **Container packaging** — a Dockerfile / image is the last mile of the container story (the
     health/readiness + graceful-shutdown *behaviour* is done, D26; packaging it is orthogonal). A
     shutdown grace deadline (force-exit after N seconds) is deferred with it.

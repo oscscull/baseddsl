@@ -149,7 +149,7 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         .ok_or_else(|| PlanError::UnknownQuery(req.callable.clone()))?;
 
     // 1. Assemble the value environment: params, then `$ctx`, then pagination.
-    let mut env = Env::default();
+    let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
         env.insert(p.name.node.clone(), bind_param(p, req)?);
     }
@@ -205,7 +205,7 @@ pub fn plan_mutation(
         .ok_or_else(|| PlanError::UnknownMutation(req.callable.clone()))?;
 
     // 1. Assemble the value environment: params, then `$ctx` (no pagination on a write).
-    let mut env = Env::default();
+    let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
         env.insert(p.name.node.clone(), bind_param(p, req)?);
     }
@@ -255,13 +255,21 @@ pub fn plan_mutation(
 // ---------- value environment ---------------------------------------------
 
 /// Named bind values gathered from the validated request; `bind` pulls from it in
-/// SQL placeholder order.
-#[derive(Default)]
+/// SQL placeholder order. Carries the target `dialect` so the positional rewrite emits
+/// the right placeholder form (`?` vs `$n`, D21/D29).
 struct Env {
+    dialect: based_codegen::Dialect,
     values: std::collections::HashMap<String, SqlValue>,
 }
 
 impl Env {
+    fn new(dialect: based_codegen::Dialect) -> Self {
+        Env {
+            dialect,
+            values: std::collections::HashMap::new(),
+        }
+    }
+
     fn insert(&mut self, name: String, v: SqlValue) {
         self.values.insert(name, v);
     }
@@ -270,7 +278,7 @@ impl Env {
     /// environment. An unresolved name is an internal invariant break, not a user
     /// error (every declared bind was inserted above).
     fn bind(&self, sql: &str) -> Result<Stmt, PlanError> {
-        let (sql, params) = to_positional(sql, |name| self.values.get(name).cloned())
+        let (sql, params) = to_positional(sql, self.dialect, |name| self.values.get(name).cloned())
             .map_err(PlanError::UnboundPlaceholder)?;
         Ok(Stmt { sql, params })
     }

@@ -9,6 +9,14 @@ use based_parser::parse_file;
 use based_sema::check;
 
 fn gen(src: &str) -> String {
+    gen_for(src, Dialect::MariaDb)
+}
+
+fn gen_pg(src: &str) -> String {
+    gen_for(src, Dialect::Postgres)
+}
+
+fn gen_for(src: &str, dialect: Dialect) -> String {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
@@ -17,7 +25,7 @@ fn gen(src: &str) -> String {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    sql::mutations::mutations(&schema, &sf.decls, Dialect::MariaDb)
+    sql::mutations::mutations(&schema, &sf.decls, dialect)
 }
 
 #[test]
@@ -325,4 +333,121 @@ fn update_where_across_relation_uses_multi_table_form() {
         "\n{out}"
     );
     assert!(out.contains("`j_org`.`name` = :name"), "\n{out}");
+}
+
+// ---------- Postgres (D29) -------------------------------------------------
+
+#[test]
+fn pg_create_double_quotes_and_keeps_named_placeholders() {
+    let out = gen_pg(
+        r#"
+        Org { name: text }
+        Order { org: Org, status: text, total: int }
+        shape OrderCard from Order { status, total }
+        mutation place(org: Id, status: text, total: int) -> OrderCard {
+          create Order { org = $org, status = $status, total = $total };
+        }
+        "#,
+    );
+    assert!(out.contains("INSERT INTO \"order\" ("), "\n{out}");
+    // engine `id` bound first, then the assigns — identifiers double-quoted.
+    assert!(
+        out.contains("(\"id\", \"org_id\", \"status\", \"total\")"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("VALUES (:id, :org, :status, :total)"),
+        "\n{out}"
+    );
+    // the D12 re-select comes back double-quoted, keyed on :result_id.
+    assert!(
+        out.contains("WHERE \"order\".\"id\" = :result_id"),
+        "\n{out}"
+    );
+    // no backtick-quoted identifiers in the statement body (the header has backticks).
+    let body = &out[out.find("INSERT").unwrap()..];
+    assert!(!body.contains('`'), "\n{out}");
+}
+
+#[test]
+fn pg_soft_delete_tombstone_uses_bare_set_column() {
+    // Postgres forbids the target alias in a SET clause, so the tombstone SET column
+    // is bare `"deleted_at" = …` (not `"order"."deleted_at" = …`).
+    let out = gen_pg(
+        r#"
+        @soft_delete(deleted_at)
+        @updated(updated_at)
+        Order { deleted_at: timestamp?, updated_at: timestamp, status: text }
+        shape OrderCard from Order { status }
+        mutation remove(id: Id) -> OrderCard { delete Order where (id = $id); }
+        "#,
+    );
+    assert!(
+        out.contains("UPDATE \"order\"\nSET \"deleted_at\" = CURRENT_TIMESTAMP, \"updated_at\" = CURRENT_TIMESTAMP"),
+        "\n{out}"
+    );
+    // the WHERE still qualifies the target row + injects the live predicate.
+    assert!(
+        out.contains("WHERE \"order\".\"id\" = :id AND \"order\".\"deleted_at\" IS NULL"),
+        "\n{out}"
+    );
+    assert!(
+        !out.contains("DELETE FROM") && !out.contains("DELETE \""),
+        "must not emit a real DELETE:\n{out}"
+    );
+}
+
+#[test]
+fn pg_update_across_relation_uses_from_clause() {
+    // Postgres has no inline join in UPDATE: the joined table goes in `FROM` and the
+    // join `ON` folds into the WHERE (ahead of the user predicate).
+    let out = gen_pg(
+        r#"
+        Org { name: text }
+        @updated(updated_at)
+        Order { updated_at: timestamp, org: Org, status: text }
+        shape OrderCard from Order { status }
+        mutation flag_org_orders(name: text, status: text) -> OrderCard {
+          update Order where (org.name = $name) { status = $status };
+        }
+        "#,
+    );
+    assert!(
+        out.contains("UPDATE \"order\"\nSET \"status\" = :status"),
+        "\n{out}"
+    );
+    assert!(out.contains("\nFROM \"org\" AS \"j_org\""), "\n{out}");
+    // join ON folded into WHERE ahead of the user predicate; no inline JOIN keyword.
+    assert!(
+        out.contains(
+            "WHERE \"j_org\".\"id\" = \"order\".\"org_id\" AND \"j_org\".\"name\" = :name"
+        ),
+        "\n{out}"
+    );
+    assert!(
+        !out.contains("\nJOIN "),
+        "no inline join in a PG update:\n{out}"
+    );
+}
+
+#[test]
+fn pg_hard_delete_across_relation_uses_using_clause() {
+    let out = gen_pg(
+        r#"
+        Org { name: text }
+        Order { org: Org, status: text }
+        shape OrderCard from Order { status }
+        mutation purge(name: text) -> OrderCard {
+          hard delete Order where (org.name = $name);
+        }
+        "#,
+    );
+    assert!(out.contains("DELETE FROM \"order\""), "\n{out}");
+    assert!(out.contains("\nUSING \"org\" AS \"j_org\""), "\n{out}");
+    assert!(
+        out.contains(
+            "WHERE \"j_org\".\"id\" = \"order\".\"org_id\" AND \"j_org\".\"name\" = :name"
+        ),
+        "\n{out}"
+    );
 }
