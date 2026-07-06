@@ -1,0 +1,74 @@
+{
+  "name": "based-vscode",
+  "displayName": "Based DSL",
+  "description": "Language support for the Based DSL (.bsl): diagnostics, inlay hints, and hover via based-lsp.",
+  "version": "0.1.0",
+  "publisher": "based",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:bsl"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "bsl",
+        "aliases": [
+          "Based DSL",
+          "bsl"
+        ],
+        "extensions": [
+          ".bsl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "bsl",
+        "scopeName": "source.bsl",
+        "path": "./syntaxes/bsl.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Based DSL",
+      "properties": {
+        "basedls.serverPath": {
+          "type": "string",
+          "default": "based-lsp",
+          "description": "Path to the based-lsp language server binary. Defaults to `based-lsp` on your PATH. Build it with `cargo build -p based-lsp` and point this at the resulting binary (e.g. target/debug/based-lsp) if it is not on PATH."
+        },
+        "basedls.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the communication between VS Code and the based-lsp language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.4.0"
+  }
+}

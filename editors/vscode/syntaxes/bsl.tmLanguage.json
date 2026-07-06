@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Based DSL",
+  "scopeName": "source.bsl",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#raw" },
+    { "include": "#decorators" },
+    { "include": "#keywords" },
+    { "include": "#params" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.bsl"
+    },
+    "strings": {
+      "name": "string.quoted.double.bsl",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.bsl" }
+      ]
+    },
+    "raw": {
+      "name": "string.quoted.other.raw.bsl",
+      "begin": "`",
+      "end": "`"
+    },
+    "decorators": {
+      "match": "@[A-Za-z_][A-Za-z0-9_]*",
+      "name": "entity.name.function.decorator.bsl"
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(model|shape|query|mutation|filter|tx|raw)\\b",
+          "name": "keyword.control.declaration.bsl"
+        },
+        {
+          "match": "\\b(create|update|delete|restore|hard|list|get|from|where|order|page|with|count|unscoped|unindexed|unsafe)\\b",
+          "name": "keyword.control.bsl"
+        },
+        {
+          "match": "\\b(default|now|asc|desc|max_rows|reason|on|true|false|null)\\b",
+          "name": "constant.language.bsl"
+        }
+      ]
+    },
+    "params": {
+      "match": "\\$[A-Za-z_][A-Za-z0-9_.]*",
+      "name": "variable.parameter.bsl"
+    },
+    "numbers": {
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b",
+      "name": "constant.numeric.bsl"
+    }
+  }
+}

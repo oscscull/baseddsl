@@ -1036,3 +1036,33 @@ read across a scope boundary.
   reaches, the common case, are covered); a joined model with a *multi-term* scope injects all its
   terms (handled — `scope_terms()` is flattened), but a term whose `$ctx` field is used **only** on a
   join (never on the root) still relies on the runtime binding it (it does — it's in `ctx_requires`).
+
+## D36 — VS Code extension: a thin LSP client under `editors/vscode/` (DoD #3, Track C)
+Turns "the server speaks standard LSP" (M5) into "a human can install an extension and get live
+feedback." The extension is deliberately **thin**: all intelligence stays in `based-lsp` (principle
+4 — one source of truth), and the client is only the transport that launches it and registers the
+`bsl` language.
+
+- **Separate toolchain, separate tree.** `editors/vscode/` is a TypeScript/npm project **outside** the
+  cargo workspace — `cargo` is entirely unaffected. Its gate is `tsc` + `@vscode/vsce package`, not
+  `cargo test`. This keeps Track C independent of the Rust driver work (Track A) so the two can run in
+  parallel without shared files.
+- **What it contributes.** `package.json` registers the `bsl` language for `.bsl`, a minimal TextMate
+  grammar (`syntaxes/bsl.tmLanguage.json` — comments, strings, raw backtick blocks, decorators,
+  keyword-ish, `$params`; deliberately not exhaustive) and a `language-configuration.json` (comment =
+  `#`, brackets), and one setting `basedls.serverPath` (defaults to `based-lsp` on PATH; the user
+  builds it with `cargo build -p based-lsp` and points the setting at `target/debug/based-lsp` if it
+  is not on PATH), plus `basedls.trace.server` for wire tracing.
+- **The client** (`src/extension.ts`, `vscode-languageclient/node`) launches `based-lsp` over
+  **stdio** (`TransportKind.stdio`, no args — the server globs `**/*.bsl` from the workspace root it
+  gets at `initialize`) and attaches it to `{ language: "bsl" }`. Diagnostics are published unprompted
+  by the server; **inlay hints** + **hover** are negotiated automatically from the capabilities the
+  server already advertises (M5), so no extra client-side enabling is needed beyond registering the
+  language. Startup failure surfaces a clear "build it / set serverPath" error message.
+- **Packaging.** `npm run compile` (`tsc` → `out/extension.js`) then `npm run package` /
+  `npx @vscode/vsce package` → `based-vscode-<version>.vsix`, installable with
+  `code --install-extension`. The `.vscodeignore` ships only `out/**` + the manifest/grammar/config +
+  README; `src/`, `node_modules/`, and maps are excluded.
+- **Not done (server-side, deferred):** go-to-definition / completion / rename — the server doesn't
+  serve them yet (needs the position→symbol layer M5 flags), so the client can't surface them. When the
+  server grows them, the client picks them up for free (same capability-negotiation path).
