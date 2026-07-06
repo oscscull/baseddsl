@@ -18,6 +18,12 @@ serve = ["mariadb", "dep:tiny_http", "dep:uuid"]
 # dependency), so it needs no live infra — the infra-free `Db`/`Backend` impl that backs
 # real in-memory end-to-end integration tests (D27). Off by default; the core stays lean.
 sqlite = ["dep:rusqlite"]
+# The concrete Postgres driver + bounded-pool `PgRouter` (`PostgresDb` / `PgRouter`), feature
+# `postgres` (A3/D38). The Postgres twin of `mariadb`: runs the *verbatim* Postgres-lowered SQL
+# (`$n`-bound, D29) against a real server via the pure-Rust sync `postgres` crate + `r2d2` bounded
+# pool (principle 7 — reuse, not hand-roll). TLS off (no system OpenSSL dep), mirroring the MariaDB
+# driver's choice. Off by default so the core stays dependency-light.
+postgres = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres", "dep:bytes"]
 # The Docker-backed real-DB integration harness + live suites (D35). Brings up an ephemeral
 # MariaDB container (via the `docker` CLI) for `tests/mariadb_integration.rs` to run the
 # *verbatim* codegen-lowered SQL against a real server. Enables `serve` for the production
@@ -25,8 +31,10 @@ sqlite = ["dep:rusqlite"]
 # `id-N` test ids — engine ids must be real v4 uuids, the same generator prod uses). When the
 # Docker daemon is unreachable the harness **skips cleanly** (logs + returns), so
 # `cargo test --all-features` stays green with no daemon — the suite never fails for want of
-# infra, it just doesn't run.
-docker-tests = ["mariadb", "serve"]
+# infra, it just doesn't run. Enables both concrete drivers so their live suites
+# (`tests/mariadb_integration.rs`, `tests/postgres_integration.rs`) can each check out a real
+# server; the Postgres suite loads commerce with `Dialect::Postgres` and runs the `$n`-bound SQL.
+docker-tests = ["mariadb", "serve", "postgres"]
 
 [dependencies]
 based-ast.workspace = true
@@ -51,6 +59,16 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 # hardened external engine (principle 7). Infra-free, so it backs in-memory integration
 # tests against a real `Db`/`Backend` rather than a `MockDb` (D27).
 rusqlite = { version = "0.37", optional = true, features = ["bundled"] }
+# The Postgres driver (pure Rust, synchronous — no async runtime, matching D20's sync/bounded-
+# pool architecture). A hardened external component (principle 7). TLS off (default features
+# dropped) to avoid a system OpenSSL dependency, exactly as the `mysql` driver above. `r2d2` +
+# `r2d2_postgres` give the bounded connection pool the `ShardRouter` twin (`PgRouter`) needs.
+postgres = { version = "0.19", optional = true, default-features = false }
+r2d2 = { version = "0.8", optional = true }
+r2d2_postgres = { version = "0.18", optional = true }
+# `bytes::BytesMut` is the buffer the `postgres` `ToSql` trait writes into (its own
+# transitive dependency); named directly so the `PgValue` codec can reference it.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 based-parser.workspace = true

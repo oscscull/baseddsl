@@ -26,18 +26,13 @@ use mysql::prelude::Queryable;
 use mysql::{Opts, OptsBuilder, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Value};
 
 use crate::run::{Backend, Db, DbError, Row};
+use crate::shard::{fnv1a_64, LOGICAL_SHARDS};
 use crate::value::SqlValue;
 
-/// A physical shard's identity: its index into the router's shard list.
-pub type ShardId = usize;
-
-/// The fixed size of the logical-shard space. Routing hashes a key into `[0,
-/// LOGICAL_SHARDS)`, then a `logical → physical` map (built at startup) sends it to a
-/// pool. This number is **permanent** — it is the granularity at which data can be
-/// rebalanced between physical shards, so it is chosen large once (4096 logical shards
-/// ⇒ up to 4096 physical shards, and any split moves whole logical shards, never
-/// rehashes keys).
-pub const LOGICAL_SHARDS: usize = 4096;
+// The shard-routing primitives now live in the backend-agnostic `crate::shard` module (a
+// key must route identically to MariaDB or Postgres). Re-exported here so the historical
+// `based_runtime::driver::{PoolConfig, ShardId}` paths (used by `based serve`) still resolve.
+pub use crate::shard::{PoolConfig, ShardId};
 
 // ---------- value conversion (pure, unit-tested) ---------------------------
 
@@ -107,20 +102,6 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// FNV-1a (64-bit) — a **stable** hash for shard routing. `DefaultHasher` is explicitly
-/// not stable across releases; a shard key must hash the same forever, so we pin the
-/// algorithm here.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = OFFSET;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h
-}
-
 // ---------- the concrete Db ------------------------------------------------
 
 /// One pooled MariaDB connection, running one request. Checked out of a shard's pool
@@ -186,22 +167,6 @@ impl Db for MariaDb {
 }
 
 // ---------- the shard router ------------------------------------------------
-
-/// Bounded per-shard pool sizing. The `max` is the concurrency ceiling against one
-/// MariaDB box (protecting it under load); `min` keeps warm connections ready.
-#[derive(Debug, Clone, Copy)]
-pub struct PoolConfig {
-    pub min: usize,
-    pub max: usize,
-}
-
-impl Default for PoolConfig {
-    /// A conservative default: a small warm floor, a bounded ceiling well under a
-    /// MariaDB box's connection limit (scale for load by adding shards + instances).
-    fn default() -> PoolConfig {
-        PoolConfig { min: 4, max: 32 }
-    }
-}
 
 /// Routes each request to exactly one physical shard's connection pool. Holds the
 /// pools (cheap to clone — each is an `Arc` internally, shared across worker threads)

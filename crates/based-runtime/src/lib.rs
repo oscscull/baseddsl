@@ -79,6 +79,7 @@ pub mod plan;
 pub mod run;
 pub mod scan;
 pub mod serve;
+pub mod shard;
 pub mod value;
 
 #[cfg(feature = "mariadb")]
@@ -86,6 +87,9 @@ pub mod driver;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+
+#[cfg(feature = "postgres")]
+pub mod postgres;
 
 #[cfg(feature = "serve")]
 pub mod http;
@@ -109,3 +113,6 @@ pub use http::{
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::{SqliteBackend, SqliteDb};
+
+#[cfg(feature = "postgres")]
+pub use postgres::{connect as pg_connect, PgRouter, PostgresDb};

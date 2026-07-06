@@ -1129,3 +1129,54 @@ parser/AST/artifact shapes an implementer needs, not naturally prose):
   the neutral-step vocabulary + the `raw(dialect)` "not offline-verifiable" contract are in the spec;
   open sub-details (snapshot serialization grammar, raw-step structural-effect annotation, hash
   canonicalization, down-invocation surface) are flagged as TODOs there for E2–E5.
+
+## D38 — the concrete Postgres driver + its live suite (Track A3)
+The Postgres runtime driver (`based-runtime::postgres`, feature `postgres`) — the twin of the
+MariaDB driver (D20) — plus its Docker-backed live integration suite. Postgres *codegen*
+(`ddl`/`dml`/`mutations`) and the dialect-aware `:name`→`$n` scanner were already done (D29); this
+is the runtime that *runs* that emitted SQL against a real server. Coverage-wise it closes DoD #1
+for the last target dialect (SQLite ✅ D27, MariaDB ✅ D35, Postgres ✅ here).
+- **Structure mirrors MariaDB exactly.** `PostgresDb` is a `Db` over one pooled connection (whole
+  request on one connection — a `tx` must see its own writes); `PgRouter` is the `ShardRouter` twin
+  (one bounded pool per physical shard, single-shard dispatch by the same stable FNV logical-shard
+  hash — no scatter-gather, a `tx` is one shard, no distributed transaction). The shared routing
+  primitives (`fnv1a_64`, `LOGICAL_SHARDS`, `PoolConfig`, `ShardId`) moved to a new backend-agnostic
+  `crate::shard` module so a key routes **identically** regardless of dialect (re-exported from
+  `driver` for the historical `based_runtime::driver::{PoolConfig, ShardId}` paths).
+- **Reuse, sync, TLS off (principle 7, D20).** The pure-Rust **synchronous** `postgres` crate — *not*
+  its async `tokio-postgres` sibling — matches D20's sync/bounded-pool model (no async runtime pulled
+  into the codebase). The bounded pool is `r2d2` + `r2d2_postgres` (the crate's own pool is the async
+  one). TLS is off (`default-features = false`, `NoTls`) to avoid a system OpenSSL dependency, exactly
+  the choice the `mysql` driver made — a deployment needing in-transit encryption re-enables it.
+- **The value-mapping crux (the one genuinely Postgres-specific decision).** The runtime is
+  dialect-neutral: a `uuid`/`timestamptz`/`jsonb`/`date` value is carried as `SqlValue::Text` (a
+  String — on the wire these are all strings, D1). Unlike MySQL/SQLite, Postgres's extended-query
+  protocol *infers* each `$n` parameter's OID from the column it binds against and, in **binary**
+  format, refuses a text-encoded Rust `String` for an inferred `uuid`/`jsonb` OID. The fix is a
+  `PgValue` `ToSql` newtype that (a) `accepts` any OID and (b) reports `Format::Text` for its string
+  variant, writing the raw UTF-8 bytes — so the server applies its normal **string-literal coercion**
+  (the identical path `'…'::uuid` / `'…'::jsonb` takes). Numbers/bool keep native binary encoding;
+  `Null` reports `IsNull::Yes` regardless of the inferred type. This keeps the runtime free of any
+  per-column Postgres type table while round-tripping every family. *Rejected alternatives:* rewriting
+  the generated SQL to add `$n::text` casts (the SQL is codegen-produced, D18/P4 — the runtime must not
+  re-author it); carrying per-column Postgres types into the runtime (a second source of column typing
+  that would drift from the schema, against P4). Reads go the symmetric way — every non-numeric/bool
+  column is pulled out as its text representation via a `FromSql` that accepts any OID, so uuid/
+  timestamptz/date/json all ride back as JSON strings (matching `from_mysql`); a genuinely binary
+  column falls back to hex (never a panic). The mapping is pure and unit-tested like `from_mysql`.
+- **The live suite is the real gate.** `tests/postgres_integration.rs` (7 tests, the Postgres twin of
+  `mariadb_integration.rs`) over a new harness `tests/support/docker_postgres.rs` (ephemeral
+  `postgres:16`, random port, force-removed on `Drop`, **skips cleanly with no daemon** so
+  `cargo test --all-features` stays green infra-free). It loads the commerce schema lowered for
+  `Dialect::Postgres` explicitly (the manifest is `mariadb`, so it re-lowers via `Compiled::from_checked`,
+  since Postgres genuinely differs — `$n` binds, `"`-quoting, native `uuid`/`jsonb`), creates tables from
+  the *generated* Postgres DDL, and drives the **verbatim** codegen-lowered SQL through `serve::dispatch`
+  against a `PostgresDb` checked out of a live `PgRouter`: get/list, `$ctx` row-scope + joined-`ON` reach,
+  write + declared-shape re-select under one tx (read-your-writes, proving the engine-generated uuid
+  round-trips the `uuid` column), idempotency dedupe, `Backend::ping`. **Ran genuinely green against real
+  Postgres 16** (not compile-verified) — this is now the `PostgresDb` driver's gate, and `docker-tests`
+  enables the `postgres` feature so the suite runs alongside the MariaDB one.
+- *Deferred (Track A4, same as MariaDB):* typed JSON reconstruction (a `jsonb` column comes back as a
+  JSON-encoded *string*, not a reconstructed object — the runtime carries no per-column types into row
+  shaping), statement timeouts, deadlock-retry, pool-exhaustion → 503 under load — designed (D20), not
+  yet stress-proven live.
