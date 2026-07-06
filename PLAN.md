@@ -10,13 +10,24 @@ for *where the implementation stands*.
 This roadmap is executed by a self-driving loop. Protocol, for whoever (human or agent)
 resumes it:
 
+- **Optimize for the project being DONE, not for the loop continuing.** The measure is the
+  Definition of Done below, not "a slice we can gate with `cargo test` today." Items are picked
+  by *distance-closed to done*, hardest-critical-path-first. **Nothing is "blocked" merely because
+  it needs Docker, a live DB, `brew`, or a non-Rust toolchain (TypeScript/npm)** — those are setup,
+  not walls (OrbStack is installed; `brew` works; SQLite already runs in-memory). Do the setup.
+  A deferred/nice-to-have item is worked ONLY when it is on the critical path or adds standalone
+  value a user would notice; otherwise it stays deferred and out of the way.
 - **One item per iteration, in fresh context.** Each iteration spawns ONE fresh
   general-purpose subagent that reads CLAUDE.md + `spec/principles.md` + this file +
-  `spec/decisions.md`, picks the **highest-leverage unstarted item**, implements it fully,
-  and commits it. A fresh subagent per item is what keeps context clean between iterations
-  (the whole point); the coordinator retains only one-line summaries, never the work.
+  `spec/decisions.md`, picks the **highest-leverage item on the critical path to done** (see the
+  Completion roadmap), implements it fully, and commits it. A fresh subagent per item is what keeps
+  context clean between iterations (the whole point); the coordinator retains only one-line
+  summaries, never the work.
 - **Gate before commit.** `cargo test --workspace --all-features`, `cargo fmt --check`, and
-  `cargo clippy --workspace --all-features` must all be clean. Never commit red.
+  `cargo clippy --workspace --all-features` must all be clean. Never commit red. **Real-DB slices
+  additionally gate on their live integration tests** — bring the DB up first (Docker, via the
+  installed OrbStack: `docker run` an ephemeral Postgres/MariaDB, or testcontainers). A driver/live
+  slice is not "done" until its real-DB test suite is green against a live server, not compile-verified.
 - **Commit style.** On the current working branch (no push, no PR): first line
   `m6: <desc> (D<n>)`, short body, ending with the trailer
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Update this file
@@ -44,6 +55,66 @@ Prior batch: D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen + the dialec
 scanner; the concrete driver deferred to the live-DB slice) + D30 (typed per-callable `$ctx` in
 the generated Rust client) + D31 (idempotency-key request fingerprint: a reused key on different
 args → loud `422`, not a silent replay of the first request) — 3/3.
+
+**Reoriented 2026-07-06 toward completion (see below).** The architecture milestones (M2–M6) are
+done; what remains is turning "architecture-ready" into "a developer can actually adopt this." The
+prior framing parked the real remaining work as "blocked — needs infra"; it is not blocked. The
+sections below define *done* and order the path to it.
+
+## Definition of Done (the product is complete when…)
+
+These are the acceptance criteria. Everything in the Completion roadmap serves one of them.
+
+1. **Proven against every target DB.** Each dialect the codegen emits (SQLite ✅, MariaDB/MySQL,
+   Postgres) has a concrete `Db`/`Backend` driver **and** a live integration suite that runs the
+   *verbatim* `based gen sql` output against a **real server (Docker)** — not compile-verified,
+   not MockDb. Coverage per DB: get/list, `$ctx`-scope filtering (row + joined-`ON`), write +
+   declared-shape re-select under one tx (read-your-writes), pagination, soft-delete/restore,
+   idempotency dedupe, and `Backend::ping`. Today only SQLite clears this bar.
+2. **A real, copyable example project per target DB.** A standalone Rust project (in-repo, **outside**
+   the cargo workspace, under `examples/`) that consumes the generated client + runtime against a
+   live DB — the thing a user copies to start. It builds in CI and doubles as an end-to-end smoke test.
+3. **A functional, installable VS Code extension.** Packaged (`.vsix`), registers the `.bsl` language,
+   launches the `based-lsp` binary, and surfaces the diagnostics + inlay hints + hover the server
+   already emits. A human can install it and get live feedback while writing `.bsl`.
+4. **Deployable + kept-proven.** A container image / Dockerfile for `based serve`, and CI that
+   actually runs the real-DB suites + example builds + extension build, so none of the above rots.
+
+Deferred items (durable multi-instance idempotency store, shutdown grace deadline, incremental LSP
+sync, go-to-def/rename, `^^` multi-level back-refs, self-ref join aliasing, nested shape sub-objects)
+stay deferred — worked only if they land on the critical path or a user would notice their absence.
+
+## Completion roadmap (ordered for velocity)
+
+Three tracks. **A and C are independent** (Rust drivers vs. TypeScript extension — different
+toolchains, no shared files) so a coordinator may run them as parallel batches. B depends on A.
+D closes it out. Order *within* a track is top-down.
+
+**Track A — real-DB proof (critical path, DoD #1).** *Mechanism decided: Docker (OrbStack, installed).*
+  - A1. **Docker-backed test harness** — a reusable way to bring up an ephemeral Postgres + MariaDB
+    for integration tests (testcontainers-rs or a thin `docker run` guard, feature-gated + skipped
+    with a clear log when no daemon). This unblocks every live suite below.
+  - A2. **MariaDB live suite** — the `MariaDb` driver (D20, today compile-verified only) exercised
+    against a real MariaDB over the harness, full DoD-#1 coverage; wire it as the driver's real gate.
+  - A3. **Postgres driver + live suite** — build the concrete `postgres` `Db`/`Backend` (codegen +
+    `$n` scanner already done, D29) and its live suite, same coverage. This is the largest single item.
+  - A4. **Live-DB hardening** — typed JSON reconstruction, statement timeouts, deadlock-retry,
+    pool-exhaustion → 503 under load; verified against the live servers, not just designed.
+
+**Track B — example projects (DoD #2, follows A per DB).**
+  - B1. Scaffold `examples/` (standalone crates, non-workspace). B2. One worked project per DB
+    (SQLite first — the driver's already live — then MariaDB, then Postgres) consuming the generated
+    client against the runtime; each builds + runs an end-to-end scenario in CI.
+
+**Track C — VS Code extension (DoD #3, independent, may run in parallel now).**
+  - C1. Scaffold `editors/vscode/` (TS + `package.json` + `vscode-languageclient`): `.bsl` language
+    registration, launch `based-lsp`, wire diagnostics/inlay/hover. C2. Package a `.vsix` + a build
+    script; a README on installing it. Gating leans on `tsc`/build + `vsce package` (no cargo twin).
+
+**Track D — deploy + keep-proven (DoD #4, last).**
+  - D1. Dockerfile / image for `based serve` (health/readiness + graceful drain behaviour already
+    done, D26 — this is packaging). D2. CI running the real-DB suites (A) + example builds (B) +
+    extension build (C) so the whole thing stays green.
 
 ## Pipeline (data flow)
 
@@ -627,7 +698,11 @@ a `MockDb`, no live DB.
     defaults `0`/`1`), and the integration test creates its tables from that *generated* DDL rather than
     a hand-shaped copy. A `SqliteBackend` *shard router* is unneeded (SQLite doesn't shard).
 
-*Not started (next slices):*
+*Not started (next slices) — NOTE: the **Completion roadmap** near the top of this file is now the
+authoritative ordering. The "deferred to the live-DB slice" / "not production-real until that lands"
+language below is superseded — that work is **Track A** (concrete Postgres/MariaDB drivers + live
+Docker-backed suites) and **Track D** (container image + CI), on the critical path, not blocked. The
+detail below is retained as reference for what each entails:*
   - ~~**Additional dialects (Postgres / MySQL)**~~ **Postgres codegen + scanner ✅ done (D29).**
     `Dialect::Postgres` is the enum's third variant: `ddl`/`dml`/`mutations` all branch (double-quoted
     identifiers via one `Dialect::quote`/`qcol` seam, native type map incl. `TIMESTAMPTZ`/`JSONB`,
