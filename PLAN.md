@@ -107,6 +107,11 @@ stay deferred — worked only if they land on the critical path or a user would 
 
 ## Completion roadmap (ordered for velocity)
 
+> 🔴 **URGENT — take FIRST, ahead of normal track ordering: Track C3** (per-file manifest resolution).
+> The extension shows spurious `E0110` on valid code whenever `.bsl` files are embedded in a repo whose
+> root isn't the schema's `based.toml` dir — i.e. the *designed* "ride along inside a Rust codebase" case.
+> Out-of-the-box breakage of DoD #3. Full diagnosis + fix + acceptance under Track C below.
+
 Five tracks. **A, C, and E are independent** (Rust drivers vs. TypeScript extension vs. the migration
 engine — no shared files) so a coordinator may run them as parallel batches. B depends on A. D closes
 it out (and its CI must cover E). Order *within* a track is top-down.
@@ -162,6 +167,26 @@ it out (and its CI must cover E). Order *within* a track is top-down.
     C2. ✅ **done (D36).** `npm run compile` (tsc) clean; `.vsix` packages via `npx @vscode/vsce package`;
     README covers building `based-lsp`, `npm install`/compile, and package/install. Gating is `tsc` +
     `vsce package` (no cargo twin).
+  - **C3. 🔴 URGENT — NEXT UP. Per-file manifest resolution (embedded-schema support).** The LSP today
+    roots at a **single** workspace folder and calls `based_manifest::discover(root)`, which reads only
+    `root/based.toml`. When that file isn't at the opened root — the **normal** case, since `.bsl` is
+    designed to *ride along inside a Rust repo* — `discover` errors and `compile` falls back to
+    **overlays-only** (`crates/based-lsp/src/compile.rs:45-53`), compiling each open buffer in
+    **isolation**. Cross-file references then fail spuriously: opening the repo root and editing
+    `spec/examples/commerce/order/model.bsl` reports `E0110 unknown model User` even though
+    `based check spec/examples/commerce` is clean (the language has **no imports** — the namespace is the
+    manifest's `**/*.bsl` glob, D9 — so the manifest *is* the project boundary the server must locate).
+    **Out-of-the-box breakage, gates DoD #3** (a human editing `.bsl` embedded in their real repo gets red
+    squiggles on valid code). **Fix:** resolve each open file's **owning `based.toml` by walking up its
+    ancestors** (the rust-analyzer/tsserver project-marker model), compile **one project per manifest**
+    (a `HashMap<manifest_root, Snapshot>`, keyed by the dir holding `based.toml`), and support **multiple
+    embedded schemas** in one workspace independently; requests (hover/inlay/diagnostics) route to the
+    snapshot owning the requested file; a file under **no** manifest keeps the current single-file
+    fallback. Refactor `State` (drop the single `root`/`snapshot`) + `refresh`/`set_overlay` accordingly;
+    add a `find_manifest_root(file)` walk-up helper. **Acceptance:** open the baseddsl **repo root** (no
+    `based.toml` there), open `commerce/order/model.bsl` → **no `E0110`**, inlay/hover work; a second
+    embedded schema elsewhere resolves on its own manifest; unit test the walk-up + a two-manifest
+    workspace. *(Diagnosed live 2026-07-06 against the running extension.)*
 
 **Track E — migration generation (DoD #5, independent, spec-first).** *Design settled 2026-07-06 with
 the user; see the decision block below. `spec/syntax/migrations.md` is written before any code.*
