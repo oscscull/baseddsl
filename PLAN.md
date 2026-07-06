@@ -122,6 +122,13 @@ stay deferred — worked only if they land on the critical path or a user would 
 > ✅ **C3 done (D40)** — the LSP now resolves each open file to its owning `based.toml` by walking up its
 > ancestors and compiles one snapshot per project, so embedded schemas (the "ride along inside a Rust repo"
 > case) resolve cross-file references. See Track C3 below for the resume note.
+>
+> 🔴 **NEXT PRIORITY — Track C4 (VS Code extension feature-parity audit + fill-in).** The user's framing: the
+> LSP exists to *power* editor tooling, not the reverse — the extension was built bottom-up from what the engine
+> derived, so table-stakes IDE features got skipped (go-to-def was missing until a user hit it, now D43). Before
+> anything else on Track C, audit the extension against a normal language extension's baseline (document symbols,
+> completion, workspace symbols, find-refs/rename, folding) and fill the expected gaps — **nothing exotic**. Full
+> item under Track C4 below.
 
 Five tracks. **A, C, and E are independent** (Rust drivers vs. TypeScript extension vs. the migration
 engine — no shared files) so a coordinator may run them as parallel batches. B depends on A. D closes
@@ -196,6 +203,35 @@ it out (and its CI must cover E). Order *within* a track is top-down.
     *Deferred:* a not-yet-saved new file isn't in its manifest's on-disk glob, so it compiles loose until first
     save (same edge as before); no proactive whole-workspace discovery on `initialize` — projects compile
     lazily as their files open (fine for a per-file editor surface).
+  - **C4. 🔴 NEXT PRIORITY. Feature-parity audit + fill-in (basic editor features a `.bsl` author expects).**
+    *Framing (user, 2026-07-06): the LSP exists to power the editor tooling, not the reverse — features are
+    driven by "what should a language extension do," and the server grows to serve them.* The extension was
+    built bottom-up from what the engine already derived (diagnostics/inlay/hover), so **table-stakes IDE
+    features were skipped** — go-to-definition was absent until a user hit it (just added as a Track C
+    follow-up, D43). Before any exotic work, **audit the extension against what a "normal" language extension
+    provides and fill the gaps.** Nothing fancy — the expected baseline only. Concretely:
+    - **Produce the checklist first** (a short section here or in `editors/vscode/README.md`): for each
+      standard LSP capability, mark have / missing / N/A-for-a-DSL, so the gap set is explicit and reviewable.
+    - **Known-present:** diagnostics ✅, inlay hints ✅, hover ✅, go-to-definition ✅ (D43),
+      TextMate coloring (models vs. builtins) ✅ (D43). Verify `language-configuration.json` covers
+      bracket matching / auto-closing pairs / comment toggling (`#`) — cheap, static, likely partial.
+    - **Likely-missing baseline to fill** (implement the ones that are genuinely expected; each is one LSP
+      request backed by the already-parsed `Snapshot.decls`, so cost is low):
+      • **document symbols** (outline / breadcrumbs / `⇧⌘O`) — models, queries, mutations, shapes, filters as
+        a flat/nested symbol tree; probably the highest value-per-effort.
+      • **completion** — model names in type position, field names after `.`, the keyword/decorator set; the
+        one feature an author feels the absence of constantly.
+      • **workspace symbols** (`⌘T`) — jump to any model/callable by name across the project.
+      • **find-references + rename** — the reference-site index is a superset of the go-to-def collector
+        (already noted as the go-to-def resume point); rename is the natural pair.
+      • **folding ranges** (block folding), **selection ranges** — minor, cheap, expected.
+      • **code actions** wiring the existing lints to quick-fixes (e.g. `W0103` → "add `@index`") — borderline;
+        include only if it falls out cheaply, else defer.
+    - **Explicitly out of scope (exotic / not baseline):** formatting (no `based fmt` yet), signature help,
+      call hierarchy, semantic-tokens re-do of coloring, debugging. List them as deferred, don't build them.
+    - **Acceptance:** the checklist exists; the agreed baseline gaps are implemented, capability-advertised,
+      unit-tested against the commerce fixture (same style as the go-to-def test), and the binary rebuilt so the
+      live extension surfaces them. Split into per-feature commits if large. *(Raised by the user 2026-07-06.)*
 
 **Track E — migration generation (DoD #5, independent, spec-first).** *Design settled 2026-07-06 with
 the user; see the decision block below. `spec/syntax/migrations.md` is written before any code.*
