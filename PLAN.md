@@ -127,9 +127,12 @@ D closes it out. Order *within* a track is top-down.
     client against the runtime; each builds + runs an end-to-end scenario in CI.
 
 **Track C — VS Code extension (DoD #3, independent, may run in parallel now).**
-  - C1. Scaffold `editors/vscode/` (TS + `package.json` + `vscode-languageclient`): `.bsl` language
-    registration, launch `based-lsp`, wire diagnostics/inlay/hover. C2. Package a `.vsix` + a build
-    script; a README on installing it. Gating leans on `tsc`/build + `vsce package` (no cargo twin).
+  - C1. ✅ **done (D36).** Scaffolded `editors/vscode/` (TS + `package.json` + `vscode-languageclient`):
+    `.bsl` language registration + minimal TextMate grammar/`language-configuration.json`, launches
+    `based-lsp` over stdio (`basedls.serverPath`, defaults to PATH), wires diagnostics/inlay/hover.
+    C2. ✅ **done (D36).** `npm run compile` (tsc) clean; `.vsix` packages via `npx @vscode/vsce package`;
+    README covers building `based-lsp`, `npm install`/compile, and package/install. Gating is `tsc` +
+    `vsce package` (no cargo twin).
 
 **Track D — deploy + keep-proven (DoD #4, last).**
   - D1. Dockerfile / image for `based serve` (health/readiness + graceful drain behaviour already
