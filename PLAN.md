@@ -84,6 +84,11 @@ These are the acceptance criteria. Everything in the Completion roadmap serves o
    already emits. A human can install it and get live feedback while writing `.bsl`.
 4. **Deployable + kept-proven.** A container image / Dockerfile for `based serve`, and CI that
    actually runs the real-DB suites + example builds + extension build, so none of the above rots.
+5. **Schema evolution: migration generation.** A `.bsl` schema change produces a reviewable,
+   editable migration you can safely apply to an existing database — not just from-scratch DDL. Spec'd
+   first (`spec/syntax/migrations.md`), then built (Track E). Critical: a DB-first DSL you cannot
+   safely evolve a production database with is not adoptable. Settled design is recorded below in the
+   Completion roadmap (Track E) and will be fleshed out in the spec.
 
 Deferred items (durable multi-instance idempotency store, shutdown grace deadline, incremental LSP
 sync, go-to-def/rename, `^^` multi-level back-refs, self-ref join aliasing, nested shape sub-objects)
@@ -91,9 +96,9 @@ stay deferred — worked only if they land on the critical path or a user would 
 
 ## Completion roadmap (ordered for velocity)
 
-Three tracks. **A and C are independent** (Rust drivers vs. TypeScript extension — different
-toolchains, no shared files) so a coordinator may run them as parallel batches. B depends on A.
-D closes it out. Order *within* a track is top-down.
+Five tracks. **A, C, and E are independent** (Rust drivers vs. TypeScript extension vs. the migration
+engine — no shared files) so a coordinator may run them as parallel batches. B depends on A. D closes
+it out (and its CI must cover E). Order *within* a track is top-down.
 
 **Track A — real-DB proof (critical path, DoD #1).** *Mechanism decided: Docker (OrbStack, installed).*
   - A1. ✅ **done (D35). Docker-backed test harness** — `crates/based-runtime/tests/support/docker_mariadb.rs`:
@@ -134,10 +139,61 @@ D closes it out. Order *within* a track is top-down.
     README covers building `based-lsp`, `npm install`/compile, and package/install. Gating is `tsc` +
     `vsce package` (no cargo twin).
 
+**Track E — migration generation (DoD #5, independent, spec-first).** *Design settled 2026-07-06 with
+the user; see the decision block below. `spec/syntax/migrations.md` is written before any code.*
+
+  Settled model — **declarative source, versioned artifacts.** The `.bsl` schema stays the single
+  source of truth (P4); migrations are the generated, reviewable, editable derivative that carries a
+  DB from schema-state N→N+1 (the Prisma/Atlas *versioned* model, NOT live declarative-apply). Settled
+  decisions (the forks the user resolved):
+  - **Directory of versioned migrations**, kept updated by `based migrate gen` (diff schema vs. last
+    captured state). `migrations/NNNN_slug/` per migration.
+  - **Baseline = stored schema snapshot per migration** (`schema.snap`) — diff = current `.bsl` vs.
+    the latest snapshot. Fully **offline/deterministic**, git-diffable, no DB to generate. *(user)*
+  - **Canonical artifact = dialect-neutral step list** (`up.mig`, in the schema's own IR vocabulary),
+    rendered to per-dialect SQL (SQLite/MariaDB/Postgres) at apply time via the existing `Dialect`
+    seam (P4 — can't drift), **plus a first-class `raw(dialect) \`…\`` escape step** for data migrations /
+    anything the neutral vocabulary can't express (mirrors `raw.md`). *Rationale (resolves the user's
+    neutral-vs-raw torn-ness):* the neutral format is what makes the two choices above actually
+    compose — the snapshot baseline and the offline editor drift check (Track E5) both need the tool to
+    answer "what schema do these migrations produce?" **without a DB**, which is only tractable if the
+    steps are machine-understandable. Raw SQL would be opaque offline (needs a SQL parser or a shadow
+    DB, which the user declined for the baseline). So: neutral for structural DDL (keeps snapshots
+    honest + drift check working infra-free); raw escape where SQL is genuinely the right tool, with
+    that migration visibly marked "not offline-verifiable for the raw step."
+  - **Rollback = roll-forward by default; an OPTIONAL author-supplied `down.mig` is honored if
+    present, never auto-generated** (no fake reverses). *(user)*
+  - **Destructive changes loud + guarded** (P1): drops / type-narrowing / new `NOT NULL` without a
+    default / new unique over existing data are generated but require an explicit `--allow-destructive`
+    / `unsafe("reason")` ack to apply — never silent data loss.
+  - **Renames never auto-guessed**: default emits drop+add (safe, visible); an explicit **`@was("old")`**
+    directive in `.bsl` declares a rename → a clean `RENAME` step. This is the user's "adjustable to
+    match an old coherent schema" requirement — the generated migration is a proposal you correct.
+  - **Applied-state ledger**: a `_based_migrations` table (id + content-hash + timestamp); a migration
+    whose hash changed after it was applied → loud error, never a silent re-apply.
+  - **Editor/LSP drift = offline schema-vs-migrations only** *(user)*: a diagnostic when the `.bsl`
+    schema has changes not yet captured in a migration ("N uncaptured changes — run `based migrate
+    gen`"). Reuses the `based-facts`/diagnostics infra, no DB. Live-DB drift stays a CLI concern.
+  - `based gen sql` stays as the from-scratch full snapshot; `0001_init`'s up == that.
+
+  Track E items (top-down):
+  - E1. **`spec/syntax/migrations.md`** — the spec, written FIRST: the `up.mig`/`down.mig` neutral step
+    grammar + the `raw(dialect)` escape, the `@was` rename directive, the `schema.snap` format, the
+    `_based_migrations` ledger schema, the destructive-change policy, and the `based migrate` command
+    surface. Update `spec/grammar.ebnf` + the CLAUDE.md spec file map.
+  - E2. **Snapshot + diff engine** — serialize `CheckedSchema` → `schema.snap`; `diff(snap_prev,
+    schema_now)` → a neutral step list; `based migrate gen [name]` writes `NNNN_slug/{up.mig,schema.snap}`.
+  - E3. **Per-dialect renderer** — neutral steps → `ALTER`/`CREATE`/`DROP` SQL for each dialect over the
+    existing `Dialect` seam; `raw(dialect)` passthrough. `based migrate render` shows the SQL.
+  - E4. **Apply + ledger** — `based migrate apply` (one tx per migration, ledger insert + hash check,
+    `--allow-destructive` gate), `based migrate status` / `verify`; honor an optional `down.mig`. Real
+    Docker-backed tests reusing the D35 harness (apply against live MariaDB, then verify).
+  - E5. **`@was` rename directive** (sema) + the **offline schema-vs-migrations LSP drift diagnostic**.
+
 **Track D — deploy + keep-proven (DoD #4, last).**
   - D1. Dockerfile / image for `based serve` (health/readiness + graceful drain behaviour already
     done, D26 — this is packaging). D2. CI running the real-DB suites (A) + example builds (B) +
-    extension build (C) so the whole thing stays green.
+    extension build (C) + the migration apply tests (E4) so the whole thing stays green.
 
 ## Pipeline (data flow)
 
