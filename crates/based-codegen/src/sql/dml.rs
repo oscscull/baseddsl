@@ -152,8 +152,12 @@ fn lower_query(
     if let Some(sd) = &root.soft_delete {
         wheres.push(soft_pred(dialect, &sel.root_alias, root, sd));
     }
-    if let Some(scope) = &root.scope {
-        wheres.push(sel.predicate(scope, root));
+    // `@scope` rides into every query on the model (auth.md) unless the query opts out
+    // with `unscoped(...)` (D32) — the greppable, linted cross-scope escape hatch.
+    if q.unscoped.is_none() {
+        if let Some(scope) = &root.scope {
+            wheres.push(sel.predicate(scope, root));
+        }
     }
 
     // 3. Sort cascade + keyset tiebreaker.

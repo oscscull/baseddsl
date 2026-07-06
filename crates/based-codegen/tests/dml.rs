@@ -162,6 +162,25 @@ fn scope_predicate_is_injected() {
 }
 
 #[test]
+fn unscoped_query_omits_the_scope_predicate() {
+    // `unscoped(...)` (D32) is the cross-scope escape hatch: no `@scope` injection for
+    // this query. Soft-delete still rides — it's a separate guarantee.
+    let ddl = gen(r#"
+        @soft_delete(deleted_at)
+        @scope(org = $ctx.org)
+        @sort(id asc)
+        Order { deleted_at: timestamp?, org: Org, total: int }
+        Org { name: text }
+        shape OrderCard from Order { total }
+        query all_orders(org) -> OrderCard[] unscoped("admin: cross-org listing");
+        "#);
+    assert!(!ddl.contains(":ctx_org"), "scope must not inject:\n{ddl}");
+    // the param `org` still filters (Handle 1), and soft-delete still guards.
+    assert!(ddl.contains("`order`.`org_id` = :org"), "\n{ddl}");
+    assert!(ddl.contains("`order`.`deleted_at` IS NULL"), "\n{ddl}");
+}
+
+#[test]
 fn offset_pagination_and_with_count() {
     let ddl = gen(r#"
         Post { id: Id, title: text }

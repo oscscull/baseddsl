@@ -992,6 +992,146 @@ fn scope_filter_counts_toward_pattern() {
     );
 }
 
+// ---------- @scope form + create auto-set + unscoped (D32) -----------------
+
+#[test]
+fn scope_must_be_ctx_equality_conjunction() {
+    // `in` (multi-owner) is not a uniform single-owner scope — that's Handle 1.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org in $ctx.orgs)
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0180"), "{:?}", codes(&d));
+
+    // a literal RHS is a standing default filter, not context-parameterized scope.
+    let (_, d) = analyze(
+        r#"
+        @scope(archived = false)
+        Doc { archived: bool, title: text }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0180"), "{:?}", codes(&d));
+
+    // `or` is not a conjunction.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org or org = $ctx.other)
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0180"), "{:?}", codes(&d));
+}
+
+#[test]
+fn multi_term_ctx_equality_scope_is_clean() {
+    // A conjunction of `col = $ctx.field` equalities is the allowed shape.
+    assert_clean(
+        r#"
+        Org { name: text }
+        Region { name: text }
+        @scope(org = $ctx.org and region = $ctx.region)
+        Doc { org: Org, region: Region, title: text, @index(org, region) }
+        shape D from Doc { title }
+        query docs() -> D[] { list Doc order (title); }
+        "#,
+    );
+}
+
+#[test]
+fn create_assigning_scope_column_is_e0181() {
+    // The scope column is engine-managed on create (auto-set from $ctx); a caller
+    // that assigns it is trying to plant a row into an arbitrary scope.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        mutation make(org: Id, title: text) -> D {
+          create Doc { org = $org, title = $title };
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0181"), "{:?}", codes(&d));
+}
+
+#[test]
+fn create_on_scoped_model_omitting_scope_column_is_clean() {
+    // The scope column is required-exempt (E0146) because the engine auto-sets it.
+    // The create's ctx bag gains `org` from that auto-set.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        mutation make(title: text) -> D { create Doc { title = $title }; }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let make = schema.mutations.iter().find(|m| m.name == "make").unwrap();
+    assert_eq!(make.ctx_requires.len(), 1);
+    assert_eq!(make.ctx_requires[0].field, "org");
+}
+
+#[test]
+fn unscoped_query_drops_the_scope_ctx_requirement() {
+    // An `unscoped` query opts out of `@scope` injection, so it no longer requires
+    // the scope's `$ctx` field.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query all(org) -> D[] unscoped("admin: cross-org read") order (title);
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let all = schema.queries.iter().find(|q| q.name == "all").unwrap();
+    assert!(all.ctx_requires.is_empty(), "{:?}", all.ctx_requires);
+}
+
+#[test]
+fn unscoped_create_may_assign_the_scope_column() {
+    // With the mutation `unscoped`, scope isn't injected/auto-set, so the caller owns
+    // the column and assigning it is fine (no E0181).
+    assert_clean(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        mutation import_doc(org: Id, title: text) -> D
+          unscoped("data import: rows land in the supplied org") {
+          create Doc { org = $org, title = $title };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn unscoped_on_a_model_without_scope_is_stale_w0106() {
+    let (_, d) = analyze(
+        r#"
+        Doc { title: text, @index title }
+        shape D from Doc { title }
+        query all() -> D[] unscoped("nothing to opt out of") order (title);
+        "#,
+    );
+    assert_eq!(codes(&d), vec!["W0106"]);
+}
+
 // ---------- $ctx inference + coherence (D4/D5) -----------------------------
 
 #[test]

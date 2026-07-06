@@ -24,9 +24,12 @@ use crate::resolve::{self, Cx, Terminal};
 pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
     let mut out = Vec::new();
     // `@scope` is injected into every query on the model (auth.md Handle 2), so a
-    // scope that reads `$ctx` makes that field a requirement of every such query.
-    if let Some(scope) = &cx.model(ti).scope {
-        walk_pred(scope, ti, cx, &mut Vec::new(), &mut out);
+    // scope that reads `$ctx` makes that field a requirement of every such query —
+    // unless the query is `unscoped` (D32), which drops the injection and the need.
+    if q.unscoped.is_none() {
+        if let Some(scope) = &cx.model(ti).scope {
+            walk_pred(scope, ti, cx, &mut Vec::new(), &mut out);
+        }
     }
     for clause in query_clauses(q) {
         if let Clause::Where(p) = clause {
@@ -40,8 +43,11 @@ pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
 /// `@scope` (update/delete/restore inject it, D12) + `create`/`update` assigns.
 pub fn collect_mutation(m: &Mutation, cx: &Cx) -> Vec<CtxReq> {
     let mut out = Vec::new();
+    // `unscoped` (D32) drops both the injected write guard and the create-time auto-set,
+    // so a scoped model contributes no `$ctx` requirement to an unscoped mutation.
+    let unscoped = m.unscoped.is_some();
     for stmt in &m.body {
-        walk_write(stmt, cx, &mut out);
+        walk_write(stmt, cx, unscoped, &mut out);
     }
     dedup(out)
 }
@@ -89,12 +95,14 @@ fn query_clauses(q: &Query) -> &[Clause] {
     }
 }
 
-fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
+fn walk_write(stmt: &WriteStmt, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) {
     match stmt {
         WriteStmt::Create { model, assigns } => {
             if let Some(mi) = cx.find(&model.node) {
-                // create is an INSERT — no `@scope` filter, but assigns can set a
-                // column from context (`org = $ctx.org`).
+                // A create on a scoped model auto-sets the scope column from `$ctx`
+                // (D32), so it *requires* that field — the create-time twin of the
+                // read/write injection. An explicit assign may also set one from ctx.
+                scope_ctx(mi, cx, unscoped, out);
                 for a in assigns {
                     record_assign(a, mi, cx, out);
                 }
@@ -106,7 +114,7 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
             assigns,
         } => {
             if let Some(mi) = cx.find(&model.node) {
-                scope_ctx(mi, cx, out);
+                scope_ctx(mi, cx, unscoped, out);
                 walk_pred(where_, mi, cx, &mut Vec::new(), out);
                 for a in assigns {
                     record_assign(a, mi, cx, out);
@@ -117,20 +125,23 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
         | WriteStmt::HardDelete { model, where_ }
         | WriteStmt::Restore { model, where_ } => {
             if let Some(mi) = cx.find(&model.node) {
-                scope_ctx(mi, cx, out);
+                scope_ctx(mi, cx, unscoped, out);
                 walk_pred(where_, mi, cx, &mut Vec::new(), out);
             }
         }
         WriteStmt::Tx(inner) => {
             for s in inner {
-                walk_write(s, cx, out);
+                walk_write(s, cx, unscoped, out);
             }
         }
         WriteStmt::Raw(_) => {} // opaque — no column to infer against
     }
 }
 
-fn scope_ctx(mi: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
+fn scope_ctx(mi: usize, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) {
+    if unscoped {
+        return;
+    }
     if let Some(scope) = &cx.model(mi).scope {
         walk_pred(scope, mi, cx, &mut Vec::new(), out);
     }

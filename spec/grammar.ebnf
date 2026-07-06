@@ -94,8 +94,14 @@ shape_value = path | raw_sql ;                 (* dotted traversal OR raw value*
 (* ---------- Queries ------------------------------------------------------- *)
 
 query       = 'query' query_name '(' [ params ] ')' '->' ret_type
-              ( query_inline | query_block | ';' ) ;
+              [ unscoped_clause ] ( query_inline | query_block | ';' ) ;
 query_name  = lower_ident ;
+
+(* Per-callable `@scope` opt-out (auth.md Handle 2 / D32): cross-scope access        *)
+(* (admin/support/jobs). Mandatory reason string — an escape hatch is never silent   *)
+(* (principle 6). Greppable + linted (W0106). Sits after the return type on a query, *)
+(* after any `guard` on a mutation.                                                  *)
+unscoped_clause = 'unscoped' '(' STRING ')' ;
 
 (* Bare/per-param/full all share the param list; binding rides each param.     *)
 params      = param { ',' param } ;
@@ -120,7 +126,7 @@ query_block = '{' statement '}' ;       (* one read statement, ';'-terminated  *
 (* ---------- Mutations ----------------------------------------------------- *)
 
 mutation    = 'mutation' query_name '(' [ params ] ')' '->' ret_type
-              [ 'guard' guard_name ] mut_block ;
+              [ 'guard' guard_name ] [ unscoped_clause ] mut_block ;
 guard_name  = lower_ident ;             (* host-language fn (auth.md Handle 3)  *)
 mut_block   = '{' { write_stmt sep } [ write_stmt ] '}' ;
 

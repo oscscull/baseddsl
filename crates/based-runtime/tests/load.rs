@@ -34,11 +34,12 @@ fn loads_and_lowers_commerce() {
 #[test]
 fn plans_a_commerce_ctx_query() {
     let c = commerce();
-    // `my_org_orders` reads `$ctx.org` — it must bind from context, positionally.
+    // `my_org_orders` is a plain `list Order`, but Order is `@scope`d (D32) so the org
+    // filter is injected from `$ctx` — it still binds from context, positionally.
     let r = Request::new("my_org_orders", json!({}), json!({ "org": "org-42" }));
     let plan = plan_query(&c, &r).unwrap();
     assert!(
-        plan.main.sql.contains("WHERE `order`.`org_id` = ?"),
+        plan.main.sql.contains("`order`.`org_id` = ?"),
         "{}",
         plan.main.sql
     );
@@ -49,12 +50,13 @@ fn plans_a_commerce_ctx_query() {
 fn plans_the_commerce_place_order_mutation() {
     let c = commerce();
     // `place_order` creates an Order; the engine generates its id, and the response
-    // identifies that row (return model = Order).
+    // identifies that row (return model = Order). Order is `@scope`d, so `org` comes
+    // from `$ctx` (auto-set on create, D32) — never a body arg.
     let mut ids = SeqIdGen::default();
     let r = Request::new(
         "place_order",
-        json!({ "org": "org-1", "buyer": "user-1", "total": 99 }),
-        json!({}),
+        json!({ "buyer": "user-1", "total": 99 }),
+        json!({ "org": "org-1" }),
     );
     let plan = plan_mutation(&c, &r, &mut ids).unwrap();
     assert_eq!(plan.stmts.len(), 1);

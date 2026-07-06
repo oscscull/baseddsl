@@ -117,7 +117,7 @@ Keywords are recognized **positionally**: an identifier is read as a keyword onl
 grammar expects one, and may otherwise be used as an ordinary identifier. The set of words
 that are keyword-in-position:
 `get list create update delete restore hard tx where order page offset count with guard
-from shape query mutation filter unindexed unsafe on column table by has in not and or
+from shape query mutation filter unindexed unsafe unscoped on column table by has in not and or
 true false null now`.
 
 Why not global reservation: the canonical `OrderItem` model names a field `order:` (a would-be
@@ -393,9 +393,10 @@ Multi-owner ("writable by a *set* of orgs") is not even single-tenant scoping �
 caller-computed filter value (auth.md Handle 1, `org in $ctx.writable_orgs`), further evidence
 `@tenant` modelled the wrong shape.
 
-**OPEN — do NOT implement `@scope` injection until this is resolved.** The feature is useful
-but must not land in an uncomfortable middle ground where it is neither the common case nor a
-clean edge case. Axes to settle first:
+**RESOLVED by D32** (the four axes below are settled there; read D32 for the shipped design).
+The injection itself was in fact built earlier (read `WHERE` + write `WHERE` + `$ctx`
+propagation); D32 closes the gaps that made it safe — the create-time hole, the escape hatch,
+and the predicate restriction. The original open axes, for the record:
 1. **Per-model vs per-operation.** Model-level `@scope` injects the *same* predicate into every
    query on the model (soft-delete-like, auth.md:18). Real access rules differ by operation
    (broad read, owner-only write). Decide: is scope attachable per query/mutation, or is
@@ -882,3 +883,51 @@ reused key on a changed payload is caught and rejected loudly instead of replaye
   stand-in fingerprint (the exact hash is opaque — only equality matters).
 - *Deferred (unchanged from D25):* the shared/durable multi-instance store (needs live infra; the seam +
   the stable FNV fingerprint are now ready for it); key TTL/eviction.
+
+## D32 — `@scope` resolved: uniform single-owner row filter + create auto-set + `unscoped`
+Resolves D19 (whose four axes are settled here). `@scope` is a **model-level, uniform,
+single-owner row-visibility filter** — a standing predicate parameterized by request context
+(auth.md Handle 2). It is *not* an authorization model, not per-operation, and not a policy
+engine. Injection (read `WHERE` / write `WHERE` / joined `ON` / `$ctx` propagation) was already
+built when this landed; D32 closes the three gaps that made it *safe*.
+
+- **Predicate is restricted to a conjunction of `col = $ctx.field` equalities** (`E0180`,
+  `resolve::check_scope_form`). `col` is a single-segment column or forward-FK on the model; the
+  RHS is strictly `$ctx.<field>`. No `or` / `in` / range / literal-RHS / multi-hop path / named
+  filter. This is what makes scope injectable *everywhere* and — critically — auto-settable on
+  `create`; a non-equality/multi-owner rule has no create-time projection and is not a scope. D19
+  already said multi-owner (`org in $ctx.writable_orgs`) is Handle 1, not scope — the restriction
+  makes that structural. `RModel::scope_terms()` flattens the predicate to `(field, ctx_field)`
+  pairs for reuse (create auto-set today; shard-key binding later).
+- **Create-time is closed by auto-set** (the safety headline). On a scoped model the scope column
+  is **engine-managed on `create`**: codegen injects `<col> = :ctx_<field>` into the INSERT
+  (`sql::mutations::lower_create`), so the row always lands in the caller's own scope and a
+  **cross-scope create is inexpressible**. A caller that *assigns* the scope column is `E0181`
+  (`check::check_scope_assign`); the column is required-exempt (`E0146`) like `id`/`@created`; and
+  the create now *requires* the scope `$ctx` field (`ctx::scope_ctx` on the Create arm), so the
+  client sends it. Before D32 an out-of-scope `create` silently inserted the row and only the
+  re-select hid it — a principle-1 violation, now removed.
+- **`unscoped("reason")` is the escape hatch** (principle 6 — mandatory, minimal-scope, greppable,
+  linted). A per-callable clause (grammar `unscoped_clause`, after the return type on a query /
+  after any `guard` on a mutation), carrying a **mandatory reason string** (never silent). It opts
+  the *one* callable out of *all* scope handling — read/write injection *and* the create auto-set —
+  for cross-scope access (admin/support/jobs/import). It forfeits **only** `@scope`; soft-delete
+  still applies. `W0106` flags a stale `unscoped` (target has no `@scope`). Threaded through sema
+  (`ctx` drops the scope requirement), dml, and every mutation-write lowering.
+- **What the compiler guarantees:** the predicate is injected into every read/write on the model
+  except explicit `unscoped` sites; cross-scope create is inexpressible; every opt-out is
+  greppable + reason-carrying + lintable. **What it does not:** verify the predicate is the correct
+  authz rule, or evaluate any role/permission matrix (that is Handle 3 `guard`, host-language).
+  `@scope` is a row-visibility filter, not a checked authorization model — do not mistake it for one.
+- **Commerce demonstration:** `Order` is now `@scope(org = $ctx.org)`, so every order query is
+  org-scoped from `$ctx`; `place_order` dropped its `org` param (auto-set); `orders_in_org` is the
+  admin cross-org lookup, marked `unscoped("admin: cross-org order lookup")`; `my_org_orders` is a
+  plain `list Order` (scope does the filtering).
+- **Tests:** 8 new sema (`E0180` × 3 forms, multi-term clean, `E0181`, create-exempt clean +
+  ctx bag, `unscoped` drops ctx, unscoped-create-may-assign, `W0106`), 3 codegen (dml unscoped
+  omits scope; mutations create auto-set + re-select scope; unscoped mutation/update omit), 1
+  parser (unscoped on query + mutation), conformance `ctx_scope` re-blessed to the new pattern.
+- **Follow-on (separate slice):** bind D20's shard key to the scope field — now that a scope is a
+  single `$ctx.field` equality, the shard key is unambiguous. Also deferred: injecting `@scope`
+  into a *joined* table's `ON` (today only the root table + write targets carry it; soft-delete
+  already does the join `ON`, so the mechanism exists to extend).

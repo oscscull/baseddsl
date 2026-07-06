@@ -1,6 +1,8 @@
-# `@scope` (predicate over $ctx) + a query reading $ctx.org — exercises per-
-# callable $ctx inference (org typed as a relation to Org from the FK it maps to)
-# and a mutation whose ctx bag is threaded through its create.
+# `@scope` (D32): a uniform single-owner filter injected into every read + write, and
+# auto-set on `create` from `$ctx` — so `place_order` takes no `org` (cross-scope create
+# is inexpressible; assigning `org` would be E0181). Exercises per-callable $ctx inference
+# (org typed as a relation to Org from the FK it maps to), including the create-time
+# requirement the auto-set introduces.
 @soft_delete(deleted_at)
 Org {
   deleted_at: timestamp?
@@ -19,6 +21,6 @@ shape OrderCard from Order { total }
 
 query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
 
-mutation place_order(org: Id, total: int) -> OrderCard {
-  create Order { org = $org, total = $total };
+mutation place_order(total: int) -> OrderCard {
+  create Order { total = $total };
 }

@@ -647,6 +647,7 @@ impl<'a> Parser<'a> {
         let params = self.param_list()?;
         self.expect(Tok::Arrow, "`->`")?;
         let ret = self.ret_type()?;
+        let unscoped = self.unscoped_clause()?;
 
         let (body, end) = if self.at(Tok::Semi) {
             let e = self.bump().unwrap().end;
@@ -668,6 +669,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             ret,
+            unscoped,
             body,
             span: Span {
                 file: self.file,
@@ -675,6 +677,28 @@ impl<'a> Parser<'a> {
                 end,
             },
         })
+    }
+
+    /// `unscoped("reason")` — the per-callable `@scope` opt-out (auth.md / D32). Sits
+    /// after the return type on a query, after any `guard` on a mutation. The reason
+    /// string is mandatory (principle 6 — an escape hatch is never silent).
+    fn unscoped_clause(&mut self) -> PResult<Option<Unscoped>> {
+        if !self.at_kw("unscoped") {
+            return Ok(None);
+        }
+        let start = self.bump().unwrap().start;
+        self.expect(Tok::LParen, "`(`")?;
+        let s = self.expect(Tok::Str, "a reason string (`unscoped` is never silent)")?;
+        let reason = unquote(self.text(s));
+        let end = self.expect(Tok::RParen, "`)`")?.end;
+        Ok(Some(Unscoped {
+            reason,
+            span: Span {
+                file: self.file,
+                start,
+                end,
+            },
+        }))
     }
 
     fn ret_type(&mut self) -> PResult<RetType> {
@@ -801,6 +825,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let unscoped = self.unscoped_clause()?;
         self.expect(Tok::LBrace, "`{`")?;
         let mut body = Vec::new();
         loop {
@@ -816,6 +841,7 @@ impl<'a> Parser<'a> {
             params,
             ret,
             guard,
+            unscoped,
             body,
             span: Span {
                 file: self.file,

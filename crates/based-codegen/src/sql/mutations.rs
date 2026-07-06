@@ -144,9 +144,14 @@ fn lower_mutation<'a>(
     m: &'a Mutation,
     dialect: Dialect,
 ) -> LoweredMutation {
+    // `unscoped(...)` (D32) drops `@scope` from every write in this mutation *and* the
+    // create-time auto-set — the greppable, linted cross-scope escape hatch (auth.md).
+    let unscoped = m.unscoped.is_some();
     let mut stmts = Vec::new();
     for stmt in &m.body {
-        lower_write(schema, decls, stmt, "id", None, dialect, &mut stmts);
+        lower_write(
+            schema, decls, stmt, "id", None, unscoped, dialect, &mut stmts,
+        );
     }
     // Re-select the declared shape (D12) only when the mutation *creates* its return
     // row — i.e. some write generates the engine `id` that binds `:result_id` at
@@ -167,6 +172,7 @@ fn lower_mutation<'a>(
                 decls,
                 &rm.ret_model,
                 rm.ret_shape.as_deref(),
+                unscoped,
                 dialect,
             )
         });
@@ -188,6 +194,7 @@ fn lower_ret_select(
     decls: &[Decl],
     ret_model: &str,
     ret_shape: Option<&str>,
+    unscoped: bool,
     dialect: Dialect,
 ) -> String {
     let model = schema
@@ -201,8 +208,10 @@ fn lower_ret_select(
     if let Some(sd) = &model.soft_delete {
         wheres.push(soft_pred(dialect, &sel.root_alias, model, sd));
     }
-    if let Some(scope) = &model.scope {
-        wheres.push(sel.predicate(scope, model));
+    if !unscoped {
+        if let Some(scope) = &model.scope {
+            wheres.push(sel.predicate(scope, model));
+        }
     }
 
     let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&model.table));
@@ -217,12 +226,17 @@ fn lower_ret_select(
 /// level, `id_<step>` inside a `tx` so sibling creates stay distinct); `back` is the
 /// preceding create a `^.field` reads from (mutations.md). A `tx` flattens: it
 /// pushes its inner writes inline and prepends the tx banner to the first of them.
+// The lowering context (schema/decls/dialect) + the per-write threading (id_param, back,
+// unscoped) genuinely need to ride together; bundling them into a struct would obscure more
+// than the arg count costs. The linted trio is intentional.
+#[allow(clippy::too_many_arguments)]
 fn lower_write<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
     stmt: &'a WriteStmt,
     id_param: &str,
     back: Option<BackCtx<'a>>,
+    unscoped: bool,
     dialect: Dialect,
     out: &mut Vec<LoweredWrite>,
 ) {
@@ -230,7 +244,7 @@ fn lower_write<'a>(
         WriteStmt::Create { model, assigns } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_create(
-                    schema, decls, m, assigns, id_param, back, dialect,
+                    schema, decls, m, assigns, id_param, back, unscoped, dialect,
                 ));
             }
         }
@@ -241,23 +255,27 @@ fn lower_write<'a>(
         } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_update(
-                    schema, decls, m, where_, assigns, back, dialect,
+                    schema, decls, m, where_, assigns, back, unscoped, dialect,
                 ));
             }
         }
         WriteStmt::Delete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_delete(schema, decls, m, where_, false, dialect));
+                out.push(lower_delete(
+                    schema, decls, m, where_, false, unscoped, dialect,
+                ));
             }
         }
         WriteStmt::HardDelete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_delete(schema, decls, m, where_, true, dialect));
+                out.push(lower_delete(
+                    schema, decls, m, where_, true, unscoped, dialect,
+                ));
             }
         }
         WriteStmt::Restore { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_restore(schema, decls, m, where_, dialect));
+                out.push(lower_restore(schema, decls, m, where_, unscoped, dialect));
             }
         }
         WriteStmt::Tx(inner) => {
@@ -271,7 +289,16 @@ fn lower_write<'a>(
                     WriteStmt::Create { .. } => format!("id_{step}"),
                     _ => "id".to_string(),
                 };
-                lower_write(schema, decls, st, &idp, prev.clone(), dialect, out);
+                lower_write(
+                    schema,
+                    decls,
+                    st,
+                    &idp,
+                    prev.clone(),
+                    unscoped,
+                    dialect,
+                    out,
+                );
                 if let WriteStmt::Create { assigns, .. } = st {
                     prev = Some(BackCtx {
                         id_param: idp,
@@ -303,6 +330,7 @@ fn lower_write<'a>(
 
 // ---------- create ---------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn lower_create<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
@@ -310,6 +338,7 @@ fn lower_create<'a>(
     assigns: &'a [Assign],
     id_param: &str,
     back: Option<BackCtx<'a>>,
+    unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect).with_back(back);
@@ -322,6 +351,21 @@ fn lower_create<'a>(
         cols.push(dialect.quote(&col));
         vals.push(sel.value(&a.value, model));
         assigned.push(col);
+    }
+
+    // `@scope` columns are engine-managed on create (D32): auto-set from `:ctx_<field>`
+    // so a caller cannot plant a row outside their own scope (cross-scope create is
+    // inexpressible). Sema forbids the caller assigning one (E0181), so on a clean schema
+    // `assigned` never contains it — the guard is defensive. Skipped when `unscoped`.
+    if !unscoped {
+        for (field, ctx_field) in model.scope_terms() {
+            let col = physical_col(model, &field);
+            if !assigned.contains(&col) {
+                cols.push(dialect.quote(&col));
+                vals.push(format!(":ctx_{ctx_field}"));
+                assigned.push(col);
+            }
+        }
     }
 
     // Implicit `id` is app-generated (D1: uuid, no SQL default) — bind it unless the
@@ -358,6 +402,7 @@ fn lower_create<'a>(
 
 // ---------- update ---------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn lower_update<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
@@ -365,6 +410,7 @@ fn lower_update<'a>(
     where_: &Predicate,
     assigns: &'a [Assign],
     back: Option<BackCtx<'a>>,
+    unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect).with_back(back);
@@ -382,7 +428,13 @@ fn lower_update<'a>(
     }
 
     let mut wheres = vec![sel.predicate(where_, model)];
-    inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
+    inject_guards(
+        &mut sel,
+        model,
+        &mut wheres,
+        /* live = */ true,
+        unscoped,
+    );
     LoweredWrite {
         header: String::new(),
         sql: update_stmt(&sel, model, &sets, &wheres),
@@ -399,6 +451,7 @@ fn lower_delete(
     model: &RModel,
     where_: &Predicate,
     hard: bool,
+    unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect);
@@ -410,7 +463,13 @@ fn lower_delete(
             sets.push(bump);
         }
         let mut wheres = vec![sel.predicate(where_, model)];
-        inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
+        inject_guards(
+            &mut sel,
+            model,
+            &mut wheres,
+            /* live = */ true,
+            unscoped,
+        );
         return LoweredWrite {
             header: "-- delete (soft): tombstone, never a real DELETE\n".to_string(),
             sql: update_stmt(&sel, model, &sets, &wheres),
@@ -421,7 +480,13 @@ fn lower_delete(
 
     // Plain model, or the loud `hard delete` opt-out -> real DELETE.
     let mut wheres = vec![sel.predicate(where_, model)];
-    inject_guards(&mut sel, model, &mut wheres, /* live = */ false);
+    inject_guards(
+        &mut sel,
+        model,
+        &mut wheres,
+        /* live = */ false,
+        unscoped,
+    );
     let header = if hard {
         "-- hard delete: real DELETE (explicit soft-delete opt-out)\n".to_string()
     } else {
@@ -442,6 +507,7 @@ fn lower_restore(
     decls: &[Decl],
     model: &RModel,
     where_: &Predicate,
+    unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect);
@@ -454,10 +520,12 @@ fn lower_restore(
         sets.push(bump);
     }
     // Restore targets the *deleted* rows, so the live predicate is NOT injected;
-    // `@scope` still applies (you can only restore within your scope).
+    // `@scope` still applies (you can only restore within your scope) unless `unscoped`.
     let mut wheres = vec![sel.predicate(where_, model)];
-    if let Some(scope) = &model.scope {
-        wheres.push(sel.predicate(scope, model));
+    if !unscoped {
+        if let Some(scope) = &model.scope {
+            wheres.push(sel.predicate(scope, model));
+        }
     }
     LoweredWrite {
         header: "-- restore: clear the tombstone\n".to_string(),
@@ -567,15 +635,24 @@ fn push_where(s: &mut String, wheres: &[String]) {
 // ---------- injected guards + engine columns -------------------------------
 
 /// Append the soft-delete live predicate (when `live`) and `@scope` to a write's
-/// `WHERE`, so a mutation can't touch a tombstoned or out-of-scope row.
-fn inject_guards(sel: &mut Select, model: &RModel, wheres: &mut Vec<String>, live: bool) {
+/// `WHERE`, so a mutation can't touch a tombstoned or out-of-scope row. `unscoped` (D32)
+/// drops the `@scope` guard only — soft-delete still applies (it's a separate guarantee).
+fn inject_guards(
+    sel: &mut Select,
+    model: &RModel,
+    wheres: &mut Vec<String>,
+    live: bool,
+    unscoped: bool,
+) {
     if live {
         if let Some(sd) = &model.soft_delete {
             wheres.push(soft_pred(sel.dialect, &sel.root_alias, model, sd));
         }
     }
-    if let Some(scope) = &model.scope {
-        wheres.push(sel.predicate(scope, model));
+    if !unscoped {
+        if let Some(scope) = &model.scope {
+            wheres.push(sel.predicate(scope, model));
+        }
     }
 }
 

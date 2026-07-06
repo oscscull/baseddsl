@@ -13,4 +13,4 @@ model Order  table=order  soft_delete=deleted_at(timestamp)  scope
   total: int
 shape OrderCard from Order
 query my_org_orders  target=Order verb=list many  shape=OrderCard  ctx=[org: -> Org]
-mutation place_order  ret=Order
+mutation place_order  ret=Order  ctx=[org: -> Org]

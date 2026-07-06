@@ -61,7 +61,11 @@ pub mod code {
     // tx back-references (mutations.md): `^.field` reads the immediately preceding
     // `create` in the same `tx`.
     pub const BACKREF_SCOPE: &str = "E0170"; // `^` outside a `tx`, or with no preceding `create`
-                                             // lints
+
+    // `@scope` (auth.md Handle 2 / D32): a uniform single-owner row filter.
+    pub const SCOPE_FORM: &str = "E0180"; // @scope must be a conjunction of `col = $ctx.field`
+    pub const SCOPE_ASSIGN: &str = "E0181"; // a `create` assigns a scope column (engine-managed)
+                                            // lints
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
@@ -69,6 +73,7 @@ pub mod code {
     pub const UNINDEXED: &str = "W0103"; // a query will scan: no usable index, no annotation
     pub const USELESS_INDEX: &str = "W0104"; // declared index no query uses (pure write-tax)
     pub const STALE_UNINDEXED: &str = "W0105"; // unindexed(...) on a query that is indexed
+    pub const STALE_UNSCOPED: &str = "W0106"; // unscoped(...) on a callable whose model has no @scope
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
@@ -148,6 +153,39 @@ impl RModel {
     }
     pub fn is_unique(&self, field: &str) -> bool {
         self.unique_cols.iter().any(|c| c == field)
+    }
+    /// The `@scope` equality terms as `(lhs_field, ctx_field)` pairs (D32): for
+    /// `@scope(org = $ctx.org)`, `[("org", "org")]`. Sema restricts `@scope` to a
+    /// conjunction of `col = $ctx.field` (`E0180`), so this is exactly the set of
+    /// columns the engine injects into every read/write and **auto-sets on create**
+    /// from `:ctx_<ctx_field>`. Empty when the model has no `@scope`. A malformed
+    /// scope (already `E0180`) contributes only its well-formed terms.
+    pub fn scope_terms(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.scope {
+            collect_scope_terms(p, &mut out);
+        }
+        out
+    }
+}
+
+/// Flatten a well-formed `@scope` predicate (an `and`-tree of `col = $ctx.field`) into
+/// its `(lhs_field, ctx_field)` terms. Non-conforming nodes are skipped (they are the
+/// `E0180` the caller already reported); this never errors.
+fn collect_scope_terms(p: &Predicate, out: &mut Vec<(String, String)>) {
+    match p {
+        Predicate::And(a, b) => {
+            collect_scope_terms(a, out);
+            collect_scope_terms(b, out);
+        }
+        Predicate::Cmp {
+            path,
+            op: based_ast::Op::Eq,
+            value: based_ast::Value::Param(pr),
+        } if path.segments.len() == 1 && pr.name.node == "ctx" && pr.path.len() == 1 => {
+            out.push((path.segments[0].node.clone(), pr.path[0].node.clone()));
+        }
+        _ => {}
     }
 }
 

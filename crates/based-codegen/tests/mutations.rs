@@ -335,6 +335,80 @@ fn update_where_across_relation_uses_multi_table_form() {
     assert!(out.contains("`j_org`.`name` = :name"), "\n{out}");
 }
 
+#[test]
+fn create_auto_sets_the_scope_column_from_ctx() {
+    // On a scoped model the scope column is engine-managed on create (D32): auto-set
+    // from `:ctx_<field>`, never a caller param. Cross-scope create is inexpressible.
+    let out = gen(r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Order { org: Org, total: int }
+        shape OrderCard from Order { total }
+        mutation place(total: int) -> OrderCard { create Order { total = $total }; }
+        "#);
+    // `org_id` is injected into the INSERT bound to `:ctx_org`, alongside the engine id.
+    assert!(
+        out.contains("INSERT INTO `order` (`total`, `org_id`, `id`)")
+            || out.contains("INSERT INTO `order` (`id`, `total`, `org_id`)"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains(":ctx_org"),
+        "scope column not auto-set:\n{out}"
+    );
+    // the re-select still applies scope (a create that lands out of scope reads absent).
+    assert!(
+        out.contains("WHERE `order`.`id` = :result_id")
+            && out.contains("`order`.`org_id` = :ctx_org"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn unscoped_mutation_omits_scope_injection_and_auto_set() {
+    // `unscoped(...)` (D32) drops the write guard *and* the create auto-set: the caller
+    // supplies the scope column and the write carries no injected scope predicate.
+    let out = gen(r#"
+        Org { name: text }
+        @soft_delete(deleted_at)
+        @scope(org = $ctx.org)
+        Order { deleted_at: timestamp?, org: Org, total: int }
+        shape OrderCard from Order { total }
+        mutation import_order(org: Id, total: int) -> OrderCard
+          unscoped("data import: rows land in the supplied org") {
+          create Order { org = $org, total = $total };
+        }
+        "#);
+    // caller-supplied org (`:org`), no auto-set from ctx.
+    assert!(out.contains(":org") && !out.contains(":ctx_org"), "\n{out}");
+    // the re-select is keyed on the created row but carries no scope predicate.
+    assert!(out.contains(":result_id"), "\n{out}");
+    assert!(
+        !out.contains("`order`.`org_id` = :ctx_org"),
+        "unscoped must not inject scope:\n{out}"
+    );
+}
+
+#[test]
+fn unscoped_update_omits_the_scope_guard() {
+    let out = gen(r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        @updated(updated_at)
+        Order { updated_at: timestamp, org: Org, status: text }
+        shape OrderCard from Order { status }
+        mutation admin_set_status(id: Id, status: text) -> OrderCard
+          unscoped("admin: correct any org's order") {
+          update Order where (id = $id) { status = $status };
+        }
+        "#);
+    assert!(
+        !out.contains(":ctx_org"),
+        "unscoped update must not inject scope:\n{out}"
+    );
+    assert!(out.contains("WHERE `order`.`id` = :id;"), "\n{out}");
+}
+
 // ---------- Postgres (D29) -------------------------------------------------
 
 #[test]

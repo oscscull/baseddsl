@@ -199,7 +199,21 @@ pub struct Query {
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: RetType,
+    /// `unscoped("reason")` — opt this callable out of `@scope` injection (auth.md / D32).
+    pub unscoped: Option<Unscoped>,
     pub body: QueryBody,
+    pub span: Span,
+}
+
+/// `unscoped("reason")` — a per-callable opt-out of `@scope` injection (auth.md / D32),
+/// the escape hatch cross-scope access (admin/support/jobs) needs. The reason string is
+/// mandatory: an escape hatch is never silent (principle 6). It is greppable (every
+/// cross-scope site is one `grep unscoped`) and linted (`W0106` when the target model
+/// carries no `@scope` to opt out of). It forfeits *only* `@scope`; soft-delete still
+/// applies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unscoped {
+    pub reason: String,
     pub span: Span,
 }
 
@@ -298,6 +312,9 @@ pub struct Mutation {
     pub params: Vec<Param>,
     pub ret: RetType,
     pub guard: Option<Ident>,
+    /// `unscoped("reason")` — opt this mutation out of `@scope` injection (auth.md / D32):
+    /// its writes carry no scope guard *and* a `create` does not auto-set the scope column.
+    pub unscoped: Option<Unscoped>,
     pub body: Vec<WriteStmt>,
     pub span: Span,
 }

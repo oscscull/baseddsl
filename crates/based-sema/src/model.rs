@@ -419,10 +419,13 @@ pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
     };
     for d in &ast.decorators {
         match d.name.node.as_str() {
-            // Scope predicates see only `$ctx` (no query params, auth.md).
+            // Scope predicates see only `$ctx` (no query params, auth.md), and are
+            // restricted to a conjunction of `col = $ctx.field` equalities (D32) so
+            // scope is injectable everywhere and auto-settable on `create`.
             "scope" => {
                 if let Some(DecoArg::Pred(p)) = d.args.first() {
                     resolve::check_predicate(p, Some(mi), cx, &[], sink);
+                    resolve::check_scope_form(p, d.name.span, sink);
                 }
             }
             "sort" => {

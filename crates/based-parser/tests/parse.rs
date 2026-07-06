@@ -182,6 +182,32 @@ fn query_tiers_and_bindings() {
 }
 
 #[test]
+fn unscoped_clause_on_query_and_mutation() {
+    // The `unscoped("reason")` opt-out (D32) parses after the return type on a query,
+    // after any `guard` on a mutation. The reason string is mandatory.
+    let sf = parse_ok(
+        r#"
+        query all_orders(org) -> OrderCard[] unscoped("admin: cross-org");
+        mutation import_order(org: Id) -> OrderCard unscoped("data import") {
+          create Order { org = $org };
+        }
+        "#,
+    );
+    let q = match &sf.decls[0] {
+        Decl::Query(q) => q,
+        other => panic!("expected query, got {other:?}"),
+    };
+    assert!(matches!(q.body, QueryBody::Bare));
+    assert_eq!(q.unscoped.as_ref().unwrap().reason, "admin: cross-org");
+
+    let m = match &sf.decls[1] {
+        Decl::Mutation(m) => m,
+        other => panic!("expected mutation, got {other:?}"),
+    };
+    assert_eq!(m.unscoped.as_ref().unwrap().reason, "data import");
+}
+
+#[test]
 fn full_query_body_predicate_precedence() {
     let sf = parse_ok(
         r#"

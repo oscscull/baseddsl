@@ -15,12 +15,25 @@ query my_orders() -> OrderCard[] {
 Not a decision — a filter value the caller produced.
 
 ## Handle 2 — model scope predicate (auto-injected)
-A standing filter, parameterized by context, injected into every query on the model — exactly like soft-delete (inherits soft-delete's cross-join correctness for free).
+A standing filter, parameterized by context, injected into every query **and write** on the model — exactly like soft-delete. Uniform, single-owner (D32).
 ```
 @scope(org = $ctx.org)
 Order { ... }
 ```
 We enforce the constraint shape; caller supplies the value. No branching.
+
+Restricted to a conjunction of `col = $ctx.field` equalities (D32) — that is what makes it *uniform* and lets it be enforced on every operation:
+- **Reads + writes:** the predicate is ANDed into every `WHERE` (updates/deletes/restores can't touch an out-of-scope row).
+- **Create:** the scope column is **engine-managed** — auto-set from `$ctx`, never a caller param. A caller can't plant a row outside their own scope; a cross-scope `create` is *inexpressible* (assigning the column is an error). So `create Order { total = $t }` gets `org` from context automatically.
+- Not uniform (differs by op) or multi-owner (`org in $ctx.orgs`)? That's not scope — use a per-query `where` (Handle 1). Real decisions → Handle 3.
+
+**Escape hatch — `unscoped("reason")`.** Cross-scope access (admin/support/jobs/import) opts one callable out of scope entirely (read + write injection *and* the create auto-set), with a **mandatory reason** (never silent), greppable, and linted:
+```
+query orders_in_org(org) -> OrderCard[] unscoped("admin: cross-org order lookup");
+```
+It forfeits *only* `@scope` — soft-delete still applies.
+
+**What the compiler guarantees / does not.** It guarantees the predicate is injected everywhere except explicit `unscoped` sites, and that cross-scope creates are inexpressible — killing accidental leaks. It does **not** verify the predicate is the *right* rule, or evaluate any role matrix (that's Handle 3). `@scope` is a row-visibility filter, not a checked authorization model.
 
 ## Handle 3 — guard hook into caller code
 For real decisions, we don't evaluate — we invoke the caller's host-language fn at the boundary and respect its verdict.

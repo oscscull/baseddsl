@@ -151,6 +151,22 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         );
     }
 
+    // `unscoped` on a query with no `@scope` to opt out of is stale (W0106) — the twin
+    // of W0105 for `unindexed`. Points the author at a no-op token to drop.
+    if let Some(u) = &q.unscoped {
+        if cx.model(ti).scope.is_none() {
+            sink.warn_note(
+                code::STALE_UNSCOPED,
+                u.span,
+                format!(
+                    "`unscoped` on query `{}` has no `@scope` to opt out of",
+                    q.name.node
+                ),
+                "drop it, or add `@scope(...)` to the target model",
+            );
+        }
+    }
+
     let ctx_requires = crate::ctx::collect_query(q, ti, cx);
 
     Some(RQuery {
@@ -375,9 +391,14 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     }
     let ret = resolve_return(&m.ret, None, cx, sink)?;
     // At the top level there is no enclosing `tx`, so no back-reference is in scope.
+    // A mutation may opt out of `@scope` on its write models (D32) — that both drops
+    // the injected guard and lets a `create` assign the (otherwise engine-managed)
+    // scope column, so the flag rides into every write check.
+    let unscoped = m.unscoped.is_some();
     for stmt in &m.body {
-        check_write(stmt, cx, &params, None, sink);
+        check_write(stmt, cx, &params, None, unscoped, sink);
     }
+    check_unscoped_stale(m, cx, sink);
     Some(RMutation {
         name: m.name.node.clone(),
         span: m.span,
@@ -390,13 +411,21 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
 /// Check one write statement. `back` is the model of the immediately preceding
 /// `create` in the enclosing `tx` (`None` at the top level or before the first
 /// create) — the model a `^.field` back-reference resolves against.
-fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], back: Option<usize>, sink: &mut Sink) {
+fn check_write(
+    stmt: &WriteStmt,
+    cx: &Cx,
+    params: &[String],
+    back: Option<usize>,
+    unscoped: bool,
+    sink: &mut Sink,
+) {
     match stmt {
         WriteStmt::Create { model, assigns } => {
             if let Some(mi) = write_model(model, cx, sink) {
                 for a in assigns {
                     check_assign(a, mi, cx, params, back, sink);
                 }
+                check_scope_assign(mi, assigns, unscoped, cx, sink);
                 check_create_required(mi, assigns, model, cx, sink);
             }
         }
@@ -436,7 +465,7 @@ fn check_write(stmt: &WriteStmt, cx: &Cx, params: &[String], back: Option<usize>
             // `^` reads the immediately preceding `create`; track it as we descend.
             let mut prev = back;
             for s in inner {
-                check_write(s, cx, params, prev, sink);
+                check_write(s, cx, params, prev, unscoped, sink);
                 if let WriteStmt::Create { model, .. } = s {
                     prev = write_model(model, cx, &mut Sink::default());
                 }
@@ -476,19 +505,49 @@ fn check_assign(
     resolve::check_assign_type(&member.kind, &a.col, &a.value, mi, back, cx, sink);
 }
 
+/// On a scoped model (D32) the `@scope` column is engine-managed on `create`: it is
+/// auto-set from `$ctx.<field>` so a caller cannot plant a row outside their own scope
+/// (cross-scope create is inexpressible). Assigning it is therefore an `E0181`, exactly
+/// as assigning `id`/`@created` would be redundant/wrong — *unless* the mutation is
+/// `unscoped` (D32), in which case scope isn't injected at all and the caller owns the
+/// column. Reports every offending assign.
+fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, sink: &mut Sink) {
+    if unscoped {
+        return;
+    }
+    let m = cx.model(mi);
+    let scope_cols = m.scope_terms();
+    for a in assigns {
+        if scope_cols.iter().any(|(f, _)| f == &a.col.node) {
+            sink.error_note(
+                code::SCOPE_ASSIGN,
+                a.col.span,
+                format!(
+                    "`{}` is `@scope`-managed on `create`; the engine sets it from `$ctx` (D32)",
+                    a.col.node
+                ),
+                "a scoped create can't target another scope — drop the assign, or mark the mutation `unscoped(\"…\")`",
+            );
+        }
+    }
+}
+
 /// A `create` must assign every *required* column: a non-optional, non-defaulted
 /// stored column or forward FK. Engine-managed fields — the `id`, `@created` /
-/// `@updated` timestamps, and the `@soft_delete` field — are set by the engine on
-/// insert, so they are exempt. Inverse edges own no column here, so they never
-/// count. A missing field is `E0146` (all missing fields reported in one error).
+/// `@updated` timestamps, the `@soft_delete` field, and any `@scope` column
+/// (auto-set from `$ctx` on insert, D32) — are set by the engine, so they are
+/// exempt. Inverse edges own no column here, so they never count. A missing field
+/// is `E0146` (all missing fields reported in one error).
 fn check_create_required(mi: usize, assigns: &[Assign], at: &Ident, cx: &Cx, sink: &mut Sink) {
     let m = cx.model(mi);
     let assigned: Vec<&str> = assigns.iter().map(|a| a.col.node.as_str()).collect();
+    let scope_cols = m.scope_terms();
     let managed = |name: &str| {
         name == "id"
             || m.created.as_deref() == Some(name)
             || m.updated.as_deref() == Some(name)
             || m.soft_delete.as_ref().map(|s| s.field.as_str()) == Some(name)
+            || scope_cols.iter().any(|(f, _)| f == name)
     };
     let missing: Vec<&str> = m
         .members
@@ -557,6 +616,38 @@ fn write_model(name: &Ident, cx: &Cx, sink: &mut Sink) -> Option<usize> {
             None
         }
     }
+}
+
+/// `unscoped` on a mutation is stale (W0106) when none of its written models carries a
+/// `@scope` to opt out of — the write-side twin of the query check above.
+fn check_unscoped_stale(m: &Mutation, cx: &Cx, sink: &mut Sink) {
+    let Some(u) = &m.unscoped else { return };
+    if !write_models_have_scope(&m.body, cx) {
+        sink.warn_note(
+            code::STALE_UNSCOPED,
+            u.span,
+            format!(
+                "`unscoped` on mutation `{}` has no `@scope` to opt out of",
+                m.name.node
+            ),
+            "drop it, or add `@scope(...)` to a written model",
+        );
+    }
+}
+
+/// Whether any model written by `body` (including inside a `tx`) carries a `@scope`.
+fn write_models_have_scope(body: &[WriteStmt], cx: &Cx) -> bool {
+    body.iter().any(|s| match s {
+        WriteStmt::Create { model, .. }
+        | WriteStmt::Update { model, .. }
+        | WriteStmt::Delete { model, .. }
+        | WriteStmt::Restore { model, .. }
+        | WriteStmt::HardDelete { model, .. } => cx
+            .find(&model.node)
+            .is_some_and(|mi| cx.model(mi).scope.is_some()),
+        WriteStmt::Tx(inner) => write_models_have_scope(inner, cx),
+        WriteStmt::Raw(_) => false,
+    })
 }
 
 // ---------- filters --------------------------------------------------------

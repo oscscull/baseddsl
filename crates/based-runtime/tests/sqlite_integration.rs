@@ -97,7 +97,9 @@ fn get_query_runs_against_real_sqlite() {
         "POST",
         "/q/order_by_id",
         json!({ "id": "order-1" }),
-        json!({}),
+        // Order is `@scope`d (D32): even a keyed `get` is org-scoped, so `$ctx.org` is
+        // required. order-1 belongs to org-1, so it's visible to this caller.
+        json!({ "org": "org-1" }),
     );
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
@@ -118,7 +120,7 @@ fn get_query_misses_return_null() {
         "POST",
         "/q/order_by_id",
         json!({ "id": "nope" }),
-        json!({}),
+        json!({ "org": "org-1" }),
     );
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(resp.body, json!(null));
@@ -168,8 +170,10 @@ fn mutation_writes_then_reselects_declared_shape() {
         &backend,
         "POST",
         "/m/place_order",
-        json!({ "org": "org-1", "buyer": "user-1", "total": 99 }),
-        json!({}),
+        // `org` is `@scope`-managed on create (D32): supplied via `$ctx`, auto-set on the
+        // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
+        json!({ "buyer": "user-1", "total": 99 }),
+        json!({ "org": "org-1" }),
     );
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     // The response is the created row in its declared shape (status defaults to 'pending').
@@ -206,8 +210,8 @@ fn bad_arg_is_a_400_before_sql() {
         &backend,
         "POST",
         "/m/place_order",
-        json!({ "org": "org-1", "buyer": "user-1", "total": "not-an-int" }),
-        json!({}),
+        json!({ "buyer": "user-1", "total": "not-an-int" }),
+        json!({ "org": "org-1" }),
     );
     assert_eq!(resp.status, 400, "{:?}", resp.body);
     assert_eq!(resp.body["error"]["code"], json!("bad_arg"));

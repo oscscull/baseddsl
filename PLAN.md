@@ -27,13 +27,14 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-Batch progress: current batch — D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen +
-the dialect-aware `?`→`$n` scanner; the concrete driver deferred to the live-DB slice) +
-D30 (typed per-callable `$ctx` in the generated Rust client) +
-D31 (idempotency-key request fingerprint: a reused key on different args → loud `422`, not a silent
-replay of the first request) done — 3/3.
-Prior batch: D26 (container probes + graceful shutdown) + D27 (SQLite backend + real integration) +
-D28 (SQLite DDL codegen) — 3/3.
+Batch progress: current batch — **D32 (`@scope` resolved: uniform single-owner row filter — a
+conjunction of `col = $ctx.field`, `E0180`; create-time auto-set of the scope column from `$ctx`
+so cross-scope create is inexpressible, `E0181`; the `unscoped("reason")` escape hatch, `W0106`;
+resolves D19)** done.
+Prior batch: D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen + the dialect-aware `?`→`$n`
+scanner; the concrete driver deferred to the live-DB slice) + D30 (typed per-callable `$ctx` in
+the generated Rust client) + D31 (idempotency-key request fingerprint: a reused key on different
+args → loud `422`, not a silent replay of the first request) — 3/3.
 
 ## Pipeline (data flow)
 
@@ -121,8 +122,10 @@ holds `&mut`.
   skipped, exactly as on the read side.
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
-  `@updated` (timestamp role), `@scope` (predicate, `$ctx`-only), `@sort`
-  (paths), `@table` (name override). Unknown `@foo` → `W0101`.
+  `@updated` (timestamp role), `@scope` (predicate, `$ctx`-only, restricted to a
+  conjunction of `col = $ctx.field` → `E0180`; scope column engine-managed on `create`
+  → `E0181`; opt out per callable with `unscoped("reason")` → `W0106` when stale; D32),
+  `@sort` (paths), `@table` (name override). Unknown `@foo` → `W0101`.
 - Table naming (D3): `snake_case`, no pluralization, `@table("…")` override.
   Relation FK column = `<field>_id` or `(column "…")`.
 - Query inferences (queries.md): target model (from return shape's `from`), verb
@@ -314,9 +317,10 @@ commerce example generates clean DDL.
     the write side as well (`Select` now carries the filter map). Tests: 3 new in
     `dml.rs` (13 total) + 1 in `mutations.rs` (9 total).
   - *Deferred inside M3 read*: nested shape sub-objects (`field { … }` — needs JSON
-    aggregation / a second query; skipped in projection); `@scope` injection (design
-    open — see decisions.md; `@tenant` removed, folded into `@scope`); keyset cursor
+    aggregation / a second query; skipped in projection); keyset cursor
     comparison + opaque cursor encoding (runtime concern — base SELECT is ORDER+LIMIT).
+    (`@scope` injection **resolved, D32** — uniform single-owner filter, create auto-set,
+    `unscoped` escape hatch; `@tenant` was removed, folded into `@scope`, D19.)
 
 *Write side (`sql::mutations`) ✅ done.* Each `mutation` body lowers to INSERT /
 UPDATE / DELETE (`based gen sql` appends them after the queries; tests:
@@ -535,8 +539,9 @@ a `MockDb`, no live DB.
     `LOGICAL_SHARDS=4096` space, `logical→physical` assignment) so adding a shard moves
     whole logical shards without rehashing keys (Vitess/Citus model). `single(url)` for
     the N=1 common case; the router is the seam so splitting later is config, not code.
-    Key extraction is left pluggable + **decoupled from D19** (`@scope`/tenant still OPEN),
-    so the shard key is not yet bound to a `$ctx.<field>`.
+    Key extraction is left pluggable, so the shard key is not yet bound to a `$ctx.<field>`.
+    (Now that `@scope` is resolved to a single `col = $ctx.field` equality — D32 — binding
+    the shard key to the scope field is a clean follow-on slice.)
 
 *HTTP listener (`based serve`) — delivered (D21):*
   - **`based-runtime::http`** (feature `serve`) — the thin socket edge over `serve::dispatch`.
