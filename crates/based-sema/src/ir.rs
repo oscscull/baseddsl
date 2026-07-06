@@ -167,6 +167,20 @@ impl RModel {
         }
         out
     }
+
+    /// The single `$ctx` field a request on this model **shards** on (D33), or `None`
+    /// when the model has no `@scope`. A scope is a conjunction of `col = $ctx.field`
+    /// (D32); the shard key is the *owner* the scope filters by, i.e. the `$ctx` field
+    /// of the **first** scope term (`@scope(org = $ctx.org)` → `Some("org")`). This is
+    /// the one field the router hashes to pick a physical shard (D20's single-shard-
+    /// per-request), read from the same `@scope` that filters rows — one source of
+    /// truth, so the shard a row lives in and the shard its owner's requests route to
+    /// can never drift. A multi-term scope shards on its first `$ctx` field (the
+    /// remaining terms narrow *within* that owner's shard); a model with no scope has
+    /// no owning shard (single-shard deployments send it to shard 0).
+    pub fn shard_key_ctx_field(&self) -> Option<String> {
+        self.scope_terms().into_iter().next().map(|(_, ctx)| ctx)
+    }
 }
 
 /// Flatten a well-formed `@scope` predicate (an `and`-tree of `col = $ctx.field`) into
@@ -278,6 +292,12 @@ pub struct RQuery {
     /// `@scope` + expanded filters), each typed by inference (D4/D5). Deduped per
     /// callable; the client sends exactly these as request context.
     pub ctx_requires: Vec<CtxReq>,
+    /// The `$ctx` field this query **shards** on (D33): the target model's `@scope`
+    /// owner field ([`RModel::shard_key_ctx_field`]), or `None` when the model has no
+    /// `@scope` *or* the query is `unscoped` (D32 — a cross-scope read has no single
+    /// owning shard, so it must route explicitly, never by a scope it disabled). The
+    /// runtime pulls this field out of the request `$ctx` to route to one shard.
+    pub shard_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,6 +313,12 @@ pub struct RMutation {
     /// models' `@scope` + `create`/`update` assigns), each typed by inference
     /// (D4/D5). Deduped per callable.
     pub ctx_requires: Vec<CtxReq>,
+    /// The `$ctx` field this mutation **shards** on (D33): the return model's `@scope`
+    /// owner field ([`RModel::shard_key_ctx_field`]), or `None` when it has no `@scope`
+    /// *or* the mutation is `unscoped` (D32). D20 makes a `tx` a single-shard unit, so
+    /// the whole mutation routes on this one field (the return model is the primary
+    /// written model). The runtime pulls it out of the request `$ctx` to pick a shard.
+    pub shard_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]

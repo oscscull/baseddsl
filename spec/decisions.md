@@ -456,9 +456,11 @@ serving architecture that meets that bar:
 - **Driver = reuse, not hand-roll (principle 7).** The `mysql` crate (pure Rust) + its built-in
   bounded pool; TLS/compression off by default to avoid a system OpenSSL dependency (a deployment
   that needs in-transit TLS re-enables it).
-- **Shard-key source deferred, decoupled from D19.** The natural shard key is the tenant/owner —
-  the same field `@scope` would use — but `@scope` injection is OPEN (D19), so the key extractor
-  is left pluggable and **not** yet bound to a `$ctx.<field>`; today it takes an explicit key.
+- ~~**Shard-key source deferred, decoupled from D19.**~~ ✅ **resolved (D33).** The natural shard
+  key is the tenant/owner — the same field `@scope` uses — which was left pluggable while `@scope`
+  was OPEN (D19). D32 resolved `@scope` to a single `col = $ctx.field` equality, so D33 binds the
+  shard key to that owner field (schema-derived per callable; `unscoped` → no owning shard; explicit
+  `X-Based-Shard-Key` override retained).
 - **Known gap — write idempotency.** App-side `id`-gen (D1) means a client retry of a `create`
   after a 503/timeout can double-insert. A dedupe/idempotency key (likely carried in `$ctx`) is
   wanted before write retries are safe at enterprise scale. Not yet designed.
@@ -927,7 +929,53 @@ built when this landed; D32 closes the three gaps that made it *safe*.
   ctx bag, `unscoped` drops ctx, unscoped-create-may-assign, `W0106`), 3 codegen (dml unscoped
   omits scope; mutations create auto-set + re-select scope; unscoped mutation/update omit), 1
   parser (unscoped on query + mutation), conformance `ctx_scope` re-blessed to the new pattern.
-- **Follow-on (separate slice):** bind D20's shard key to the scope field — now that a scope is a
-  single `$ctx.field` equality, the shard key is unambiguous. Also deferred: injecting `@scope`
-  into a *joined* table's `ON` (today only the root table + write targets carry it; soft-delete
-  already does the join `ON`, so the mechanism exists to extend).
+- ~~**Follow-on (separate slice):** bind D20's shard key to the scope field~~ ✅ **done (D33).**
+  Also deferred: injecting `@scope` into a *joined* table's `ON` (today only the root table +
+  write targets carry it; soft-delete already does the join `ON`, so the mechanism exists to
+  extend).
+
+## D33 — shard key bound to the resolved `@scope` `$ctx` field
+Closes the follow-on D32 flagged and the shard-key hole D20 left open. D20 built the `ShardRouter`
+(one bounded pool per physical shard, a stable FNV logical-shard hash) but left the **key source**
+pluggable and unbound — the natural key is the tenant/owner, i.e. the field `@scope` uses, but
+`@scope` was OPEN (D19). D32 resolved `@scope` to a single `col = $ctx.field` equality, so the
+owner field is now unambiguous. D33 makes the shard key that field, derived from the schema per
+callable — retiring the hand-set `--shard-key-field` config.
+- **The shard key is the callable's target model's `@scope` owner field** ([`RModel::
+  shard_key_ctx_field`] → the `$ctx` field of the first scope term; `@scope(org = $ctx.org)` →
+  `org`). Read off the *same* `@scope` that filters the rows (D32), so the shard a row lives in and
+  the shard its owner's requests route to share one source of truth (principle 4) — they can never
+  drift, which a separate `--shard-key-field` flag could. A multi-term scope shards on its first
+  `$ctx` field (the rest narrow *within* that owner's shard).
+- **Resolved in sema, carried on the IR.** `RQuery::shard_key` / `RMutation::shard_key`
+  (`Option<String>`) record the field, computed where `@scope` *and* `unscoped` are both visible.
+  An `unscoped` callable (D32) is `None`: it deliberately reads/writes across scopes, so it has no
+  single owning shard and must route by an explicit key (never by a scope it disabled — the safe,
+  loud default, principle 1). A mutation routes on its **return model**'s scope field: a `tx` is a
+  single-shard unit (D20 — no distributed transaction), so the primary written model's owner is the
+  one shard.
+- **The listener derives the key from the route + `$ctx`** (`http::resolve_shard_key`, pure +
+  unit-tested): `Compiled::shard_key_field(is_mutation, name)` gives the callable's scope field, and
+  the listener pulls that field's value out of the request `$ctx` (server-supplied, never the body —
+  auth.md/D7). Precedence: an explicit `X-Based-Shard-Key` **override** wins (the escape hatch for a
+  deployment that must route otherwise, or a callable with no `@scope`), else the schema-derived
+  field, else `""` (an `unscoped` callable / an unscoped model / a single-shard deployment → shard
+  0). A non-string owner (an int tenant id) is stringified so the FNV hash sees a stable byte string;
+  a scoped callable whose `$ctx` lacks the field routes to `""` (the missing-`$ctx` `400` follows in
+  `dispatch` — routing only picks the shard).
+- **`ContextSource` no longer produces the key.** `Context` now carries `$ctx` + an *optional*
+  `shard_key_override` (the header), not a resolved key; `TrustedHeaderContext` dropped its
+  `shard_key_field` config (a unit struct now), and the CLI dropped the `--shard-key-field` flag —
+  the schema is authoritative. The `serve::route_target(path)` helper exposes the route grammar so
+  the edge resolves the callable (for its shard key) *before* checkout, using the same grammar
+  `dispatch` enforces.
+- **What the compiler guarantees:** every request routes on the field its model is scoped by, with
+  no per-deployment config to keep in step. **What it does not:** verify a single `tx` writes only
+  same-shard models (a cross-shard `tx` is a deployment invariant, D20 — the return model's field is
+  the well-defined key); the concrete driver still needs the live-DB slice to exercise real routing.
+- **Tests:** 9 new (`based-runtime/src/http.rs`) — a scoped query and a scoped mutation each shard on
+  their scope `$ctx` field, an `unscoped` callable and an unscoped model each have `None`/`""`, the
+  explicit header overrides a scoped callable, a non-string owner is stringified, a missing `$ctx`
+  value routes to `""`; the two `TrustedHeaderContext` tests updated to the override shape.
+- *Deferred:* binding the *concrete* driver's shard routing end-to-end (the live-DB slice, D20/D29);
+  a `tx` that spans two differently-scoped models is unmodelled (single-shard invariant).

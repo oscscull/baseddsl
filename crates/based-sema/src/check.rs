@@ -169,6 +169,15 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
 
     let ctx_requires = crate::ctx::collect_query(q, ti, cx);
 
+    // The shard key is the target model's `@scope` owner field (D33) — the field the
+    // request routes on — but a `unscoped` query (D32) deliberately reads across scopes,
+    // so it has no single owning shard and must route by an explicit key instead.
+    let shard_key = if q.unscoped.is_some() {
+        None
+    } else {
+        cx.model(ti).shard_key_ctx_field()
+    };
+
     Some(RQuery {
         name: q.name.node.clone(),
         span: q.span,
@@ -178,6 +187,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         ret_shape: ret.shape,
         paginated,
         ctx_requires,
+        shard_key,
     })
 }
 
@@ -399,12 +409,22 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         check_write(stmt, cx, &params, None, unscoped, sink);
     }
     check_unscoped_stale(m, cx, sink);
+    // Shard key (D33): the return model's `@scope` owner field — a `tx` is a single-shard
+    // unit (D20), so the whole mutation routes on the primary written model's owner. An
+    // `unscoped` mutation (D32) disables scope and so has no owning shard.
+    let shard_key = if unscoped {
+        None
+    } else {
+        cx.find(&ret.model)
+            .and_then(|mi| cx.model(mi).shard_key_ctx_field())
+    };
     Some(RMutation {
         name: m.name.node.clone(),
         span: m.span,
         ret_model: ret.model,
         ret_shape: ret.shape,
         ctx_requires: crate::ctx::collect_mutation(m, cx),
+        shard_key,
     })
 }
 

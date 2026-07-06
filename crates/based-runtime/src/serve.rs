@@ -147,6 +147,14 @@ enum Kind {
     Mutation,
 }
 
+/// The routable target of a path: `(is_mutation, name)`, or `None` when unroutable.
+/// Exposed so the listener edge can resolve a request's callable — to look up its
+/// shard key (D33) — *before* it borrows a connection, using the same route grammar
+/// `dispatch` enforces (one source of truth for what `/q|m/<name>` means).
+pub fn route_target(path: &str) -> Option<(bool, &str)> {
+    parse_route(path).map(|(kind, name)| (matches!(kind, Kind::Mutation), name))
+}
+
 /// Match `/q/<name>` or `/m/<name>`, returning the side and callable name. Anything
 /// else (wrong prefix, missing name, extra segments) is unroutable → `None`.
 fn parse_route(path: &str) -> Option<(Kind, &str)> {

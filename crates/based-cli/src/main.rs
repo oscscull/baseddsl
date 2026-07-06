@@ -66,10 +66,6 @@ enum Command {
         /// Max connections per shard pool (the per-box concurrency cap).
         #[arg(long, default_value_t = 32)]
         pool_max: usize,
-        /// The `$ctx` field to route on when no `X-Based-Shard-Key` header is sent
-        /// (e.g. `org`). Omit for the single-shard common case.
-        #[arg(long)]
-        shard_key_field: Option<String>,
     },
 }
 
@@ -122,16 +118,7 @@ fn main() -> anyhow::Result<()> {
             workers,
             pool_min,
             pool_max,
-            shard_key_field,
-        } => cmd_serve(
-            &root,
-            &listen,
-            database_url,
-            workers,
-            pool_min,
-            pool_max,
-            shard_key_field,
-        ),
+        } => cmd_serve(&root, &listen, database_url, workers, pool_min, pool_max),
     }
 }
 
@@ -293,7 +280,6 @@ fn cmd_serve(
     workers: Option<usize>,
     pool_min: usize,
     pool_max: usize,
-    shard_key_field: Option<String>,
 ) -> anyhow::Result<()> {
     use based_runtime::driver::{PoolConfig, ShardRouter};
     use based_runtime::http::{serve_with_handle, ServeConfig, TrustedHeaderContext};
@@ -324,7 +310,9 @@ fn cmd_serve(
     };
     let router = ShardRouter::new(&urls, pool)
         .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
-    let ctx_source = TrustedHeaderContext { shard_key_field };
+    // The shard key is schema-derived per callable (D33): the target model's `@scope`
+    // owner field. No hand-set field here — the router reads it off the compiled schema.
+    let ctx_source = TrustedHeaderContext;
     // Default workers to the pool ceiling so a worker never blocks waiting for a free
     // connection on a single shard (D20: bounded worker pool over the bounded conn pool).
     let config = ServeConfig {

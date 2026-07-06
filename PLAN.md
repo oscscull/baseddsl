@@ -30,7 +30,11 @@ resumes it:
 Batch progress: current batch — **D32 (`@scope` resolved: uniform single-owner row filter — a
 conjunction of `col = $ctx.field`, `E0180`; create-time auto-set of the scope column from `$ctx`
 so cross-scope create is inexpressible, `E0181`; the `unscoped("reason")` escape hatch, `W0106`;
-resolves D19)** done.
+resolves D19)** + **D33 (shard key bound to the resolved `@scope` `$ctx` field: `RModel::
+shard_key_ctx_field` → per-callable `RQuery`/`RMutation.shard_key`, derived from the same `@scope`
+that filters the row so routing and row-visibility can't drift; `unscoped` → no owning shard;
+listener `http::resolve_shard_key` pulls the field out of `$ctx`, `X-Based-Shard-Key` override
+retained; retires the hand-set `--shard-key-field` flag; closes the D20/D32 follow-on)** done.
 Prior batch: D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen + the dialect-aware `?`→`$n`
 scanner; the concrete driver deferred to the live-DB slice) + D30 (typed per-callable `$ctx` in
 the generated Rust client) + D31 (idempotency-key request fingerprint: a reused key on different
@@ -539,9 +543,12 @@ a `MockDb`, no live DB.
     `LOGICAL_SHARDS=4096` space, `logical→physical` assignment) so adding a shard moves
     whole logical shards without rehashing keys (Vitess/Citus model). `single(url)` for
     the N=1 common case; the router is the seam so splitting later is config, not code.
-    Key extraction is left pluggable, so the shard key is not yet bound to a `$ctx.<field>`.
-    (Now that `@scope` is resolved to a single `col = $ctx.field` equality — D32 — binding
-    the shard key to the scope field is a clean follow-on slice.)
+    **The shard key is now bound to the resolved `@scope` `$ctx` field (D33):** each callable's
+    `RQuery`/`RMutation.shard_key` (`RModel::shard_key_ctx_field`) records its target model's scope
+    owner field, read off the *same* `@scope` that filters the row so routing and row-visibility
+    can't drift; an `unscoped` callable has no owning shard. The listener (`http::resolve_shard_key`)
+    pulls that field out of `$ctx` per request (`X-Based-Shard-Key` override retained), retiring the
+    hand-set `--shard-key-field` flag.
 
 *HTTP listener (`based serve`) — delivered (D21):*
   - **`based-runtime::http`** (feature `serve`) — the thin socket edge over `serve::dispatch`.
@@ -549,7 +556,8 @@ a `MockDb`, no live DB.
     share one blocking `tiny_http::Server` (hardened lib, principle 7), each looping
     `recv → decode → dispatch → respond`. `based serve <root>` (CLI) loads the checked schema,
     builds the `ShardRouter`, and runs it (`--listen`, `--database-url` × shards / `BASED_DATABASE_URL`,
-    `--workers`, `--pool-{min,max}`, `--shard-key-field`).
+    `--workers`, `--pool-{min,max}`; the shard key is schema-derived per callable — D33 — so there is
+    no `--shard-key-field` flag).
   - **`$ctx` from headers, never the body** (auth.md/D7): a pluggable `ContextSource` derives
     `$ctx` + the shard key from request headers; the default `TrustedHeaderContext` reads a
     pre-authenticated `X-Based-Context` (JSON) an upstream auth proxy sets. Non-object → 400.

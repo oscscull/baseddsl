@@ -92,4 +92,33 @@ impl Compiled {
             mutations,
         }
     }
+
+    /// The `$ctx` field a request on this route **shards** on (D33), or `None` when the
+    /// callable's target model has no `@scope` (single-shard deployments route it to
+    /// shard 0) or the callable is `unscoped` (a cross-scope read/write has no single
+    /// owning shard). `is_mutation` picks the wire side (the same `/q` vs `/m` prefix the
+    /// router already keys on). An unknown name is `None` — dispatch reports the 404, and
+    /// an unroutable request never reaches a shard anyway.
+    ///
+    /// This is the binding D20 deferred: the shard key is now the model's resolved scope
+    /// owner field (read off the same `@scope` that filters rows, D32), so the shard a row
+    /// lives in and the shard its owner's requests route to share one source of truth
+    /// (principle 4) — no hand-set, drift-prone `--shard-key-field` config.
+    pub fn shard_key_field(&self, is_mutation: bool, name: &str) -> Option<&str> {
+        if is_mutation {
+            self.schema
+                .mutations
+                .iter()
+                .find(|m| m.name == name)?
+                .shard_key
+                .as_deref()
+        } else {
+            self.schema
+                .queries
+                .iter()
+                .find(|q| q.name == name)?
+                .shard_key
+                .as_deref()
+        }
+    }
 }

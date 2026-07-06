@@ -12,9 +12,12 @@
 //! 1. Decode the request line (`POST /q|m/<name>`), headers, and the JSON body (the
 //!    argument object — calling.md #2). A non-POST or unroutable path is rejected
 //!    *before* a connection is borrowed ([`crate::serve::preflight`]).
-//! 2. Derive `$ctx` + the shard key from the headers via the pluggable
-//!    [`ContextSource`] — **never the body** (auth.md, D7: a client cannot inject scope;
-//!    request context is server-supplied out of band by the auth edge).
+//! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`] — **never the
+//!    body** (auth.md, D7: a client cannot inject scope; request context is
+//!    server-supplied out of band by the auth edge). The shard key is then derived from
+//!    the callable's resolved `@scope` owner field pulled out of `$ctx` (D33) — the same
+//!    `@scope` that filters the row, so routing and row-visibility share one source of
+//!    truth (an explicit `X-Based-Shard-Key` header can override it).
 //! 3. Check a connection out of the [`Backend`] for that shard key (single-shard
 //!    dispatch, D20) and run [`dispatch`] with a fresh per-request [`UuidGen`]. The
 //!    edge is `Backend`-generic — it never names a concrete driver — so a Postgres /
@@ -51,7 +54,7 @@ use crate::id::UuidGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
 use crate::run::Backend;
-use crate::serve::{dispatch, preflight, WireResponse};
+use crate::serve::{dispatch, preflight, route_target, WireResponse};
 
 /// Largest request body we read (1 MiB). The wire carries a small argument object;
 /// anything larger is malformed or hostile, so we cap the read rather than let a
@@ -81,12 +84,20 @@ pub trait ContextSource: Send + Sync {
 }
 
 /// What a [`ContextSource`] produces: the request `$ctx` (passed to `dispatch` as the
-/// out-of-band context) and the shard key that routes the request to one physical
-/// shard (D20 — the key source is deliberately decoupled from `@scope`/D19).
+/// out-of-band context) and an **optional explicit** shard-key override.
+///
+/// The shard key is *normally* derived from the schema (D33): the callable's target
+/// model's resolved `@scope` owner field, pulled out of `$ctx` by the listener — so the
+/// shard a row lives in and the shard its owner's requests route to share one source of
+/// truth (the `@scope`, D32), never a hand-set config. `shard_key_override` is the escape
+/// hatch: a deployment (or a callable with no `@scope`) that must route by some other key
+/// sets the `X-Based-Shard-Key` header, and it wins over the schema-derived field.
 #[derive(Debug, Clone)]
 pub struct Context {
     pub ctx: serde_json::Value,
-    pub shard_key: String,
+    /// An explicit shard key from `X-Based-Shard-Key`, or `None` to let the listener
+    /// derive it from the callable's `@scope` field (D33).
+    pub shard_key_override: Option<String>,
 }
 
 /// A case-insensitive view over the request's headers, handed to a [`ContextSource`].
@@ -109,19 +120,16 @@ impl HeaderView<'_> {
 ///   which is correct for a callable that requires no `$ctx`). Present-but-invalid or
 ///   non-object → `400` (a misconfigured edge, surfaced loudly rather than silently
 ///   dropped).
-/// - The shard key comes from the `X-Based-Shard-Key` header, or — absent that — the
-///   configured `$ctx` field (typically the tenant/owner). Absent everywhere it is the
-///   empty string, which the single-shard router (the common case) sends to shard 0.
+/// - The shard key is normally *not* read here — the listener derives it from the
+///   callable's `@scope` field (D33). This source only surfaces the `X-Based-Shard-Key`
+///   header as an explicit override (usually absent), which the listener honours over the
+///   schema-derived field.
 ///
 /// This is the trusted-edge seam, not an authenticator: it assumes the proxy strips
 /// any client-supplied `X-Based-*` header. For local development you set the headers
 /// yourself.
 #[derive(Default)]
-pub struct TrustedHeaderContext {
-    /// The `$ctx` field to fall back to for the shard key when no explicit
-    /// `X-Based-Shard-Key` header is sent (e.g. `"org"`). `None` → key is header-only.
-    pub shard_key_field: Option<String>,
-}
+pub struct TrustedHeaderContext;
 
 impl ContextSource for TrustedHeaderContext {
     fn derive(&self, headers: &HeaderView) -> Result<Context, WireResponse> {
@@ -138,19 +146,34 @@ impl ContextSource for TrustedHeaderContext {
                 }
             },
         };
-        // Shard key: explicit header wins, else the configured $ctx field, else "".
-        let shard_key = headers
-            .get("X-Based-Shard-Key")
-            .map(str::to_string)
-            .or_else(|| {
-                let field = self.shard_key_field.as_deref()?;
-                match ctx.get(field)? {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    other => Some(other.to_string()),
-                }
-            })
-            .unwrap_or_default();
-        Ok(Context { ctx, shard_key })
+        // The shard key is schema-derived (D33) unless a deployment forces it with an
+        // explicit header. Only that override is read here; the derivation needs the
+        // route, which the listener knows.
+        let shard_key_override = headers.get("X-Based-Shard-Key").map(str::to_string);
+        Ok(Context {
+            ctx,
+            shard_key_override,
+        })
+    }
+}
+
+/// Resolve the shard key for a routable request (D33): the explicit `X-Based-Shard-Key`
+/// override wins; else the callable's `@scope` owner field pulled out of `$ctx`; else the
+/// empty string (an unscoped callable, or a single-shard deployment — both route to shard
+/// 0). Pure, so the derivation is unit-testable without a socket. `$ctx.<field>` is read
+/// as its JSON string; a non-string owner (e.g. an int tenant id) is stringified so the
+/// FNV hash sees a stable byte string.
+fn resolve_shard_key(compiled: &Compiled, is_mutation: bool, name: &str, ctx: &Context) -> String {
+    if let Some(explicit) = &ctx.shard_key_override {
+        return explicit.clone();
+    }
+    let Some(field) = compiled.shard_key_field(is_mutation, name) else {
+        return String::new();
+    };
+    match ctx.ctx.get(field) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
     }
 }
 
@@ -334,8 +357,11 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
     if let Some(resp) = preflight(&method, &path) {
         return resp;
     }
+    // Preflight guaranteed a routable path, so this is the callable to run — needed now
+    // to derive the shard key from its `@scope` field (D33), before checkout.
+    let (is_mutation, name) = route_target(&path).expect("preflight guaranteed a routable path");
 
-    // Derive $ctx + shard key from the headers (never the body).
+    // Derive $ctx (never the body) + the explicit shard-key override, from the headers.
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
@@ -352,6 +378,11 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
         Err(resp) => return resp,
     };
 
+    // The shard key: the callable's `@scope` owner field pulled out of `$ctx` (D33), or
+    // an explicit header override, or "" (unscoped / single-shard → shard 0). Derived from
+    // the same `@scope` that filters the row, so routing and row-visibility can't drift.
+    let shard_key = resolve_shard_key(&shared.compiled, is_mutation, name, &context);
+
     // The mutation idempotency key (D25) rides the standard `Idempotency-Key` header —
     // out of band, never the body. Absent/blank → no dedupe; queries ignore it.
     let idem_key = header_view.get("Idempotency-Key").map(str::to_string);
@@ -365,7 +396,7 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
     // Route to one physical shard and borrow a connection for this request. A checkout
     // failure (pool exhausted, shard down) is operational → the same retryable 503 an
     // in-flight DB fault yields.
-    let mut db = match shared.backend.checkout(&context.shard_key) {
+    let mut db = match shared.backend.checkout(&shard_key) {
         Ok(db) => db,
         Err(e) => return WireResponse::error(503, "database_error", e.message),
     };
@@ -450,6 +481,7 @@ fn read_json_body(request: &mut Request) -> Result<serde_json::Value, WireRespon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -469,40 +501,131 @@ mod tests {
 
     #[test]
     fn trusted_header_context_parses_ctx_and_explicit_key() {
-        let src = TrustedHeaderContext::default();
+        let src = TrustedHeaderContext;
         let h = headers(&[
             ("X-Based-Context", r#"{"org":"org-1"}"#),
             ("X-Based-Shard-Key", "shard-9"),
         ]);
         let c = src.derive(&HeaderView(&h)).unwrap();
         assert_eq!(c.ctx, serde_json::json!({ "org": "org-1" }));
-        // Explicit key header wins over any field fallback.
-        assert_eq!(c.shard_key, "shard-9");
-    }
-
-    #[test]
-    fn shard_key_falls_back_to_ctx_field() {
-        let src = TrustedHeaderContext {
-            shard_key_field: Some("org".to_string()),
-        };
-        let h = headers(&[("X-Based-Context", r#"{"org":"org-1"}"#)]);
-        let c = src.derive(&HeaderView(&h)).unwrap();
-        assert_eq!(c.shard_key, "org-1");
+        // The explicit key header is surfaced as the override (it wins at resolution).
+        assert_eq!(c.shard_key_override.as_deref(), Some("shard-9"));
     }
 
     #[test]
     fn absent_context_is_empty_and_unkeyed() {
-        let src = TrustedHeaderContext::default();
+        let src = TrustedHeaderContext;
         let c = src.derive(&HeaderView(&[])).unwrap();
         assert_eq!(c.ctx, serde_json::json!({}));
-        assert_eq!(c.shard_key, "");
+        assert_eq!(c.shard_key_override, None);
     }
 
     #[test]
     fn non_object_context_is_rejected() {
-        let src = TrustedHeaderContext::default();
+        let src = TrustedHeaderContext;
         let h = headers(&[("X-Based-Context", "[1,2,3]")]);
         let err = src.derive(&HeaderView(&h)).unwrap_err();
         assert_eq!(err.status, 400);
+    }
+
+    // ---- shard-key derivation from `@scope` (D33) ----------------------------
+
+    /// A tiny scoped schema: `Order @scope(org = $ctx.org)`, one scoped query, one
+    /// scoped mutation, one `unscoped` cross-org query, and one unscoped-model query.
+    fn compiled() -> Compiled {
+        use based_ast::FileId;
+        const SCHEMA: &str = r#"
+            Org { name: text }
+            @scope(org = $ctx.org)
+            Order { org: Org, status: text }
+            shape OrderCard from Order { status }
+
+            query order_by_id(id) -> OrderCard;
+            query all_orders(org) -> OrderCard[] unscoped("admin");
+            query list_orgs() -> Org[] { list Org; }
+            mutation place_order(status) -> OrderCard {
+                create Order { status = $status };
+            }
+        "#;
+        let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+        let (schema, diags) = based_sema::check(&sf.decls);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "schema should check clean: {diags:?}"
+        );
+        Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
+    }
+
+    fn ctx(v: serde_json::Value) -> Context {
+        Context {
+            ctx: v,
+            shard_key_override: None,
+        }
+    }
+
+    #[test]
+    fn scoped_query_shards_on_its_scope_ctx_field() {
+        let c = compiled();
+        // `Order @scope(org = $ctx.org)` → a query on it shards on `$ctx.org`.
+        assert_eq!(c.shard_key_field(false, "order_by_id"), Some("org"));
+        let key = resolve_shard_key(&c, false, "order_by_id", &ctx(json!({ "org": "org-1" })));
+        assert_eq!(key, "org-1");
+    }
+
+    #[test]
+    fn scoped_mutation_shards_on_its_scope_ctx_field() {
+        let c = compiled();
+        assert_eq!(c.shard_key_field(true, "place_order"), Some("org"));
+        let key = resolve_shard_key(&c, true, "place_order", &ctx(json!({ "org": "org-9" })));
+        assert_eq!(key, "org-9");
+    }
+
+    #[test]
+    fn unscoped_callable_has_no_shard_field() {
+        let c = compiled();
+        // `unscoped("admin")` disables scope → no owning shard → key "" (shard 0).
+        assert_eq!(c.shard_key_field(false, "all_orders"), None);
+        let key = resolve_shard_key(&c, false, "all_orders", &ctx(json!({ "org": "org-1" })));
+        assert_eq!(key, "");
+    }
+
+    #[test]
+    fn unscoped_model_has_no_shard_field() {
+        let c = compiled();
+        // `Org` has no `@scope`, so a query on it has no shard field.
+        assert_eq!(c.shard_key_field(false, "list_orgs"), None);
+        let key = resolve_shard_key(&c, false, "list_orgs", &ctx(json!({})));
+        assert_eq!(key, "");
+    }
+
+    #[test]
+    fn explicit_header_overrides_scope_field() {
+        let c = compiled();
+        let context = Context {
+            ctx: json!({ "org": "org-1" }),
+            shard_key_override: Some("forced-shard".to_string()),
+        };
+        // The override wins even for a scoped callable.
+        let key = resolve_shard_key(&c, false, "order_by_id", &context);
+        assert_eq!(key, "forced-shard");
+    }
+
+    #[test]
+    fn non_string_scope_value_is_stringified() {
+        // A tenant id that arrives as a JSON number still yields a stable byte key.
+        let c = compiled();
+        let key = resolve_shard_key(&c, false, "order_by_id", &ctx(json!({ "org": 42 })));
+        assert_eq!(key, "42");
+    }
+
+    #[test]
+    fn missing_scope_value_in_ctx_is_empty_key() {
+        // The callable is scoped but `$ctx` lacks the field (a plan error follows in
+        // dispatch — here we only pin the routing: no owner → shard 0).
+        let c = compiled();
+        let key = resolve_shard_key(&c, false, "order_by_id", &ctx(json!({})));
+        assert_eq!(key, "");
     }
 }
