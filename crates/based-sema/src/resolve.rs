@@ -22,6 +22,10 @@ pub struct Cx<'a> {
     pub filters: &'a HashMap<String, &'a NamedFilter>,
     /// shape name -> the model it projects (`from`). Used to resolve return types.
     pub shapes: &'a HashMap<String, String>,
+    /// shape name -> its projection body. Lets `$ctx` collection (D34) walk a return
+    /// shape's relation reaches to find joined *scoped* models, whose `@scope` codegen
+    /// injects into the join `ON` — so the callable must require their `$ctx` fields.
+    pub shape_bodies: &'a HashMap<String, &'a [ShapeField]>,
 }
 
 impl<'a> Cx<'a> {

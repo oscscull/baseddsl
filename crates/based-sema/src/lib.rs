@@ -76,6 +76,13 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             shape_from.insert(s.name.node.clone(), s.from.node.clone());
         }
     }
+    // Shape bodies keyed by name, so `$ctx` collection can walk a return shape's
+    // relation reaches to find joined scoped models (D34). Last write wins on a
+    // duplicate name (already reported above); the collector only reads it.
+    let mut shape_bodies: HashMap<String, &[based_ast::ShapeField]> = HashMap::new();
+    for s in &shapes {
+        shape_bodies.insert(s.name.node.clone(), s.body.as_slice());
+    }
     // Full filter defs (not just arity): the body is re-resolved against each
     // call-site model in the predicate checker.
     let mut filter_defs: HashMap<String, &based_ast::NamedFilter> = HashMap::new();
@@ -123,6 +130,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             index: &index,
             filters: &filter_defs,
             shapes: &shape_from,
+            shape_bodies: &shape_bodies,
         };
 
         for ast in &models {

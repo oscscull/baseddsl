@@ -34,7 +34,12 @@ resolves D19)** + **D33 (shard key bound to the resolved `@scope` `$ctx` field: 
 shard_key_ctx_field` → per-callable `RQuery`/`RMutation.shard_key`, derived from the same `@scope`
 that filters the row so routing and row-visibility can't drift; `unscoped` → no owning shard;
 listener `http::resolve_shard_key` pulls the field out of `$ctx`, `X-Based-Shard-Key` override
-retained; retires the hand-set `--shard-key-field` flag; closes the D20/D32 follow-on)** done.
+retained; retires the hand-set `--shard-key-field` flag; closes the D20/D32 follow-on)** + **D34
+(`@scope` injected into a *joined* table's `ON`: a query/mutation reaching a *different* scoped
+model through a relation now filters that joined model by its `@scope` in the join `ON` — the same
+slot soft-delete uses — closing the cross-scope leak D32 left open; `Select::scope_join_pred` binds
+the shared `:ctx_<field>`, sema's `ctx` collector requires the joined field so the bind is present,
+`unscoped` drops the joins too; proven end-to-end against live SQLite)** done.
 Prior batch: D29 (Postgres dialect: `ddl`/`dml`/`mutations` codegen + the dialect-aware `?`→`$n`
 scanner; the concrete driver deferred to the live-DB slice) + D30 (typed per-callable `$ctx` in
 the generated Rust client) + D31 (idempotency-key request fingerprint: a reused key on different
@@ -128,7 +133,10 @@ holds `&mut`.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/
   `@updated` (timestamp role), `@scope` (predicate, `$ctx`-only, restricted to a
   conjunction of `col = $ctx.field` → `E0180`; scope column engine-managed on `create`
-  → `E0181`; opt out per callable with `unscoped("reason")` → `W0106` when stale; D32),
+  → `E0181`; opt out per callable with `unscoped("reason")` → `W0106` when stale; D32;
+  injected into the root/write-target `WHERE` *and* every joined scoped model's `ON`, so a
+  relation reach can't read across the scope boundary — D34, and the joined field is required
+  in the callable's `ctx_requires` bag so its `:ctx_<field>` bind is present),
   `@sort` (paths), `@table` (name override). Unknown `@foo` → `W0101`.
 - Table naming (D3): `snake_case`, no pluralization, `@table("…")` override.
   Relation FK column = `<field>_id` or `(column "…")`.
@@ -305,7 +313,9 @@ commerce example generates clean DDL.
 10 cases; commerce generates clean SELECTs). Delivered:
   - **Headline soft-delete injection** (soft-delete.md): tombstone predicate on the
     root table (`WHERE`) *and* every joined table (in its `ON`, so `LEFT JOIN` stays
-    left). `@scope` (auth.md) rides the same path. Conventions recorded in **D11**.
+    left). `@scope` (auth.md) rides the same path — on the root `WHERE` **and** every
+    joined scoped model's `ON` (D34), so a relation reach into another tenant is
+    filtered too. Conventions recorded in **D11**/**D34**.
   - Shape projection: bare local columns, `out = path` relation reaches (each hop a
     JOIN, deduped by path prefix, aliased `j_<prefix>`), `out = sql`…`` inline exprs.
     Bare-model return projects every stored column (FKs as `<field>_id`).

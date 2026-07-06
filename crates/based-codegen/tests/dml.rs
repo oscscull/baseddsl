@@ -78,6 +78,73 @@ fn shape_reach_joins_and_injects_soft_delete_in_on() {
 }
 
 #[test]
+fn shape_reach_into_scoped_model_injects_scope_in_join_on() {
+    // D34: a query reaching a *scoped* model through a relation carries that model's
+    // `@scope` into the join `ON` — same slot as soft-delete — so it can't read a row
+    // across the scope boundary. Here `Contact` is org-scoped and reached via a shape.
+    let ddl = gen(r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject, who = raised_by.name }
+        query ticket_by_id(id) -> TicketCard;
+        "#);
+    // The join into the scoped `contact` ANDs `contact.org_id = :ctx_org` into its ON.
+    assert!(
+        ddl.contains(
+            "JOIN `contact` AS `j_raised_by` ON `j_raised_by`.`id` = `ticket`.`raised_by_id` AND `j_raised_by`.`org_id` = :ctx_org"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn where_reach_into_scoped_model_injects_scope_in_join_on() {
+    // The same injection fires for a relation reached in a `where`, not just a shape.
+    let ddl = gen(r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject }
+        query tickets_by_contact_name(name) -> TicketCard[] {
+          list Ticket where (raised_by.name = $name);
+        }
+        "#);
+    assert!(
+        ddl.contains(
+            "JOIN `contact` AS `j_raised_by` ON `j_raised_by`.`id` = `ticket`.`raised_by_id` AND `j_raised_by`.`org_id` = :ctx_org"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn unscoped_query_drops_joined_scope_too() {
+    // `unscoped` (D32) opts out of *all* scope handling — the joined table's `@scope`
+    // (D34) included, not just the root's. The join `ON` carries no scope predicate.
+    let ddl = gen(r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject, who = raised_by.name }
+        query any_ticket(id) -> TicketCard unscoped("admin: cross-org ticket lookup");
+        "#);
+    assert!(
+        ddl.contains(
+            "JOIN `contact` AS `j_raised_by` ON `j_raised_by`.`id` = `ticket`.`raised_by_id`"
+        ),
+        "\n{ddl}"
+    );
+    assert!(
+        !ddl.contains(":ctx_org"),
+        "unscoped must inject no scope\n{ddl}"
+    );
+}
+
+#[test]
 fn optional_relation_is_left_join() {
     let ddl = gen(r#"
         User { name: text }

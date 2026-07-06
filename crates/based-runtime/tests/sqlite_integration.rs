@@ -23,10 +23,13 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
+use based_ast::FileId;
 use based_codegen::{sql, Dialect};
+use based_parser::parse_file;
 use based_runtime::idempotency::NoStore;
 use based_runtime::run::Backend;
 use based_runtime::{dispatch, Compiled, SeqIdGen, SqliteBackend};
+use based_sema::check;
 
 /// Load the real commerce example — the same front end (discover → parse → check) +
 /// codegen lowering the CLI uses, so the SQL executed here is `based gen sql`'s output.
@@ -222,4 +225,75 @@ fn backend_ping_succeeds_on_a_live_db() {
     // The readiness seam (D26) works against a real engine: `SELECT 1` round-trips.
     let c = commerce();
     assert!(seeded_backend(&c).ping().is_ok());
+}
+
+/// Compile an in-line schema for SQLite (skip disk), mirroring `Compiled::load`.
+fn compile_sqlite(src: &str) -> Compiled {
+    let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
+    let (schema, diags) = check(&sf.decls);
+    let errs: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .map(|d| d.code)
+        .collect();
+    assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
+    Compiled::from_checked(schema, sf.decls, Dialect::Sqlite)
+}
+
+#[test]
+fn joined_scope_hides_cross_scope_row_end_to_end() {
+    // D34, proven against a real engine: a query on the *unscoped* `Ticket` reaches the
+    // org-*scoped* `Contact` through `raised_by`. Codegen injects `Contact`'s `@scope`
+    // into the join `ON` (`contact.org_id = :ctx_org`), so a contact belonging to another
+    // org is invisible across the join. This is the exact cross-scope leak D32 left open.
+    let c = compile_sqlite(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact?, subject: text }
+        shape TicketCard from Ticket { subject, who = raised_by.name }
+        query ticket_by_id(id) -> TicketCard;
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme'), ('org-2', 'Beta');
+            INSERT INTO `contact` (`id`, `org_id`, `name`) VALUES ('c-2', 'org-2', 'Zoe');
+            INSERT INTO `ticket` (`id`, `raised_by_id`, `subject`)
+                VALUES ('t-1', 'c-2', 'help');
+            "#,
+        )
+        .expect("seed");
+
+    // Caller is in org-1; the ticket's contact belongs to org-2. The `LEFT JOIN` still
+    // yields the ticket row, but the scoped join means the cross-org contact is filtered
+    // out — `who` comes back null (the joined name is invisible across the scope boundary).
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/ticket_by_id",
+        json!({ "id": "t-1" }),
+        json!({ "org": "org-1" }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(resp.body, json!({ "subject": "help", "who": null }));
+
+    // The contact's own org *does* see the joined name — same request, in-scope caller.
+    let in_scope = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/ticket_by_id",
+        json!({ "id": "t-1" }),
+        json!({ "org": "org-2" }),
+    );
+    assert_eq!(in_scope.body, json!({ "subject": "help", "who": "Zoe" }));
 }

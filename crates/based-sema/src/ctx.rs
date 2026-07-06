@@ -36,12 +36,163 @@ pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
             walk_pred(p, ti, cx, &mut Vec::new(), &mut out);
         }
     }
+    // Joined *scoped* models (D34): codegen injects a joined model's `@scope` into
+    // its join `ON`, so a query that reaches another scoped tenant through a relation
+    // must *also* require that model's `$ctx` field (else the injected `:ctx_<field>`
+    // bind is unbound at runtime). `unscoped` drops the whole scope machinery, joins
+    // included, so it collects none — mirroring the codegen `with_scope_inject(false)`.
+    if q.unscoped.is_none() {
+        collect_joined_scope(q, ti, cx, &mut out);
+    }
     dedup(out)
 }
 
+/// Collect the `@scope` `$ctx` requirements of every scoped model a query *joins*
+/// (D34). The join sources are exactly codegen's: relation reaches in a `where` path,
+/// the sort path (query `order`, else the model `@sort`), and the return shape's
+/// `out = path` reaches. A `Nest { … }` shape sub-object produces no join today
+/// (codegen defers JSON aggregation), so it is deliberately not walked — sema and
+/// codegen stay aligned on exactly which joins exist.
+fn collect_joined_scope(q: &Query, ti: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
+    // `where` paths.
+    for clause in query_clauses(q) {
+        match clause {
+            Clause::Where(p) => walk_pred_paths(p, ti, cx, out),
+            Clause::Order(terms) => {
+                for t in terms {
+                    walk_path_scope(&t.path, ti, cx, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Model `@sort` only applies when the query supplies no `order` (codegen's cascade).
+    let has_query_order = query_clauses(q)
+        .iter()
+        .any(|c| matches!(c, Clause::Order(_)));
+    if !has_query_order {
+        for t in &cx.model(ti).sort {
+            walk_path_scope(&t.path, ti, cx, out);
+        }
+    }
+    // Return shape reaches.
+    if let Some(body) = cx.shape_bodies.get(&q.ret.ty.node) {
+        walk_shape_scope(body, ti, cx, out);
+    }
+}
+
+/// Walk every column path in a predicate, recording joined-model scope for each
+/// relation reach. Filter calls expand against the call site (D14), guarded against
+/// self-reference. (`walk_pred` above collects *direct* `$ctx` uses; this collects
+/// the *joined-model* scope those same paths traverse — a separate concern.)
+fn walk_pred_paths(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
+    walk_pred_paths_in(pred, model, cx, &mut Vec::new(), out);
+}
+
+fn walk_pred_paths_in(
+    pred: &Predicate,
+    model: usize,
+    cx: &Cx,
+    in_filters: &mut Vec<String>,
+    out: &mut Vec<CtxReq>,
+) {
+    match pred {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            walk_pred_paths_in(a, model, cx, in_filters, out);
+            walk_pred_paths_in(b, model, cx, in_filters, out);
+        }
+        Predicate::Not(p) => walk_pred_paths_in(p, model, cx, in_filters, out),
+        Predicate::Cmp { path, value, .. } => {
+            walk_path_scope(path, model, cx, out);
+            if let Value::Path(p) = value {
+                walk_path_scope(p, model, cx, out);
+            }
+        }
+        Predicate::Bare(path) => {
+            if path.segments.len() == 1 {
+                if let Some(def) = cx.filters.get(&path.segments[0].node) {
+                    walk_filter_paths(def, model, cx, in_filters, out);
+                    return;
+                }
+            }
+            walk_path_scope(path, model, cx, out);
+        }
+        Predicate::FilterCall { name, .. } => {
+            if let Some(def) = cx.filters.get(&name.node) {
+                walk_filter_paths(def, model, cx, in_filters, out);
+            }
+        }
+        Predicate::Raw(_) => {}
+    }
+}
+
+fn walk_filter_paths(
+    def: &NamedFilter,
+    model: usize,
+    cx: &Cx,
+    in_filters: &mut Vec<String>,
+    out: &mut Vec<CtxReq>,
+) {
+    if in_filters.iter().any(|n| n == &def.name.node) {
+        return;
+    }
+    in_filters.push(def.name.node.clone());
+    walk_pred_paths_in(&def.pred, model, cx, in_filters, out);
+    in_filters.pop();
+}
+
+/// Walk a return shape body: an `out = path` reach may join, a `Bare` never does
+/// (single-segment), a `Nest` is deferred in codegen (no join → not walked, D34).
+fn walk_shape_scope(body: &[ShapeField], model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
+    for f in body {
+        if let ShapeField::Rename {
+            value: ShapeValue::Path(p),
+            ..
+        } = f
+        {
+            walk_path_scope(p, model, cx, out);
+        }
+    }
+}
+
+/// Walk a dotted path from `start`, and at every *intermediate* model entered through
+/// a relation hop (a join in codegen), collect that model's `@scope` `$ctx` fields.
+/// The final segment is a terminal column/FK, not a join, so it is skipped. Mirrors
+/// codegen's `Select::resolve` (a join per non-last relation hop).
+fn walk_path_scope(path: &Path, start: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
+    let mut cur = start;
+    let n = path.segments.len();
+    for (i, seg) in path.segments.iter().enumerate() {
+        let Some(mem) = cx.model(cur).member(&seg.node) else {
+            return; // sema already reported the unknown field
+        };
+        if i + 1 == n {
+            return; // terminal segment — a column/FK, never a join
+        }
+        match &mem.kind {
+            MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
+                let Some(mi) = cx.find(target) else { return };
+                // The join into `target` carries `target`'s `@scope` (D34).
+                if let Some(scope) = &cx.model(mi).scope {
+                    walk_pred(scope, mi, cx, &mut Vec::new(), out);
+                }
+                cur = mi;
+            }
+            MemberKind::Scalar { .. } => return, // can't traverse a scalar
+        }
+    }
+}
+
 /// The `$ctx` a mutation requires: each write statement's `where` + its model's
-/// `@scope` (update/delete/restore inject it, D12) + `create`/`update` assigns.
-pub fn collect_mutation(m: &Mutation, cx: &Cx) -> Vec<CtxReq> {
+/// `@scope` (update/delete/restore inject it, D12) + `create`/`update` assigns, plus
+/// (D34) any scoped model a write `where` or the create's declared-shape re-select
+/// *joins*. `ret_shape`/`ret_model` describe that re-select's projection.
+pub fn collect_mutation(
+    m: &Mutation,
+    ret_shape: Option<&str>,
+    ret_model: &str,
+    cx: &Cx,
+) -> Vec<CtxReq> {
     let mut out = Vec::new();
     // `unscoped` (D32) drops both the injected write guard and the create-time auto-set,
     // so a scoped model contributes no `$ctx` requirement to an unscoped mutation.
@@ -49,7 +200,42 @@ pub fn collect_mutation(m: &Mutation, cx: &Cx) -> Vec<CtxReq> {
     for stmt in &m.body {
         walk_write(stmt, cx, unscoped, &mut out);
     }
+    // Joined-model scope (D34), unless `unscoped` (which drops all scope handling).
+    if !unscoped {
+        for stmt in &m.body {
+            collect_write_joined_scope(stmt, cx, &mut out);
+        }
+        // The declared-shape re-select (D12) projects `ret_shape` from `ret_model`,
+        // so its relation reaches join scoped models exactly like a query's shape.
+        if let (Some(name), Some(mi)) = (ret_shape, cx.find(ret_model)) {
+            if let Some(body) = cx.shape_bodies.get(name) {
+                walk_shape_scope(body, mi, cx, &mut out);
+            }
+        }
+    }
     dedup(out)
+}
+
+/// A write's `where` paths reach through relations (update/delete/restore); each
+/// non-terminal hop into a scoped model is a scope-injected join (D34). A `create`
+/// has no `where`; a `tx` recurses.
+fn collect_write_joined_scope(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
+    match stmt {
+        WriteStmt::Update { model, where_, .. }
+        | WriteStmt::Delete { model, where_ }
+        | WriteStmt::HardDelete { model, where_ }
+        | WriteStmt::Restore { model, where_ } => {
+            if let Some(mi) = cx.find(&model.node) {
+                walk_pred_paths(where_, mi, cx, out);
+            }
+        }
+        WriteStmt::Tx(inner) => {
+            for s in inner {
+                collect_write_joined_scope(s, cx, out);
+            }
+        }
+        WriteStmt::Create { .. } | WriteStmt::Raw(_) => {}
+    }
 }
 
 /// Closed-world coherence (D4/D5): a `$ctx.<field>` must carry the same type

@@ -200,7 +200,7 @@ fn lower_ret_select(
     let model = schema
         .model(ret_model)
         .expect("return model resolved by sema");
-    let mut sel = Select::new(schema, decls, model, dialect);
+    let mut sel = Select::new(schema, decls, model, dialect).with_scope_inject(!unscoped);
 
     // Projection first (it seeds joins for reached columns), then scope (may seed more).
     let projection = project_return(&mut sel, decls, ret_shape, ret_model, model);
@@ -341,7 +341,9 @@ fn lower_create<'a>(
     unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect).with_back(back);
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_back(back)
+        .with_scope_inject(!unscoped);
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
@@ -413,7 +415,9 @@ fn lower_update<'a>(
     unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect).with_back(back);
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_back(back)
+        .with_scope_inject(!unscoped);
     let mut sets: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
 
@@ -454,7 +458,7 @@ fn lower_delete(
     unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect);
+    let mut sel = Select::new(schema, decls, model, dialect).with_scope_inject(!unscoped);
 
     // Soft model + plain `delete` -> tombstone UPDATE, never a real DELETE.
     if let (Some(sd), false) = (&model.soft_delete, hard) {
@@ -510,7 +514,7 @@ fn lower_restore(
     unscoped: bool,
     dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect);
+    let mut sel = Select::new(schema, decls, model, dialect).with_scope_inject(!unscoped);
     // sema (E-restore) guarantees a soft-delete model here; fall back defensively.
     let mut sets = match &model.soft_delete {
         Some(sd) => vec![tombstone_set(&sel, model, sd, /* deleting = */ false)],

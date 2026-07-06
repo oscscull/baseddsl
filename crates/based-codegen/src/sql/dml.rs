@@ -141,7 +141,9 @@ fn lower_query(
     dialect: Dialect,
 ) -> LoweredQuery {
     let root = schema.model(&rq.target).expect("target resolved by sema");
-    let mut sel = Select::new(schema, decls, root, dialect);
+    // `unscoped` (D32) opts the whole query out of scope handling — the joined
+    // tables' `@scope` (D34) as well as the root's, kept in one decision (P4).
+    let mut sel = Select::new(schema, decls, root, dialect).with_scope_inject(q.unscoped.is_none());
 
     // 1. Projection (drives the SELECT list; also seeds joins for reached columns).
     let projection = build_projection(&mut sel, decls, rq, root);
@@ -413,6 +415,13 @@ pub(crate) struct Select<'a> {
     /// The immediately preceding `create` in an enclosing `tx`, so a `^.field`
     /// back-reference can bind to it (mutations.md). `None` outside a `tx`.
     back: Option<BackCtx<'a>>,
+    /// Whether to inject a *joined* scoped model's `@scope` into its join `ON`
+    /// (D34). True by default; set false for an `unscoped` callable (D32), which
+    /// opts out of *all* scope handling — the joined tables included, not just the
+    /// root. The root/write-target `@scope` is injected by the caller (`lower_query`
+    /// / `lower_write`), which already honours `unscoped`; this flag governs only the
+    /// join-`ON` injection the resolver performs as it materializes each join.
+    inject_scope: bool,
 }
 
 /// What a `^.field` back-reference resolves to: the preceding `create`'s bound `id`
@@ -448,6 +457,7 @@ impl<'a> Select<'a> {
             filters,
             filter_stack: Vec::new(),
             back: None,
+            inject_scope: true,
         }
     }
 
@@ -466,6 +476,38 @@ impl<'a> Select<'a> {
     pub(crate) fn with_back(mut self, back: Option<BackCtx<'a>>) -> Self {
         self.back = back;
         self
+    }
+
+    /// Set whether a joined scoped model's `@scope` rides into its join `ON` (D34).
+    /// An `unscoped` callable (D32) passes `false` to drop scope from the joined
+    /// tables too — the same opt-out the root/write-target scope already honours.
+    pub(crate) fn with_scope_inject(mut self, inject: bool) -> Self {
+        self.inject_scope = inject;
+        self
+    }
+
+    /// The `@scope` conjunction for a *joined* model, anchored at its join alias:
+    /// each D32 term `col = $ctx.field` becomes `<alias>.<col> = :ctx_<field>`,
+    /// ANDed. Empty (returns `None`) for an unscoped model or when scope injection is
+    /// off (`unscoped` callable). The bind name `:ctx_<field>` is the *same* one the
+    /// root scope + create auto-set use (mutations.rs), so the runtime binds it once
+    /// from the request `$ctx` — no new bind surface (P4). Sema (D34) makes the
+    /// callable *require* this field so the bind is always present.
+    fn scope_join_pred(&self, alias: &str, model: &RModel) -> Option<String> {
+        if !self.inject_scope {
+            return None;
+        }
+        let terms: Vec<String> = model
+            .scope_terms()
+            .into_iter()
+            .map(|(field, ctx_field)| {
+                format!(
+                    "{} = :ctx_{ctx_field}",
+                    self.qcol(alias, &physical_col(model, &field))
+                )
+            })
+            .collect();
+        (!terms.is_empty()).then(|| terms.join(" AND "))
     }
 
     /// Resolve a dotted path from `root` to `(table_alias, column)`, materializing
@@ -543,6 +585,14 @@ impl<'a> Select<'a> {
                 soft_pred(self.dialect, &alias, tmodel, sd)
             ));
         }
+        // A joined *scoped* model rides its `@scope` into the `ON` too (D34) — the
+        // exact parallel of the soft-delete injection above, so a query reaching
+        // another tenant's row through a relation can't read across the scope
+        // boundary. A LEFT JOIN stays a left join (the predicate is in `ON`, not
+        // `WHERE`): an out-of-scope joined row simply yields NULLs.
+        if let Some(scope) = self.scope_join_pred(&alias, tmodel) {
+            on.push_str(&format!(" AND {scope}"));
+        }
         self.record(kind, tmodel.table.clone(), alias.clone(), on, prefix);
         (alias, tmodel)
     }
@@ -577,6 +627,10 @@ impl<'a> Select<'a> {
                 " AND {}",
                 soft_pred(self.dialect, &alias, tmodel, sd)
             ));
+        }
+        // Joined-model `@scope` rides the `ON` too (D34), same as the forward join.
+        if let Some(scope) = self.scope_join_pred(&alias, tmodel) {
+            on.push_str(&format!(" AND {scope}"));
         }
         self.record("LEFT JOIN", tmodel.table.clone(), alias.clone(), on, prefix);
         (alias, tmodel)

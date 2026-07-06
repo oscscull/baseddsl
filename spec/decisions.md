@@ -930,9 +930,9 @@ built when this landed; D32 closes the three gaps that made it *safe*.
   omits scope; mutations create auto-set + re-select scope; unscoped mutation/update omit), 1
   parser (unscoped on query + mutation), conformance `ctx_scope` re-blessed to the new pattern.
 - ~~**Follow-on (separate slice):** bind D20's shard key to the scope field~~ ✅ **done (D33).**
-  Also deferred: injecting `@scope` into a *joined* table's `ON` (today only the root table +
-  write targets carry it; soft-delete already does the join `ON`, so the mechanism exists to
-  extend).
+  ~~Also deferred: injecting `@scope` into a *joined* table's `ON`~~ ✅ **done (D34):** a query/mutation
+  reaching another scoped model through a relation now carries that model's `@scope` into the join
+  `ON` (the same slot soft-delete uses), closing the cross-scope leak on the join side.
 
 ## D33 — shard key bound to the resolved `@scope` `$ctx` field
 Closes the follow-on D32 flagged and the shard-key hole D20 left open. D20 built the `ShardRouter`
@@ -979,3 +979,60 @@ callable — retiring the hand-set `--shard-key-field` config.
   value routes to `""`; the two `TrustedHeaderContext` tests updated to the override shape.
 - *Deferred:* binding the *concrete* driver's shard routing end-to-end (the live-DB slice, D20/D29);
   a `tx` that spans two differently-scoped models is unmodelled (single-shard invariant).
+
+## D34 — `@scope` injected into a *joined* table's `ON` (closes the D32 follow-on)
+Closes the cross-scope leak D32 explicitly left open: until now `@scope` was injected only into the
+**root** table's `WHERE` (reads) and the **write-target**'s `WHERE`, so a query that reached a
+*different* scoped model **through a relation** read that joined model **unfiltered** — a
+tenant-boundary leak on the join side. Soft-delete already injected its tombstone into *every* joined
+table's `ON` (D11); D34 makes `@scope` ride the *exact same slot*, so a relation reach can no longer
+read across a scope boundary.
+- **Injection point = the join resolver, not the caller.** `Select::join_forward`/`join_inverse`
+  (`based-codegen::sql::dml`) already append the joined model's soft-delete predicate to the `ON`;
+  they now also append its `@scope` (via `Select::scope_join_pred`). Every join — from a `where`
+  path, a sort path (query `order` or model `@sort`), or a return-shape `out = path` reach — flows
+  through this one chokepoint, so the injection is uniform across all join sources with no per-source
+  code. A `LEFT JOIN` stays a left join (the predicate is in `ON`, not `WHERE`): an out-of-scope
+  joined row simply yields NULLs; an `INNER JOIN`'s row drops entirely (the correct, only expressible
+  shape — a required relation to an out-of-scope owner has no in-scope match).
+- **The bind is the *same* `:ctx_<field>`** the root scope + create auto-set use (D11/D32). A D32
+  scope term `col = $ctx.field` on the joined model becomes `<join_alias>.<physical_col> = :ctx_<field>`.
+  The runtime binds `:ctx_<field>` **once** from the request `$ctx`, so no new bind surface is added
+  (principle 4) — every scoped table in the query, root or joined, reads the same context value.
+  Closed-world coherence (D4) guarantees a `$ctx` field name means one type everywhere, so sharing the
+  bind across tables is sound.
+- **Sema makes the callable *require* the joined field** (`based-sema::ctx`, D4/D5). Because codegen
+  now emits `:ctx_<field>` for a joined scope, the callable **must** carry that field in its
+  `ctx_requires` bag or the bind is unbound at runtime. `collect_query`/`collect_mutation` gained a
+  joined-scope walk that mirrors codegen's joins: it follows each relation reach in a `where` path,
+  the sort path, and the return shape's `out = path` reaches (a `Nest { … }` sub-object is **not**
+  walked — codegen defers those, so they produce no join, and sema stays aligned) and records the
+  `@scope` `$ctx` of every scoped model traversed *into* (the terminal segment is a column, not a
+  join, so it is skipped). A mutation additionally walks its write `where`s and its declared-shape
+  re-select (D12). The scope's field type is inferred by resolving the joined model's `@scope`
+  against that model — reusing the existing `walk_pred` inference, so the joined-field type can't
+  drift from the root-field type for the same column (P4). `Cx` grew a `shape_bodies` map (shape name
+  → body) so the collector can reach a return shape's reaches.
+- **`unscoped` (D32) drops the joins too.** An `unscoped` callable opts out of *all* scope handling —
+  the joined tables' `@scope` as well as the root's — in one decision: codegen passes
+  `Select::with_scope_inject(false)` (so `scope_join_pred` returns nothing) and sema collects no
+  joined-scope requirement. Root and join opt-out can't diverge (they read the one `unscoped` flag).
+- **What the compiler guarantees:** a scoped model is filtered by its `@scope` *wherever it appears*
+  in a query — as the root, a write target, **or a joined relation** — except at explicit `unscoped`
+  sites. **What it does not** (unchanged from D32): verify the predicate is the correct authz rule.
+- **Commerce is unchanged** (its only scoped model, `Order`, is reached-*from*, never reached-*into*
+  — you don't scope the tenant-owner table by itself), so all goldens are byte-identical; the new
+  behaviour is proven on a synthetic `Ticket → Contact` (`@scope(org = $ctx.org)`) topology instead.
+- **Tests:** 3 codegen (`based-codegen/tests/dml.rs`: shape-reach + `where`-reach inject
+  `contact.org_id = :ctx_org` into the join `ON`; `unscoped` injects none), 4 sema
+  (`based-sema/tests/check.rs`: a shape-reach and a `where`-reach each add the joined `org` to
+  `ctx_requires`, a mutation's re-select does too, `unscoped` drops it), and 1 **real end-to-end**
+  (`based-runtime/tests/sqlite_integration.rs`): a `Ticket → Contact?` cross-org row read against a
+  live SQLite engine comes back with the joined `who` NULL for an out-of-scope caller and populated
+  for the in-scope one — the leak is actually closed, not just bound.
+- *Deferred:* injecting `@scope` into a joined table reached through a *named-filter* body's own
+  relation reach when the filter expands to a differently-scoped model (the filter-call path resolves
+  columns but the joined-scope walk doesn't recurse filter *bodies* for joins yet — rare; direct
+  reaches, the common case, are covered); a joined model with a *multi-term* scope injects all its
+  terms (handled — `scope_terms()` is flattened), but a term whose `$ctx` field is used **only** on a
+  join (never on the root) still relies on the runtime binding it (it does — it's in `ctx_requires`).

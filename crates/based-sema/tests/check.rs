@@ -1190,6 +1190,78 @@ fn ctx_scope_propagates_to_every_query() {
 }
 
 #[test]
+fn ctx_joined_scope_is_required_via_shape_reach() {
+    // D34: a query on an *unscoped* model that reaches a *scoped* model through a
+    // shape relation joins it, and codegen injects the joined model's `@scope` into
+    // the join `ON` — so the callable must require that model's `$ctx.org`, else the
+    // injected `:ctx_org` bind is unbound at runtime.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject, who = raised_by.name }
+        query ticket_by_id(id) -> TicketCard;
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let q = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "ticket_by_id")
+        .unwrap();
+    assert_eq!(q.ctx_requires.len(), 1, "{:?}", q.ctx_requires);
+    assert_eq!(q.ctx_requires[0].field, "org");
+}
+
+#[test]
+fn ctx_joined_scope_is_required_via_where_reach() {
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text, @index name }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject }
+        query tickets(name) -> TicketCard[] {
+          list Ticket where (raised_by.name = $name) order (subject);
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let q = schema.queries.iter().find(|q| q.name == "tickets").unwrap();
+    assert!(
+        q.ctx_requires.iter().any(|r| r.field == "org"),
+        "{:?}",
+        q.ctx_requires
+    );
+}
+
+#[test]
+fn ctx_unscoped_query_drops_joined_scope_requirement() {
+    // `unscoped` (D32) drops all scope handling, joins included, so the joined
+    // scoped model contributes no `$ctx` requirement (mirrors codegen D34).
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject, who = raised_by.name }
+        query any_ticket(id) -> TicketCard unscoped("admin: cross-org lookup");
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let q = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "any_ticket")
+        .unwrap();
+    assert!(q.ctx_requires.is_empty(), "{:?}", q.ctx_requires);
+}
+
+#[test]
 fn ctx_bad_path_errors() {
     // `$ctx` fields are flat: exactly one segment.
     let (_, d) = analyze(
@@ -1277,6 +1349,37 @@ fn ctx_from_create_assign_is_recorded() {
     let add = schema.mutations.iter().find(|m| m.name == "add").unwrap();
     assert_eq!(add.ctx_requires.len(), 1);
     assert_eq!(add.ctx_requires[0].field, "org");
+}
+
+#[test]
+fn ctx_mutation_reselect_joined_scope_is_required() {
+    // D34: a mutation's declared-shape re-select (D12) projects the return shape, so a
+    // relation reach in that shape joins a scoped model and injects its `@scope` — the
+    // mutation must require the joined model's `$ctx.org` too. Here `Ticket` is
+    // unscoped but its re-select reaches the org-scoped `Contact`.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope(org = $ctx.org)
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject, who = raised_by.name }
+        mutation open_ticket(by: Contact, subject: text) -> TicketCard {
+          create Ticket { raised_by = $by, subject = $subject };
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let m = schema
+        .mutations
+        .iter()
+        .find(|m| m.name == "open_ticket")
+        .unwrap();
+    assert!(
+        m.ctx_requires.iter().any(|r| r.field == "org"),
+        "{:?}",
+        m.ctx_requires
+    );
 }
 
 // ---------- tx back-references (`^`, mutations.md) --------------------------
