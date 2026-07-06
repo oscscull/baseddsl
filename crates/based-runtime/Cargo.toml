@@ -18,6 +18,15 @@ serve = ["mariadb", "dep:tiny_http", "dep:uuid"]
 # dependency), so it needs no live infra — the infra-free `Db`/`Backend` impl that backs
 # real in-memory end-to-end integration tests (D27). Off by default; the core stays lean.
 sqlite = ["dep:rusqlite"]
+# The Docker-backed real-DB integration harness + live suites (D35). Brings up an ephemeral
+# MariaDB container (via the `docker` CLI) for `tests/mariadb_integration.rs` to run the
+# *verbatim* codegen-lowered SQL against a real server. Enables `serve` for the production
+# `UuidGen` (the MariaDB DDL emits native `UUID` columns, which reject the deterministic
+# `id-N` test ids — engine ids must be real v4 uuids, the same generator prod uses). When the
+# Docker daemon is unreachable the harness **skips cleanly** (logs + returns), so
+# `cargo test --all-features` stays green with no daemon — the suite never fails for want of
+# infra, it just doesn't run.
+docker-tests = ["mariadb", "serve"]
 
 [dependencies]
 based-ast.workspace = true

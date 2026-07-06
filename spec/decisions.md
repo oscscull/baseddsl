@@ -1036,3 +1036,47 @@ read across a scope boundary.
   reaches, the common case, are covered); a joined model with a *multi-term* scope injects all its
   terms (handled — `scope_terms()` is flattened), but a term whose `$ctx` field is used **only** on a
   join (never on the root) still relies on the runtime binding it (it does — it's in `ctx_requires`).
+
+## D35 — Docker-backed real-DB integration harness + the MariaDB live suite (Track A1+A2)
+Turns "architecture-ready" into "proven" for the `MariaDb` driver (D20), which until now was only
+**compile-verified** — its connect/exec paths never ran against a real server. Two pieces, both behind
+the new `docker-tests` cargo feature (off by default; the core stays infra-free):
+- **The harness** (`crates/based-runtime/tests/support/docker_mariadb.rs`). `MariaDbContainer::start()`
+  shells out to the `docker` CLI to `docker run --rm --detach` a pinned **`mariadb:11.4`** on a random
+  free host port (`-p 0:3306`, read back via `docker port`), polls a *real* connection (`SELECT 1`)
+  until ready, and force-removes the container on `Drop` — so even a panicking test cleans up. Chosen
+  over testcontainers-rs deliberately: testcontainers pulls an **async runtime**, and this codebase is
+  sync-by-decision (D20); a thin `docker run` guard reuses the hardened external tool (principle 7)
+  without importing tokio into the test tree.
+- **Skip-never-fail** (the load-bearing property). When the Docker daemon is unreachable (`docker info`
+  exits non-zero — a fast, reliable probe) `start()` returns `None` after logging a clear
+  `[docker-mariadb] SKIP: …` line; each test early-returns on `None`. So `cargo test --workspace
+  --all-features` is **green with or without a daemon** — the real-DB proof runs when infra is present
+  and is simply absent otherwise, never turning missing infra into a red build (principle 1: the safe
+  state is the silent default; the dangerous "no proof ran" case is a visible log, not a hidden pass).
+- **The live suite** (`crates/based-runtime/tests/mariadb_integration.rs`, 7 tests — the MariaDB twin of
+  `sqlite_integration.rs`, D27). It loads the *actual* commerce schema (`Compiled::load`, whose manifest
+  dialect is `mariadb`, so the DML lowers with `?` binds — exactly what this driver runs), creates every
+  table from the **generated** MariaDB DDL (`sql::ddl(_, Dialect::MariaDb)`, not a hand copy — so the
+  whole `based gen sql` artifact, DDL *and* DML, is proven to execute), seeds fixtures, and drives real
+  requests through `serve::dispatch` against a concrete `MariaDb` checked out of a live
+  `ShardRouter::single`. Coverage (DoD #1): a `get` (join + project) + its miss→`null`, a `$ctx`-scoped
+  `list` (row scope actually filters; a different org sees nothing) + the joined-`ON` reach projecting
+  live, the `place_order` write (INSERT + declared-shape re-select under one tx, read-your-writes
+  verified by a follow-up read), idempotency-key dedupe (a retry replays, no double-insert), and
+  `Backend::ping`. **Ran genuinely green against a live MariaDB 11.4.**
+- **`docker-tests` enables `serve`, not just `mariadb`.** The generated MariaDB DDL emits **native `UUID`
+  columns**, which *validate* on insert/compare — so the deterministic `SeqIdGen` (`id-0`, …) and
+  `'org-1'`-style fixtures the SQLite test uses are rejected. The suite therefore uses the production
+  `UuidGen` (v4 uuids, valid for a `UUID` column — the same generator prod uses, gated on `serve`) for
+  engine ids, and valid-UUID literals for the seed rows. A `get`/`list` *miss* can still pass a non-UUID
+  string like `'nope'` — MariaDB treats an invalid-UUID comparison value as simply non-matching (empty
+  result), not an error (verified), so the miss cases read naturally.
+- **What this proves / unblocks:** the `MariaDb` `Db`/`Backend`/`ping` seams work against a real server,
+  not on paper; the generated DDL executes on MariaDB; and the A1 harness is now the reusable seam the
+  **Postgres** driver + live suite (Track A3) plug straight into. It is the completion roadmap's
+  largest-leverage first step (DoD #1).
+- *Deferred (Track A4, live-DB hardening):* typed JSON reconstruction for `JSON` columns, statement
+  timeouts, deadlock-retry, pool-exhaustion → 503 under load — designed (D20/D26) but not yet
+  stress-proven against the live server; a shared/durable idempotency store for multi-instance dedupe
+  (D25). A Postgres live suite awaits its concrete driver (A3).

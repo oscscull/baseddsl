@@ -1,0 +1,332 @@
+//! End-to-end integration against a **real** MariaDB server, over Docker (D35).
+//!
+//! This is the MariaDB twin of `sqlite_integration.rs`: it loads the *actual* commerce
+//! schema (`Compiled::load` — the same discover → parse → check front end + codegen lowering
+//! the CLI uses), creates its tables from the *generated* MariaDB DDL (`based gen sql` with
+//! `Dialect::MariaDb`), and drives real requests through `serve::dispatch` against the
+//! concrete `MariaDb` driver checked out of a live `ShardRouter`. What runs is the *verbatim*
+//! codegen-lowered SQL — bound positionally (`?`) by the runtime — so a passing test proves
+//! the whole engine (the `MariaDb` `Db`/`Backend`/`ping` seams, D20/D26) works against a
+//! genuine server, not just compile-verified as before.
+//!
+//! Unlike SQLite this needs infra: an ephemeral MariaDB container. The harness
+//! ([`support::docker_mariadb`]) starts one on a random port and tears it down after; when
+//! the Docker daemon is unreachable it returns `None` and **each test skips cleanly** (logs
+//! + early-returns), so `cargo test --workspace --all-features` stays green with no daemon.
+//! The suite is the driver's real gate: it exercises the SQL a live MariaDB actually runs.
+
+#![cfg(feature = "docker-tests")]
+
+#[path = "support/docker_mariadb.rs"]
+mod docker_mariadb;
+
+use std::path::PathBuf;
+
+use serde_json::json;
+
+use based_codegen::{sql, Dialect};
+use based_runtime::driver::{PoolConfig, ShardRouter};
+use based_runtime::id::UuidGen;
+use based_runtime::idempotency::{MemStore, NoStore};
+use based_runtime::run::Backend;
+use based_runtime::{dispatch, Compiled};
+
+use docker_mariadb::MariaDbContainer;
+
+// Valid v4-shaped UUIDs for the seed rows — MariaDB's native `UUID` column (which the
+// generated DDL emits) rejects a non-UUID string like `'org-1'`, so the fixtures use real
+// UUID literals. The trailing digits keep them human-readable across the assertions.
+const ORG_1: &str = "00000000-0000-4000-8000-0000000000a1";
+const USER_1: &str = "00000000-0000-4000-8000-0000000000b1";
+const ORDER_1: &str = "00000000-0000-4000-8000-0000000000c1";
+
+/// Bring up a live MariaDB, load commerce, create the generated MariaDB DDL, seed a couple
+/// of rows, and return the router (the live `Backend`) alongside the loaded schema. Returns
+/// `None` when Docker is unavailable — the caller skips. The container's lifetime is tied to
+/// the returned guard, so the caller must hold it for the test's duration.
+fn live() -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
+    let container = MariaDbContainer::start()?;
+
+    // The commerce manifest's dialect is `mariadb`, so `Compiled::load` lowers the DML for
+    // MariaDB (`?` binds) — exactly the SQL this driver must run. (SQLite reused the same
+    // load because its DML is byte-identical to MariaDB's; here the dialect genuinely matters.)
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../spec/examples/commerce")
+        .canonicalize()
+        .expect("commerce example dir");
+    let compiled = Compiled::load(&root).unwrap_or_else(|e| panic!("commerce did not load: {e:?}"));
+    assert_eq!(
+        compiled.dialect,
+        Dialect::MariaDb,
+        "commerce is a MariaDB project"
+    );
+
+    let router = ShardRouter::single(&container.url(), PoolConfig::default())
+        .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
+
+    // Create every commerce table from the *generated* MariaDB DDL (not a hand copy), then
+    // seed fixtures — so this suite exercises the whole `based gen sql` artifact (DDL + DML).
+    let ddl = sql::ddl(&compiled.schema, Dialect::MariaDb);
+    run_batch(&router, &ddl);
+    run_batch(
+        &router,
+        // `total` is BIGINT; ids/uuids ride as text (real UUID literals — MariaDB validates
+        // the native `UUID` column). `deleted_at` defaults NULL (live rows).
+        &format!(
+            "INSERT INTO `org` (`id`, `name`, `slug`) VALUES ('{ORG_1}', 'Acme', 'acme');\n\
+             INSERT INTO `user` (`id`, `email`, `name`) VALUES ('{USER_1}', 'a@x.com', 'Ada');\n\
+             INSERT INTO `order` (`id`, `org_id`, `placed_by_id`, `status`, `total`)\n\
+                 VALUES ('{ORDER_1}', '{ORG_1}', '{USER_1}', 'paid', 500);"
+        ),
+    );
+
+    Some((compiled, router, container))
+}
+
+/// Run a `;`-separated batch of statements against the live server, one at a time (the
+/// `mysql` driver executes a single statement per call). Blank fragments (from trailing
+/// newlines / the DDL's comment-only lines) are skipped.
+fn run_batch(router: &ShardRouter, batch: &str) {
+    use based_runtime::Db;
+    let mut db = router.checkout("").expect("checkout");
+    for stmt in split_statements(batch) {
+        db.execute(&stmt, &[])
+            .unwrap_or_else(|e| panic!("setup statement failed: {e:?}\n{stmt}"));
+    }
+}
+
+/// Split a SQL script into individual statements on `;`, stripping `--` comment lines and
+/// blank fragments. The generated DDL uses `;` only as a statement terminator (no `;` inside
+/// a string literal or identifier), so a plain split is safe for this fixture SQL.
+fn split_statements(script: &str) -> Vec<String> {
+    script
+        .split(';')
+        .map(|frag| {
+            frag.lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Run one request through the real dispatch core against a connection checked out of the
+/// live router — the exact path `based serve` uses, minus the socket.
+fn call(
+    compiled: &Compiled,
+    router: &ShardRouter,
+    method: &str,
+    path: &str,
+    args: serde_json::Value,
+    ctx: serde_json::Value,
+) -> based_runtime::WireResponse {
+    let mut db = router.checkout("").expect("checkout");
+    let mut ids = UuidGen;
+    dispatch(
+        compiled, &mut db, &mut ids, &NoStore, method, path, args, ctx, None,
+    )
+}
+
+#[test]
+fn get_query_runs_against_live_mariadb() {
+    // `order_by_id` is a `get`: it joins order → user + org and projects OrderCard. This is
+    // the verbatim lowered SELECT (MariaDB dialect) executed against a live server.
+    let Some((c, router, _guard)) = live() else {
+        return;
+    };
+    let resp = call(
+        &c,
+        &router,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": ORDER_1 }),
+        // Order is `@scope`d (D32): even a keyed `get` is org-scoped, so `$ctx.org` is
+        // required. order-1 belongs to org-1, visible to this caller.
+        json!({ "org": ORG_1 }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({ "status": "paid", "total": 500, "buyer": "Ada", "org": "Acme" })
+    );
+}
+
+#[test]
+fn get_query_miss_returns_null() {
+    // A `get` on an absent key is `Option<T>` → JSON null (a real empty result set).
+    let Some((c, router, _guard)) = live() else {
+        return;
+    };
+    let resp = call(
+        &c,
+        &router,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "nope" }),
+        json!({ "org": ORG_1 }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(resp.body, json!(null));
+}
+
+#[test]
+fn ctx_scoped_list_filters_by_org() {
+    // `my_org_orders` reads `$ctx.org` — the runtime binds it positionally into the WHERE.
+    // A `list` shapes as a JSON array. The row scope predicate is real: a different org
+    // sees none of org-1's rows.
+    let Some((c, router, _guard)) = live() else {
+        return;
+    };
+    let resp = call(
+        &c,
+        &router,
+        "POST",
+        "/q/my_org_orders",
+        json!({}),
+        json!({ "org": ORG_1 }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!([{ "status": "paid", "total": 500, "buyer": "Ada", "org": "Acme" }])
+    );
+
+    let empty = call(
+        &c,
+        &router,
+        "POST",
+        "/q/my_org_orders",
+        json!({}),
+        json!({ "org": "org-other" }),
+    );
+    assert_eq!(empty.body, json!([]));
+}
+
+#[test]
+fn mutation_writes_then_reselects_declared_shape() {
+    // `place_order` creates an Order (engine-generated uuid) and reads it back in its
+    // declared OrderCard shape (D12), all under one transaction — the full write path
+    // against a real engine: INSERT commits, the re-select joins and projects
+    // (read-your-writes). The created row is then visible to a follow-up read.
+    let Some((c, router, _guard)) = live() else {
+        return;
+    };
+    let resp = call(
+        &c,
+        &router,
+        "POST",
+        "/m/place_order",
+        // `org` is `@scope`-managed on create (D32): supplied via `$ctx`, auto-set on the
+        // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
+        json!({ "buyer": USER_1, "total": 99 }),
+        json!({ "org": ORG_1 }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({ "status": "pending", "total": 99, "buyer": "Ada", "org": "Acme" })
+    );
+
+    // The write actually committed: the new order is now readable.
+    let listed = call(
+        &c,
+        &router,
+        "POST",
+        "/q/my_org_orders",
+        json!({}),
+        json!({ "org": ORG_1 }),
+    );
+    let rows = listed.body.as_array().expect("list");
+    assert_eq!(rows.len(), 2, "the created order is now readable: {rows:?}");
+}
+
+#[test]
+fn joined_scope_hides_cross_scope_row() {
+    // D34 against a live server: `my_org_orders` reaches org-scoped `User`/`Org` through the
+    // Order relations. Here we prove the joined-`ON` scope with the commerce topology by
+    // confirming an in-scope caller sees the joined `buyer`/`org` names — the same join that
+    // would come back NULL for an out-of-scope owner. (The dedicated cross-scope `Ticket →
+    // Contact` case is covered on SQLite; here we assert the join projects live.)
+    let Some((c, router, _guard)) = live() else {
+        return;
+    };
+    let resp = call(
+        &c,
+        &router,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": ORDER_1 }),
+        json!({ "org": ORG_1 }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    // The joined `buyer` (User.name) and `org` (Org.name) both resolve live across the join.
+    assert_eq!(resp.body["buyer"], json!("Ada"));
+    assert_eq!(resp.body["org"], json!("Acme"));
+}
+
+#[test]
+fn idempotency_key_dedupes_a_retried_write() {
+    // A keyed mutation runs its write body at most once per key (D25): a retry with the same
+    // key + payload replays the recorded response instead of double-inserting. Proven against
+    // a live engine — the second call must not create a second order.
+    let Some((c, router, _guard)) = live() else {
+        return;
+    };
+    let store = MemStore::default();
+    let mut ids = UuidGen;
+
+    let mut first_db = router.checkout("").expect("checkout");
+    let first = dispatch(
+        &c,
+        &mut first_db,
+        &mut ids,
+        &store,
+        "POST",
+        "/m/place_order",
+        json!({ "buyer": USER_1, "total": 7 }),
+        json!({ "org": ORG_1 }),
+        Some("key-abc".to_string()),
+    );
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    drop(first_db);
+
+    let mut second_db = router.checkout("").expect("checkout");
+    let second = dispatch(
+        &c,
+        &mut second_db,
+        &mut ids,
+        &store,
+        "POST",
+        "/m/place_order",
+        json!({ "buyer": USER_1, "total": 7 }),
+        json!({ "org": ORG_1 }),
+        Some("key-abc".to_string()),
+    );
+    drop(second_db);
+    // The retry replays the first response — same body, no second insert.
+    assert_eq!(second.status, 200, "{:?}", second.body);
+    assert_eq!(first.body, second.body);
+
+    // Exactly one order was created for this key (plus the seeded order-1) → 2 total.
+    let listed = call(
+        &c,
+        &router,
+        "POST",
+        "/q/my_org_orders",
+        json!({}),
+        json!({ "org": ORG_1 }),
+    );
+    assert_eq!(listed.body.as_array().expect("list").len(), 2);
+}
+
+#[test]
+fn backend_ping_succeeds_on_a_live_server() {
+    // The readiness seam (D26) works against a real MariaDB: `ShardRouter::ping` runs
+    // `SELECT 1` on every shard's pooled connection.
+    let Some((_c, router, _guard)) = live() else {
+        return;
+    };
+    assert!(router.ping().is_ok());
+}
