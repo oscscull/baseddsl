@@ -105,6 +105,14 @@ pub fn dispatch(
             "idempotency_conflict",
             format!("a request with idempotency key `{key}` is already in progress"),
         ),
+        // The idempotency key was reused for a *different* request (D25). Not retryable —
+        // replaying the first request's response would be wrong; the client must use a fresh
+        // key. 422 (well-formed request, but its key/payload pairing is unprocessable).
+        Err(RunError::KeyReuse(key)) => WireResponse::error(
+            422,
+            "idempotency_key_reuse",
+            format!("idempotency key `{key}` was already used for a different request"),
+        ),
     }
 }
 

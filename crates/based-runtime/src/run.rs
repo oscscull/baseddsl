@@ -51,6 +51,11 @@ pub enum RunError {
     /// exists to prevent, so the retry is rejected as a retryable conflict (`409`): the
     /// client retries once the first attempt settles.
     Conflict(String),
+    /// The idempotency key was reused for a **different** request — same key, different
+    /// args/`$ctx` (D25). Replaying the first attempt's response would answer the wrong
+    /// request, so the reuse is rejected loudly (a non-retryable `422`) rather than run or
+    /// replayed. The client must use a fresh key for a genuinely different request.
+    KeyReuse(String),
 }
 
 impl From<PlanError> for RunError {
@@ -157,11 +162,15 @@ pub fn run_mutation(
         Some(k) => k,
     };
 
-    match store.begin(&req.callable, key) {
-        // A prior attempt already committed: replay its response, run no writes.
+    // Fingerprint the request payload (args + `$ctx`) so the store can tell a genuine
+    // retry (same payload) from one key reused for a different request (D25).
+    match store.begin(&req.callable, key, req.fingerprint()) {
+        // A prior attempt with the same payload already committed: replay it, run no writes.
         KeyState::Done(response) => Ok(response),
-        // A concurrent attempt is still running: don't run a second write.
+        // A concurrent attempt (same payload) is still running: don't run a second write.
         KeyState::InFlight => Err(RunError::Conflict(key.clone())),
+        // Same key, *different* payload: reject — replaying would answer the wrong request.
+        KeyState::Mismatch => Err(RunError::KeyReuse(key.clone())),
         // Fresh: we hold the claim. Run the write, then record its response — or release
         // the claim on failure so a later retry (same key) may try again.
         KeyState::Fresh => match apply(db, &plan) {

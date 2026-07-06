@@ -57,6 +57,37 @@ impl Request {
         self.idempotency_key = key.filter(|k| !k.trim().is_empty());
         self
     }
+
+    /// A stable hash of this request's **payload** — its args and `$ctx` — for the
+    /// idempotency store (D25). A genuine retry of the same request produces the same
+    /// fingerprint (so the stored response replays); a caller who reuses one key for a
+    /// *different* request produces a different one, which the store rejects rather than
+    /// silently answering with the first request's result.
+    ///
+    /// Only the payload is fingerprinted, not the callable or the key — the store already
+    /// scopes an entry by `(callable, key)`, so the fingerprint's job is purely to detect a
+    /// payload change under a reused `(callable, key)`. The idempotency key itself is
+    /// deliberately excluded (it *is* the entry's key). `serde_json::Map` is BTreeMap-backed
+    /// (sorted keys), so `to_string` is a canonical serialization and the hash is stable
+    /// across attempts.
+    pub fn fingerprint(&self) -> crate::idempotency::Fingerprint {
+        // FNV-1a over the canonical JSON of (args, ctx). A field-count prefix separates the
+        // two maps so that moving a field from args to ctx changes the hash (no ambiguous
+        // concatenation). FNV is stable across releases (unlike `DefaultHasher`), which the
+        // durable multi-instance store (deferred, D25) will rely on.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis.
+        for part in [&self.args, &self.ctx] {
+            let s = serde_json::Value::Object(part.clone()).to_string();
+            for b in s.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime.
+            }
+            // A separator byte between the two maps (see above).
+            h ^= 0xff;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
 }
 
 /// How the executed rows become the response body (queries.md / pagination.md).
@@ -400,4 +431,42 @@ fn find_mutation<'a>(decls: &'a [Decl], name: &str) -> Option<&'a Mutation> {
         Decl::Mutation(m) if m.name.node == name => Some(m),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The fingerprint is stable for the same payload, differs when args or `$ctx` change,
+    /// and is invariant to the idempotency key (the store scopes by key already — the
+    /// fingerprint's only job is to detect a payload change under a reused key, D25).
+    #[test]
+    fn fingerprint_tracks_the_payload_not_the_key() {
+        let base = Request::new("m", json!({ "a": 1, "b": "x" }), json!({ "org": "o-1" }));
+
+        // Same payload → same fingerprint, whatever the key.
+        let same = base
+            .clone()
+            .with_idempotency_key(Some("different-key".into()));
+        assert_eq!(base.fingerprint(), same.fingerprint());
+
+        // Key order in the JSON object does not matter (BTreeMap-backed, sorted).
+        let reordered = Request::new("m", json!({ "b": "x", "a": 1 }), json!({ "org": "o-1" }));
+        assert_eq!(base.fingerprint(), reordered.fingerprint());
+
+        // A different arg value → a different fingerprint.
+        let arg_changed = Request::new("m", json!({ "a": 2, "b": "x" }), json!({ "org": "o-1" }));
+        assert_ne!(base.fingerprint(), arg_changed.fingerprint());
+
+        // A different `$ctx` → a different fingerprint.
+        let ctx_changed = Request::new("m", json!({ "a": 1, "b": "x" }), json!({ "org": "o-2" }));
+        assert_ne!(base.fingerprint(), ctx_changed.fingerprint());
+
+        // Moving a field between args and ctx changes the hash (the separator prevents an
+        // ambiguous concatenation collapsing the two maps).
+        let a = Request::new("m", json!({ "x": 1 }), json!({}));
+        let b = Request::new("m", json!({}), json!({ "x": 1 }));
+        assert_ne!(a.fingerprint(), b.fingerprint());
+    }
 }

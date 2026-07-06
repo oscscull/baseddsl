@@ -843,3 +843,42 @@ inference exactly.
   header (a runtime concern; the trait shape is ready); a non-Rust client's `$ctx` typing rides D24's
   OpenAPI `x-ctx-requires` vendor extension (descriptive, not a generated struct) rather than this
   Rust-only struct.
+
+## D31 — idempotency-key request fingerprint (`based-runtime::idempotency`)
+Closes the D25 residue "rejecting a replayed key carrying *different* args." Until now the idempotency
+key alone was authoritative (the Stripe *default*): a caller who reused one `Idempotency-Key` for two
+**different** requests silently got the *first* request's response back for the second — a quiet wrong
+answer, the worst quadrant of principle 1. The key now also carries a **request fingerprint**, so a
+reused key on a changed payload is caught and rejected loudly instead of replayed.
+- **The fingerprint is a stable hash of the request payload** — its args + `$ctx`, `Request::fingerprint`.
+  FNV-1a over the canonical JSON of the two maps (`serde_json::Map` is `BTreeMap`-backed → sorted keys →
+  canonical `to_string`), with a separator byte between them so moving a field from args to `$ctx` changes
+  the hash. FNV (not `DefaultHasher`) because it is stable across releases — the durable multi-instance
+  store (still deferred, D25) will compare fingerprints minted by a different process. The idempotency key
+  and callable are **excluded** from the fingerprint: the store already scopes an entry by `(callable,
+  key)`, so the fingerprint's sole job is detecting a *payload* change under a reused `(callable, key)`.
+- **`IdempotencyStore::begin` grows a `fingerprint` parameter**, and each stored `Entry` (`InFlight` /
+  `Done`) records the fingerprint of the attempt that created it. A `begin` replays (`Done`) or blocks
+  (`InFlight`) **only** for a *matching* fingerprint; a different one is the new `KeyState::Mismatch`. The
+  matching case is unchanged — a genuine retry carries the same payload, so it still dedupes exactly as
+  before (D25). `record` preserves the claiming `begin`'s fingerprint (a stray record with no live claim
+  falls back to `Fingerprint::MAX`, which never matches a real request, so it can never be replayed).
+  `NoStore` ignores the fingerprint (always `Fresh`), so the "idempotency off" path is unchanged.
+- **`run_mutation` computes `req.fingerprint()` and threads it to `begin`**; a `Mismatch` becomes the new
+  `RunError::KeyReuse`. `dispatch` maps it to a **non-retryable `422`** `idempotency_key_reuse` (the
+  request is well-formed but its key/payload pairing is unprocessable — distinct from the retryable `409`
+  `idempotency_conflict` an in-flight *same-payload* duplicate still gets). The client's fix is a fresh
+  key for the genuinely different request; retrying the *same* key/payload is not the answer, hence
+  non-retryable. No write runs and nothing is replayed on the mismatch.
+- **Why not silently replay (the old Stripe default).** Replaying the first result for a *different*
+  request answers the wrong question — a correctness bug the caller can't see. Principle 1 (dangerous is
+  explicit + visible) and principle 2 (nothing consequential is true by omission) both say make it loud.
+  A `422` costs the careless caller a clear error; the careful caller (fresh key per request) is unaffected.
+- **Tests** (all `cargo test`, no infra): 2 new store unit tests (a different fingerprint on a `Done` and
+  on an `InFlight` key → `Mismatch`, and the original fingerprint still replays afterward — the mismatch
+  doesn't corrupt the entry), 1 `Request::fingerprint` unit test (stable per payload, key-invariant,
+  order-invariant, args↔ctx move detected), and 1 end-to-end `serve.rs` test (same key + different args →
+  `422` with no SQL, and the genuine retry still replays). The existing 4 idempotency tests carry a
+  stand-in fingerprint (the exact hash is opaque — only equality matters).
+- *Deferred (unchanged from D25):* the shared/durable multi-instance store (needs live infra; the seam +
+  the stable FNV fingerprint are now ready for it); key TTL/eviction.

@@ -92,7 +92,7 @@ pub mod http;
 
 pub use embed::Engine;
 pub use id::{IdGen, SeqIdGen};
-pub use idempotency::{IdempotencyStore, KeyState, MemStore, NoStore};
+pub use idempotency::{Fingerprint, IdempotencyStore, KeyState, MemStore, NoStore};
 pub use load::Compiled;
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,

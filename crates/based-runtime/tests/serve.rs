@@ -6,7 +6,7 @@
 //! bad/mismatched route; (2) success returns 200 + the shaped response; (3) every
 //! `PlanError` maps to its HTTP status + `{ error: { code, message } }`; (4) only POST
 //! is accepted (no GET query-string surface, calling.md); (5) a mutation idempotency
-//! key dedupes a retry (D25).
+//! key dedupes a retry, and (6) reusing one key for a *different* request is a 422 (D25).
 
 use based_ast::FileId;
 use based_parser::parse_file;
@@ -441,4 +441,77 @@ fn bad_request_does_not_consume_the_key() {
     );
     assert_eq!(ok.status, 200);
     assert_eq!(db2.calls.len(), 2);
+}
+
+/// Reusing one idempotency key for a *different* request is rejected with a 422, not
+/// silently answered with the first request's response (D25 fingerprint check). The first
+/// attempt commits under `req-x`; a second request under the *same* key but a different
+/// `total` must not run a write and must not replay the first row.
+#[test]
+fn reused_key_with_different_args_is_a_422() {
+    let c = compile(SCHEMA);
+    let store = MemStore::new();
+
+    // First request under the key: runs and records its response.
+    let mut db1 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
+    let mut ids1 = SeqIdGen::default();
+    let first = dispatch(
+        &c,
+        &mut db1,
+        &mut ids1,
+        &store,
+        "POST",
+        "/m/place_order",
+        json!({ "org": "o-1", "status": "open", "total": 7 }),
+        json!({}),
+        Some("req-x".to_string()),
+    );
+    assert_eq!(first.status, 200);
+
+    // Same key, *different* payload (`total` 999) → 422, no write, no replay.
+    let mut db2 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 999 }))]]);
+    let mut ids2 = SeqIdGen::default();
+    let reuse = dispatch(
+        &c,
+        &mut db2,
+        &mut ids2,
+        &store,
+        "POST",
+        "/m/place_order",
+        json!({ "org": "o-1", "status": "open", "total": 999 }),
+        json!({}),
+        Some("req-x".to_string()),
+    );
+    assert_eq!(reuse.status, 422);
+    assert_eq!(reuse.body["error"]["code"], "idempotency_key_reuse");
+    assert!(
+        db2.calls.is_empty(),
+        "a key-reuse rejection must run no SQL"
+    );
+    assert!(
+        db2.tx.is_empty(),
+        "a key-reuse rejection must open no transaction"
+    );
+
+    // The genuine retry (same key *and* payload) still replays the first response — the
+    // mismatch above didn't disturb the recorded entry.
+    let mut db3 = MockDb::new(vec![]);
+    let mut ids3 = SeqIdGen::default();
+    let retry = dispatch(
+        &c,
+        &mut db3,
+        &mut ids3,
+        &store,
+        "POST",
+        "/m/place_order",
+        json!({ "org": "o-1", "status": "open", "total": 7 }),
+        json!({}),
+        Some("req-x".to_string()),
+    );
+    assert_eq!(retry.status, 200);
+    assert_eq!(retry.body, json!({ "status": "open", "total": 7 }));
+    assert!(
+        db3.calls.is_empty(),
+        "the genuine retry replays, runs no SQL"
+    );
 }
