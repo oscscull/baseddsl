@@ -223,6 +223,18 @@ the user; see the decision block below. `spec/syntax/migrations.md` is written b
     done, D26 — this is packaging). D2. CI running the real-DB suites (A) + example builds (B) +
     extension build (C) + the migration apply tests (E4) so the whole thing stays green.
 
+**Track F — source hygiene pass (quality, cross-cutting; standalone value, off the DoD critical
+path — worked when it won't preempt A/B/D/E).**
+  - F1. **Finalize comments across all source.** Sweep every `crates/**/*.rs` and rewrite build-time /
+    WIP narration ("here's what I'm building", running commentary on construction-in-progress) into
+    clean, **brief** what+why comments matching surrounding density. `sqlite.rs` is the known offender —
+    do it first, then the rest of the workspace. Source must read as finished source, not a scratch pad:
+    narration reads as unfinished and leads humans *and* agents off task (invites re-litigation, buries
+    intent). Move TODOs out of code into PLAN.md / the relevant roadmap `.md` unless a TODO is genuinely
+    must-do/blocking (then it may stay inline, terse). Comment-only, so it gates on `cargo fmt --check`
+    + `cargo clippy` (tests unaffected). The standing rule is recorded in Conventions below so new code
+    holds the bar from the start.
+
 ## Pipeline (data flow)
 
 ```
@@ -909,5 +921,9 @@ should chase the former.
   isn't obvious from the message.
 - Audience is LLMs + reviewers: optimize tokens-to-comprehend, readable > terse
   (CLAUDE.md). Match surrounding comment density.
+- **Comments state what + why, briefly — never build-time narration.** Source is finished
+  source, not a scratch pad: no "here's what I'm building" / WIP running commentary (it reads
+  as unfinished and leads humans *and* agents off task). TODOs live in PLAN.md / roadmap `.md`,
+  not inline, unless genuinely must-do/blocking. (One-time cleanup of existing narration = Track F1.)
 - `spec/principles.md` are the tiebreakers, in order. `spec/decisions.md` (D1–D9)
   resolves anything the prose left open.
