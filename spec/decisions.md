@@ -1180,3 +1180,52 @@ for the last target dialect (SQLite ✅ D27, MariaDB ✅ D35, Postgres ✅ here)
   JSON-encoded *string*, not a reconstructed object — the runtime carries no per-column types into row
   shaping), statement timeouts, deadlock-retry, pool-exhaustion → 503 under load — designed (D20), not
   yet stress-proven live.
+
+## D39 — migration snapshot + diff engine (Track E2)
+The snapshot + diff half of migration generation (`based-codegen::migrate`; CLI `based migrate gen`).
+D37 pinned the *artifact layout* + `@was`; migrations.md (E1) wrote the *model*; this records the
+*implementation* decisions E2 had to commit to (the spec left the snapshot serialization + step-data
+shape as E2's TODOs).
+- **Placement: `based-codegen::migrate`, not a new crate.** The snapshot/diff format is decoupled from
+  SQL text (it names no dialect), but E3's per-dialect renderer lowers the neutral `Step`s over the
+  *same* `Dialect` seam the DDL/DML emitters already use, so the migration engine lives beside them —
+  one crate owns "neutral IR → target" (P4, one lowering seam). No `based-migrate` crate.
+- **`schema.snap` grammar (finalizing migrations.md's TODO).** A stable-ordered indented text block in
+  the schema's own neutral vocabulary — *not* JSON, *not* SQL (dialect-neutral: `int`/`text`/`uuid`,
+  never `BIGINT`; a `default=now()`, never `CURRENT_TIMESTAMP`):
+  ```
+  snapshot v1 dialect=neutral
+  table <name> [soft_delete=<col>:<mode>] [created=<col>] [updated=<col>] [scope=(<col> = $ctx.<f>, …)] [sort=(<col> <dir>, …)]
+    column <name> <type> null|not_null [default=<lit>] [unique] [fk=<Model>]
+    index  <name> (<col>, …) [unique] [inferred]
+  ```
+  Determinism is the hard invariant (the loop forbids wall-clock in reproducible library paths): tables
+  sorted by name, columns + indexes sorted by name within a table, every derived name (`inf_`/`idx_`/
+  `uq_`, FK `<field>_id`) reproduced exactly as `sql::ddl` names it. A relation is its FK column
+  (`fk=<Model>` records the target so a retyped/dropped relation diffs as an add/drop/alter of
+  `<field>_id`, D3). The default `id` (uuid/not-null/not-unique, D2) is **elided** and carried as an
+  invariant; a non-default `id` records itself. Soft-delete/`@created`/`@updated` roles + `@scope`/
+  `@sort` ride the table header (they emit no column step but must round-trip so drift stays honest).
+  `schema.snap` is **timestamp-free** — a migration timestamp, if ever wanted, is CLI-layer metadata,
+  never snapshot content (keeps `schema.snap` byte-stable across runs).
+- **Round-trippable.** `Snapshot::render`/`Snapshot::parse` are inverses, so the stored baseline parses
+  back to the identical neutral model a `diff` compares against — the property the offline diff (no DB)
+  relies on. A corrupt/hand-edited `schema.snap` is a loud `ParseError(line, message)`, never a silent
+  mis-diff.
+- **Neutral step vocabulary + destructive *marking* (not gating).** `diff(prev_snapshot, schema)` →
+  `Vec<Step>` in migrations.md's `up.mig` vocabulary (create/drop table, add/drop/alter column, add/drop
+  index/unique). `0001_init` (empty prior) is a full create set == `based gen sql` from scratch. Renames
+  are **drop + add**, never auto-guessed (the `@was` RENAME step is E5). E2 *marks* a data-losing step
+  `Step::destructive()` — drop table/column, a **narrowing** type change (anything but a widen to `text`,
+  conservative per P1), a new `not_null` without a default, a new `unique` over existing data — so E4's
+  apply can gate on `--allow-destructive`/`unsafe("reason")`; E2 marks, **never applies** (offline).
+- **`based migrate gen [name]`** loads the checked schema (reuses `load_checked`), reads the highest-
+  `NNNN` `migrations/*/schema.snap` (empty if none), diffs, and — only if the step list is non-empty —
+  writes the next zero-padded `NNNN_slug/{up.mig, schema.snap}`. **`NNNN` comes from counting existing
+  dirs, not time** (determinism). Slug = the snake-cased `[name]` arg, else `init` (first) / `schema_
+  update`. No changes ⇒ writes nothing, exits clean. Fully offline — no database.
+- *Deferred to E3/E4/E5, unchanged:* the per-dialect SQL render of the neutral steps + the `raw(dialect)`
+  passthrough + `based migrate render` (E3); apply + the `_based_migrations` ledger + hash/tamper rule +
+  the destructive **gate** + `verify`/`status` (E4); the `@was` RENAME step + the offline LSP drift
+  diagnostic (E5). The raw-step structural-effect annotation (migrations.md's other open TODO) is
+  untouched — E2 emits no `raw` steps.

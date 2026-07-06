@@ -44,6 +44,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Generate + manage schema migrations (E2: `gen` — snapshot + diff, offline).
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
     /// Serve the checked schema as a live RPC service (`POST /q|m/<name>`).
     Serve {
         /// Project root (holds based.toml). Defaults to the current directory.
@@ -66,6 +71,21 @@ enum Command {
         /// Max connections per shard pool (the per-box concurrency cap).
         #[arg(long, default_value_t = 32)]
         pool_max: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Diff the current `.bsl` against the latest `schema.snap` and write the next
+    /// `migrations/NNNN_slug/{up.mig, schema.snap}`. No changes ⇒ writes nothing.
+    /// Offline + deterministic — never touches a database (E2).
+    Gen {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// A short label for the migration slug (snake-cased). When omitted, the slug
+        /// is derived from the change (`init` for the first, else `schema_update`).
+        name: Option<String>,
     },
 }
 
@@ -109,6 +129,9 @@ fn main() -> anyhow::Result<()> {
             GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
             GenTarget::Client { root, out } => cmd_gen_client(&root, out.as_deref()),
             GenTarget::Openapi { root, out } => cmd_gen_openapi(&root, out.as_deref()),
+        },
+        Command::Migrate { action } => match action {
+            MigrateAction::Gen { root, name } => cmd_migrate_gen(&root, name.as_deref()),
         },
         Command::Facts { root, json } => cmd_facts(&root, json),
         Command::Serve {
@@ -189,6 +212,94 @@ fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
         None => print!("{doc}"),
     }
     Ok(())
+}
+
+/// `based migrate gen [name]`: diff the current `.bsl` against the latest captured
+/// snapshot and, if there are changes, write the next `migrations/NNNN_slug/{up.mig,
+/// schema.snap}` (E2). Offline + deterministic: the baseline is a stored snapshot, never
+/// a database. No changes ⇒ writes nothing and says so (a clean exit).
+fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> anyhow::Result<()> {
+    use based_codegen::migrate;
+
+    let (_project, schema, _decls, _sources, _warnings) = load_checked(root)?;
+    let migrations_dir = root.join("migrations");
+
+    // The baseline is the highest-NNNN migration's snapshot (empty for 0001_init).
+    let existing = existing_migrations(&migrations_dir)?;
+    let prev = match existing.last() {
+        Some((_, dir)) => {
+            let snap_path = dir.join("schema.snap");
+            let text = std::fs::read_to_string(&snap_path)
+                .with_context(|| format!("reading {}", snap_path.display()))?;
+            migrate::Snapshot::parse(&text)
+                .with_context(|| format!("parsing {}", snap_path.display()))?
+        }
+        None => migrate::Snapshot::default(),
+    };
+
+    let steps = migrate::diff(&prev, &schema);
+    if steps.is_empty() {
+        println!("no schema changes since the latest migration — nothing to generate");
+        return Ok(());
+    }
+
+    // Next number is a count of existing dirs (never a timestamp — determinism, E2).
+    let next = existing.last().map(|(n, _)| n + 1).unwrap_or(1);
+    let slug = migration_slug(name, next);
+    let dir_name = format!("{next:04}_{slug}");
+    let dir = migrations_dir.join(&dir_name);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let up = migrate::render_up(&steps);
+    let snap = migrate::snapshot(&schema);
+    std::fs::write(dir.join("up.mig"), &up)?;
+    std::fs::write(dir.join("schema.snap"), &snap)?;
+
+    let destructive = steps.iter().filter(|s| s.destructive()).count();
+    println!(
+        "wrote migrations/{dir_name}/ ({} step(s){})",
+        steps.len(),
+        if destructive > 0 {
+            format!(", {destructive} destructive")
+        } else {
+            String::new()
+        }
+    );
+    Ok(())
+}
+
+/// Existing `migrations/NNNN_slug/` directories, sorted by their `NNNN` number. A
+/// non-conforming entry (no `NNNN_` prefix) is ignored — only zero-padded sequential
+/// dirs order the ledger (migrations.md).
+fn existing_migrations(dir: &Path) -> anyhow::Result<Vec<(u32, PathBuf)>> {
+    let mut out = Vec::new();
+    if !dir.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some((num, _)) = name.split_once('_') {
+            if let Ok(n) = num.parse::<u32>() {
+                out.push((n, entry.path()));
+            }
+        }
+    }
+    out.sort_by_key(|(n, _)| *n);
+    Ok(out)
+}
+
+/// The migration slug: the snake-cased `name` argument, or a default (`init` for the
+/// first migration, else `schema_update`). Cosmetic — only `NNNN` orders (migrations.md).
+fn migration_slug(name: Option<&str>, number: u32) -> String {
+    match name {
+        Some(n) => based_sema::snake_case(&n.replace([' ', '-'], "_")),
+        None if number == 1 => "init".to_string(),
+        None => "schema_update".to_string(),
+    }
 }
 
 /// The front end's output: the project, the checked schema, the declaration set,

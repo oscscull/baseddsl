@@ -6,13 +6,16 @@
 //! ([`client`]): `CheckedSchema` -> a Rust client module (M4). The **OpenAPI** spec
 //! ([`openapi`]): `CheckedSchema` -> one OpenAPI document over the same wire, so
 //! `openapi-generator` yields clients in any language (polyglot via one emitter, not
-//! N — D23). Each is a module reading the same resolved IR.
+//! N — D23). The **migration** engine ([`migrate`]): `CheckedSchema` -> a canonical
+//! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list (E2). Each
+//! is a module reading the same resolved IR.
 //!
 //! The compiler seed is `based_sema::CheckedSchema`. Codegen never re-derives
 //! resolution facts (table names, FK columns, soft-delete mode) — those live on the
 //! IR. It only picks physical representations (SQL types, index names) per dialect.
 
 pub mod client;
+pub mod migrate;
 pub mod openapi;
 pub mod sql;
 
