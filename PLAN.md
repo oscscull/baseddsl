@@ -705,10 +705,12 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
   **diagnostics** (every parse/sema error + lint, mapped span→range, republished for
   all files so fixes clear), **inlay hints** (each fact placed next to its
   declaration — inverse after the field, index at the model header line — with the
-  `detail` as tooltip), and **hover** (the fuller "why" for any fact whose span
-  covers the cursor). `LineIndex` does faithful UTF-16 position mapping (LSP's
-  default). Tests: `based-lsp/src/compile.rs` unit tests (position round-trips incl.
-  multibyte; `compile` over commerce). Smoke-tested end-to-end over the JSON-RPC wire.
+  `detail` as tooltip), **hover** (the fuller "why" for any fact whose span
+  covers the cursor), and **go-to-definition** (Cmd+click a model/type reference →
+  its declaration, cross-file; D43). `LineIndex` does faithful UTF-16 position mapping
+  (LSP's default). Tests: `based-lsp/src/compile.rs` unit tests (position round-trips
+  incl. multibyte; `compile` over commerce; go-to-def cross-file). Smoke-tested
+  end-to-end over the JSON-RPC wire.
 - **`based facts [--json]`** — the same core exposed on the CLI (`file:line:col  kind
   label` + a `= note` "why" line, or a hand-rolled deterministic JSON array).
   *Deferred inside M5* (what's shipped is the principle-8 core — derived facts +
@@ -725,13 +727,20 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
     already speaks standard LSP, so any client attaches; an actual packaged extension
     is what turns this into something a user runs. Wanted *before* the IDE-ergonomics
     features below, because an MVP a human can use beats a smarter headless server.
-  - **Go-to-definition / completion / rename — planned, needed before v1, deferred.**
-    These are general IDE ergonomics, not derived-fact surfacing, so principle 8
-    neither requires nor forbids them — they're an ordinary product call, sequenced
-    after the VS Code client. They also need infra the server lacks today: a
-    position→symbol resolution layer (offset → the resolved thing here + all its
-    reference sites, cross-file), which rename in particular depends on. Land the
-    client first, then build this layer and these features on top.
+  - **Go-to-definition ✅ done (D43); completion / rename still deferred.**
+    General IDE ergonomics, not derived-fact surfacing, so principle 8 neither
+    requires nor forbids them — an ordinary product call, sequenced after the VS Code
+    client. Go-to-def landed as a Track C follow-up: `Snapshot` now retains the parsed
+    `decls`, `Snapshot::definition_at(fid, offset)` collects every model/type-reference
+    `Ident` across the AST (field types, opt-in inverses, shape `from`, query/mutation
+    return + param types + `get`/`list` targets, write targets incl. nested `tx`,
+    filter param types) and resolves the one under the cursor to its `Model`/`Shape`
+    declaration's name span — cross-file, routed to the owning snapshot exactly like
+    hover/inlay. Also shipped: **type-name syntax coloring** in the VS Code grammar
+    (`editors/vscode/syntaxes/bsl.tmLanguage.json` `#types`: builtin primitives →
+    `support.type.primitive`, PascalCase refs → `entity.name.type`; D43). *Still
+    deferred:* completion + rename — rename needs the *reference-site* index (all uses
+    of a symbol), a superset of the single-target resolution go-to-def uses.
 
 **M6 — runtime (`based-runtime`). 🚧 read + write path done.** The engine that turns
 a wire request into a bound, executable statement and shapes the result. Architecture:

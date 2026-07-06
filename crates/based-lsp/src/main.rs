@@ -164,6 +164,7 @@ impl LanguageServer for Backend {
                 )),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -250,6 +251,41 @@ impl LanguageServer for Backend {
         Ok(Some(hints))
     }
 
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let st = self.state.lock().unwrap();
+        let pos = params.text_document_position_params;
+        let Ok(path) = pos.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        // Route to the snapshot owning the requested file (its nearest manifest),
+        // exactly as hover/inlay do, so cross-file references resolve.
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        let offset = snapshot.lines[fid].offset(pos.position) as u32;
+
+        // Resolve the reference under the cursor to its declaration's name span,
+        // then point the editor at that span in whichever file declares it.
+        let Some(def) = snapshot.definition_at(fid, offset) else {
+            return Ok(None);
+        };
+        let def_fid = def.file.0 as usize;
+        let Ok(uri) = Url::from_file_path(&snapshot.sources[def_fid].0) else {
+            return Ok(None);
+        };
+        let range = span_to_range(def, &snapshot.lines[def_fid]);
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri,
+            range,
+        })))
+    }
+
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let st = self.state.lock().unwrap();
         let pos = params.text_document_position_params;
@@ -287,13 +323,18 @@ impl LanguageServer for Backend {
     }
 }
 
+/// Map a source `Span`'s byte range onto an LSP `Range` via the owning file's index.
+fn span_to_range(span: based_ast::Span, idx: &compile::LineIndex) -> Range {
+    Range::new(
+        idx.position(span.start as usize),
+        idx.position(span.end as usize),
+    )
+}
+
 /// Map an internal diagnostic onto the LSP wire, resolving its span to a range.
 fn to_lsp_diagnostic(d: &based_diagnostics::Diagnostic, idx: &compile::LineIndex) -> Diagnostic {
     let range = match d.span {
-        Some(span) => Range::new(
-            idx.position(span.start as usize),
-            idx.position(span.end as usize),
-        ),
+        Some(span) => span_to_range(span, idx),
         None => Range::default(),
     };
     let severity = Some(match d.severity {

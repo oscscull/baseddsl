@@ -1343,3 +1343,27 @@ plus `based-codegen::migrate::{sql_statements, content_hash}` (the offline halve
   harness — apply against a real `mariadb:11.4`, ledger + column verified, re-apply no-op, tamper), both ran
   genuinely green. *Deferred:* multi-instance apply coordination (advisory lock for racing deployers, parallels
   D25's durable-store deferral); `@was` renames + the LSP drift diagnostic (E5); the `raw(dialect)` up step.
+
+## D43 — LSP go-to-definition + type-name syntax coloring (Track C follow-up)
+The first non-diagnostic IDE ergonomic, plus the coloring that makes types legible. Both are ordinary
+product calls (principle 8 neither requires nor forbids them), sequenced after the VS Code client (D36).
+- **Go-to-definition = reference-collection over the retained AST, no new resolver.** `Snapshot` now keeps the
+  parsed `decls` (the same AST sema checked); `Snapshot::definition_at(fid, offset)` walks *every* AST position
+  where a name *points at* a declared type — field types (`BaseType::Model`), opt-in inverses (`InverseRef.model`),
+  shape `from`, query/mutation return types (`RetType.ty`) + param types (`Param.ty`) + `get`/`list` targets
+  (`Statement.model`), write targets (`WriteStmt::{Create,Update,Delete,Restore,HardDelete}.model`, recursing
+  through `tx`), and filter param types — finds the reference `Ident` whose span covers the cursor, and resolves
+  it to the `Model` **or** `Shape` declaration of that name, returning that decl's *name* span. (Shapes included
+  because a return type may name a shape, not just a model — strictly more useful at no extra cost.) Cross-file:
+  routed to the snapshot *owning* the requested file (nearest `based.toml`, D40) exactly as hover/inlay, so a
+  reference resolves to its declaration in a sibling file. `None` when the cursor is off any reference or the
+  type is undeclared — the definition is *not* invented, matching the diagnostic that already flags it. This is
+  a single-target lookup, deliberately **not** the full reference-site index rename needs (still deferred): the
+  collector finds one match under the cursor rather than indexing all uses of a symbol.
+- **Type-name coloring = a PascalCase heuristic, not semantic resolution.** TextMate is regex-based, so the
+  grammar (`editors/vscode/syntaxes/bsl.tmLanguage.json` `#types`, after `#keywords` so lowercase keywords win)
+  has two rules, primitives *first*: builtin scalars (`text|int|bool|timestamp|date|json|uuid|Id` — the exact
+  `Primitive` variants) → `support.type.primitive`, then any PascalCase word (`[A-Z]…`, D7's model-name
+  convention) → `entity.name.type`. Model refs get a distinct theme color from builtin scalars and from
+  lowercase field names/keywords. Precision is intentionally the heuristic's, not the semantic analyzer's — a
+  PascalCase word *is* a type reference by convention; the LSP already carries the exact diagnostics.

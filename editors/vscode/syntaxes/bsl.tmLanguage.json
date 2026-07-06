@@ -8,6 +8,7 @@
     { "include": "#raw" },
     { "include": "#decorators" },
     { "include": "#keywords" },
+    { "include": "#types" },
     { "include": "#params" },
     { "include": "#numbers" }
   ],
@@ -46,6 +47,18 @@
         {
           "match": "\\b(default|now|asc|desc|max_rows|reason|on|true|false|null)\\b",
           "name": "constant.language.bsl"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "match": "\\b(text|int|bool|timestamp|date|json|uuid|Id)\\b",
+          "name": "support.type.primitive.bsl"
+        },
+        {
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+          "name": "entity.name.type.bsl"
         }
       ]
     },

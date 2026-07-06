@@ -13,7 +13,7 @@
 //! references inside a manifest resolve, and multiple embedded schemas in one
 //! workspace stay independent. A file under no manifest keeps a single-file fallback.
 
-use based_ast::{Decl, FileId};
+use based_ast::{BaseType, Decl, FileId, Ident, Member, QueryBody, Span, TypeExpr, WriteStmt};
 use based_diagnostics::Diagnostic;
 use based_facts::Fact;
 use std::collections::HashMap;
@@ -27,6 +27,10 @@ pub struct Snapshot {
     /// Byte-offset <-> LSP position index, parallel to `sources`.
     pub lines: Vec<LineIndex>,
     pub facts: Vec<Fact>,
+    /// The parsed declarations (spans stamped with each file's `FileId`), retained
+    /// so position-based requests (go-to-definition) can resolve references against
+    /// the same AST the front end checked. Empty if no file parsed clean.
+    pub decls: Vec<Decl>,
     /// Diagnostics carrying a span (attachable to a file). Spanless project-level
     /// diagnostics are surfaced separately (as window messages).
     pub diagnostics: Vec<Diagnostic>,
@@ -39,6 +43,96 @@ impl Snapshot {
     pub fn file_id_of(&self, path: &Path) -> Option<usize> {
         let want = canon(path);
         self.sources.iter().position(|(p, _)| canon(p) == want)
+    }
+
+    /// Resolve a model/type reference under the cursor to the span of the matching
+    /// declaration's name. `(fid, offset)` is the byte offset within file `fid`.
+    /// Returns the name span of the `Model` (or `Shape`) the reference names — a
+    /// `Location` the editor jumps to — or `None` if the cursor is not on a type
+    /// reference, or the referenced type is undeclared in this project.
+    pub fn definition_at(&self, fid: usize, offset: u32) -> Option<Span> {
+        let target = collect_type_refs(&self.decls).into_iter().find(|id| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        })?;
+        self.decls.iter().find_map(|d| match d {
+            Decl::Model(m) if m.name.node == target.node => Some(m.name.span),
+            Decl::Shape(s) if s.name.node == target.node => Some(s.name.span),
+            _ => None,
+        })
+    }
+}
+
+/// Every model/type-reference identifier across the AST, with its span — the sites
+/// a name *points at* a declared model or shape (not the declarations themselves).
+/// Traverses all reference-bearing positions: field types, opt-in inverses, shape
+/// `from`, query/mutation return types + param types + `get`/`list` targets, write
+/// targets (incl. nested `tx`), and filter param types.
+fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
+    let mut out = Vec::new();
+    for d in decls {
+        match d {
+            Decl::Model(m) => {
+                for member in &m.members {
+                    if let Member::Field(f) = member {
+                        collect_type_expr(&f.ty, &mut out);
+                        if let Some(inv) = &f.inverse {
+                            out.push(&inv.model);
+                        }
+                    }
+                }
+            }
+            Decl::Shape(s) => out.push(&s.from),
+            Decl::Query(q) => {
+                out.push(&q.ret.ty);
+                for p in &q.params {
+                    if let Some(ty) = &p.ty {
+                        collect_type_expr(ty, &mut out);
+                    }
+                }
+                if let QueryBody::Block(stmt) = &q.body {
+                    out.push(&stmt.model);
+                }
+            }
+            Decl::Mutation(m) => {
+                out.push(&m.ret.ty);
+                for p in &m.params {
+                    if let Some(ty) = &p.ty {
+                        collect_type_expr(ty, &mut out);
+                    }
+                }
+                collect_write_targets(&m.body, &mut out);
+            }
+            Decl::Filter(f) => {
+                for p in &f.params {
+                    if let Some(ty) = &p.ty {
+                        collect_type_expr(ty, &mut out);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The model reference in a type expression, if its base is a model (not a primitive).
+fn collect_type_expr<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Ident>) {
+    if let BaseType::Model(id) = &ty.base {
+        out.push(id);
+    }
+}
+
+/// Write-target models, recursing through `tx` blocks; `raw` carries no target.
+fn collect_write_targets<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
+    for w in body {
+        match w {
+            WriteStmt::Create { model, .. }
+            | WriteStmt::Update { model, .. }
+            | WriteStmt::Delete { model, .. }
+            | WriteStmt::Restore { model, .. }
+            | WriteStmt::HardDelete { model, .. } => out.push(model),
+            WriteStmt::Tx(inner) => collect_write_targets(inner, out),
+            WriteStmt::Raw(_) => {}
+        }
     }
 }
 
@@ -134,6 +228,7 @@ fn compile_paths(
         sources,
         lines,
         facts,
+        decls,
         diagnostics,
         project_diagnostics,
     }
@@ -322,6 +417,36 @@ mod tests {
             "single-file fallback should not resolve the sibling model: {:?}",
             loose.diagnostics
         );
+    }
+
+    /// A cursor inside a model *reference* (`org: Org`) resolves to that model's
+    /// declaration span in the sibling file that declares it — the go-to-definition
+    /// core, hermetic over a two-file manifest project.
+    #[test]
+    fn goto_definition_resolves_model_reference_cross_file() {
+        let ws = TempWorkspace::new("gotodef");
+        ws.write("based.toml", "");
+        ws.write("org.bsl", "Org { name: text }\n");
+        ws.write("user.bsl", "User {\n  org: Org\n  name: text\n}\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // Cursor mid-`Org` in the `org: Org` field type of user.bsl.
+        let user_fid = snap.file_id_of(&ws.path("user.bsl")).unwrap();
+        let src = &snap.sources[user_fid].1;
+        let off = (src.find("Org").unwrap() + 1) as u32;
+        let def = snap
+            .definition_at(user_fid, off)
+            .expect("reference resolves to a declaration");
+
+        // It points at the `Org` model's name span, in org.bsl.
+        let (def_path, def_src) = &snap.sources[def.file.0 as usize];
+        assert!(def_path.ends_with("org.bsl"), "{def_path:?}");
+        assert_eq!(&def_src[def.start as usize..def.end as usize], "Org");
+
+        // Whitespace (a non-reference offset) resolves to nothing.
+        let ws_off = src.find("\n  name").unwrap() as u32;
+        assert_eq!(snap.definition_at(user_fid, ws_off), None);
     }
 
     /// A throwaway workspace dir under the system temp, removed on drop.
