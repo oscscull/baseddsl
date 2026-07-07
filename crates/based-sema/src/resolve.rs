@@ -26,6 +26,11 @@ pub struct Cx<'a> {
     /// shape's relation reaches to find joined *scoped* models, whose `@scope` codegen
     /// injects into the join `ON` — so the callable must require their `$ctx` fields.
     pub shape_bodies: &'a HashMap<String, &'a [ShapeField]>,
+    /// Resolved `scope` decls (auth.md / D46) — for validating a callable's
+    /// `scoped Name` acknowledgement.
+    pub scopes: &'a [RScope],
+    /// scope name -> index into `scopes`.
+    pub scope_index: &'a HashMap<String, usize>,
 }
 
 impl<'a> Cx<'a> {
@@ -34,6 +39,9 @@ impl<'a> Cx<'a> {
     }
     pub fn find(&self, name: &str) -> Option<usize> {
         self.index.get(name).copied()
+    }
+    pub fn scope(&self, name: &str) -> Option<&RScope> {
+        self.scope_index.get(name).map(|&i| &self.scopes[i])
     }
 }
 
@@ -620,72 +628,6 @@ fn check_raw_params(raw: &RawSql, params: &[String], sink: &mut Sink) {
 
 pub fn check_sort_term(t: &SortTerm, model: usize, cx: &Cx, sink: &mut Sink) {
     resolve_path(&t.path, model, cx, sink);
-}
-
-/// Restrict `@scope` to a **uniform single-owner** row filter (auth.md Handle 2 / D32):
-/// a conjunction (`and`) of `col = $ctx.field` equalities where `col` is a single-segment
-/// column / forward-FK on the model and the RHS is `$ctx.<field>`. That shape is exactly
-/// what lets scope be injected into every read *and* write *and* auto-set on `create` (a
-/// non-equality / multi-hop / caller-param scope has no create-time projection). Anything
-/// else is `E0180`: it is not a scope but a per-query `where` (Handle 1) or a `guard`
-/// (Handle 3). `fallback` spans nodes that carry none of their own. Path *columns* are
-/// resolved separately by `check_predicate`; this only fixes the *form*.
-pub fn check_scope_form(p: &Predicate, fallback: Span, sink: &mut Sink) {
-    match p {
-        Predicate::And(a, b) => {
-            check_scope_form(a, fallback, sink);
-            check_scope_form(b, fallback, sink);
-        }
-        Predicate::Cmp {
-            path,
-            op: Op::Eq,
-            value,
-        } => {
-            let span = path.segments.first().map(|s| s.span).unwrap_or(fallback);
-            if path.segments.len() != 1 {
-                sink.error_note(
-                    code::SCOPE_FORM,
-                    span,
-                    "an `@scope` term must compare a single column, not a relation path",
-                    "scope is a uniform single-owner filter; reach across relations in a per-query `where` (Handle 1)",
-                );
-            }
-            match value {
-                Value::Param(pr) if pr.name.node == "ctx" && pr.path.len() == 1 => {}
-                Value::Param(pr) => sink.error(
-                    code::SCOPE_FORM,
-                    pr.name.span,
-                    "an `@scope` term compares a column against `$ctx.<field>` only",
-                ),
-                _ => sink.error_note(
-                    code::SCOPE_FORM,
-                    span,
-                    "an `@scope` term compares a column against `$ctx.<field>`",
-                    "scope is parameterized by request context (auth.md); a literal/computed filter is a per-query `where` (Handle 1)",
-                ),
-            }
-        }
-        other => sink.error_note(
-            code::SCOPE_FORM,
-            scope_pred_span(other, fallback),
-            "`@scope` must be a conjunction of `col = $ctx.field` equalities",
-            "`or` / `in` / ranges / `not` / named filters aren't uniform single-owner scope — use a per-query `where` (Handle 1) or a `guard` (Handle 3)",
-        ),
-    }
-}
-
-/// A best-effort span for a scope predicate node (for `E0180` on a node without an
-/// intrinsic span — `And`/`Not` wrappers). Falls back to the decorator span.
-fn scope_pred_span(p: &Predicate, fallback: Span) -> Span {
-    match p {
-        Predicate::Bare(path) | Predicate::Cmp { path, .. } => {
-            path.segments.first().map(|s| s.span).unwrap_or(fallback)
-        }
-        Predicate::FilterCall { name, .. } => name.span,
-        Predicate::Raw(raw) => raw.span,
-        Predicate::Not(inner) => scope_pred_span(inner, fallback),
-        Predicate::Or(a, _) | Predicate::And(a, _) => scope_pred_span(a, fallback),
-    }
 }
 
 /// Resolve a relation's custom `on:` join predicate (relations.md, resume #5).

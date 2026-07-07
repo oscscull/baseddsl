@@ -131,5 +131,6 @@ fn summarize_decl(decl: &Decl) -> String {
             m.body.len()
         ),
         Decl::Filter(f) => format!("filter {}  params={}", f.name.node, f.params.len()),
+        Decl::Scope(s) => format!("scope {}  terms={}", s.name.node, s.terms.len()),
     }
 }

@@ -59,8 +59,9 @@ fn create_binds_id_relation_fk_and_engine_timestamps() {
 fn update_injects_soft_delete_scope_and_bumps_updated() {
     let out = gen(r#"
         Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
-        @scope(org = $ctx.org)
+        @scope Tenant
         @updated(updated_at)
         Order {
           deleted_at: timestamp?
@@ -69,7 +70,7 @@ fn update_injects_soft_delete_scope_and_bumps_updated() {
           status: text
         }
         shape OrderCard from Order { status }
-        mutation set_status(id: Id, status: text) -> OrderCard {
+        mutation set_status(id: Id, status: text) -> OrderCard scoped Tenant {
           update Order where (id = $id) { status = $status };
         }
         "#);
@@ -142,11 +143,12 @@ fn delete_on_soft_model_rewrites_to_tombstone_update() {
 fn hard_delete_emits_real_delete_and_keeps_scope() {
     let out = gen(r#"
         Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
-        @scope(org = $ctx.org)
+        @scope Tenant
         Order { deleted_at: timestamp?, org: Org, status: text }
         shape OrderCard from Order { status }
-        mutation purge(id: Id) -> OrderCard {
+        mutation purge(id: Id) -> OrderCard scoped Tenant {
           hard delete Order where (id = $id);
         }
         "#);
@@ -341,10 +343,11 @@ fn create_auto_sets_the_scope_column_from_ctx() {
     // from `:ctx_<field>`, never a caller param. Cross-scope create is inexpressible.
     let out = gen(r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Order { org: Org, total: int }
         shape OrderCard from Order { total }
-        mutation place(total: int) -> OrderCard { create Order { total = $total }; }
+        mutation place(total: int) -> OrderCard scoped Tenant { create Order { total = $total }; }
         "#);
     // `org_id` is injected into the INSERT bound to `:ctx_org`, alongside the engine id.
     assert!(
@@ -370,8 +373,9 @@ fn unscoped_mutation_omits_scope_injection_and_auto_set() {
     // supplies the scope column and the write carries no injected scope predicate.
     let out = gen(r#"
         Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
-        @scope(org = $ctx.org)
+        @scope Tenant
         Order { deleted_at: timestamp?, org: Org, total: int }
         shape OrderCard from Order { total }
         mutation import_order(org: Id, total: int) -> OrderCard
@@ -393,7 +397,8 @@ fn unscoped_mutation_omits_scope_injection_and_auto_set() {
 fn unscoped_update_omits_the_scope_guard() {
     let out = gen(r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         @updated(updated_at)
         Order { updated_at: timestamp, org: Org, status: text }
         shape OrderCard from Order { status }

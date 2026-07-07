@@ -472,3 +472,89 @@ fn unindexed_clause_forms() {
         matches!(clause_of(&sf.decls[2]).kind, UnindexedKind::Unsafe(Some(r)) if r == "ops table, tiny")
     );
 }
+
+#[test]
+fn scope_decl_and_refs() {
+    // The named-scope surface (auth.md / D46/D47): a `scope` decl, the `@scope Name`
+    // model decorator (an alternative; comma-separated names are one conjunction), and
+    // the `scoped Name` callable acknowledgement.
+    let sf = parse_ok(
+        r#"
+        scope Tenant (org: Org = $ctx.org, region: Region = $ctx.region)
+        @soft_delete(deleted_at)
+        @scope Tenant
+        Order { deleted_at: timestamp?, org: Org, region: Region, total: int }
+        shape OrderCard from Order { total }
+        query order_by_id(id) -> OrderCard scoped Tenant;
+        mutation place(total: int) -> OrderCard scoped Tenant { create Order { total = $total }; }
+        "#,
+    );
+    // The scope decl carries two `col: Type = $ctx.field` terms.
+    let Decl::Scope(s) = &sf.decls[0] else {
+        panic!("expected a scope decl, got {:?}", sf.decls[0]);
+    };
+    assert_eq!(s.name.node, "Tenant");
+    assert_eq!(s.terms.len(), 2);
+    assert_eq!(s.terms[0].col.node, "org");
+    assert_eq!(s.terms[0].ctx.name.node, "ctx");
+    assert_eq!(s.terms[0].ctx.path[0].node, "org");
+
+    // The model carries one `@scope` alternative naming `Tenant`; the generic
+    // decorator stack keeps only `@soft_delete`.
+    let Decl::Model(m) = &sf.decls[1] else {
+        panic!("expected a model, got {:?}", sf.decls[1]);
+    };
+    assert_eq!(m.scopes.len(), 1);
+    assert_eq!(m.scopes[0].names.len(), 1);
+    assert_eq!(m.scopes[0].names[0].node, "Tenant");
+    assert!(m.decorators.iter().all(|d| d.name.node != "scope"));
+
+    // The callables carry `scoped Tenant`, not `unscoped`.
+    let Decl::Query(q) = &sf.decls[3] else {
+        panic!("expected a query, got {:?}", sf.decls[3]);
+    };
+    let scoped = q.scoped.as_ref().expect("query has `scoped`");
+    assert_eq!(scoped.names[0].node, "Tenant");
+    assert!(q.unscoped.is_none());
+}
+
+#[test]
+fn repeated_scope_decorator_is_two_alternatives() {
+    // Stacked `@scope` decorators are OR-alternatives; a comma inside one is an AND.
+    let m = only_model(
+        r#"
+        @scope Page, Author
+        @scope Admin
+        Post { page: Page, author: User, body: text }
+        "#,
+    );
+    assert_eq!(m.scopes.len(), 2);
+    assert_eq!(
+        m.scopes[0]
+            .names
+            .iter()
+            .map(|n| n.node.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Page", "Author"]
+    );
+    assert_eq!(m.scopes[1].names[0].node, "Admin");
+}
+
+#[test]
+fn callable_scoped_and_unscoped_are_exclusive_forms() {
+    // A callable takes at most one of `scoped Name` / `unscoped("reason")`.
+    let sf = parse_ok(
+        r#"
+        query a() -> P[] scoped Tenant order (id);
+        query b() -> P[] unscoped("admin") order (id);
+        "#,
+    );
+    let Decl::Query(a) = &sf.decls[0] else {
+        panic!("expected query");
+    };
+    assert!(a.scoped.is_some() && a.unscoped.is_none());
+    let Decl::Query(b) = &sf.decls[1] else {
+        panic!("expected query");
+    };
+    assert!(b.unscoped.is_some() && b.scoped.is_none());
+}

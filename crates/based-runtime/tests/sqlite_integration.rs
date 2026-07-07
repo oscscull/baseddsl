@@ -249,11 +249,12 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
     let c = compile_sqlite(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact?, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
-        query ticket_by_id(id) -> TicketCard;
+        query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#,
     );
     let backend = SqliteBackend::in_memory().expect("open sqlite");

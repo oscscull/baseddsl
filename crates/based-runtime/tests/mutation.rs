@@ -148,8 +148,9 @@ fn unknown_mutation_is_rejected() {
 
 const UPDATE_SCHEMA: &str = r#"
     Org { name: text }
+    scope Tenant (org: Org = $ctx.org)
     @soft_delete(deleted_at)
-    @scope(org = $ctx.org)
+    @scope Tenant
     @updated(updated_at)
     Order {
         deleted_at: timestamp?,
@@ -158,7 +159,7 @@ const UPDATE_SCHEMA: &str = r#"
         status: text,
     }
     shape OrderCard from Order { status }
-    mutation set_status(id: Id, status: text) -> OrderCard {
+    mutation set_status(id: Id, status: text) -> OrderCard scoped Tenant {
         update Order where (id = $id) { status = $status };
     }
 "#;

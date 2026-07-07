@@ -162,7 +162,7 @@ impl<'a> Parser<'a> {
                         || l.tok == Tok::UpperIdent
                         || matches!(
                             self.ident_at(0),
-                            Some("shape" | "query" | "mutation" | "filter")
+                            Some("shape" | "scope" | "query" | "mutation" | "filter")
                         )
                     {
                         break;
@@ -198,6 +198,7 @@ impl<'a> Parser<'a> {
         }
         match self.ident_at(0) {
             Some("shape") => self.shape().map(Decl::Shape),
+            Some("scope") => self.scope_decl().map(Decl::Scope),
             Some("query") => self.query().map(Decl::Query),
             Some("mutation") => self.mutation().map(Decl::Mutation),
             Some("filter") => self.named_filter().map(Decl::Filter),
@@ -213,8 +214,16 @@ impl<'a> Parser<'a> {
     fn model(&mut self) -> PResult<Model> {
         let start = self.here().start;
         let mut decorators = Vec::new();
+        let mut scopes = Vec::new();
         while self.at(Tok::At) {
-            decorators.push(self.decorator()?);
+            // `@scope Name[, Name]*` is a distinct decorator form (bare names, no
+            // predicate — the predicate lives in the `scope` decl, D46). Every other
+            // decorator takes the generic parenthesized-args form.
+            if self.ident_at(1) == Some("scope") {
+                scopes.push(self.scope_deco()?);
+            } else {
+                decorators.push(self.decorator()?);
+            }
         }
         let name = self.upper_ident("model name")?;
         self.expect(Tok::LBrace, "`{`")?;
@@ -229,6 +238,7 @@ impl<'a> Parser<'a> {
         let close = self.expect(Tok::RBrace, "`}`")?;
         Ok(Model {
             decorators,
+            scopes,
             name,
             members,
             span: Span {
@@ -236,6 +246,80 @@ impl<'a> Parser<'a> {
                 start,
                 end: close.end,
             },
+        })
+    }
+
+    /// `@scope Name[, Name]*` — one scope alternative on a model (auth.md / D46/D47).
+    /// Bare names (no parenthesized predicate); commas within one decorator are an
+    /// AND-conjunction, repeated decorators are OR-alternatives.
+    fn scope_deco(&mut self) -> PResult<ScopeRef> {
+        let at = self.expect(Tok::At, "`@`")?;
+        if !self.eat_kw("scope") {
+            self.err("expected `@scope`");
+            return Err(());
+        }
+        let mut names = vec![self.upper_ident("scope name")?];
+        while self.eat(Tok::Comma) {
+            names.push(self.upper_ident("scope name")?);
+        }
+        let end = names.last().map(|n| n.span.end).unwrap_or(at.end);
+        Ok(ScopeRef {
+            names,
+            span: Span {
+                file: self.file,
+                start: at.start,
+                end,
+            },
+        })
+    }
+
+    // ---------- scope declarations ----------------------------------------
+
+    /// `scope Name (col: Type = $ctx.field, …)` — a named row-visibility contract
+    /// (auth.md Handle 2 / D46). Each term declares a scope column, its type (the
+    /// one place the `$ctx` field's type is written), and the `$ctx.field` it binds.
+    fn scope_decl(&mut self) -> PResult<ScopeDecl> {
+        let start = self.here().start;
+        self.eat_kw("scope");
+        let name = self.upper_ident("scope name")?;
+        self.expect(Tok::LParen, "`(`")?;
+        let mut terms = Vec::new();
+        if !self.at(Tok::RParen) {
+            loop {
+                terms.push(self.scope_term()?);
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        let end = self.expect(Tok::RParen, "`)`")?.end;
+        Ok(ScopeDecl {
+            name,
+            terms,
+            span: Span {
+                file: self.file,
+                start,
+                end,
+            },
+        })
+    }
+
+    fn scope_term(&mut self) -> PResult<ScopeTerm> {
+        let col = self.lower_ident("scope column")?;
+        self.expect(Tok::Colon, "`:`")?;
+        let ty = self.type_expr()?;
+        self.expect(Tok::Eq, "`=` (a scope term is `col: Type = $ctx.field`)")?;
+        let ctx = self.param_ref()?;
+        let end = ctx.path.last().map(|s| s.span.end).unwrap_or(ty.span.end);
+        Ok(ScopeTerm {
+            span: Span {
+                file: self.file,
+                start: col.span.start,
+                end,
+            },
+            col,
+            ty,
+            ctx,
         })
     }
 
@@ -647,7 +731,7 @@ impl<'a> Parser<'a> {
         let params = self.param_list()?;
         self.expect(Tok::Arrow, "`->`")?;
         let ret = self.ret_type()?;
-        let unscoped = self.unscoped_clause()?;
+        let (scoped, unscoped) = self.scope_ack()?;
 
         let (body, end) = if self.at(Tok::Semi) {
             let e = self.bump().unwrap().end;
@@ -669,8 +753,41 @@ impl<'a> Parser<'a> {
             name,
             params,
             ret,
+            scoped,
             unscoped,
             body,
+            span: Span {
+                file: self.file,
+                start,
+                end,
+            },
+        })
+    }
+
+    /// The per-callable scope acknowledgement (auth.md Handle 2 / D46): exactly one of
+    /// `scoped Name[, Name]*` (accept the standing scope) or `unscoped("reason")` (opt
+    /// out). Sits after the return type on a query, after any `guard` on a mutation.
+    /// Both `None` is legal at the parse level; sema enforces the required-declaration
+    /// rule (`E0182`) where the target is actually scoped.
+    fn scope_ack(&mut self) -> PResult<(Option<Scoped>, Option<Unscoped>)> {
+        if self.at_kw("scoped") {
+            Ok((Some(self.scoped_clause()?), None))
+        } else {
+            Ok((None, self.unscoped_clause()?))
+        }
+    }
+
+    /// `scoped Name[, Name]*` — accept the standing scope(s) injected on the target
+    /// (auth.md / D46). Bare names, comma-separated (mirrors `guard name`).
+    fn scoped_clause(&mut self) -> PResult<Scoped> {
+        let start = self.bump().unwrap().start; // `scoped`
+        let mut names = vec![self.upper_ident("scope name")?];
+        while self.eat(Tok::Comma) {
+            names.push(self.upper_ident("scope name")?);
+        }
+        let end = names.last().map(|n| n.span.end).unwrap_or(start);
+        Ok(Scoped {
+            names,
             span: Span {
                 file: self.file,
                 start,
@@ -825,7 +942,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let unscoped = self.unscoped_clause()?;
+        let (scoped, unscoped) = self.scope_ack()?;
         self.expect(Tok::LBrace, "`{`")?;
         let mut body = Vec::new();
         loop {
@@ -841,6 +958,7 @@ impl<'a> Parser<'a> {
             params,
             ret,
             guard,
+            scoped,
             unscoped,
             body,
             span: Span {

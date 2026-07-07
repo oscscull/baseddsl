@@ -407,6 +407,11 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
                 }
             }
             Decl::Shape(s) => out.push(&s.from),
+            Decl::Scope(s) => {
+                for t in &s.terms {
+                    collect_type_expr(&t.ty, &mut out);
+                }
+            }
             Decl::Query(q) => {
                 out.push(&q.ret.ty);
                 for p in &q.params {

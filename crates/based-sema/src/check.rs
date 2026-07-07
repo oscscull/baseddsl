@@ -151,18 +151,30 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         );
     }
 
+    // Scope acknowledgement (auth.md Handle 2 / D46): a callable touching a scoped
+    // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
+    let touched = crate::scope::touched_query(q, ti, cx);
+    crate::scope::check_ack(
+        q.scoped.as_ref(),
+        q.unscoped.is_some(),
+        &touched,
+        cx,
+        q.span,
+        sink,
+    );
+
     // `unscoped` on a query with no `@scope` to opt out of is stale (W0106) — the twin
     // of W0105 for `unindexed`. Points the author at a no-op token to drop.
     if let Some(u) = &q.unscoped {
-        if cx.model(ti).scope.is_none() {
+        if touched.is_empty() {
             sink.warn_note(
                 code::STALE_UNSCOPED,
                 u.span,
                 format!(
-                    "`unscoped` on query `{}` has no `@scope` to opt out of",
+                    "`unscoped` on query `{}` has no scope to opt out of",
                     q.name.node
                 ),
-                "drop it, or add `@scope(...)` to the target model",
+                "drop it, or add `@scope Name` to a touched model",
             );
         }
     }
@@ -408,7 +420,25 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     for stmt in &m.body {
         check_write(stmt, cx, &params, None, unscoped, sink);
     }
-    check_unscoped_stale(m, cx, sink);
+
+    // Scope acknowledgement (auth.md Handle 2 / D46): a mutation touching a scoped
+    // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
+    let touched = crate::scope::touched_mutation(m, ret.shape.as_deref(), &ret.model, cx);
+    crate::scope::check_ack(m.scoped.as_ref(), unscoped, &touched, cx, m.span, sink);
+    // `unscoped` on a mutation touching no scope is stale (W0106).
+    if let Some(u) = &m.unscoped {
+        if touched.is_empty() {
+            sink.warn_note(
+                code::STALE_UNSCOPED,
+                u.span,
+                format!(
+                    "`unscoped` on mutation `{}` has no scope to opt out of",
+                    m.name.node
+                ),
+                "drop it, or add `@scope Name` to a written model",
+            );
+        }
+    }
     // Shard key (D33): the return model's `@scope` owner field — a `tx` is a single-shard
     // unit (D20), so the whole mutation routes on the primary written model's owner. An
     // `unscoped` mutation (D32) disables scope and so has no owning shard.
@@ -636,38 +666,6 @@ fn write_model(name: &Ident, cx: &Cx, sink: &mut Sink) -> Option<usize> {
             None
         }
     }
-}
-
-/// `unscoped` on a mutation is stale (W0106) when none of its written models carries a
-/// `@scope` to opt out of — the write-side twin of the query check above.
-fn check_unscoped_stale(m: &Mutation, cx: &Cx, sink: &mut Sink) {
-    let Some(u) = &m.unscoped else { return };
-    if !write_models_have_scope(&m.body, cx) {
-        sink.warn_note(
-            code::STALE_UNSCOPED,
-            u.span,
-            format!(
-                "`unscoped` on mutation `{}` has no `@scope` to opt out of",
-                m.name.node
-            ),
-            "drop it, or add `@scope(...)` to a written model",
-        );
-    }
-}
-
-/// Whether any model written by `body` (including inside a `tx`) carries a `@scope`.
-fn write_models_have_scope(body: &[WriteStmt], cx: &Cx) -> bool {
-    body.iter().any(|s| match s {
-        WriteStmt::Create { model, .. }
-        | WriteStmt::Update { model, .. }
-        | WriteStmt::Delete { model, .. }
-        | WriteStmt::Restore { model, .. }
-        | WriteStmt::HardDelete { model, .. } => cx
-            .find(&model.node)
-            .is_some_and(|mi| cx.model(mi).scope.is_some()),
-        WriteStmt::Tx(inner) => write_models_have_scope(inner, cx),
-        WriteStmt::Raw(_) => false,
-    })
 }
 
 // ---------- filters --------------------------------------------------------

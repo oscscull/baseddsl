@@ -530,20 +530,21 @@ mod tests {
 
     // ---- shard-key derivation from `@scope` (D33) ----------------------------
 
-    /// A tiny scoped schema: `Order @scope(org = $ctx.org)`, one scoped query, one
-    /// scoped mutation, one `unscoped` cross-org query, and one unscoped-model query.
+    /// A tiny scoped schema: `Order @scope Tenant`, one scoped query, one scoped
+    /// mutation, one `unscoped` cross-org query, and one unscoped-model query.
     fn compiled() -> Compiled {
         use based_ast::FileId;
         const SCHEMA: &str = r#"
             Org { name: text }
-            @scope(org = $ctx.org)
+            scope Tenant (org: Org = $ctx.org)
+            @scope Tenant
             Order { org: Org, status: text }
             shape OrderCard from Order { status }
 
-            query order_by_id(id) -> OrderCard;
+            query order_by_id(id) -> OrderCard scoped Tenant;
             query all_orders(org) -> OrderCard[] unscoped("admin");
             query list_orgs() -> Org[] { list Org; }
-            mutation place_order(status) -> OrderCard {
+            mutation place_order(status) -> OrderCard scoped Tenant {
                 create Order { status = $status };
             }
         "#;

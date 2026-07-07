@@ -22,6 +22,7 @@ mod indexes;
 mod ir;
 mod model;
 mod resolve;
+mod scope;
 
 pub use ir::*;
 
@@ -37,6 +38,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     // 1. Collect declarations by kind.
     let mut models = Vec::new();
     let mut shapes = Vec::new();
+    let mut scope_decls = Vec::new();
     let mut queries = Vec::new();
     let mut mutations = Vec::new();
     let mut filters = Vec::new();
@@ -44,6 +46,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         match d {
             Decl::Model(m) => models.push(m),
             Decl::Shape(s) => shapes.push(s),
+            Decl::Scope(s) => scope_decls.push(s),
             Decl::Query(q) => queries.push(q),
             Decl::Mutation(m) => mutations.push(m),
             Decl::Filter(f) => filters.push(f),
@@ -122,6 +125,11 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         model::validate(ast, mi, &mut rmodels, &index, &mut sink);
     }
 
+    // 3b. Named scopes (auth.md / D46): resolve the `scope` decls, then attach each
+    // model's `@scope Name` refs (E0183/E0184) + synthesize the injected predicate.
+    let (rscopes, scope_index) = scope::resolve_decls(&scope_decls, &index, &mut sink);
+    scope::attach_models(&models, &mut rmodels, &rscopes, &scope_index, &mut sink);
+
     // 4/5. Everything from here reads the finished models through one context
     // (scoped so its borrow of `rmodels` ends before the inferred indexes land).
     let (rshapes, rqueries, rmutations, rfilters, inferred) = {
@@ -131,6 +139,8 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             filters: &filter_defs,
             shapes: &shape_from,
             shape_bodies: &shape_bodies,
+            scopes: &rscopes,
+            scope_index: &scope_index,
         };
 
         for ast in &models {
@@ -172,10 +182,12 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let schema = CheckedSchema {
         models: rmodels,
         shapes: rshapes,
+        scopes: rscopes,
         queries: rqueries,
         mutations: rmutations,
         filters: rfilters,
         model_index: index,
+        scope_index,
     };
     (schema, sink.diags)
 }

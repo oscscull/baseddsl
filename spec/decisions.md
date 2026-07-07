@@ -1513,3 +1513,51 @@ and the *callable/create semantics* generalize. Revises D46.
   (`posts_on_page` ≠ `my_posts`). A *runtime* `WHERE a OR b` where the returned data is identical and you
   only check a credential stays Handle 3 (`guard`), NOT a scope. Rule: disjunction that changes *which
   rows* → `@scope` alternatives; disjunction that only gates *whether the same rows* → `guard`.
+
+## D48 — named scope landed: `scope`/`@scope Name`/`scoped Name` replaces inline `@scope(pred)`
+Implements D46 (Track G, iteration 1): the inline, per-callable-inferred `@scope(pred)` (D32) is gone;
+scope is now a first-class **named** decl referenced by name on both sides. Parser/AST/sema all ship;
+codegen + runtime are unchanged in *effect*. Multi-scope DNF (D47) is the next iteration.
+- **AST/parser.** New `Decl::Scope(ScopeDecl)` (`scope Name (col: Type = $ctx.field, …)`, each term a
+  `ScopeTerm { col, ty, ctx }`). `@scope Name[, Name]*` parses into `Model.scopes: Vec<ScopeRef>` (a
+  distinct decorator form, special-cased in the model-decorator loop — bare names, never the generic
+  parenthesized `Decorator`). `scoped Name[, Name]*` parses into `Query.scoped`/`Mutation.scoped:
+  Option<Scoped>` via a shared `scope_ack` (mutually exclusive with the unchanged `unscoped`). `scope`
+  is a new top-level decl keyword; `scope`/`scoped` are contextual (D8).
+- **Sema (`scope.rs`).** `resolve_decls` builds `CheckedSchema.scopes: Vec<RScope>` (`RScopeTerm { column,
+  ctx_field, ty: CtxField }`) — the `col: Type` is where the scope field's type is declared, checking the
+  binding is `$ctx.<field>` (`E0180` now fires at the decl, not per callable) and the term type resolves
+  (dup name → `E0105`). `attach_models` resolves each model's `@scope` refs → `RModel.scope_alts:
+  Vec<Vec<String>>` (a DNF list, forward-compat for D47 though iteration 1 uses the single alternative),
+  checks each named scope's column exists on the model at a conforming type (`E0184`), reports unknown
+  names (`E0183`), and **synthesizes `RModel.scope: Option<Predicate>`** = the AND of the chosen
+  alternative's `col = $ctx.field` terms. Keeping `RModel.scope` as a synthesized predicate is the key
+  impl decision: `scope_terms()`, `shard_key_ctx_field()`, and **all of codegen/runtime are untouched** —
+  they lower the same predicate the old inline form produced (a good regression check; the codegen golden
+  SQL is unchanged, the sema conformance golden is byte-identical). Callable acknowledgement is checked
+  against the scoped models a callable *touches* (root + D34 joined reaches, walked in `scope.rs` the same
+  way `ctx.rs` walks joins): neither `scoped` nor `unscoped` on a scoped target → `E0182`; `scoped` naming
+  an unknown scope → `E0183`, or a scope no touched model declares / too few axes for any alternative →
+  `E0185`. `W0106` (stale unscoped) now keys on the touched set being empty.
+- **`$ctx` type sourcing (ends D4/D5 for the scope field).** Because the scope column conforms to the
+  decl type (`E0184`), inferring the scope field's `$ctx` type from the synthesized predicate's column
+  yields exactly the declared type — so coherence for the scope field is structurally consistent (never a
+  clash); non-scope `$ctx` fields are still inferred per callable (`E0161` unchanged). `CheckedSchema`
+  exposes `scope(name) -> Option<&RScope>` for facts/LSP (iteration 3).
+- **Pass order.** Scope resolution slots between model `validate` and the `Cx`-based check pass (`Cx`
+  gained `scopes`/`scope_index`); `resolve.rs::check_scope_form` and model.rs's `@scope`-decorator arms
+  were removed (dead — `@scope` no longer lands in `Model.decorators`).
+- **Commerce migrated end-to-end.** `spec/examples/commerce/order` now declares
+  `scope Tenant (org: Org = $ctx.org)`, puts `@scope Tenant` on `Order`, and marks the three Order
+  queries + `place_order` `scoped Tenant` (the cross-org `orders_in_org` stays `unscoped`). `based check
+  spec/examples/commerce` is clean.
+- **E0186 deferred** to iteration 2 (a single-alternative create with a present-by-auto-set scope column
+  can't be unsatisfiable, so it isn't reachable in the single-scope world). The `SCOPE_CREATE_UNSAT`
+  code is registered for it.
+- **Left ready for iteration 2 (multi-scope DNF, D47).** `Model.scopes`/`RModel.scope_alts` are already
+  lists of alternatives; `scoped`/`@scope` already parse comma-separated name sets; `check_ack` already
+  implements the superset-of-an-alternative rule over a `Vec` of alternatives. Remaining: make codegen
+  inject the *callable-chosen* alternative's conjunction (today it synthesizes the single alternative's
+  predicate onto `RModel.scope`); `E0186` (create satisfies ≥1 alternative); the migration `schema.snap`
+  serializer (record scopes by name + a model's alternative set — the E-track snapshot change flagged in
+  D46/G5); facts/LSP go-to-def/rename/hover over scope refs.

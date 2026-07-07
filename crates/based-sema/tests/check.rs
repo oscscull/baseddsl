@@ -974,59 +974,53 @@ fn scope_filter_counts_toward_pattern() {
     let (_, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text }
         shape D from Doc { title }
-        query docs() -> D[] order (title);
+        query docs() -> D[] scoped Tenant order (title);
         "#,
     );
     assert_eq!(codes(&d), vec!["W0103"]);
     assert_clean(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text, @index org }
         shape D from Doc { title }
-        query docs() -> D[] order (title);
+        query docs() -> D[] scoped Tenant order (title);
         "#,
     );
 }
 
-// ---------- @scope form + create auto-set + unscoped (D32) -----------------
+// ---------- named scope: decl / @scope / scoped (D46/D47) ------------------
 
 #[test]
-fn scope_must_be_ctx_equality_conjunction() {
-    // `in` (multi-owner) is not a uniform single-owner scope — that's Handle 1.
+fn scope_term_must_bind_ctx_field() {
+    // A `scope` decl term binds `col: Type = $ctx.<field>`; a non-`$ctx` binding is
+    // `E0180` (the predicate-form rule, now at the decl site).
     let (_, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org in $ctx.orgs)
+        scope Tenant (org: Org = $other.org)
+        @scope Tenant
         Doc { org: Org, title: text }
         shape D from Doc { title }
-        query docs() -> D[] order (title);
+        query docs() -> D[] scoped Tenant order (title);
         "#,
     );
     assert!(errors(&d).contains(&"E0180"), "{:?}", codes(&d));
 
-    // a literal RHS is a standing default filter, not context-parameterized scope.
-    let (_, d) = analyze(
-        r#"
-        @scope(archived = false)
-        Doc { archived: bool, title: text }
-        shape D from Doc { title }
-        query docs() -> D[] order (title);
-        "#,
-    );
-    assert!(errors(&d).contains(&"E0180"), "{:?}", codes(&d));
-
-    // `or` is not a conjunction.
+    // A multi-segment `$ctx` path is not the flat scope-field form → `E0180`.
     let (_, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org or org = $ctx.other)
+        scope Tenant (org: Org = $ctx.org.id)
+        @scope Tenant
         Doc { org: Org, title: text }
         shape D from Doc { title }
-        query docs() -> D[] order (title);
+        query docs() -> D[] scoped Tenant order (title);
         "#,
     );
     assert!(errors(&d).contains(&"E0180"), "{:?}", codes(&d));
@@ -1034,17 +1028,122 @@ fn scope_must_be_ctx_equality_conjunction() {
 
 #[test]
 fn multi_term_ctx_equality_scope_is_clean() {
-    // A conjunction of `col = $ctx.field` equalities is the allowed shape.
+    // A conjunction of `col = $ctx.field` equalities is the allowed shape (one decl
+    // with two terms, D46).
     assert_clean(
         r#"
         Org { name: text }
         Region { name: text }
-        @scope(org = $ctx.org and region = $ctx.region)
+        scope Tenant (org: Org = $ctx.org, region: Region = $ctx.region)
+        @scope Tenant
         Doc { org: Org, region: Region, title: text, @index(org, region) }
         shape D from Doc { title }
-        query docs() -> D[] { list Doc order (title); }
+        query docs() -> D[] scoped Tenant { list Doc order (title); }
         "#,
     );
+}
+
+#[test]
+fn scoped_callable_must_acknowledge_scope_e0182() {
+    // A callable touching a scoped model with neither `scoped …` nor `unscoped(…)` is
+    // `E0182` — the contract is written, not implied.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0182"), "{:?}", codes(&d));
+}
+
+#[test]
+fn scope_ref_unknown_name_is_e0183() {
+    // `@scope Name` / `scoped Name` naming no `scope` decl is `E0183`.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        @scope Nope
+        Doc { org: Org, title: text }
+        shape D from Doc { title }
+        query docs() -> D[] scoped Nope order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0183"), "{:?}", codes(&d));
+}
+
+#[test]
+fn scope_model_missing_or_wrong_column_is_e0184() {
+    // A `@scope` model must carry the scope's column at a conforming type. Here `Doc`
+    // has no `org` field → `E0184`.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Doc { title: text }
+        shape D from Doc { title }
+        query docs() -> D[] scoped Tenant order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0184"), "{:?}", codes(&d));
+
+    // A column of the wrong type also fails E0184 (`org` is text, not the relation `Org`).
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Doc { org: text, title: text }
+        shape D from Doc { title }
+        query docs() -> D[] scoped Tenant order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0184"), "{:?}", codes(&d));
+}
+
+#[test]
+fn scoped_naming_untouched_scope_is_e0185() {
+    // `scoped Other` names a scope no model this callable touches declares → `E0185`.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        scope Other (org: Org = $ctx.org)
+        @scope Tenant
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] scoped Other order (title);
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0185"), "{:?}", codes(&d));
+}
+
+#[test]
+fn scope_field_type_sourced_from_the_decl() {
+    // The scope field's `$ctx` type comes from the decl (`org: Org`), so a scoped query
+    // requires `$ctx.org` typed as an `Org` relation — no per-callable inference needed.
+    let (schema, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Doc { org: Org, title: text, @index org }
+        shape D from Doc { title }
+        query docs() -> D[] scoped Tenant order (title);
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let scope = schema.scope("Tenant").expect("Tenant scope resolved");
+    assert_eq!(scope.terms.len(), 1);
+    assert_eq!(scope.terms[0].column, "org");
+    assert_eq!(scope.terms[0].ctx_field, "org");
+    let docs = schema.queries.iter().find(|q| q.name == "docs").unwrap();
+    assert_eq!(docs.ctx_requires.len(), 1);
+    assert_eq!(docs.ctx_requires[0].field, "org");
 }
 
 #[test]
@@ -1054,10 +1153,11 @@ fn create_assigning_scope_column_is_e0181() {
     let (_, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text, @index org }
         shape D from Doc { title }
-        mutation make(org: Id, title: text) -> D {
+        mutation make(org: Id, title: text) -> D scoped Tenant {
           create Doc { org = $org, title = $title };
         }
         "#,
@@ -1072,10 +1172,11 @@ fn create_on_scoped_model_omitting_scope_column_is_clean() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text, @index org }
         shape D from Doc { title }
-        mutation make(title: text) -> D { create Doc { title = $title }; }
+        mutation make(title: text) -> D scoped Tenant { create Doc { title = $title }; }
         "#,
     );
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -1091,7 +1192,8 @@ fn unscoped_query_drops_the_scope_ctx_requirement() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text, @index org }
         shape D from Doc { title }
         query all(org) -> D[] unscoped("admin: cross-org read") order (title);
@@ -1109,7 +1211,8 @@ fn unscoped_create_may_assign_the_scope_column() {
     assert_clean(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text }
         shape D from Doc { title }
         mutation import_doc(org: Id, title: text) -> D
@@ -1177,10 +1280,11 @@ fn ctx_scope_propagates_to_every_query() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Doc { org: Org, title: text, @index org }
         shape D from Doc { title }
-        query docs() -> D[] order (title);
+        query docs() -> D[] scoped Tenant order (title);
         "#,
     );
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -1198,11 +1302,12 @@ fn ctx_joined_scope_is_required_via_shape_reach() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
-        query ticket_by_id(id) -> TicketCard;
+        query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#,
     );
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -1220,11 +1325,12 @@ fn ctx_joined_scope_is_required_via_where_reach() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text, @index name }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject }
-        query tickets(name) -> TicketCard[] {
+        query tickets(name) -> TicketCard[] scoped Tenant {
           list Ticket where (raised_by.name = $name) order (subject);
         }
         "#,
@@ -1245,7 +1351,8 @@ fn ctx_unscoped_query_drops_joined_scope_requirement() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
@@ -1360,11 +1467,12 @@ fn ctx_mutation_reselect_joined_scope_is_required() {
     let (schema, d) = analyze(
         r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
-        mutation open_ticket(by: Contact, subject: text) -> TicketCard {
+        mutation open_ticket(by: Contact, subject: text) -> TicketCard scoped Tenant {
           create Ticket { raised_by = $by, subject = $subject };
         }
         "#,

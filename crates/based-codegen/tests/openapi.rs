@@ -226,11 +226,12 @@ fn ctx_requirements_surface_as_vendor_extension() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
         Org { deleted_at: timestamp?, name: text }
+        scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
-        @scope(org = $ctx.org)
+        @scope Tenant
         Order { deleted_at: timestamp?, org: Org, total: int }
         shape OrderCard from Order { total }
-        query my_org_orders() -> OrderCard[] {
+        query my_org_orders() -> OrderCard[] scoped Tenant {
           list Order where (org = $ctx.org);
         }
         "#);

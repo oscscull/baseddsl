@@ -117,12 +117,13 @@ fn postgres_offset_pagination_orders_placeholders() {
     // the order they appear in the SQL.
     let c = compile_pg(
         r#"
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         @sort(id asc)
         Order { org: Org, total: int }
         Org { name: text }
         shape OrderCard from Order { total }
-        query orders() -> OrderCard[] { list Order order (id asc) page (20) offset; }
+        query orders() -> OrderCard[] scoped Tenant { list Order order (id asc) page (20) offset; }
         "#,
     );
     let req = Request::new("orders", json!({ "offset": 40 }), json!({ "org": "org-1" }));

@@ -20,6 +20,7 @@ pub mod code {
     pub const DUP_CALLABLE: &str = "E0102"; // query/mutation share the wire namespace
     pub const DUP_FILTER: &str = "E0103";
     pub const DUP_FIELD: &str = "E0104";
+    pub const DUP_SCOPE: &str = "E0105"; // duplicate `scope` decl name
     pub const UNKNOWN_MODEL: &str = "E0110";
     pub const UNKNOWN_FIELD: &str = "E0111";
     pub const TRAVERSE_SCALAR: &str = "E0112"; // dotted past a scalar column
@@ -62,10 +63,16 @@ pub mod code {
     // `create` in the same `tx`.
     pub const BACKREF_SCOPE: &str = "E0170"; // `^` outside a `tx`, or with no preceding `create`
 
-    // `@scope` (auth.md Handle 2 / D32): a uniform single-owner row filter.
-    pub const SCOPE_FORM: &str = "E0180"; // @scope must be a conjunction of `col = $ctx.field`
+    // Named scope (auth.md Handle 2 / D46/D47): a `scope` decl referenced by
+    // `@scope Name` on a model + `scoped Name` on every callable that touches it.
+    pub const SCOPE_FORM: &str = "E0180"; // a `scope` decl's predicate isn't a conjunction of `col = $ctx.field`
     pub const SCOPE_ASSIGN: &str = "E0181"; // a `create` assigns a scope column (engine-managed)
-                                            // lints
+    pub const SCOPE_MISSING_ACK: &str = "E0182"; // scoped callable writes neither `scoped …` nor `unscoped(…)`
+    pub const SCOPE_UNKNOWN: &str = "E0183"; // `@scope Name` / `scoped Name` names no `scope` decl
+    pub const SCOPE_MODEL_COLUMN: &str = "E0184"; // `@scope` model lacks the scope's column / wrong type
+    pub const SCOPE_ACK_MISMATCH: &str = "E0185"; // `scoped …` set ⊉ any alternative of a touched scoped model
+    pub const SCOPE_CREATE_UNSAT: &str = "E0186"; // a `create` can satisfy no alternative (D47 — deferred)
+                                                  // lints
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
@@ -97,17 +104,44 @@ pub const KNOWN_FUNCS: &[&str] = &["now"];
 pub struct CheckedSchema {
     pub models: Vec<RModel>,
     pub shapes: Vec<RShape>,
+    /// Named scope decls (auth.md Handle 2 / D46), keyed by name in `scope_index`.
+    pub scopes: Vec<RScope>,
     pub queries: Vec<RQuery>,
     pub mutations: Vec<RMutation>,
     pub filters: Vec<RFilter>,
     /// model name -> index into `models`.
     pub model_index: HashMap<String, usize>,
+    /// scope name -> index into `scopes`.
+    pub scope_index: HashMap<String, usize>,
 }
 
 impl CheckedSchema {
     pub fn model(&self, name: &str) -> Option<&RModel> {
         self.model_index.get(name).map(|&i| &self.models[i])
     }
+    pub fn scope(&self, name: &str) -> Option<&RScope> {
+        self.scope_index.get(name).map(|&i| &self.scopes[i])
+    }
+}
+
+/// A resolved `scope` decl (auth.md Handle 2 / D46): its terms carry the column,
+/// the `$ctx` field, and the type declared once here (the one source of truth for
+/// both the governed models' column and the `$ctx.field`, P4).
+#[derive(Debug, Clone)]
+pub struct RScope {
+    pub name: String,
+    pub span: Span,
+    pub terms: Vec<RScopeTerm>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RScopeTerm {
+    /// The scope column (the field name a governed model must carry).
+    pub column: String,
+    /// The `$ctx.<field>` the column binds to.
+    pub ctx_field: String,
+    /// The type declared in the decl (`col: Type`) — a primitive or a relation.
+    pub ty: CtxField,
 }
 
 #[derive(Debug, Clone)]
@@ -120,8 +154,18 @@ pub struct RModel {
     pub soft_delete: Option<SoftDelete>,
     /// Model default sort (`@sort`); empty when none is declared.
     pub sort: Vec<SortTerm>,
-    /// `@scope(pred)` — a standing auth filter injected into every query (auth.md).
+    /// The standing scope filter injected into every read/write on this model
+    /// (auth.md Handle 2). Synthesized from the model's `@scope Name` reference(s) —
+    /// the conjunction of the referenced `scope` decls' `col = $ctx.field` terms
+    /// (the single alternative, iteration 1). `None` when the model is not scoped.
+    /// Codegen lowers it exactly like any `where` (D32/D34), so scope injection is
+    /// unchanged in effect from the old inline `@scope(pred)`.
     pub scope: Option<Predicate>,
+    /// The model's `@scope` alternatives as scope-name sets (auth.md / D47 DNF): each
+    /// `@scope Name[, Name]*` decorator is one alternative (an AND of names). Empty
+    /// when the model is not scoped. Iteration 1 resolves exactly one alternative but
+    /// stores a list so multi-scope (D47) adds DNF without reshaping this.
+    pub scope_alts: Vec<Vec<String>>,
     /// `@created` / `@updated` engine-managed timestamp fields (D2).
     pub created: Option<String>,
     pub updated: Option<String>,

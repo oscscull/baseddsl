@@ -1,8 +1,11 @@
-# `@scope` (D32): a uniform single-owner filter injected into every read + write, and
-# auto-set on `create` from `$ctx` — so `place_order` takes no `org` (cross-scope create
-# is inexpressible; assigning `org` would be E0181). Exercises per-callable $ctx inference
-# (org typed as a relation to Org from the FK it maps to), including the create-time
-# requirement the auto-set introduces.
+# Named scope (D46): a `scope` decl referenced by `@scope Tenant` on the model and
+# `scoped Tenant` on every callable that touches it. The scope is injected into every
+# read + write, and auto-set on `create` from `$ctx` — so `place_order` takes no `org`
+# (cross-scope create is inexpressible; assigning `org` would be E0181). The `org: Org`
+# term is the one place `$ctx.org`'s type is declared, sourcing it structurally instead
+# of per-callable inference.
+scope Tenant (org: Org = $ctx.org)
+
 @soft_delete(deleted_at)
 Org {
   deleted_at: timestamp?
@@ -10,7 +13,7 @@ Org {
 }
 
 @soft_delete(deleted_at)
-@scope(org = $ctx.org)
+@scope Tenant
 Order {
   deleted_at: timestamp?
   org:        Org
@@ -19,8 +22,8 @@ Order {
 
 shape OrderCard from Order { total }
 
-query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
+query my_org_orders() -> OrderCard[] scoped Tenant { list Order where (org = $ctx.org); }
 
-mutation place_order(total: int) -> OrderCard {
+mutation place_order(total: int) -> OrderCard scoped Tenant {
   create Order { total = $total };
 }

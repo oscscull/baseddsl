@@ -72,6 +72,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
         soft_delete: None,
         sort: Vec::new(),
         scope: None,
+        scope_alts: Vec::new(),
         created: None,
         updated: None,
         indexes: Vec::new(),
@@ -287,12 +288,8 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
                     resolve_managed_ts(&d.name.node, field, mi, models, sink);
                 }
             }
-            // Scope/sort *paths* traverse other models — resolved in `resolve_exprs`.
-            "scope" => {
-                if let Some(DecoArg::Pred(p)) = d.args.first() {
-                    models[mi].scope = Some(p.clone());
-                }
-            }
+            // `@scope Name` is parsed into `Model.scopes`, not `decorators`, and is
+            // resolved by the scope pass — it never reaches here.
             "sort" => {
                 for a in &d.args {
                     if let DecoArg::Sort(t) = a {
@@ -410,32 +407,23 @@ fn compute_unique(ast: &Model, m: &mut RModel) {
     m.unique_cols = unique;
 }
 
-/// Read-only pass over one model's expression-valued decorators/fields: `@scope`
-/// predicates, model `@sort` terms, and relation-field `@sort` terms. Run after
-/// every model is built, so path traversal into other models is safe.
+/// Read-only pass over one model's expression-valued decorators/fields: model
+/// `@sort` terms, relation-field `@sort` terms, and custom `on:` joins. Run after
+/// every model is built, so path traversal into other models is safe. (`@scope`
+/// refs are resolved separately by the scope pass.)
 pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
     let Some(mi) = cx.find(&ast.name.node) else {
         return;
     };
     for d in &ast.decorators {
-        match d.name.node.as_str() {
-            // Scope predicates see only `$ctx` (no query params, auth.md), and are
-            // restricted to a conjunction of `col = $ctx.field` equalities (D32) so
-            // scope is injectable everywhere and auto-settable on `create`.
-            "scope" => {
-                if let Some(DecoArg::Pred(p)) = d.args.first() {
-                    resolve::check_predicate(p, Some(mi), cx, &[], sink);
-                    resolve::check_scope_form(p, d.name.span, sink);
+        // Model `@sort` paths traverse into related models, so resolve them here in the
+        // read pass. (`@scope` refs are resolved separately by the scope pass.)
+        if d.name.node == "sort" {
+            for a in &d.args {
+                if let DecoArg::Sort(t) = a {
+                    resolve::check_sort_term(t, mi, cx, sink);
                 }
             }
-            "sort" => {
-                for a in &d.args {
-                    if let DecoArg::Sort(t) = a {
-                        resolve::check_sort_term(t, mi, cx, sink);
-                    }
-                }
-            }
-            _ => {}
         }
     }
     // Custom `on:` joins span two tables (this model + the relation target), so

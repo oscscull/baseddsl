@@ -123,14 +123,15 @@ stay deferred — worked only if they land on the critical path or a user would 
 > ancestors and compiles one snapshot per project, so embedded schemas (the "ride along inside a Rust repo"
 > case) resolve cross-file references. See Track C3 below for the resume note.
 >
-> 🔴 **NEXT PRIORITY — Track G (named scope — a user-raised language change).** Scope becomes a first-class
+> 🟡 **IN PROGRESS — Track G (named scope — a user-raised language change).** Scope is now a first-class
 > **named** declaration referenced on both sides (`scope Name (col: Type = $ctx.field)`, `@scope Name` on the
 > model, `scoped Name` on the callable). The user's framing (2026-07-07): "a scope contract this important must
 > be *written, not implied*" — the old `@scope(pred)` inferred the `$ctx` type per callable and only *showed* it
-> as an editor hint (D4/D5), which principle 2 forbids for a consequential contract. **Now generalized to
-> multiple scopes (D47): `@scope` is repeatable — commas within one decorator are AND (one alternative),
-> stacked decorators are OR (alternatives), a DNF; a callable confines by ⊇ one alternative.** **Spec landed
-> (D46 + D47); implementation follows in ordered iterations — see Track G below.** Higher priority than the remaining C4 gaps.
+> as an editor hint (D4/D5), which principle 2 forbids for a consequential contract. **✅ Iteration 1 (named
+> scope, single-scope semantics) landed as D48** — parser/AST/sema ship, codegen/runtime unchanged in effect,
+> commerce migrated + clean. **Remaining: iteration 2 (multi-scope DNF — codegen picks the callable-chosen
+> alternative, `E0186`, snapshot serializer) + iteration 3 (facts/LSP over scope refs + D-number hover scrub).**
+> See Track G below. Higher priority than the remaining C4 gaps.
 >
 > **Track C4 (VS Code feature-parity fill-in)** is queued *behind* Track G — remaining: workspace symbols,
 > find-refs, rename, folding (document symbols D44 + completion D45 done). The **D4/D5-hover scrub** (strip
@@ -366,7 +367,21 @@ the user; see the decision block below. `spec/syntax/migrations.md` is written b
     `@was` renames + the LSP drift diagnostic (E5); the `raw(dialect)` up step.
   - E5. **`@was` rename directive** (sema) + the **offline schema-vs-migrations LSP drift diagnostic**.
 
-**Track G — named + multi-scope (DoD-adjacent language change, NEXT PRIORITY; user-raised 2026-07-07).**
+**Track G — named + multi-scope (DoD-adjacent language change; user-raised 2026-07-07).**
+> ✅ **Iteration 1 (named scope) landed as D48.** Inline `@scope(pred)` is replaced by the named surface:
+> `scope Name (col: Type = $ctx.field)` decl, `@scope Name` on the model (→ `Model.scopes: Vec<ScopeRef>`,
+> a DNF-ready list of alternatives), `scoped Name` on the callable (`scope_ack`, mutually exclusive with
+> `unscoped`). Sema builds `CheckedSchema.scopes`/`RScope`, moves `E0180` to the decl site, adds
+> `E0182`/`E0183`/`E0184`/`E0185` (+ the touched-scoped-model superset rule over `RModel.scope_alts`), and
+> **synthesizes `RModel.scope: Option<Predicate>` from the chosen alternative** so codegen/runtime are
+> untouched (golden SQL unchanged; sema conformance golden byte-identical). Scope-field `$ctx` type sourced
+> from the decl (ends D4/D5 for it; coherence structural). Commerce migrated (`scope Tenant`, `@scope
+> Tenant` on `Order`, `scoped Tenant` on its callables) and checks clean. **`E0186` deferred** (unreachable
+> single-scope; code registered). **Iteration 2 (multi-scope DNF) remaining:** codegen injects the
+> *callable-chosen* alternative (not the single synthesized `RModel.scope`); `E0186` (create satisfies ≥1
+> alternative); the `schema.snap` serializer (scopes by name + a model's alternative set, G5); the OR
+> commerce example. **Iteration 3:** facts/LSP go-to-def/rename/hover over scope refs + D-number hover scrub.
+>
 *Spec settled in **D46** (named) + **D47** (multi-scope) + rewritten auth.md Handle 2 + grammar
 (`scope_decl`, `scope_deco`, `scoped_clause`).* Scope is a first-class **named** declaration referenced by
 name on both sides — the model (`@scope Name`) and every callable that touches it (`scoped Name`), the

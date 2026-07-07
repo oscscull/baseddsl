@@ -84,11 +84,12 @@ fn shape_reach_into_scoped_model_injects_scope_in_join_on() {
     // across the scope boundary. Here `Contact` is org-scoped and reached via a shape.
     let ddl = gen(r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
-        query ticket_by_id(id) -> TicketCard;
+        query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#);
     // The join into the scoped `contact` ANDs `contact.org_id = :ctx_org` into its ON.
     assert!(
@@ -104,11 +105,12 @@ fn where_reach_into_scoped_model_injects_scope_in_join_on() {
     // The same injection fires for a relation reached in a `where`, not just a shape.
     let ddl = gen(r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject }
-        query tickets_by_contact_name(name) -> TicketCard[] {
+        query tickets_by_contact_name(name) -> TicketCard[] scoped Tenant {
           list Ticket where (raised_by.name = $name);
         }
         "#);
@@ -126,7 +128,8 @@ fn unscoped_query_drops_joined_scope_too() {
     // (D34) included, not just the root's. The join `ON` carries no scope predicate.
     let ddl = gen(r#"
         Org { name: text }
-        @scope(org = $ctx.org)
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
         Contact { org: Org, name: text }
         Ticket { raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
@@ -215,13 +218,14 @@ fn block_query_where_order_page_and_bare_bool() {
 #[test]
 fn scope_predicate_is_injected() {
     let ddl = gen(r#"
+        scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
-        @scope(org = $ctx.org)
+        @scope Tenant
         @sort(id asc)
         Order { deleted_at: timestamp?, org: Org, total: int }
         Org { name: text }
         shape OrderCard from Order { total }
-        query orders() -> OrderCard[];
+        query orders() -> OrderCard[] scoped Tenant;
         "#);
     // @scope rides the same injection path; `$ctx.org` -> `:ctx_org`.
     assert!(ddl.contains("`order`.`org_id` = :ctx_org"), "\n{ddl}");
@@ -233,8 +237,9 @@ fn unscoped_query_omits_the_scope_predicate() {
     // `unscoped(...)` (D32) is the cross-scope escape hatch: no `@scope` injection for
     // this query. Soft-delete still rides — it's a separate guarantee.
     let ddl = gen(r#"
+        scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
-        @scope(org = $ctx.org)
+        @scope Tenant
         @sort(id asc)
         Order { deleted_at: timestamp?, org: Org, total: int }
         Org { name: text }

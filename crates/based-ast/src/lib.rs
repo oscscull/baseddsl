@@ -43,9 +43,55 @@ pub struct SchemaFile {
 pub enum Decl {
     Model(Model),
     Shape(Shape),
+    Scope(ScopeDecl),
     Query(Query),
     Mutation(Mutation),
     Filter(NamedFilter),
+}
+
+// ---------- Scopes (auth.md Handle 2, D46/D47) -----------------------------
+
+/// `scope Name (col: Type = $ctx.field, …)` — a named row-visibility contract,
+/// declared once and referenced by name on the model (`@scope Name`) and every
+/// callable that touches it (`scoped Name`). The predicate is the D32 restricted
+/// form (a conjunction of `col = $ctx.field`); the term's `Type` is the one place
+/// the scope column's — and thus `$ctx.field`'s — type is declared (D46, P4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeDecl {
+    pub name: Ident,
+    pub terms: Vec<ScopeTerm>,
+    pub span: Span,
+}
+
+/// One `col: Type = $ctx.field` term of a `scope` decl.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeTerm {
+    pub col: Ident,
+    pub ty: TypeExpr,
+    /// The `$ctx.field` the column binds to. Sema checks it is `$ctx.<field>`
+    /// (exactly one segment) — anything else is `E0180`.
+    pub ctx: ParamRef,
+    pub span: Span,
+}
+
+/// One `@scope Name[, Name]*` decorator on a model — **one alternative** of the
+/// model's scope DNF (auth.md / D47): the comma-separated names are a conjunction
+/// (all required together). A model stacks these; the stack is the OR of
+/// alternatives. `@scope` is repeatable, so a model carries a `Vec<ScopeRef>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeRef {
+    pub names: Vec<Ident>,
+    pub span: Span,
+}
+
+/// `scoped Name[, Name]*` — the per-callable acknowledgement of the standing scope(s)
+/// injected (auth.md Handle 2 / D46). Mutually exclusive with `unscoped(…)`; sits
+/// where `unscoped` sits. The named set must be a superset of ≥1 declared `@scope`
+/// alternative of each scoped model the callable touches (`E0185`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scoped {
+    pub names: Vec<Ident>,
+    pub span: Span,
 }
 
 // ---------- Models ---------------------------------------------------------
@@ -53,6 +99,10 @@ pub enum Decl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     pub decorators: Vec<Decorator>,
+    /// `@scope Name[, Name]*` decorators (auth.md / D46/D47). A distinct form from
+    /// the generic parenthesized `decorators` (bare names, no predicate — the
+    /// predicate lives in the `scope` decl, P4). Each entry is one alternative.
+    pub scopes: Vec<ScopeRef>,
     pub name: Ident,
     pub members: Vec<Member>,
     pub span: Span,
@@ -199,6 +249,9 @@ pub struct Query {
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: RetType,
+    /// `scoped Name[, Name]*` — accept the standing scope(s) on the target (auth.md / D46).
+    /// Mutually exclusive with `unscoped`.
+    pub scoped: Option<Scoped>,
     /// `unscoped("reason")` — opt this callable out of `@scope` injection (auth.md / D32).
     pub unscoped: Option<Unscoped>,
     pub body: QueryBody,
@@ -312,6 +365,9 @@ pub struct Mutation {
     pub params: Vec<Param>,
     pub ret: RetType,
     pub guard: Option<Ident>,
+    /// `scoped Name[, Name]*` — accept the standing scope(s) on the written model(s)
+    /// (auth.md / D46). Mutually exclusive with `unscoped`.
+    pub scoped: Option<Scoped>,
     /// `unscoped("reason")` — opt this mutation out of `@scope` injection (auth.md / D32):
     /// its writes carry no scope guard *and* a `create` does not auto-set the scope column.
     pub unscoped: Option<Unscoped>,
