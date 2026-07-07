@@ -89,9 +89,10 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
                     out.push(Fact {
                         span: mem.span,
                         kind: FactKind::InferredInverse,
-                        // Terse: `OrderItem[]` is already on the line, so the hint only
-                        // adds the forward edge the engine paired through.
-                        label: format!("via {via}"),
+                        // The forward edge the engine paired through, qualified by its
+                        // model: `via OrderItem.order` reads unambiguously even when the
+                        // field name (`order`) echoes a model name.
+                        label: format!("via {target}.{via}"),
                         detail: format!(
                             "inferred inverse: `{}.{}` pairs with the forward edge \
                              `{target}.{via}`, which the engine derived from the one \

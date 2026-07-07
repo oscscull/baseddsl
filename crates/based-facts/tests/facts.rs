@@ -32,9 +32,9 @@ fn inferred_inverse_is_shown() {
     let fs = facts_of(TRAVERSAL);
     let inv = of_kind(&fs, FactKind::InferredInverse);
     assert_eq!(inv.len(), 1, "{fs:#?}");
-    // Terse label (the type `OrderItem[]` is already on the line); the forward edge
-    // it pairs through is the command-click target carried in `nav`.
-    assert_eq!(inv[0].label, "via order");
+    // The forward edge it pairs through, model-qualified so `order` (a field name that
+    // echoes a model) is unambiguous; it is also the command-click target in `nav`.
+    assert_eq!(inv[0].label, "via OrderItem.order");
     assert!(
         inv[0].detail.contains("OrderItem.order"),
         "{}",

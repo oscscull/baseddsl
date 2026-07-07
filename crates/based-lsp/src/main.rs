@@ -14,7 +14,6 @@
 mod compile;
 
 use based_diagnostics::Severity;
-use based_facts::FactKind;
 use compile::{canon, compile_loose, compile_manifest, find_manifest_root, Snapshot};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -225,50 +224,12 @@ impl LanguageServer for Backend {
         let Some(fid) = snapshot.file_id_of(&path) else {
             return Ok(None);
         };
-        let idx = &snapshot.lines[fid];
-
-        let mut hints = Vec::new();
-        for f in &snapshot.facts {
-            if f.span.file.0 as usize != fid {
-                continue;
-            }
-            // Every derived-fact hint reads best at the end of its line: the inverse
-            // after the field's type, the model/callable-wide facts after the header.
-            let position = match f.kind {
-                FactKind::InferredInverse
-                | FactKind::InferredIndex
-                | FactKind::CtxRequirement
-                | FactKind::ResolvedQuery => idx.end_of_line(f.span.start as usize),
-                // A scope is written, not derived — it needs no inlay hint (hover only).
-                FactKind::Scope => continue,
-            };
-            if position < params.range.start || position > params.range.end {
-                continue;
-            }
-            // An inferred inverse links to the forward edge it pairs through, so the
-            // `via order` hint is command-clickable; other facts are plain text.
-            let label = match (f.kind, f.nav) {
-                (FactKind::InferredInverse, Some(nav)) => {
-                    InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
-                        value: f.label.clone(),
-                        location: nav_location(snapshot, nav),
-                        tooltip: None,
-                        command: None,
-                    }])
-                }
-                _ => InlayHintLabel::String(format!("{} {}", f.kind.tag(), f.label)),
-            };
-            hints.push(InlayHint {
-                position,
-                label,
-                kind: Some(InlayHintKind::TYPE),
-                text_edits: None,
-                tooltip: Some(InlayHintTooltip::String(f.detail.clone())),
-                padding_left: Some(true),
-                padding_right: None,
-                data: None,
-            });
-        }
+        // Build the file's hints, then keep only those in the requested viewport.
+        let hints = snapshot
+            .inlay_hints(fid)
+            .into_iter()
+            .filter(|h| h.position >= params.range.start && h.position <= params.range.end)
+            .collect();
         Ok(Some(hints))
     }
 
@@ -390,18 +351,6 @@ impl LanguageServer for Backend {
             range: None,
         }))
     }
-}
-
-/// A cross-file `Location` for a span, resolving its `FileId` to the owning URI —
-/// the command-click target of an inlay label part (e.g. an inverse's forward edge).
-fn nav_location(snapshot: &Snapshot, span: based_ast::Span) -> Option<Location> {
-    let fid = span.file.0 as usize;
-    let (path, _) = snapshot.sources.get(fid)?;
-    let uri = Url::from_file_path(path).ok()?;
-    Some(Location {
-        uri,
-        range: span_to_range(span, &snapshot.lines[fid]),
-    })
 }
 
 /// Map a source `Span`'s byte range onto an LSP `Range` via the owning file's index.

@@ -19,11 +19,12 @@ use based_ast::{
     ShapeValue, Span, TypeExpr, Value, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
-use based_facts::Fact;
+use based_facts::{Fact, FactKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, DocumentSymbol, Position, Range, SymbolKind,
+    CompletionItem, CompletionItemKind, DocumentSymbol, InlayHint, InlayHintKind, InlayHintLabel,
+    InlayHintLabelPart, InlayHintTooltip, Location, Position, Range, SymbolKind, Url,
 };
 
 /// A compiled view of the project the server answers requests from.
@@ -82,6 +83,65 @@ impl Snapshot {
             return Some(f.name.span);
         }
         None
+    }
+
+    /// The inlay hints for file `fid`: one per derived fact anchored in it, each at
+    /// the end of its line. The inferred-inverse hint is a command-clickable label
+    /// part linking to the forward edge it pairs through (`OrderItem.order`); the
+    /// model/callable-wide facts are plain `tag label` strings; a scope is *written*,
+    /// not derived, so it carries no inlay (hover only). The caller filters by the
+    /// requested viewport range.
+    pub fn inlay_hints(&self, fid: usize) -> Vec<InlayHint> {
+        let idx = &self.lines[fid];
+        let mut hints = Vec::new();
+        for f in &self.facts {
+            if f.span.file.0 as usize != fid {
+                continue;
+            }
+            let position = match f.kind {
+                FactKind::InferredInverse
+                | FactKind::InferredIndex
+                | FactKind::CtxRequirement
+                | FactKind::ResolvedQuery => idx.end_of_line(f.span.start as usize),
+                FactKind::Scope => continue,
+            };
+            // An inferred inverse links to the forward edge it pairs through, so the
+            // `via Model.field` hint is command-clickable; other facts are plain text.
+            let label = match (f.kind, f.nav) {
+                (FactKind::InferredInverse, Some(nav)) => {
+                    InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
+                        value: f.label.clone(),
+                        location: self.nav_location(nav),
+                        tooltip: None,
+                        command: None,
+                    }])
+                }
+                _ => InlayHintLabel::String(format!("{} {}", f.kind.tag(), f.label)),
+            };
+            hints.push(InlayHint {
+                position,
+                label,
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::String(f.detail.clone())),
+                padding_left: Some(true),
+                padding_right: None,
+                data: None,
+            });
+        }
+        hints
+    }
+
+    /// A cross-file `Location` for a span, resolving its `FileId` to the owning URI —
+    /// the command-click target of an inlay label part (an inverse's forward edge).
+    fn nav_location(&self, span: Span) -> Option<Location> {
+        let fid = span.file.0 as usize;
+        let (path, _) = self.sources.get(fid)?;
+        let uri = Url::from_file_path(path).ok()?;
+        Some(Location {
+            uri,
+            range: span_range(span, &self.lines[fid]),
+        })
     }
 
     /// Rich "what" for the symbol under the cursor — a field's `name: Type`, or a
@@ -1154,7 +1214,9 @@ mod tests {
         assert!(!snap.sources.is_empty());
         // The inferred inverse on `Order.items` is surfaced.
         assert!(
-            snap.facts.iter().any(|f| f.label.contains("via order")),
+            snap.facts
+                .iter()
+                .any(|f| f.label.contains("via OrderItem.order")),
             "{:?}",
             snap.facts
         );
@@ -1288,6 +1350,41 @@ mod tests {
             .expect("scoped resolves");
         assert_eq!(&src[d2.start as usize..d2.end as usize], "Tenant");
         assert_eq!(d2.start as usize, decl_at);
+    }
+
+    /// The inferred-inverse inlay is a *clickable* label part: `via OrderItem.order`
+    /// whose location points at the `order` forward edge in order_item/model.bsl, so
+    /// command-clicking the hint navigates to the edge it pairs through.
+    #[test]
+    fn inverse_inlay_is_a_clickable_label_part() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        let model_fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
+
+        let hints = snap.inlay_hints(model_fid);
+        // Find the inverse hint (the only label-parts hint) and inspect its part.
+        let parts = hints
+            .iter()
+            .find_map(|h| match &h.label {
+                InlayHintLabel::LabelParts(p) => Some(p),
+                _ => None,
+            })
+            .expect("an inverse hint rendered as label parts");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].value, "via OrderItem.order");
+
+        // The part carries a location, and it points at `order` in order_item/model.bsl.
+        let loc = parts[0].location.as_ref().expect("clickable location");
+        assert!(
+            loc.uri.path().ends_with("order_item/model.bsl"),
+            "{}",
+            loc.uri
+        );
+        let oi_fid = snap.file_id_of(&root.join("order_item/model.bsl")).unwrap();
+        let oi_src = &snap.sources[oi_fid].1;
+        let off = snap.lines[oi_fid].offset(loc.range.start);
+        assert!(oi_src[off..].starts_with("order"), "lands on the edge name");
     }
 
     /// Go-to-definition on a *field-reference* path resolves each segment to the
