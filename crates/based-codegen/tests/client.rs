@@ -271,3 +271,35 @@ fn ctx_scalar_field_typed_by_inference() {
     assert!(out.contains("pub struct MyTierCtx {"), "\n{out}");
     assert!(out.contains("pub tier: i64,"), "\n{out}");
 }
+
+#[test]
+fn nested_to_one_shape_emits_nested_struct() {
+    // A to-one `placed_by { … }` nest emits a nested struct `<Parent><Field>` and the
+    // parent field takes that type; an optional relation nests as `Option<…>`.
+    let out = gen(r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, fulfilled_by: User?, total: int }
+        shape OrderCard from Order {
+          total
+          placed_by { name, email }
+          fulfilled_by { name }
+        }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    // parent references the nested struct type (required + optional relations).
+    assert!(out.contains("pub struct OrderCard {"), "\n{out}");
+    assert!(out.contains("pub total: i64,"), "\n{out}");
+    assert!(out.contains("pub placed_by: OrderCardPlacedBy,"), "\n{out}");
+    assert!(
+        out.contains("pub fulfilled_by: Option<OrderCardFulfilledBy>,"),
+        "\n{out}"
+    );
+    // the nested structs are emitted with their projected fields.
+    assert!(out.contains("pub struct OrderCardPlacedBy {"), "\n{out}");
+    assert!(out.contains("pub name: String,"), "\n{out}");
+    assert!(out.contains("pub email: String,"), "\n{out}");
+    assert!(out.contains("pub struct OrderCardFulfilledBy {"), "\n{out}");
+    // to-many nests are still deferred: no struct for a collection field.
+    assert!(!out.contains("OrderCardItems"), "\n{out}");
+}

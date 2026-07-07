@@ -34,8 +34,9 @@
 //! -> the property is not `required`; a to-many scalar -> an `array`.
 //!
 //! ## Deferred (documented, not silently wrong — same gaps as the client)
-//! - Nested shape sub-objects (`field { … }`) are skipped in the output schema (they
-//!   need JSON aggregation; PLAN M3), exactly like the client + SQL sides.
+//! - A to-**one** nested sub-object (`buyer { … }`) is emitted as an inline nested
+//!   object schema, matching the client + SQL sides. To-**many** nested arrays are
+//!   still skipped (they need JSON aggregation; PLAN L1 follow-up).
 //! - A `sql`…`` shape field has no statically known type -> the open-object `Json`.
 //! - A **pure** update/delete mutation still responds `{ id }` (its declared-shape
 //!   re-select is deferred, D12), so its `200` schema is the `MutationResult` `{ id }`
@@ -359,8 +360,10 @@ fn out_schema(
     }
 }
 
-/// Project a shape body into `(field, schema, required)` triples. Nested sub-objects
-/// are skipped (deferred); a `sql`…`` field maps to the open-object `Json`.
+/// Project a shape body into `(field, schema, required)` triples. A `sql`…`` field
+/// maps to the open-object `Json`; a to-**one** nest (`buyer { … }`) becomes an inline
+/// nested object schema (recursively projected), required unless the relation is
+/// optional. A to-**many** nest is skipped (deferred, like the client + SQL sides).
 fn shape_fields(
     schema: &CheckedSchema,
     body: &[ShapeField],
@@ -381,10 +384,38 @@ fn shape_fields(
                 }
                 ShapeValue::Raw(_) => fields.push((out.node.clone(), json_schema(), false)),
             },
-            ShapeField::Nest { .. } => {}
+            ShapeField::Nest { field, body } => {
+                if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
+                    let nested = shape_fields(schema, body, Some(target));
+                    fields.push((field.node.clone(), object_schema(&nested), !optional));
+                }
+                // to-many nest: deferred (L1 array follow-up) — skipped.
+            }
         }
     }
     fields
+}
+
+/// The target model + `optional` of a **to-one** relation field, or `None` for a scalar,
+/// an unknown field, or a to-**many** edge (a Forward is always to-one; an Inverse is
+/// to-one only when its paired forward FK is unique — a one-to-one back edge, which may
+/// be absent, hence optional). The OpenAPI twin of the client emitter's `to_one_relation`
+/// and the SQL side's `enter_to_one`.
+fn to_one_relation<'a>(
+    schema: &'a CheckedSchema,
+    model: Option<&RModel>,
+    field: &str,
+) -> Option<(&'a RModel, bool)> {
+    match model?.member(field).map(|m| &m.kind)? {
+        MemberKind::Forward {
+            target, optional, ..
+        } => schema.model(target).map(|t| (t, *optional)),
+        MemberKind::Inverse { target, via } => {
+            let t = schema.model(target)?;
+            t.is_unique(via).then_some((t, true))
+        }
+        MemberKind::Scalar { .. } => None,
+    }
 }
 
 /// Every stored column of a bare-model return: scalars by their mapped schema, forward

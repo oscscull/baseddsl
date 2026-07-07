@@ -298,3 +298,82 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
     );
     assert_eq!(in_scope.body, json!({ "subject": "help", "who": "Zoe" }));
 }
+
+/// A to-one nested shape sub-object (`placed_by { name, email }`, L1) returns a nested
+/// JSON object end-to-end: the codegen-prefixed columns (`placed_by.name`, …) come back
+/// from the live SELECT and the runtime reassembles them into a sub-object — proven
+/// against a real engine, not compile-verified. Self-contained (no commerce schema) so
+/// the nesting is the only variable.
+#[test]
+fn nested_to_one_query_returns_nested_json() {
+    let src = r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, fulfilled_by: User?, total: int }
+        shape OrderCard from Order { total, placed_by { name, email } }
+        query order_by_id(id) -> OrderCard;
+        query orders() -> OrderCard[];
+    "#;
+    let sf = parse_file(src, FileId(0)).expect("parse");
+    let (schema, diags) = check(&sf.decls);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != based_diagnostics::Severity::Error),
+        "unexpected sema errors: {diags:#?}"
+    );
+    let c = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("generated DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `user` (`id`, `name`, `email`) VALUES ('u1', 'Ada', 'a@x.com');
+            INSERT INTO `order` (`id`, `placed_by_id`, `total`) VALUES ('o1', 'u1', 500);
+            "#,
+        )
+        .expect("seed");
+
+    // `get`: the nested object rides back under `placed_by`, not as flat `placed_by.*`.
+    let mut db = backend.checkout("").expect("checkout");
+    let mut ids = SeqIdGen::default();
+    let resp = dispatch(
+        &c,
+        db.as_mut(),
+        &mut ids,
+        &NoStore,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "o1" }),
+        json!({}),
+        None,
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({ "total": 500, "placed_by": { "name": "Ada", "email": "a@x.com" } })
+    );
+
+    // `list`: every row reassembles independently.
+    let mut db = backend.checkout("").expect("checkout");
+    let listed = dispatch(
+        &c,
+        db.as_mut(),
+        &mut ids,
+        &NoStore,
+        "POST",
+        "/q/orders",
+        json!({}),
+        json!({}),
+        None,
+    );
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(
+        listed.body,
+        json!([{ "total": 500, "placed_by": { "name": "Ada", "email": "a@x.com" } }])
+    );
+}

@@ -48,7 +48,9 @@ resumes it:
 dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — but the **language itself is not yet
 feature-complete**. A 2026-07-07 audit found that normal-workday query surface parses and type-checks
 yet emits *nothing*: nested/relation projection in shapes (`items { … }`, `invited_users`) and
-keyset-cursor pagination both stub out in codegen/runtime. **The top priority is finishing the language**
+keyset-cursor pagination both stub out in codegen/runtime. (Since then: to-**one** nested shape
+sub-objects now emit end-to-end — D55 — leaving to-many arrays + keyset as the open language gaps.)
+**The top priority is finishing the language**
 (Track L) — a complete, functional, usable BSL covering ordinary GET/PUT queries end-to-end. Everything
 else is subordinate: **DB-verification hardening (A) and example projects (B) *follow* feature
 completion** (you cannot prove a feature that isn't built), while the **independent non-feature tracks —
@@ -108,18 +110,18 @@ read/write *core* is built and proven live — get/list, `where`/operators/named
 sort cascade, offset pagination, create/update/delete/restore/`tx`/single-level `^`, soft-delete,
 `@scope` injection, raw SQL, idempotency. These are the *specified, normal-workday* gaps the 2026-07-07
 audit found where source parses + type-checks but codegen/runtime emit nothing or only part:
-  - **L1. 🔴 NEXT PRIORITY. Nested / relation projection in shapes** — `field { … }` expanding a
-    relation into a to-one sub-object *and* a to-many array (`OrderCard.items`, `User.invited_users`).
-    Sema already fully checks the nested body (`based-sema check.rs:53-67`); every **emit** surface
-    silently drops it: SQL `based-codegen sql/dml.rs:293` (`ShapeField::Nest {..} => {}`), client
-    `client.rs:293`, OpenAPI `openapi.rs:384`, and the runtime maps flat rows only (`run.rs:235`). This
-    is the single biggest hole in the language: **today no query can return any related object or array**
-    — only individually reached scalar columns (`buyer = placed_by.name` works; `items { … }` yields
-    nothing). Build: nested projection in dml (JSON aggregation or a companion query per nested edge) +
-    nested client/OpenAPI types + runtime row-tree reassembly. Large — **sequence to-one nesting first,
-    then to-many arrays.** NB the flagship `User.invited_users` case is **self-referential**, so it also
-    forces *self-ref join aliasing* — resolve that within L1 (or take the to-one, non-self-ref slice
-    first and land self-ref arrays as its own follow-up iteration). Verify end-to-end against a live DB.
+  - **L1. 🟡 PARTIAL. Nested / relation projection in shapes.** To-**one** sub-objects are **done
+    (D55)**: `field { … }` over a Forward (or unique one-to-one Inverse) relation nests the target's
+    columns end-to-end — SQL prefixes them under a `field.<col>` alias (reusing the reach-rename JOIN),
+    the runtime `nest_row` reassembles the flat row into a sub-object, and the client/OpenAPI emit the
+    nested type; recurses for nested-within-nested. Verified live against SQLite. **Remaining follow-up:
+    to-many nested ARRAYS** (`OrderCard.items`, `User.invited_users`). These need JSON aggregation (a
+    per-dialect JSON_ARRAYAGG / a companion query per nested edge) and, for the flagship self-referential
+    `User.invited_users`, **self-ref join aliasing** — the same model joined to itself under distinct
+    aliases. The emit surfaces already *skip* to-many nests cleanly (guarded by the to-one cardinality
+    check: `enter_to_one`/`to_one_relation` return `None` for a collection), so this is additive. Resume:
+    extend `project_body`'s Nest arm to aggregate a to-many edge into a JSON array column, teach `nest_row`
+    to parse it, and emit the `Vec<…>` client/OpenAPI type. Verify end-to-end against a live DB.
   - **L2. 🔴 Keyset-cursor pagination.** `dml.rs:363-368` emits `ORDER + LIMIT + id`-tiebreaker but no
     cursor `WHERE` comparison, and `run.rs:251` hard-codes `cursor: null` — so a keyset `page` returns
     only page 1 and a returned cursor does nothing. Build the cursor `WHERE` predicate in dml + opaque

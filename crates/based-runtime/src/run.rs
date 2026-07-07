@@ -210,7 +210,7 @@ fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbEr
     // Read the written row back in its declared shape, still inside the transaction.
     let response = match &plan.ret_select {
         Some(stmt) => match db.fetch(&stmt.sql, &stmt.params) {
-            Ok(rows) => rows.into_iter().next().map(J::Object).unwrap_or(J::Null),
+            Ok(rows) => rows.into_iter().next().map(nest_row).unwrap_or(J::Null),
             Err(e) => {
                 let _ = db.rollback();
                 return Err(e);
@@ -231,22 +231,60 @@ fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbEr
     Ok(response)
 }
 
+/// Reassemble a flat result row into the response object, nesting to-one sub-objects.
+///
+/// A nested to-one shape sub-object (`buyer { name, email }`) is projected by codegen
+/// as columns aliased `buyer.name`, `buyer.email` ([`based_codegen::sql::NEST_SEP`] is
+/// the `.`); this splits each such key back into a nested object, recursing for
+/// nested-within-nested (`buyer.org.name`). A `.` cannot occur in a BSL identifier, so
+/// a flat query (no nest) has no dotted key and passes through unchanged — the
+/// transform is a no-op there. One convention, owned by codegen, read here (principle 4).
+fn nest_row(row: Row) -> serde_json::Value {
+    let mut root = serde_json::Map::new();
+    for (key, val) in row {
+        insert_path(&mut root, &key, val);
+    }
+    serde_json::Value::Object(root)
+}
+
+/// Insert `val` at a possibly-dotted `key` into `obj`, creating intermediate objects for
+/// each `NEST_SEP` segment (`buyer.org.name` → `{buyer:{org:{name:val}}}`).
+fn insert_path(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    val: serde_json::Value,
+) {
+    match key.split_once(based_codegen::sql::NEST_SEP) {
+        None => {
+            obj.insert(key.to_string(), val);
+        }
+        Some((head, rest)) => {
+            let entry = obj
+                .entry(head.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let serde_json::Value::Object(child) = entry {
+                insert_path(child, rest, val);
+            }
+        }
+    }
+}
+
 /// Execute a plan's statements and assemble the response per its envelope.
 fn shape(db: &mut dyn Db, plan: &QueryPlan) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
     let rows = run_stmt(db, &plan.main)?;
     Ok(match plan.envelope {
         // `get`: the first row, or JSON null (Option<T>).
-        Envelope::One => rows.into_iter().next().map(J::Object).unwrap_or(J::Null),
+        Envelope::One => rows.into_iter().next().map(nest_row).unwrap_or(J::Null),
         // `list`: every row as an array.
-        Envelope::Many => J::Array(rows.into_iter().map(J::Object).collect()),
+        Envelope::Many => J::Array(rows.into_iter().map(nest_row).collect()),
         // paginated `list`: the { rows, cursor } envelope (cursor deferred → null),
         // plus `total` when the query asked for a count.
         Envelope::Page { with_count } => {
             let mut obj = serde_json::Map::new();
             obj.insert(
                 "rows".into(),
-                J::Array(rows.into_iter().map(J::Object).collect()),
+                J::Array(rows.into_iter().map(nest_row).collect()),
             );
             obj.insert("cursor".into(), J::Null);
             if with_count {

@@ -263,3 +263,32 @@ fn shared_shape_emits_one_schema() {
         "#/components/schemas/OrderCard"
     );
 }
+
+#[test]
+fn nested_to_one_shape_emits_inline_object_schema() {
+    // A to-one `placed_by { … }` nest becomes an inline nested object property in the
+    // output schema, required unless the relation is optional.
+    let doc = gen(r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, fulfilled_by: User?, total: int }
+        shape OrderCard from Order {
+          total
+          placed_by { name, email }
+          fulfilled_by { name }
+        }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    let props = &doc["components"]["schemas"]["OrderCard"]["properties"];
+    // the nested to-one is an object schema with the projected properties.
+    assert_eq!(props["placed_by"]["type"], "object");
+    assert_eq!(props["placed_by"]["properties"]["name"]["type"], "string");
+    assert_eq!(props["placed_by"]["properties"]["email"]["type"], "string");
+    assert_eq!(props["fulfilled_by"]["type"], "object");
+    // required: the non-optional relation is required, the optional one is not.
+    let required = doc["components"]["schemas"]["OrderCard"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(required.iter().any(|v| v == "placed_by"));
+    assert!(!required.iter().any(|v| v == "fulfilled_by"));
+}

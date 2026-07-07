@@ -355,6 +355,119 @@ fn multi_hop_path_chains_joins() {
     assert!(ddl.contains("`j_address_city`.`name` AS `city`"), "\n{ddl}");
 }
 
+// ---------- nested to-one shape sub-objects (L1) ---------------------------
+
+#[test]
+fn nested_to_one_forward_projects_prefixed_columns() {
+    // A to-one `placed_by { … }` nest projects the joined User's columns under a
+    // `placed_by.`-prefixed alias the runtime reassembles into a sub-object. The join is
+    // the same one a reach-rename would build (reused machinery).
+    let ddl = gen(r#"
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text, email: text }
+        @soft_delete(deleted_at)
+        @sort(placed_at desc)
+        Order { deleted_at: timestamp?, placed_by: User, total: int, placed_at: timestamp }
+        shape OrderCard from Order { total, placed_by { name, email } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    // the local column stays flat, the nested columns carry the `placed_by.` prefix.
+    assert!(ddl.contains("`order`.`total` AS `total`"), "\n{ddl}");
+    assert!(
+        ddl.contains("`j_placed_by`.`name` AS `placed_by.name`"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("`j_placed_by`.`email` AS `placed_by.email`"),
+        "\n{ddl}"
+    );
+    // the relation join is materialized (required relation -> INNER JOIN).
+    assert!(
+        ddl.contains("JOIN `user` AS `j_placed_by` ON `j_placed_by`.`id` = `order`.`placed_by_id`"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn nested_to_one_recurses_and_reaches_inside_nest() {
+    // Nested-within-nested (`placed_by { org { name } }`) chains joins and deepens the
+    // alias prefix (`placed_by.org.name`); a `=`-reach inside a nest resolves from the
+    // nested model's alias.
+    let ddl = gen(r#"
+        Org { name: text }
+        @sort(id asc)
+        User { org: Org, name: text }
+        @sort(id asc)
+        Order { placed_by: User, total: int }
+        shape OrderCard from Order { total, placed_by { name, org { name }, org_name = org.name } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        ddl.contains("`j_placed_by`.`name` AS `placed_by.name`"),
+        "\n{ddl}"
+    );
+    // the doubly-nested column carries the full prefix chain.
+    assert!(
+        ddl.contains("`j_placed_by_org`.`name` AS `placed_by.org.name`"),
+        "\n{ddl}"
+    );
+    // a `=`-reach inside the nest is prefixed by the nest it sits in.
+    assert!(
+        ddl.contains("`j_placed_by_org`.`name` AS `placed_by.org_name`"),
+        "\n{ddl}"
+    );
+    // both joins exist, the second keyed off the first's alias.
+    assert!(
+        ddl.contains("JOIN `user` AS `j_placed_by` ON `j_placed_by`.`id` = `order`.`placed_by_id`"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains(
+            "JOIN `org` AS `j_placed_by_org` ON `j_placed_by_org`.`id` = `j_placed_by`.`org_id`"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn nested_to_many_is_skipped() {
+    // A to-many nest (`items { … }`, an inverse collection) is deferred (L1 follow-up):
+    // it emits no projection rather than wrong SQL, so the SELECT lists only `total`.
+    let ddl = gen(r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        @sort(id asc)
+        OrderItem { order: Order, quantity: int }
+        shape OrderCard from Order { total, items { quantity } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(ddl.contains("`order`.`total` AS `total`"), "\n{ddl}");
+    // no `items.` prefixed column, no join into order_item.
+    assert!(
+        !ddl.contains("items."),
+        "to-many nest must be skipped\n{ddl}"
+    );
+    assert!(!ddl.contains("order_item"), "\n{ddl}");
+}
+
+#[test]
+fn pg_nested_to_one_double_quotes_prefixed_alias() {
+    let sql = gen_pg(
+        r#"
+        @sort(id asc)
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, total: int }
+        shape OrderCard from Order { total, placed_by { name } }
+        query order_by_id(id) -> OrderCard;
+        "#,
+    );
+    assert!(
+        sql.contains("\"j_placed_by\".\"name\" AS \"placed_by.name\""),
+        "\n{sql}"
+    );
+}
+
 // ---------- Postgres (D29) -------------------------------------------------
 
 #[test]

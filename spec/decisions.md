@@ -25,6 +25,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **SQL codegen — mutations/writes** — D12 (mutation writes), D16 (tx back-refs `^`)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
+- **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
@@ -1803,3 +1804,38 @@ project by name, so an author jumps to any model/callable without knowing its fi
   `status` field contained in `Order`; kind mapping for shape/query/mutation; the `"oc"` fuzzy query
   narrows to a subset including `OrderCard` while a non-subsequence query drops it. Plus a unit test
   pinning `fuzzy_match` as an ordered, case-insensitive subsequence with empty-matches-all.
+
+## D55 — nested to-one shape sub-objects (`field { … }`)
+Track L1, first slice. A shape may expand a **to-one** relation into a nested object
+(`shape OrderCard from Order { total, placed_by { name, email } }` → `{ total, placed_by:
+{ name, email } }`). Sema already type-checked the nested body (`check.rs` `ShapeField::Nest`);
+every emit surface silently dropped it. Now built end-to-end. **To-many arrays** (`items:
+OrderItem[]`, the self-referential `User.invited_users`) stay deferred — they need JSON
+aggregation / a companion query + self-ref join aliasing (the remaining L1 follow-up).
+- **Cardinality rule.** A `Forward` relation is always to-one. An `Inverse` is to-one only
+  when its paired forward FK (`via`) is unique on the target (a genuine one-to-one back edge);
+  otherwise it is a collection and the nest is skipped (not mis-lowered). One helper expresses
+  this on each emit surface: SQL `Select::enter_to_one`, client/OpenAPI `to_one_relation`.
+- **SQL (`sql/dml.rs`).** A to-one nest reuses the *same* relation JOIN a reach-rename builds
+  (join dedup keyed by path prefix, so `buyer = placed_by.name` and `placed_by { name }` share
+  one join). The nested model's columns are projected under a **prefixed output alias**:
+  `placed_by { name }` → `` `j_placed_by`.`name` AS `placed_by.name` ``. The separator is
+  `NEST_SEP = '.'` — a `.` cannot occur in a BSL identifier, so any alias containing it is
+  unambiguously a nested projection. Nesting recurses (`placed_by { org { name } }` →
+  `placed_by.org.name`), deepening both the join alias and the output prefix. `project_body`
+  threads `(alias, prefix, out_prefix)` and resolves paths from the nested model's alias.
+- **Runtime reassembly (`run.rs`).** `nest_row` splits each flat row key on `NEST_SEP` and
+  rebuilds the nested object (`{"placed_by.name": …}` → `{"placed_by": {"name": …}}`), recursing
+  for deeper nests. Applied to every query envelope (`get`/`list`/`page`) and the mutation
+  declared-shape re-select. A flat query has no dotted key, so the transform is a no-op there —
+  it never changes existing behaviour. The alias convention is codegen's single source of truth,
+  read by the runtime (principle 4).
+- **Client + OpenAPI.** The client emits a nested struct `<Parent><Field>` (e.g.
+  `OrderCardPlacedBy`) referenced by the parent field's type (`Option<…>` when the relation is
+  optional), deduped across callables. OpenAPI emits an inline nested object schema, required
+  unless the relation is optional. Both mirror the SQL cardinality rule; to-many nests are still
+  skipped on both.
+- **Verified live.** A self-contained SQLite integration test (`sqlite_integration.rs`) seeds a
+  User + Order and dispatches a nested `get`/`list`, asserting the reassembled nested JSON against
+  a real engine — not compile-verified. Plus codegen unit tests (SQL prefix aliases + recursion +
+  to-many skip + Postgres quoting; client nested struct; OpenAPI nested object schema).

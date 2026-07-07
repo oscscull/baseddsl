@@ -36,8 +36,9 @@
 //! contract instead of smuggling `$ctx` on the side.
 //!
 //! ## Deferred (documented, not silently wrong)
-//! - Nested shape sub-objects (`field { … }`) are skipped in the output struct, same
-//!   as the read side (they need JSON aggregation; PLAN M3).
+//! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct, matching the
+//!   read side. To-**many** nested arrays are still skipped (they need JSON aggregation
+//!   / a companion query; PLAN L1 follow-up).
 //! - A `sql`…`` shape field has no statically known type, so it maps to `Json`.
 //! - The keyset cursor is an opaque `Option<String>` in `Page<T>`; its encoding is a
 //!   runtime concern (pagination.md).
@@ -96,6 +97,10 @@ struct Callable<'a> {
 struct OutStruct {
     name: String,
     fields: Vec<(String, String)>, // (field name, rust type)
+    /// Auxiliary structs for to-one nested sub-objects (`buyer { … }`), each the
+    /// projection of one nested relation, emitted alongside the parent and referenced by
+    /// the parent's field type. Empty for a flat shape.
+    nested: Vec<OutStruct>,
 }
 
 // ---------- Rust target ----------------------------------------------------
@@ -112,14 +117,9 @@ mod rust {
         // Output structs first (deduped by name; a shape shared by two queries is one
         // struct). Emitted in first-seen order for deterministic output.
         out.push_str("\n// ---------- output types ----------\n");
-        let mut seen: Vec<&str> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for c in &callables {
-            if seen.contains(&c.out_struct.name.as_str()) {
-                continue;
-            }
-            seen.push(&c.out_struct.name);
-            out.push('\n');
-            out.push_str(&render_struct(&c.out_struct.name, &c.out_struct.fields));
+            emit_struct(&mut out, &c.out_struct, &mut seen);
         }
 
         // Input structs (+ the per-callable `Ctx` struct, when the callable needs
@@ -248,10 +248,7 @@ mod rust {
         if name != "full" {
             if let Some(shape) = find_shape(decls, name) {
                 let model = schema.model(&shape.from.node);
-                return OutStruct {
-                    name: name.to_string(),
-                    fields: shape_fields(schema, &shape.body, model),
-                };
+                return build_struct(schema, name.to_string(), &shape.body, model);
             }
         }
         // `full` or a bare model: every stored column of the resolved model.
@@ -259,24 +256,31 @@ mod rust {
             Some(m) => OutStruct {
                 name: m.name.clone(),
                 fields: model_fields(m),
+                nested: Vec::new(),
             },
             // Unresolvable (sema would have flagged it) — an empty struct keeps the
             // emitted module compiling rather than referencing a missing type.
             None => OutStruct {
                 name: pascal(name),
                 fields: Vec::new(),
+                nested: Vec::new(),
             },
         }
     }
 
-    /// Project a shape body into `(field, type)` pairs. Nested sub-objects are
-    /// skipped (deferred, like the SQL side); a `sql`…`` field maps to `Json`.
-    fn shape_fields(
+    /// Build one output struct from a shape body: `(field, type)` pairs plus the
+    /// auxiliary structs for its to-one nested sub-objects. A `sql`…`` field maps to
+    /// `Json`; a to-one nest (`buyer { … }`) becomes a nested struct named
+    /// `<Parent><Field>` and the field takes that type (`Option<…>` when the relation
+    /// is optional). A to-many nest is skipped (deferred, like the SQL side).
+    fn build_struct(
         schema: &CheckedSchema,
+        name: String,
         body: &[ShapeField],
         model: Option<&RModel>,
-    ) -> Vec<(String, String)> {
+    ) -> OutStruct {
         let mut fields = Vec::new();
+        let mut nested = Vec::new();
         for f in body {
             match f {
                 ShapeField::Bare(id) => {
@@ -290,10 +294,62 @@ mod rust {
                     // A raw SQL expression has no statically known type -> `Json`.
                     ShapeValue::Raw(_) => fields.push((out.node.clone(), "Json".to_string())),
                 },
-                ShapeField::Nest { .. } => {}
+                ShapeField::Nest { field, body } => {
+                    if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
+                        let sub_name = format!("{name}{}", pascal(&field.node));
+                        let sub = build_struct(schema, sub_name.clone(), body, Some(target));
+                        let ty = if optional {
+                            format!("Option<{sub_name}>")
+                        } else {
+                            sub_name
+                        };
+                        fields.push((field.node.clone(), ty));
+                        nested.push(sub);
+                    }
+                    // to-many nest: deferred (L1 array follow-up) — skipped.
+                }
             }
         }
-        fields
+        OutStruct {
+            name,
+            fields,
+            nested,
+        }
+    }
+
+    /// The target model + `optional` of a **to-one** relation field, or `None` for a
+    /// scalar, an unknown field, or a to-**many** edge (a Forward is always to-one; an
+    /// Inverse is to-one only when its paired forward FK is unique — a one-to-one back
+    /// edge, which may be absent, hence optional). Mirrors the SQL side's `enter_to_one`.
+    fn to_one_relation<'a>(
+        schema: &'a CheckedSchema,
+        model: Option<&RModel>,
+        field: &str,
+    ) -> Option<(&'a RModel, bool)> {
+        match model?.member(field).map(|m| &m.kind)? {
+            MemberKind::Forward {
+                target, optional, ..
+            } => schema.model(target).map(|t| (t, *optional)),
+            MemberKind::Inverse { target, via } => {
+                let t = schema.model(target)?;
+                t.is_unique(via).then_some((t, true))
+            }
+            MemberKind::Scalar { .. } => None,
+        }
+    }
+
+    /// Emit an output struct and its to-one nested aux structs, deduped by name across
+    /// callables (a shape shared by two queries is one struct).
+    fn emit_struct(out: &mut String, s: &OutStruct, seen: &mut Vec<String>) {
+        if seen.contains(&s.name) {
+            return;
+        }
+        seen.push(s.name.clone());
+        out.push('\n');
+        out.push_str(&render_struct(&s.name, &s.fields));
+        for n in &s.nested {
+            emit_struct(out, n, seen);
+        }
     }
 
     /// Every stored column of a bare-model return: scalars by their type, forward

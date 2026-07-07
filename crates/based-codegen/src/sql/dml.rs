@@ -11,7 +11,9 @@
 //! - Projection from the return **shape**: bare fields are local columns, `out =
 //!   path` reaches across relations (each relation step becomes a JOIN), `out =
 //!   sql`…`` is an inline expression. A bare-model return projects every stored
-//!   column. (Nested shape sub-objects are deferred — see PLAN M3.)
+//!   column. A to-one relation `field { … }` nests the target's projected columns
+//!   under a `field`-prefixed alias (`field.<col>`, [`NEST_SEP`]-joined), which the
+//!   runtime reassembles into a sub-object; to-many arrays are still deferred (L1).
 //! - WHERE from the query filter (bare-param same-name equality, per-param
 //!   bindings, or an explicit `where`), then the injected soft-delete + scope.
 //!   A named-filter call in `where` is inlined: its body is substituted with the
@@ -32,8 +34,9 @@
 //! (`has` -> MySQL's `MEMBER OF` vs Postgres's `@>`). Everything else is portable.
 //!
 //! ## Deferred (documented, not silently wrong)
-//! - Nested shape sub-objects (`field { ... }`): need JSON aggregation / a second
-//!   query; skipped in projection for now.
+//! - To-**many** nested arrays (`items: OrderItem[]`, a self-referential
+//!   `invited_users`): need JSON aggregation / a companion query + self-ref join
+//!   aliasing; skipped in projection for now. To-one nests are handled (above).
 //! - Keyset cursor comparison + opaque cursor encoding: runtime concern; the base
 //!   SELECT carries only ORDER + LIMIT + tiebreaker.
 
@@ -43,6 +46,14 @@ use based_ast::*;
 use based_sema::{CheckedSchema, MemberKind, RModel, RQuery, ScopeInject, SoftDelete, SoftMode};
 
 use crate::Dialect;
+
+/// The separator joining a nested to-one relation's field name to its projected
+/// columns in a SELECT output alias (`buyer` + `name` → `buyer.name`). A `.` cannot
+/// occur in a BSL identifier, so any output alias containing it is unambiguously a
+/// nested projection — the runtime (`run.rs`) splits on it to reassemble the flat row
+/// into a sub-object. One source of truth for the convention (principle 4): codegen
+/// emits it, the runtime reads it.
+pub const NEST_SEP: char = '.';
 
 /// Render every query in the schema as a parameterized SELECT (mutations join in a
 /// later increment). Statements are separated by blank lines, in declaration order.
@@ -212,7 +223,12 @@ fn lower_query(
 
 /// Build the indented SELECT-list text for a query. Delegates to [`project_return`],
 /// the shape-projection core the write side reuses for its post-write re-select (D12).
-fn build_projection(sel: &mut Select, decls: &[Decl], rq: &RQuery, root: &RModel) -> String {
+fn build_projection<'a>(
+    sel: &mut Select<'a>,
+    decls: &'a [Decl],
+    rq: &RQuery,
+    root: &'a RModel,
+) -> String {
     project_return(sel, decls, rq.ret_shape.as_deref(), &rq.target, root)
 }
 
@@ -220,18 +236,19 @@ fn build_projection(sel: &mut Select, decls: &[Decl], rq: &RQuery, root: &RModel
 /// when present, else projects every stored column of a bare-model return. Shared by
 /// the read side (queries) and the write side (`mutations`'s declared-shape re-select,
 /// D12), so a mutation returns the *same* projection a `get` of that shape would.
-pub(crate) fn project_return(
-    sel: &mut Select,
-    decls: &[Decl],
+pub(crate) fn project_return<'a>(
+    sel: &mut Select<'a>,
+    decls: &'a [Decl],
     ret_shape: Option<&str>,
     target: &str,
-    root: &RModel,
+    root: &'a RModel,
 ) -> String {
     let mut cols: Vec<String> = Vec::new();
     match ret_shape {
         Some(name) => {
             if let Some(shape) = find_shape(decls, name, target) {
-                project_body(sel, &shape.body, root, &mut cols);
+                let root_alias = sel.root_alias.clone();
+                project_body(sel, &shape.body, root, &root_alias, "", "", &mut cols);
             }
         }
         None => {
@@ -264,35 +281,76 @@ pub(crate) fn project_return(
 }
 
 /// Project a shape body against `model`, appending `expr AS out` lines to `cols`.
-fn project_body(sel: &mut Select, fields: &[ShapeField], model: &RModel, cols: &mut Vec<String>) {
+///
+/// `alias`/`prefix` locate the model in the join graph (the root alias + empty prefix
+/// at the top; a joined alias + its path prefix inside a nest), so paths resolve from
+/// the right table. `out_prefix` is prepended to every emitted output alias — empty at
+/// the top, `field.` (one [`NEST_SEP`] per level) inside a nest — so a nested column
+/// lands under a `parent.child` alias the runtime reassembles into a sub-object.
+fn project_body<'a>(
+    sel: &mut Select<'a>,
+    fields: &[ShapeField],
+    model: &'a RModel,
+    alias: &str,
+    prefix: &str,
+    out_prefix: &str,
+    cols: &mut Vec<String>,
+) {
     for f in fields {
         match f {
             ShapeField::Bare(id) => {
-                let (alias, col) = sel.resolve(&single(&id.node), model);
-                cols.push(format!("{} AS {}", sel.qcol(&alias, &col), sel.q(&id.node)));
+                let (a, col) = sel.resolve_from(&single(&id.node), alias, prefix, model);
+                cols.push(format!(
+                    "{} AS {}",
+                    sel.qcol(&a, &col),
+                    sel.q(&out_alias(out_prefix, &id.node))
+                ));
             }
             ShapeField::Rename { out, value } => match value {
                 ShapeValue::Path(p) => {
-                    let (alias, col) = sel.resolve(p, model);
+                    let (a, col) = sel.resolve_from(p, alias, prefix, model);
                     cols.push(format!(
                         "{} AS {}",
-                        sel.qcol(&alias, &col),
-                        sel.q(&out.node)
+                        sel.qcol(&a, &col),
+                        sel.q(&out_alias(out_prefix, &out.node))
                     ));
                 }
                 ShapeValue::Raw(raw) => {
                     cols.push(format!(
                         "({}) AS {}",
-                        render_raw(sel.dialect, raw, &sel.root_alias, &model.table),
-                        sel.q(&out.node)
+                        render_raw(sel.dialect, raw, alias, &model.table),
+                        sel.q(&out_alias(out_prefix, &out.node))
                     ));
                 }
             },
-            // Nested sub-objects need JSON aggregation / a second query — deferred
-            // (PLAN M3). Skipped rather than emitting wrong SQL.
-            ShapeField::Nest { .. } => {}
+            // A to-**one** relation nests the target's columns under a `field.`-prefixed
+            // alias (reassembled by the runtime). To-many arrays are still deferred (L1),
+            // so `enter_to_one` returns `None` for them and the field is skipped rather
+            // than emitting wrong SQL.
+            ShapeField::Nest { field, body } => {
+                if let Some((child_alias, child_prefix, child_model)) =
+                    sel.enter_to_one(&field.node, alias, prefix, model)
+                {
+                    let nested_out = format!("{out_prefix}{}{NEST_SEP}", field.node);
+                    project_body(
+                        sel,
+                        body,
+                        child_model,
+                        &child_alias,
+                        &child_prefix,
+                        &nested_out,
+                        cols,
+                    );
+                }
+            }
         }
     }
+}
+
+/// Prepend the nest output prefix to a field's output alias (`""` at the top,
+/// `"buyer."` inside a nest → `"buyer.name"`).
+fn out_alias(prefix: &str, name: &str) -> String {
+    format!("{prefix}{name}")
 }
 
 // ---------- filters (the query's own predicate) ---------------------------
@@ -549,9 +607,63 @@ impl<'a> Select<'a> {
     /// a JOIN for each relation step. A terminal relation resolves to its FK column
     /// (so `where (org = $org)` compares `org_id`), never a join.
     pub(crate) fn resolve(&mut self, path: &Path, root: &RModel) -> (String, String) {
-        let mut cur = root;
-        let mut alias = self.root_alias.clone();
-        let mut prefix = String::new();
+        let root_alias = self.root_alias.clone();
+        self.resolve_from(path, &root_alias, "", root)
+    }
+
+    /// Materialize the JOIN for a to-**one** relation member `field` on `model` (rooted
+    /// at `alias`/`prefix`), returning `(joined_alias, joined_prefix, target_model)` for
+    /// projecting the nested sub-object's columns. `None` for a scalar (not a relation)
+    /// or a to-**many** inverse edge — the array case is deferred (L1), so a nest over it
+    /// is dropped, not mis-lowered. A Forward relation is always to-one; an Inverse is
+    /// to-one only when its paired forward FK (`via`) is unique on the target (a genuine
+    /// one-to-one back edge), else it is a collection.
+    pub(crate) fn enter_to_one(
+        &mut self,
+        field: &str,
+        alias: &str,
+        prefix: &str,
+        model: &RModel,
+    ) -> Option<(String, String, &'a RModel)> {
+        let mem = model.member(field)?;
+        let mut prefix = prefix.to_string();
+        match &mem.kind {
+            MemberKind::Forward {
+                target,
+                fk_col,
+                optional,
+                ..
+            } => {
+                let (a, m) =
+                    self.join_forward(alias, &mut prefix, field, target, fk_col, *optional);
+                Some((a, prefix, m))
+            }
+            MemberKind::Inverse { target, via } => {
+                let tmodel = self.schema.model(target)?;
+                if !tmodel.is_unique(via) {
+                    return None; // to-many collection — deferred (L1 array follow-up).
+                }
+                let (a, m) = self.join_inverse(alias, &mut prefix, field, target, via);
+                Some((a, prefix, m))
+            }
+            MemberKind::Scalar { .. } => None,
+        }
+    }
+
+    /// Resolve a dotted path starting from `start_model` (aliased `start_alias`, at join
+    /// path `start_prefix`) to `(table_alias, column)`, materializing a JOIN per relation
+    /// step. [`resolve`](Self::resolve) is this rooted at the query's root; a nested shape
+    /// body resolves its paths from the joined relation's alias/prefix instead.
+    pub(crate) fn resolve_from(
+        &mut self,
+        path: &Path,
+        start_alias: &str,
+        start_prefix: &str,
+        start_model: &RModel,
+    ) -> (String, String) {
+        let mut cur = start_model;
+        let mut alias = start_alias.to_string();
+        let mut prefix = start_prefix.to_string();
         let n = path.segments.len();
         for (i, seg) in path.segments.iter().enumerate() {
             let name = &seg.node;
