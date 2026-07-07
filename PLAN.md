@@ -44,10 +44,16 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-**Where things stand (as of D50):** the architecture milestones (M2–M6) are done, and all three
-target dialects (SQLite/MariaDB/Postgres) clear the real-DB bar. Remaining work is turning
-"architecture-ready" into "a developer can adopt this" — see the Completion roadmap. Batch-by-batch
-history is in `PLAN-archive.md`.
+**Where things stand (as of D54):** the architecture milestones (M2–M6) are done and all three target
+dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — but the **language itself is not yet
+feature-complete**. A 2026-07-07 audit found that normal-workday query surface parses and type-checks
+yet emits *nothing*: nested/relation projection in shapes (`items { … }`, `invited_users`) and
+keyset-cursor pagination both stub out in codegen/runtime. **The top priority is finishing the language**
+(Track L) — a complete, functional, usable BSL covering ordinary GET/PUT queries end-to-end. Everything
+else is subordinate: **DB-verification hardening (A) and example projects (B) *follow* feature
+completion** (you cannot prove a feature that isn't built), while the **independent non-feature tracks —
+the extension (C) and migrations (E) — may run in parallel** since they share no files with L.
+Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -60,7 +66,8 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    `$ctx`-scope filtering (row + joined-`ON`), write + declared-shape re-select under one tx
    (read-your-writes), pagination, soft-delete/restore, idempotency dedupe, `Backend::ping`.
    **✅ Core met** — SQLite (D27), MariaDB Docker (D35), Postgres Docker (D38). *Remaining:*
-   pagination + soft-delete/restore under the live suites (the A4 extras).
+   pagination + soft-delete/restore under the live suites (the A4 extras) — **keyset-pagination
+   coverage is gated on Track L2** (the feature isn't built yet; see the priority note above).
 2. **A real, copyable example project per target DB.** A standalone Rust project (in-repo, **outside**
    the workspace, under `examples/`) consuming the generated client + runtime against a live DB — the
    thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **🔴 Not started
@@ -78,17 +85,52 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    LSP drift diagnostic) + the `raw(dialect)` up step.
 
 Deferred items (durable multi-instance idempotency store, shutdown grace deadline, incremental LSP
-sync, rename, `^^` multi-level back-refs, self-ref join aliasing, nested shape sub-objects) stay
-deferred — worked only if they land on the critical path or a user would notice their absence.
+sync, `^^` multi-level back-refs) stay deferred — worked only if they land on the critical path or a
+user would notice their absence. **Promoted off this list by the 2026-07-07 audit:** *nested shape
+sub-objects + relation-array projection* → **Track L1** (core language surface, not optional — no query
+can return a related object/array without it); *self-ref join aliasing* → folded into L1 (the flagship
+`User.invited_users` case is self-referential and forces it); *rename* → done (D53).
 
 ## Completion roadmap (ordered for velocity)
 
-Five tracks. **A, C, and E are independent** (Rust drivers vs. the TS extension vs. the migration
-engine — no shared files) so a coordinator may run them as parallel batches. B depends on A. D closes
-it out (and its CI must cover E). Order *within* a track is top-down. Done items are one-liners with
-their D#; open items carry full resume context. Delivery detail: `PLAN-archive.md`.
+**Priority order — largest value, closest-to-done first: Track L (finish the language) comes before
+everything.** A complete, functional, usable BSL — all normal-workday GET/PUT query + shape surface,
+working end-to-end — is the product's spine; DB-verification (A), examples (B), and deploy (D) are
+*followups* to it, because you cannot verify or ship a feature that isn't built. The **independent
+non-feature tracks — C (extension) and E (migrations) — share no files with L and *may run in parallel
+batches* alongside it**; **A and B are subordinate and largely gated on L** (A's keyset + richer-shape
+live coverage can't be proven until L builds them). **D** closes it all out (its CI must cover E).
+Order *within* a track is top-down. Done items are one-liners with their D#; open items carry full
+resume context. Delivery detail: `PLAN-archive.md`.
 
-**Track A — real-DB proof (critical path, DoD #1).** *Mechanism: Docker (OrbStack).*
+**Track L — language feature-completeness (TOP PRIORITY, critical path, DoD-spanning). 🔴 OPEN.** The
+read/write *core* is built and proven live — get/list, `where`/operators/named-filter inlining, the
+sort cascade, offset pagination, create/update/delete/restore/`tx`/single-level `^`, soft-delete,
+`@scope` injection, raw SQL, idempotency. These are the *specified, normal-workday* gaps the 2026-07-07
+audit found where source parses + type-checks but codegen/runtime emit nothing or only part:
+  - **L1. 🔴 NEXT PRIORITY. Nested / relation projection in shapes** — `field { … }` expanding a
+    relation into a to-one sub-object *and* a to-many array (`OrderCard.items`, `User.invited_users`).
+    Sema already fully checks the nested body (`based-sema check.rs:53-67`); every **emit** surface
+    silently drops it: SQL `based-codegen sql/dml.rs:293` (`ShapeField::Nest {..} => {}`), client
+    `client.rs:293`, OpenAPI `openapi.rs:384`, and the runtime maps flat rows only (`run.rs:235`). This
+    is the single biggest hole in the language: **today no query can return any related object or array**
+    — only individually reached scalar columns (`buyer = placed_by.name` works; `items { … }` yields
+    nothing). Build: nested projection in dml (JSON aggregation or a companion query per nested edge) +
+    nested client/OpenAPI types + runtime row-tree reassembly. Large — **sequence to-one nesting first,
+    then to-many arrays.** NB the flagship `User.invited_users` case is **self-referential**, so it also
+    forces *self-ref join aliasing* — resolve that within L1 (or take the to-one, non-self-ref slice
+    first and land self-ref arrays as its own follow-up iteration). Verify end-to-end against a live DB.
+  - **L2. 🔴 Keyset-cursor pagination.** `dml.rs:363-368` emits `ORDER + LIMIT + id`-tiebreaker but no
+    cursor `WHERE` comparison, and `run.rs:251` hard-codes `cursor: null` — so a keyset `page` returns
+    only page 1 and a returned cursor does nothing. Build the cursor `WHERE` predicate in dml + opaque
+    cursor encode/decode(/sign) in runtime plan/run. Offset pagination is already complete. Unblocks A4's
+    live pagination coverage. Medium.
+  - **L3. 🔴 Update/delete declared-shape re-select.** D12's re-select fires only when a mutation
+    *creates* its return row; a pure `update`/`delete` returns `{id}`/`{}` instead of its declared shape
+    (`based-codegen mutations.rs:37`, `based-runtime run.rs:221-228`). Re-select keyed off the write
+    `where`. Small–medium.
+
+**Track A — real-DB proof (DoD #1; A4 subordinate to / gated on Track L).** *Mechanism: Docker (OrbStack).*
   - A1. ✅ **done (D35).** Docker-backed ephemeral-MariaDB test harness (`tests/support/docker_mariadb.rs`,
     feature `docker-tests`, skips cleanly with no daemon).
   - A2. ✅ **done (D35).** MariaDB live suite — verbatim codegen-lowered SQL through `serve::dispatch`
@@ -99,7 +141,7 @@ their D#; open items carry full resume context. Delivery detail: `PLAN-archive.m
     pool-exhaustion → 503 under load; verified against the live servers, not just designed. Also the
     remaining DoD-#1 coverage (pagination + soft-delete/restore) under the live suites.
 
-**Track B — example projects (DoD #2, follows A per DB). 🔴 OPEN.**
+**Track B — example projects (DoD #2, follows A per DB; presupposes the Track L features it exercises). 🔴 OPEN.**
   - B1. Scaffold `examples/` (standalone crates, non-workspace).
   - B2. One worked project per DB (SQLite first — its driver's already live — then MariaDB, then
     Postgres) consuming the generated client against the runtime; each builds + runs an end-to-end
@@ -111,8 +153,9 @@ their D#; open items carry full resume context. Delivery detail: `PLAN-archive.m
     `.vsix` packages.
   - C3. ✅ **done (D40).** Per-file manifest resolution — each open file resolves to its nearest
     `based.toml`, one snapshot per project, so embedded schemas resolve cross-file (no spurious E0110).
-  - **C4. 🔴 NEXT PRIORITY. Feature-parity audit + fill-in** (baseline editor features a `.bsl` author
-    expects). *Framing (user, 2026-07-06): the LSP exists to power the editor tooling, not the reverse.*
+  - **C4. 🔴 OPEN (parallel-eligible; no longer the top priority — that is Track L1). Feature-parity
+    audit + fill-in** (baseline editor features a `.bsl` author expects). *Framing (user, 2026-07-06):
+    the LSP exists to power the editor tooling, not the reverse.*
     The audit checklist lives in `editors/vscode/README.md` ("LSP capability audit"). Done so far:
     document symbols (D44), completion (D45), go-to-def (D43), find-references (D52), rename +
     prepareRename (D53), workspace symbols `⌘T` (D54). **Remaining:** folding ranges, selection ranges;
