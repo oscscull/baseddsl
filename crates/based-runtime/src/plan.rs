@@ -116,6 +116,19 @@ pub struct QueryPlan {
     pub main: Stmt,
     pub count: Option<Stmt>,
     pub envelope: Envelope,
+    /// Keyset descriptor for a cursor-paginated `list` (pagination.md), else `None`.
+    /// The run stage reads the last row's hidden `__keyset_<i>` columns to mint the
+    /// next cursor and strips them from the response.
+    pub keyset: Option<KeysetPlan>,
+}
+
+/// What the run stage needs to finish a keyset page: how many sort-key columns the
+/// cursor carries (`__keyset_0..keys`) and the page size, so a full page yields a
+/// "more" cursor and a short page (the last page) yields none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeysetPlan {
+    pub keys: usize,
+    pub page_size: u64,
 }
 
 /// A planned mutation: the write statements in execution order (all bound
@@ -162,6 +175,9 @@ pub enum PlanError {
     /// The SQL referenced a `:name` the runtime could not resolve — an internal
     /// invariant break (codegen emitted a placeholder the planner did not bind).
     UnboundPlaceholder(String),
+    /// A keyset `cursor` arg was present but malformed/tampered/of the wrong arity
+    /// (cursor.md validation). The caller sent a bad cursor — a boundary error.
+    BadCursor(String),
 }
 
 /// Plan a query request against a compiled project.
@@ -190,6 +206,14 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     if offset_paginated(ast) {
         env.insert("offset".to_string(), bind_offset(req)?);
     }
+    // Keyset pagination (pagination.md): decode the opaque `cursor` arg into the
+    // sort-key values codegen's `:keyset_<i>` placeholders compare against, and flip
+    // `:keyset_active`. Absent cursor = the first page: `:keyset_active = 0` short-
+    // circuits the comparison to a no-op, and the `:keyset_<i>` bind to NULL (never
+    // consulted). `low.keyset` is the codegen-authoritative key count.
+    if let Some(n) = low.keyset {
+        bind_cursor(&mut env, req, n)?;
+    }
 
     // 2. Translate `:name` → `?` for the main and (optional) count statements.
     let main = env.bind(&low.sql)?;
@@ -204,11 +228,18 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         Verb::List => Envelope::Many,
     };
 
+    // A keyset page carries the descriptor the run stage needs to mint the next cursor.
+    let keyset = low.keyset.map(|keys| KeysetPlan {
+        keys,
+        page_size: page_size(ast).unwrap_or(u64::MAX),
+    });
+
     Ok(QueryPlan {
         name: req.callable.clone(),
         main,
         count,
         envelope,
+        keyset,
     })
 }
 
@@ -380,6 +411,31 @@ fn bind_offset(req: &Request) -> Result<SqlValue, PlanError> {
     }
 }
 
+/// Bind a keyset page's cursor placeholders (`:keyset_active` + `:keyset_0..n`). The
+/// caller sends the opaque `cursor` arg; absence is the first page (`:keyset_active =
+/// 0`, the comparison a no-op, the value placeholders NULL — never consulted). A
+/// present cursor is decoded + validated into its `n` sort-key values (`cursor.rs`); a
+/// bad one is a `BadCursor` boundary error, not a silent empty page.
+fn bind_cursor(env: &mut Env, req: &Request, n: usize) -> Result<(), PlanError> {
+    match req.args.get("cursor").filter(|v| !v.is_null()) {
+        Some(serde_json::Value::String(s)) => {
+            let vals = crate::cursor::decode(s, n).map_err(|e| PlanError::BadCursor(e.0))?;
+            env.insert("keyset_active".into(), SqlValue::Int(1));
+            for (i, v) in vals.into_iter().enumerate() {
+                env.insert(format!("keyset_{i}"), v);
+            }
+        }
+        Some(_) => return Err(PlanError::BadCursor("cursor must be a string".into())),
+        None => {
+            env.insert("keyset_active".into(), SqlValue::Int(0));
+            for i in 0..n {
+                env.insert(format!("keyset_{i}"), SqlValue::Null);
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------- helpers --------------------------------------------------------
 
 fn bad_arg(name: &str, e: CoerceError) -> PlanError {
@@ -415,6 +471,20 @@ fn offset_paginated(ast: &Query) -> bool {
     clauses
         .iter()
         .any(|c| matches!(c, Clause::Page(p) if p.offset))
+}
+
+/// The `page (...)` size of a paginated query (`None` when it does not paginate).
+fn page_size(ast: &Query) -> Option<u64> {
+    use based_ast::{Clause, QueryBody};
+    let clauses: &[Clause] = match &ast.body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        QueryBody::Bare => &[],
+    };
+    clauses.iter().find_map(|c| match c {
+        Clause::Page(p) => Some(p.size),
+        _ => None,
+    })
 }
 
 /// Find a query decl by name.

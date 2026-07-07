@@ -213,6 +213,24 @@ fn block_query_where_order_page_and_bare_bool() {
         !ddl.contains("OFFSET"),
         "keyset must not emit OFFSET:\n{ddl}"
     );
+    // keyset cursor comparison: lexicographic over the sort keys, guarded by
+    // `:keyset_active` (a no-op on page 1). `created_at DESC` compares `<`; the `id ASC`
+    // tiebreaker compares `>` behind the `created_at =` equality prefix.
+    assert!(ddl.contains(":keyset_active = 0 OR"), "\n{ddl}");
+    assert!(
+        ddl.contains("`product`.`created_at` < :keyset_0"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("`product`.`created_at` = :keyset_0 AND `product`.`id` > :keyset_1"),
+        "\n{ddl}"
+    );
+    // hidden cursor-basis columns the runtime reads to mint the next cursor.
+    assert!(
+        ddl.contains("`product`.`created_at` AS `__keyset_0`"),
+        "\n{ddl}"
+    );
+    assert!(ddl.contains("`product`.`id` AS `__keyset_1`"), "\n{ddl}");
 }
 
 #[test]
@@ -265,6 +283,12 @@ fn offset_pagination_and_with_count() {
     // second statement counts live rows, no LIMIT.
     assert!(ddl.contains("SELECT COUNT(*) AS `count`"), "\n{ddl}");
     assert!(ddl.contains("-- query posts (count)"), "\n{ddl}");
+    // offset pagination is not keyset — no cursor comparison, no hidden columns.
+    assert!(
+        !ddl.contains("keyset"),
+        "offset must not emit keyset:\n{ddl}"
+    );
+    assert!(!ddl.contains("__keyset"), "\n{ddl}");
 }
 
 #[test]

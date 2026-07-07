@@ -12,9 +12,11 @@ use crate::id::IdGen;
 use crate::idempotency::{IdempotencyStore, KeyState};
 use crate::load::Compiled;
 use crate::plan::{
-    plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
+    plan_mutation, plan_query, Envelope, KeysetPlan, MutationPlan, PlanError, QueryPlan, Request,
+    Stmt,
 };
 use crate::value::SqlValue;
+use based_codegen::sql::KEYSET_PREFIX;
 
 /// One returned row: column alias → JSON value (the SELECT aliases each projection
 /// to its output name, so a row is already the response object).
@@ -269,24 +271,51 @@ fn insert_path(
     }
 }
 
+/// Mint the "more" cursor for a keyset page (pagination.md): the last row's sort-key
+/// values, read from the hidden `__keyset_<i>` columns codegen projected. Only a *full*
+/// page (`page_size` rows) can have a next page — a short page is the last, so it gets
+/// no cursor (the caller stops paging rather than making one more empty request).
+fn next_cursor(rows: &[Row], ks: KeysetPlan) -> Option<String> {
+    use serde_json::Value as J;
+    if (rows.len() as u64) < ks.page_size {
+        return None;
+    }
+    let last = rows.last()?;
+    let vals: Vec<J> = (0..ks.keys)
+        .map(|i| {
+            last.get(&format!("{KEYSET_PREFIX}{i}"))
+                .cloned()
+                .unwrap_or(J::Null)
+        })
+        .collect();
+    Some(crate::cursor::encode(&vals))
+}
+
 /// Execute a plan's statements and assemble the response per its envelope.
 fn shape(db: &mut dyn Db, plan: &QueryPlan) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
-    let rows = run_stmt(db, &plan.main)?;
+    let mut rows = run_stmt(db, &plan.main)?;
     Ok(match plan.envelope {
         // `get`: the first row, or JSON null (Option<T>).
         Envelope::One => rows.into_iter().next().map(nest_row).unwrap_or(J::Null),
         // `list`: every row as an array.
         Envelope::Many => J::Array(rows.into_iter().map(nest_row).collect()),
-        // paginated `list`: the { rows, cursor } envelope (cursor deferred → null),
-        // plus `total` when the query asked for a count.
+        // paginated `list`: the { rows, cursor } envelope. For a keyset page, mint the
+        // next cursor from the last row's hidden sort-key columns and strip them from
+        // the response; `total` rides along when the query asked for a count.
         Envelope::Page { with_count } => {
+            let cursor = plan.keyset.and_then(|ks| next_cursor(&rows, ks));
+            if plan.keyset.is_some() {
+                for r in &mut rows {
+                    r.retain(|k, _| !k.starts_with(KEYSET_PREFIX));
+                }
+            }
             let mut obj = serde_json::Map::new();
             obj.insert(
                 "rows".into(),
                 J::Array(rows.into_iter().map(nest_row).collect()),
             );
-            obj.insert("cursor".into(), J::Null);
+            obj.insert("cursor".into(), cursor.map(J::String).unwrap_or(J::Null));
             if with_count {
                 if let Some(count) = &plan.count {
                     let total = run_stmt(db, count)?

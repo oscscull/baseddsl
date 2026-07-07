@@ -20,7 +20,9 @@
 //!   call args and lowered against the call-site model (the codegen twin of sema D14).
 //! - ORDER from the sort cascade (query `order` > model `@sort`); keyset queries
 //!   get the unique `id` tiebreaker appended, shown not written (pagination.md).
-//! - LIMIT / OFFSET from `page (...)`; `with count` emits a second COUNT(*).
+//! - LIMIT / OFFSET from `page (...)`; `with count` emits a second COUNT(*). A keyset
+//!   page also carries the lexicographic cursor predicate (guarded by `:keyset_active`,
+//!   a no-op on page 1) + hidden `__keyset_<i>` cursor-basis columns.
 //!
 //! ## Parameter placeholders
 //! Signature inputs render as `:name` named placeholders (`$ctx.org` -> `:ctx_org`).
@@ -37,8 +39,6 @@
 //! - To-**many** nested arrays (`items: OrderItem[]`, a self-referential
 //!   `invited_users`): need JSON aggregation / a companion query + self-ref join
 //!   aliasing; skipped in projection for now. To-one nests are handled (above).
-//! - Keyset cursor comparison + opaque cursor encoding: runtime concern; the base
-//!   SELECT carries only ORDER + LIMIT + tiebreaker.
 
 use std::collections::HashMap;
 
@@ -54,6 +54,14 @@ use crate::Dialect;
 /// into a sub-object. One source of truth for the convention (principle 4): codegen
 /// emits it, the runtime reads it.
 pub const NEST_SEP: char = '.';
+
+/// The output-alias prefix for a keyset query's hidden cursor-basis columns. Each
+/// sort key `k_i` is projected an extra time as `<k_i> AS __keyset_<i>` so the runtime
+/// can read the last row's sort-key values to mint the next cursor, then strip these
+/// columns from the response. The `__` prefix cannot begin a BSL identifier, so it can
+/// never collide with a projected field. One source of the convention (principle 4):
+/// codegen emits it, the runtime (`run.rs`) reads + strips it.
+pub const KEYSET_PREFIX: &str = "__keyset_";
 
 /// Render every query in the schema as a parameterized SELECT (mutations join in a
 /// later increment). Statements are separated by blank lines, in declaration order.
@@ -99,6 +107,14 @@ pub struct LoweredQuery {
     pub sql: String,
     /// The live-row `COUNT(*)` SELECT for a `with count` page, else `None`.
     pub count_sql: Option<String>,
+    /// For a **keyset** page (paginated, not `offset`): the number of sort-key columns
+    /// the cursor comparison ranges over. The SELECT carries `<key> AS __keyset_<i>`
+    /// hidden columns (`0..n`) so the runtime can read the last row's cursor basis, and
+    /// `:keyset_active` + `:keyset_<i>` placeholders it binds from the incoming cursor.
+    /// `None` for a non-paginated or offset-paginated query. The runtime reads `n` to
+    /// bind the cursor in and extract the next one — one source of the keyset convention
+    /// (principle 4): codegen emits it, the runtime reads it.
+    pub keyset: Option<usize>,
 }
 
 /// Lower every query in the schema to its structured SQL, in declaration order.
@@ -159,7 +175,7 @@ fn lower_query(
         .with_scope_terms(&rq.scope_inject);
 
     // 1. Projection (drives the SELECT list; also seeds joins for reached columns).
-    let projection = build_projection(&mut sel, decls, rq, root);
+    let mut projection = build_projection(&mut sel, decls, rq, root);
 
     // 2. Filter conditions: the query's own predicate first, then injected guards.
     let mut wheres: Vec<String> = Vec::new();
@@ -174,14 +190,50 @@ fn lower_query(
         wheres.push(scope);
     }
 
-    // 3. Sort cascade + keyset tiebreaker.
-    let order = build_order(&mut sel, q, root);
+    // 3. Sort cascade + keyset tiebreaker. The resolved keys (their `table`.`col`
+    //    references + directions) drive both the ORDER BY and the keyset comparison.
+    let order_keys = build_order(&mut sel, q, root);
+    let order: Vec<String> = order_keys
+        .iter()
+        .map(|k| format!("{} {}", k.col_ref, dir(k.dir)))
+        .collect();
+
+    // 4. Keyset pagination (pagination.md): a `page` without `offset` compares against
+    //    an opaque cursor. The runtime binds the cursor's sort-key values into
+    //    `:keyset_<i>` and flips `:keyset_active`; here we emit the lexicographic
+    //    "strictly after the cursor" predicate plus the hidden `__keyset_<i>` columns
+    //    the runtime reads to mint the next cursor. The count query stays cursor-free
+    //    (it is the page-independent live-row total), so the guard lands on the main
+    //    WHERE only. Requires resolved sort keys (the tiebreaker guarantees ≥1).
+    let keyset = query_page(q)
+        .filter(|p| !p.offset && !order_keys.is_empty())
+        .map(|_| order_keys.len());
+    let mut main_wheres = wheres.clone();
+    if keyset.is_some() {
+        let hidden = order_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                format!(
+                    "  {} AS {}",
+                    k.col_ref,
+                    sel.q(&format!("{KEYSET_PREFIX}{i}"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        projection = format!("{projection},\n{hidden}");
+        main_wheres.push(format!(
+            "(:keyset_active = 0 OR ({}))",
+            keyset_predicate(&order_keys)
+        ));
+    }
 
     // Assemble. Joins were accumulated by every resolve above, so emit them now.
     let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&root.table));
     push_joins(&mut sql, sel.dialect, &sel.joins);
-    if !wheres.is_empty() {
-        sql.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
+    if !main_wheres.is_empty() {
+        sql.push_str(&format!("\nWHERE {}", main_wheres.join(" AND ")));
     }
     if !order.is_empty() {
         sql.push_str(&format!("\nORDER BY {}", order.join(", ")));
@@ -216,7 +268,33 @@ fn lower_query(
         name: q.name.node.clone(),
         sql,
         count_sql,
+        keyset,
     }
+}
+
+/// The keyset "strictly after the cursor" predicate over the ordered sort keys
+/// (pagination.md). For keys `k0 dir0, k1 dir1, …` and cursor values `:keyset_0, …`,
+/// the row-comparison expands lexicographically:
+/// `(k0 ▷ v0) OR (k0 = v0 AND k1 ▷ v1) OR …`, where `▷` is `>` for an ASC key and `<`
+/// for a DESC key. The expanded form (rather than a `(k0,k1) > (v0,v1)` row-value
+/// comparison) is used because SQL row comparison cannot mix ASC/DESC directions and
+/// the expansion is portable across all three dialects. The final key is always the
+/// unique `id` tiebreaker, so the comparison never drops or repeats a row.
+fn keyset_predicate(keys: &[OrderKey]) -> String {
+    (0..keys.len())
+        .map(|i| {
+            let mut ands: Vec<String> = (0..i)
+                .map(|j| format!("{} = :keyset_{j}", keys[j].col_ref))
+                .collect();
+            let cmp = match keys[i].dir {
+                SortDir::Asc => ">",
+                SortDir::Desc => "<",
+            };
+            ands.push(format!("{} {} :keyset_{i}", keys[i].col_ref, cmp));
+            format!("({})", ands.join(" AND "))
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 // ---------- projection -----------------------------------------------------
@@ -401,9 +479,16 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
 
 // ---------- sort cascade ---------------------------------------------------
 
+/// One resolved sort key: its quoted `table`.`col` reference + direction. Drives both
+/// the ORDER BY and (for a keyset page) the cursor comparison, so the two can't drift.
+struct OrderKey {
+    col_ref: String,
+    dir: SortDir,
+}
+
 /// query `order (...)` > model `@sort` > none (sema already lints the empty case).
 /// Keyset queries (paginated, not `offset`) append `id` as a unique tiebreaker.
-fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<String> {
+fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
     let query_order: Option<&[SortTerm]> = match &q.body {
         QueryBody::Inline(cs) => cs.iter().find_map(order_of),
         QueryBody::Block(s) => s.clauses.iter().find_map(order_of),
@@ -411,16 +496,27 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<String> {
     };
     let terms: &[SortTerm] = query_order.unwrap_or(&root.sort);
 
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<OrderKey> = Vec::new();
     let mut last_is_id = false;
     for t in terms {
         let (alias, col) = sel.resolve(&t.path, root);
         last_is_id = alias == sel.root_alias && col == "id";
-        out.push(format!("{} {}", sel.qcol(&alias, &col), dir(t.dir)));
+        out.push(OrderKey {
+            col_ref: sel.qcol(&alias, &col),
+            dir: t.dir,
+        });
     }
     if let Some(page) = query_page(q) {
-        if !page.offset && !last_is_id && !out.is_empty() {
-            out.push(format!("{} ASC", sel.qcol(&sel.root_alias, "id")));
+        // A keyset page must be deterministic (pagination.md): append the unique `id`
+        // tiebreaker unless the sort already ends on it. This holds even with no
+        // explicit `order`/`@sort` — an empty order still yields `ORDER BY id`, so the
+        // cursor comparison has a unique basis and never drops or repeats a row. Offset
+        // pages don't need the tiebreaker (their window is positional).
+        if !page.offset && !last_is_id {
+            out.push(OrderKey {
+                col_ref: sel.qcol(&sel.root_alias, "id"),
+                dir: SortDir::Asc,
+            });
         }
     }
     out

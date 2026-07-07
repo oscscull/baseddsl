@@ -49,7 +49,8 @@ dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — but the **language 
 feature-complete**. A 2026-07-07 audit found that normal-workday query surface parses and type-checks
 yet emits *nothing*: nested/relation projection in shapes (`items { … }`, `invited_users`) and
 keyset-cursor pagination both stub out in codegen/runtime. (Since then: to-**one** nested shape
-sub-objects now emit end-to-end — D55 — leaving to-many arrays + keyset as the open language gaps.)
+sub-objects emit end-to-end — D55 — and keyset-cursor pagination is fully built + proven live — D56 —
+leaving **to-many nested arrays (L1) the last open language gap**.)
 **The top priority is finishing the language**
 (Track L) — a complete, functional, usable BSL covering ordinary GET/PUT queries end-to-end. Everything
 else is subordinate: **DB-verification hardening (A) and example projects (B) *follow* feature
@@ -67,9 +68,9 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    **real server (Docker)** — not compile-verified, not MockDb. Per-DB coverage: get/list,
    `$ctx`-scope filtering (row + joined-`ON`), write + declared-shape re-select under one tx
    (read-your-writes), pagination, soft-delete/restore, idempotency dedupe, `Backend::ping`.
-   **✅ Core met** — SQLite (D27), MariaDB Docker (D35), Postgres Docker (D38). *Remaining:*
-   pagination + soft-delete/restore under the live suites (the A4 extras) — **keyset-pagination
-   coverage is gated on Track L2** (the feature isn't built yet; see the priority note above).
+   **✅ Core met** — SQLite (D27), MariaDB Docker (D35), Postgres Docker (D38). Keyset pagination is
+   now built + proven live on SQLite (D56). *Remaining:* pagination + soft-delete/restore under the
+   MariaDB/Postgres live suites (the A4 extras).
 2. **A real, copyable example project per target DB.** A standalone Rust project (in-repo, **outside**
    the workspace, under `examples/`) consuming the generated client + runtime against a live DB — the
    thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **🔴 Not started
@@ -122,11 +123,13 @@ audit found where source parses + type-checks but codegen/runtime emit nothing o
     check: `enter_to_one`/`to_one_relation` return `None` for a collection), so this is additive. Resume:
     extend `project_body`'s Nest arm to aggregate a to-many edge into a JSON array column, teach `nest_row`
     to parse it, and emit the `Vec<…>` client/OpenAPI type. Verify end-to-end against a live DB.
-  - **L2. 🔴 Keyset-cursor pagination.** `dml.rs:363-368` emits `ORDER + LIMIT + id`-tiebreaker but no
-    cursor `WHERE` comparison, and `run.rs:251` hard-codes `cursor: null` — so a keyset `page` returns
-    only page 1 and a returned cursor does nothing. Build the cursor `WHERE` predicate in dml + opaque
-    cursor encode/decode(/sign) in runtime plan/run. Offset pagination is already complete. Unblocks A4's
-    live pagination coverage. Medium.
+  - **L2. ✅ done (D56). Keyset-cursor pagination.** A keyset `page` now walks the whole set: codegen
+    emits the lexicographic "strictly after the cursor" `WHERE` (guarded by `:keyset_active`, a no-op on
+    page 1) over the resolved sort keys + hidden `__keyset_<i>` cursor-basis columns; the runtime decodes
+    the incoming `cursor` into `:keyset_<i>` binds, mints the next opaque cursor from the last row (checksum-
+    validated, `cursor.rs`), and strips the hidden columns. Client/OpenAPI carry `cursor`/`offset` inputs.
+    A non-offset `page` always gets the `id` tiebreaker (deterministic even with no `order`). Proven live
+    against SQLite (paging full→full→short, tampered cursor → 400). Unblocks A4's live pagination coverage.
   - **L3. 🔴 Update/delete declared-shape re-select.** D12's re-select fires only when a mutation
     *creates* its return row; a pure `update`/`delete` returns `{id}`/`{}` instead of its declared shape
     (`based-codegen mutations.rs:37`, `based-runtime run.rs:221-228`). Re-select keyed off the write
@@ -268,10 +271,10 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | based-sema | ✅ stable | resolution + checks + lints + `CheckedSchema` IR. Detailed behaviour in the next section. |
 | based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
-| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; `client` → typed Rust client; `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
+| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; nested to-one shape sub-objects (D55) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (paginated inputs carry `cursor`/`offset`, D56); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
-| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select (D12). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
+| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select (D12); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
 

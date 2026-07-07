@@ -215,6 +215,7 @@ fn plan_error_response(e: PlanError) -> WireResponse {
             "internal",
             format!("unbound placeholder `:{n}` (codegen/planner mismatch)"),
         ),
+        BadCursor(msg) => WireResponse::error(400, "bad_cursor", format!("invalid cursor: {msg}")),
     }
 }
 

@@ -77,6 +77,18 @@ struct Callable<'a> {
     out_schema: OutSchema,
     /// Whether this is a mutation (drives the summary + `MutationResult` fallback).
     is_mutation: bool,
+    /// How this callable paginates (pagination.md), driving the extra input property:
+    /// a keyset page a `cursor` string, an offset page an `offset` integer.
+    page: PageInput,
+}
+
+/// How a callable paginates, driving its extra request-body property (pagination.md).
+/// Mirrors the client emitter's enum so the two request surfaces stay in lockstep.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageInput {
+    None,
+    Keyset,
+    Offset,
 }
 
 /// A named output object schema: a shape projection or a bare-model row.
@@ -237,6 +249,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     response: query_response(rq, &os),
                     out_schema: os,
                     is_mutation: false,
+                    page: page_input(q),
                 });
             }
             Decl::Mutation(m) => {
@@ -263,6 +276,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     response: mutation_response(m, &os),
                     out_schema: os,
                     is_mutation: true,
+                    page: PageInput::None,
                 });
             }
             _ => {}
@@ -457,6 +471,23 @@ fn input_schema(schema: &CheckedSchema, c: &Callable) -> Value {
             required.push(Value::String(p.name.node.clone()));
         }
     }
+    // Page control (pagination.md): a keyset page carries the opaque cursor back, an
+    // offset page an explicit offset. Both optional (absent = the first page).
+    match c.page {
+        PageInput::Keyset => {
+            props.insert(
+                "cursor".to_string(),
+                json!({ "type": ["string", "null"], "description": "Opaque keyset cursor from a prior page's `cursor`; omit for the first page." }),
+            );
+        }
+        PageInput::Offset => {
+            props.insert(
+                "offset".to_string(),
+                json!({ "type": "integer", "minimum": 0, "description": "Row offset; omit for the first page." }),
+            );
+        }
+        PageInput::None => {}
+    }
     let mut obj = Map::new();
     obj.insert("type".to_string(), json!("object"));
     if !required.is_empty() {
@@ -464,6 +495,23 @@ fn input_schema(schema: &CheckedSchema, c: &Callable) -> Value {
     }
     obj.insert("properties".to_string(), Value::Object(props));
     Value::Object(obj)
+}
+
+/// How a query paginates, for its request-body page-control property (pagination.md).
+fn page_input(q: &Query) -> PageInput {
+    let clauses: &[Clause] = match &q.body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        QueryBody::Bare => return PageInput::None,
+    };
+    clauses
+        .iter()
+        .find_map(|c| match c {
+            Clause::Page(p) if p.offset => Some(PageInput::Offset),
+            Clause::Page(_) => Some(PageInput::Keyset),
+            _ => None,
+        })
+        .unwrap_or(PageInput::None)
 }
 
 /// A param's JSON-Schema type. Explicit annotation wins (a model type -> a `uuid`

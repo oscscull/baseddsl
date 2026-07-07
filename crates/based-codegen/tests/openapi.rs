@@ -137,6 +137,33 @@ fn paginated_query_response_is_page_envelope() {
     // cursor is nullable string.
     assert_eq!(sch["properties"]["cursor"]["type"][0], "string");
     assert_eq!(sch["properties"]["cursor"]["type"][1], "null");
+    // A keyset page's request body carries the opaque cursor back for the next page.
+    let input = &doc["components"]["schemas"]["ActiveInput"];
+    assert_eq!(input["properties"]["cursor"]["type"][0], "string");
+    assert_eq!(input["properties"]["cursor"]["type"][1], "null");
+    // The cursor is optional (absent = first page), so never in `required`.
+    assert!(
+        !input["required"]
+            .as_array()
+            .map(|r| r.iter().any(|v| v == "cursor"))
+            .unwrap_or(false),
+        "\n{input}"
+    );
+}
+
+#[test]
+fn offset_page_input_carries_offset() {
+    let doc = gen(r#"
+        Post { id: Id, title: text }
+        shape PostCard from Post { title }
+        query posts() -> PostCard[] {
+          list Post order (id asc) page (50) offset;
+        }
+        "#);
+    // An offset page's request body carries an integer offset, not a cursor.
+    let input = &doc["components"]["schemas"]["PostsInput"];
+    assert_eq!(input["properties"]["offset"]["type"], "integer");
+    assert!(input["properties"]["cursor"].is_null(), "\n{input}");
 }
 
 #[test]

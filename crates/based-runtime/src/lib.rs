@@ -71,6 +71,7 @@
 //! The write response is the created row's engine `id` today — the declared-shape
 //! re-select (RETURNING) is deferred (D12).
 
+pub mod cursor;
 pub mod embed;
 pub mod id;
 pub mod idempotency;

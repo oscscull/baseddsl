@@ -93,6 +93,25 @@ fn paginated_query_returns_page_envelope() {
         ),
         "\n{out}"
     );
+    // A keyset page's input carries the opaque cursor to fetch the next page.
+    assert!(out.contains("pub cursor: Option<String>"), "\n{out}");
+}
+
+#[test]
+fn offset_page_input_carries_offset() {
+    let out = gen(r#"
+        Post { id: Id, title: text }
+        shape PostCard from Post { title }
+        query posts() -> PostCard[] {
+          list Post order (id asc) page (50) offset;
+        }
+        "#);
+    // An offset page's input carries an explicit offset, and no cursor (the `pub cursor`
+    // in the shared `Page<T>` envelope is the only one in the module).
+    assert!(
+        out.contains("pub struct PostsInput {\n    pub offset: Option<i64>,\n}"),
+        "\n{out}"
+    );
 }
 
 #[test]

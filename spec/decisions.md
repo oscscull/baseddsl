@@ -26,6 +26,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects)
+- **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
+  opaque validated cursor)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
@@ -1839,3 +1841,44 @@ aggregation / a companion query + self-ref join aliasing (the remaining L1 follo
   User + Order and dispatches a nested `get`/`list`, asserting the reassembled nested JSON against
   a real engine — not compile-verified. Plus codegen unit tests (SQL prefix aliases + recursion +
   to-many skip + Postgres quoting; client nested struct; OpenAPI nested object schema).
+
+## D56 — keyset-cursor pagination (`page` without `offset`)
+Track L2. A keyset `page` walks the whole set: each page returns the next window + an opaque cursor,
+the caller passes the cursor back for the next page, and the final short page returns a `null` cursor.
+Previously codegen emitted only `ORDER + LIMIT + id`-tiebreaker and the runtime hard-coded `cursor:
+null`, so a keyset page returned only page 1. Now built end-to-end (offset pagination was already
+complete; this is its keyset twin). Governed by pagination.md (principle 1: keyset is the safe default;
+principle 8: the tiebreaker is shown, not written).
+- **Cursor comparison (`sql/dml.rs`).** The cursor `WHERE` is the lexicographic "strictly after the
+  cursor" predicate over the ordered sort keys: `(k0 ▷ v0) OR (k0 = v0 AND k1 ▷ v1) OR …`, where `▷`
+  is `>` for an ASC key and `<` for a DESC key. The **expanded** form (not a `(k0,k1) > (v0,v1)`
+  row-value comparison) is used because SQL row comparison can't mix ASC/DESC directions and the
+  expansion is portable across all three dialects. The predicate is guarded — `(:keyset_active = 0 OR
+  (…))` — so page 1 (no cursor, `:keyset_active = 0`) short-circuits it to a no-op and the `:keyset_<i>`
+  placeholders bind to NULL (never consulted). One fixed SQL string, always the same placeholders — no
+  string surgery per page.
+- **Hidden cursor basis.** The sort keys may not be projected (the shape can omit `created_at`/`id`),
+  so the SELECT carries them a second time as `<key> AS __keyset_<i>` columns. The runtime reads the
+  last row's `__keyset_<i>` to mint the next cursor, then strips the `__keyset_` columns from the
+  response. The `__` prefix can't begin a BSL identifier, so it never collides with a field.
+  `KEYSET_PREFIX`/`LoweredQuery.keyset` (the key count) are codegen's single source of the convention
+  (principle 4), read by the runtime.
+- **Deterministic order.** A non-offset `page` **always** gets the unique `id` tiebreaker appended
+  (unless the sort already ends on `id`) — even with no explicit `order`/`@sort`, so an empty order
+  still yields `ORDER BY id` and the cursor has a unique basis that never drops or repeats a row.
+  Offset pages don't get it (their window is positional).
+- **Opaque cursor (`based-runtime/cursor.rs`).** Wire form `<fnv-checksum-hex>.<payload-hex>`, payload
+  = the JSON array of the last row's sort-key values. Decode validates the checksum, JSON structure,
+  and arity; any deviation is `PlanError::BadCursor` → 400 (never fed to the query). The checksum
+  catches corruption/tampering; it is **not** a cryptographic signature (that needs a server secret —
+  deferred). The real safety property — no predicate injection — holds regardless: cursor values only
+  ever fill bound parameters, never concatenate into SQL. The count query (`with count`) stays
+  cursor-free (page-independent total), so the guard lands on the main `WHERE` only.
+- **Client + OpenAPI.** A keyset query's input gains `cursor: Option<String>` (absent = first page);
+  an offset query's gains `offset: Option<i64>` (this also completes offset's previously-missing input
+  surface). `Page<T>.cursor` (client) + the OpenAPI page envelope already modeled the returned cursor.
+- **Verified live.** A self-contained SQLite integration test pages a `page (2)` query through 5 rows
+  (full → full → short), asserts the cursor works even though the sort basis is unprojected (hidden
+  columns stripped), and asserts a tampered cursor → 400. Plus codegen unit tests (the guarded
+  comparison, `__keyset_` columns, offset-emits-no-keyset) and `cursor.rs` round-trip/tamper/arity
+  unit tests.

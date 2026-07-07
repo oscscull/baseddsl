@@ -91,6 +91,21 @@ struct Callable<'a> {
     /// Empty for a public callable (no context); non-empty callables get a typed
     /// `<Name>Ctx` struct the method takes and the `Transport` carries.
     ctx_requires: &'a [CtxReq],
+    /// how this callable paginates (pagination.md), so the input struct carries the
+    /// right page control: a keyset page a `cursor`, an offset page an `offset`.
+    page: PageInput,
+}
+
+/// How a callable paginates, driving its extra input field (calling.md / pagination.md).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageInput {
+    /// Not paginated (a `get`, or a `list` with no `page`) — no page-control input.
+    None,
+    /// Keyset (`page` without `offset`): an opaque `cursor: Option<String>` (absent =
+    /// the first page); the response's `Page.cursor` is fed straight back for the next.
+    Keyset,
+    /// Explicit offset (`page … offset`): an `offset: Option<i64>` (absent = offset 0).
+    Offset,
 }
 
 /// A named output struct: a shape projection or a bare-model row.
@@ -185,6 +200,7 @@ mod rust {
                         output: query_output(rq, &os.name),
                         out_struct: os,
                         ctx_requires: &rq.ctx_requires,
+                        page: page_input(q),
                     });
                 }
                 Decl::Mutation(m) => {
@@ -213,6 +229,7 @@ mod rust {
                         output,
                         out_struct: os,
                         ctx_requires: &rm.ctx_requires,
+                        page: PageInput::None,
                     });
                 }
                 _ => {}
@@ -376,10 +393,36 @@ mod rust {
     /// The input fields for a callable: one per signature param, typed from its
     /// explicit annotation or inferred from the column it maps to.
     fn input_fields(schema: &CheckedSchema, c: &Callable) -> Vec<(String, String)> {
-        c.params
+        let mut fields: Vec<(String, String)> = c
+            .params
             .iter()
             .map(|p| (p.name.node.clone(), param_type(schema, c.root, p)))
-            .collect()
+            .collect();
+        // Page control (pagination.md): a keyset page takes the opaque cursor back, an
+        // offset page an explicit offset. Both optional — absence is the first page.
+        match c.page {
+            PageInput::Keyset => fields.push(("cursor".into(), "Option<String>".into())),
+            PageInput::Offset => fields.push(("offset".into(), "Option<i64>".into())),
+            PageInput::None => {}
+        }
+        fields
+    }
+
+    /// How a query paginates, for its input page-control field (pagination.md).
+    fn page_input(q: &Query) -> PageInput {
+        let clauses: &[Clause] = match &q.body {
+            QueryBody::Inline(cs) => cs,
+            QueryBody::Block(s) => &s.clauses,
+            QueryBody::Bare => return PageInput::None,
+        };
+        clauses
+            .iter()
+            .find_map(|c| match c {
+                Clause::Page(p) if p.offset => Some(PageInput::Offset),
+                Clause::Page(_) => Some(PageInput::Keyset),
+                _ => None,
+            })
+            .unwrap_or(PageInput::None)
     }
 
     /// A param's Rust type. Explicit annotation wins (a model type -> `Uuid`, the FK

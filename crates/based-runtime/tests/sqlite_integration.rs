@@ -377,3 +377,71 @@ fn nested_to_one_query_returns_nested_json() {
         json!([{ "total": 500, "placed_by": { "name": "Ada", "email": "a@x.com" } }])
     );
 }
+
+/// Keyset-cursor pagination (L2), proven against a real engine: paging a `page (2)`
+/// keyset query walks the whole set exactly once — each page returns the next window and
+/// an opaque cursor, the final short page returns a `null` cursor, and the cursor works
+/// even though the sort basis (`rank`, `id`) is not projected (the runtime strips the
+/// hidden `__keyset_*` columns from the response). A tampered cursor is a 400.
+#[test]
+fn keyset_pagination_walks_the_set_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @sort(id asc)
+        Item { name: text, rank: int }
+        shape ItemCard from Item { name, rank }
+        query items() -> ItemCard[] { list Item order (rank asc) page (2); }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `item` (`id`, `name`, `rank`) VALUES
+                ('i1', 'a', 10), ('i2', 'b', 20), ('i3', 'c', 30),
+                ('i4', 'd', 40), ('i5', 'e', 50);
+            "#,
+        )
+        .expect("seed");
+
+    let page = |args: serde_json::Value| call(&c, &backend, "POST", "/q/items", args, json!({}));
+
+    // Page 1 (no cursor): the two lowest-ranked rows + a "more" cursor (a full page).
+    // Rows carry only the projected `{name, rank}` — the hidden sort-key columns are
+    // stripped even though they drive the cursor.
+    let p1 = page(json!({}));
+    assert_eq!(p1.status, 200, "{:?}", p1.body);
+    assert_eq!(
+        p1.body["rows"],
+        json!([{ "name": "a", "rank": 10 }, { "name": "b", "rank": 20 }])
+    );
+    let c1 = p1.body["cursor"]
+        .as_str()
+        .expect("page 1 cursor")
+        .to_string();
+
+    // Page 2 (cursor from page 1): the next window, another full page → another cursor.
+    let p2 = page(json!({ "cursor": c1 }));
+    assert_eq!(
+        p2.body["rows"],
+        json!([{ "name": "c", "rank": 30 }, { "name": "d", "rank": 40 }])
+    );
+    let c2 = p2.body["cursor"]
+        .as_str()
+        .expect("page 2 cursor")
+        .to_string();
+
+    // Page 3 (cursor from page 2): the final row. A short page (1 < 2) → no more cursor.
+    let p3 = page(json!({ "cursor": c2 }));
+    assert_eq!(p3.body["rows"], json!([{ "name": "e", "rank": 50 }]));
+    assert_eq!(p3.body["cursor"], json!(null), "last page has no cursor");
+
+    // A tampered cursor is rejected at the boundary (400), never fed to the query.
+    let bad = page(json!({ "cursor": "deadbeef.00" }));
+    assert_eq!(bad.status, 400, "{:?}", bad.body);
+    assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
+}
