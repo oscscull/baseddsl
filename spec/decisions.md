@@ -6,6 +6,39 @@ chosen it follows principle 2 (omission must have one safe meaning).
 
 Status: proposed. These are my reads of the spec — flag any you'd decide differently.
 
+## Topic index
+
+Decisions are a chronological log (D1→D50); this routes by topic so you can load only the
+relevant entries instead of scanning. A decision may appear under more than one topic.
+
+- **Types & schema fundamentals** — D1 (`Id`/PK), D2 (implicit `id` + timestamps), D3 (table/column
+  naming), D6 (one extension, uniform grammar), D7 (identifier casing), D8 (contextual keywords),
+  D9 (free layout)
+- **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
+- **`$ctx` (per-request context)** — D4 (inferred, never a global type)
+- **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
+  filter + create auto-set + `unscoped`), D33 (shard key ← scope `$ctx` field), D34 (`@scope` in a
+  joined `ON`), D46 (named scope, spec), D47 (multi-scope DNF, spec), D48 (named scope, impl),
+  D49 (multi-scope DNF, impl + E0186), D50 (scope editor surface + snapshot serializer)
+- **SQL codegen — DDL** — D10 (type mapping)
+- **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
+- **SQL codegen — mutations/writes** — D12 (mutation writes), D16 (tx back-refs `^`)
+- **Indexing** — D15 (index inference, baseline emission, lints)
+- **Relations** — D17 (custom `on:` join resolution)
+- **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client)
+- **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
+- **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
+  bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
+  idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency key fingerprint)
+- **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
+- **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
+  scanner), D38 (Postgres driver + live suite)
+- **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite)
+- **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
+  (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion)
+- **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
+  renderer), D42 (apply + `_based_migrations` ledger)
+
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
 implicit `id` is **`uuid` by default** (distributed-friendly, non-enumerable; MariaDB native
