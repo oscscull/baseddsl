@@ -166,6 +166,12 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // `.` opens field completion, `@` the decorator set (see
+                // `Snapshot::completions`); other contexts trigger on identifier chars.
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string(), "@".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         })
@@ -305,6 +311,26 @@ impl LanguageServer for Backend {
         };
         Ok(Some(DocumentSymbolResponse::Nested(
             snapshot.document_symbols(fid),
+        )))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let st = self.state.lock().unwrap();
+        let pos = params.text_document_position;
+        let Ok(path) = pos.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        // Route to the snapshot owning the file (nearest manifest), like every other
+        // position request, so type/field completions see the whole project.
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        let offset = snapshot.lines[fid].offset(pos.position) as u32;
+        Ok(Some(CompletionResponse::Array(
+            snapshot.completions(fid, offset),
         )))
     }
 

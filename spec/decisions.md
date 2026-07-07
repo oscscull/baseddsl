@@ -1389,3 +1389,34 @@ document symbols.
   languageclient` negotiates the outline automatically (verified — same as inlay/hover/definition). The
   reference-site index that find-references + rename will reuse is still the deferred go-to-def resume point;
   document symbols does not build it (it finds decl *sites*, not use *sites*).
+
+## D45 — LSP completion (Track C4)
+The gap the C4 audit calls the one an author feels constantly, and the next C4 fill-in after document symbols
+(D44). `Snapshot::completions(fid, offset)` over the retained `decls`, advertised via `completion_provider`
+(trigger chars `.` and `@`); `vscode-languageclient` negotiates it with no client change.
+- **Context by source prefix, not by parsing the mid-edit buffer.** The buffer under an edit is routinely
+  unparseable (a half-typed `order.`), so the resolver never re-parses it — it reads the source *prefix* before
+  the cursor, strips the partial word + trailing spaces, and dispatches on the exposed **trigger character**
+  (the token immediately before the word being typed). This is the pragmatic heuristic the task called for; it
+  is O(prefix) and independent of parse state, so completion works even while the file has errors.
+- **The five contexts** (kinds in parens): `@` → the decorator set (`PROPERTY`); `<ident>.` → the base model's
+  fields (`FIELD`); `:` → primitives + model names (a field's type annotation — `KEYWORD` + `STRUCT`); `->` →
+  models + shapes (a return type — `STRUCT` + `INTERFACE`); anything else → the keyword + function vocabulary +
+  model names (`KEYWORD`/`FUNCTION`/`STRUCT`).
+- **Field completion is precision-over-recall (matches W0103's stance).** Fields are offered *only* when the
+  dotted path's base is statically resolvable: the enclosing decl must give a cheap root model — a shape's
+  `from` or a query block's target (`root_model_at`) — and each path segment before the `.` must be a relation
+  field, walked to its target model (`field_items_after_dot`). Any non-relation segment, unknown root, or a
+  context without a cheap root (a mutation write body — no `WriteStmt` span; an inline/bare query — target only
+  in the IR, not the AST; `^.`/`$ctx.`) returns nothing rather than wrong suggestions. So `org.` inside a shape
+  completes the related model's fields; `total.` (a scalar) and `^.` complete nothing.
+- **The exposed sets are derived, not invented.** Keywords = the parser's positionally-recognized keyword
+  strings (grep `eat_kw`/`at_kw`) — note there is **no `model` keyword** (a model is a bare `UpperName { … }`),
+  so it is deliberately absent. Decorators = `based_sema::KNOWN_DECORATORS` (`soft_delete`/`sort`/`scope`/
+  `created`/`updated`/`table`) + the member-level `@index` + the `@was("old")` rename directive (E1 grammar;
+  not yet in `KNOWN_DECORATORS` since E5's sema is pending, but a real author-typed decorator). Primitives =
+  the `Primitive` variant spellings (`text`/`int`/`bool`/`timestamp`/`date`/`json`/`uuid`/`Id`). Functions =
+  `based_sema::KNOWN_FUNCS`. Sourcing from the sema consts keeps the sets from drifting.
+- **No fuzzy ranking / snippets** — each item is a bare label + kind; the client filters by the typed prefix.
+  The reference-site index that find-references + rename will reuse is still the deferred go-to-def resume
+  point (`collect_type_refs` finds one use under the cursor, not all uses of a symbol).

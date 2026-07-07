@@ -76,6 +76,9 @@ code --install-extension based-vscode-0.1.0.vsix
 - **Go-to-definition** — jump from a model/shape reference to its declaration.
 - **Document symbols** — the outline / breadcrumbs (⇧⌘O): models (fields nested),
   shapes, queries, mutations, filters.
+- **Completion** — model names in a type annotation (after `:`) or return type
+  (after `->`), a base model's fields after a resolvable `.`, decorators after `@`,
+  and the keyword vocabulary otherwise.
 
 ## LSP capability audit (Track C4)
 
@@ -90,7 +93,7 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 | Go-to-definition (`definition`) | **have** | model/shape references → declaration (D43) |
 | Document symbols (`documentSymbol`) | **have** | outline / breadcrumbs (D44) |
 | Syntax highlighting (TextMate) | **have** | models vs. builtins; type-name coloring (D43) |
-| Completion (`completion`) | **missing** | model names in type position, fields after `.`, keyword/decorator set — next C4 |
+| Completion (`completion`) | **have** | model names in type position, fields after a resolvable `.`, keyword/decorator set (D45) |
 | Workspace symbols (`workspaceSymbol`) | **missing** | jump to any model/callable by name across the project |
 | Find references (`references`) | **missing** | reference-site index (superset of the go-to-def collector) |
 | Rename (`rename`) | **missing** | the natural pair of find-references |
