@@ -531,7 +531,7 @@ fn lint_useless(ast: &Model, mi: usize, usage: &Usage, cx: &Cx, sink: &mut Sink)
                 code::USELESS_INDEX,
                 decl.span,
                 format!(
-                    "index on `{lead}` duplicates its UNIQUE constraint — pure write tax; drop it"
+                    "index on `{lead}` is unnecessary: its `(unique)` constraint already indexes it, so this only adds write cost — drop it"
                 ),
             );
             continue;
@@ -543,7 +543,7 @@ fn lint_useless(ast: &Model, mi: usize, usage: &Usage, cx: &Cx, sink: &mut Sink)
                 code::USELESS_INDEX,
                 decl.span,
                 format!(
-                    "no query filters, sorts, or joins on `{lead}` — this index is pure write tax; drop it or add the query that needs it"
+                    "index on `{lead}` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it"
                 ),
             );
         }

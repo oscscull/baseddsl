@@ -82,6 +82,41 @@ impl Snapshot {
         if let Some(f) = self.field_ref_at(fid, offset) {
             return Some(f.name.span);
         }
+        // A declaration's own name resolves to itself. Conventional for go-to-def on a
+        // definition, and load-bearing for the inverse inlay: VS Code activates a label
+        // part's `location` by running go-to-def *at* it (LSP 3.17), and that location
+        // is the forward edge's declaration — so it must resolve, or the click is inert.
+        self.decl_name_at(fid, offset)
+    }
+
+    /// The name span of a declaration whose own name the cursor sits on: a model, one
+    /// of its fields, a shape, a query/mutation/filter, or a scope. `None` elsewhere.
+    fn decl_name_at(&self, fid: usize, offset: u32) -> Option<Span> {
+        let under = |id: &Ident| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        };
+        for d in &self.decls {
+            match d {
+                Decl::Model(m) => {
+                    if under(&m.name) {
+                        return Some(m.name.span);
+                    }
+                    for mem in &m.members {
+                        if let Member::Field(f) = mem {
+                            if under(&f.name) {
+                                return Some(f.name.span);
+                            }
+                        }
+                    }
+                }
+                Decl::Shape(s) if under(&s.name) => return Some(s.name.span),
+                Decl::Query(q) if under(&q.name) => return Some(q.name.span),
+                Decl::Mutation(m) if under(&m.name) => return Some(m.name.span),
+                Decl::Filter(f) if under(&f.name) => return Some(f.name.span),
+                Decl::Scope(s) if under(&s.name) => return Some(s.name.span),
+                _ => {}
+            }
+        }
         None
     }
 
@@ -1385,6 +1420,14 @@ mod tests {
         let oi_src = &snap.sources[oi_fid].1;
         let off = snap.lines[oi_fid].offset(loc.range.start);
         assert!(oi_src[off..].starts_with("order"), "lands on the edge name");
+
+        // VS Code activates the label part by running go-to-def *at* its location
+        // (LSP 3.17), so that must resolve — otherwise the click is inert even though
+        // the link underlines. The forward edge's declaration resolves to itself.
+        let def = snap
+            .definition_at(oi_fid, off as u32)
+            .expect("the click's go-to-def-at-location round-trips");
+        assert!(oi_src[def.start as usize..].starts_with("order"));
     }
 
     /// Go-to-definition on a *field-reference* path resolves each segment to the

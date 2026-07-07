@@ -1707,13 +1707,25 @@ already advertise all three.
   existing derived-fact "why" (`---`-separated), so a field with an inferred inverse shows both.
 - **Clickable inverse inlay (`based-facts` + `based-lsp`).** The inferred-inverse inlay was
   `inverse <- OrderItem via order` — wordy (the `OrderItem[]` type is already on the line) and inert.
-  Trimmed to **`via order`** and made command-clickable: `Fact` gains a `nav: Option<Span>` (the paired
-  forward edge's span, resolved from the checked schema — `OrderItem.order`), and the LSP renders the
-  inverse hint as an `InlayHintLabelPart` carrying that `Location`, positioned at end-of-line like the
-  model/callable-wide facts. Other fact kinds keep their plain `tag + label` string. The full "why"
-  stays on hover.
-- **Tests.** `based-facts`: the inverse label is now `via order` with a non-`None` `nav`. `based-lsp`:
-  field-reference go-to-def over commerce (`placed_by` → `Order.placed_by`, `placed_by.name` →
-  `User.name` cross-file, a bare shape field → its column) + a hermetic query-`where`/`order` +
-  mutation-assign column test; a hover test asserting field/model/shape signatures for both references
-  and declaration sites.
+  Trimmed to **`via OrderItem.order`** (model-qualified so the field name — which can echo a model
+  name — reads unambiguously) and made command-clickable: `Fact` gains a `nav: Option<Span>` (the
+  paired forward edge's span, resolved from the checked schema — `OrderItem.order`), and the LSP
+  renders the inverse hint as an `InlayHintLabelPart` carrying that `Location`, positioned at
+  end-of-line like the model/callable-wide facts (extracted into a testable `Snapshot::inlay_hints`).
+  Other fact kinds keep their plain `tag + label` string. The full "why" stays on hover. **Click
+  activation:** VS Code activates a label part by running go-to-def *at* its `location` (LSP 3.17), not
+  by jumping to it — so the location (the forward edge's *declaration*) had to resolve, or the link
+  underlines yet the click is inert. `definition_at` now resolves a cursor on any declaration's own
+  name to itself (`decl_name_at`: model/field/shape/callable/scope), closing that round-trip and
+  doubling as the go-to-def-on-a-definition convention.
+- **Lint tone (user directive).** The `W0104` useless-index messages were reworded to lead with the
+  verdict and drop internal phrasing: `index on \`x\` is unnecessary: …, so this only adds write cost
+  — drop it` (was `… — pure write tax; drop it`). "Pure write tax" stays in the *internal* code
+  comments (`ir.rs`/`indexes.rs`), not the user-facing string.
+- **Tests.** `based-facts`: the inverse label is now `via OrderItem.order` with a non-`None` `nav`.
+  `based-lsp`: field-reference go-to-def over commerce (`placed_by` → `Order.placed_by`,
+  `placed_by.name` → `User.name` cross-file, a bare shape field → its column) + a hermetic
+  query-`where`/`order` + mutation-assign column test; a hover test asserting field/model/shape
+  signatures for both references and declaration sites; an inlay test asserting the inverse hint is a
+  `LabelParts` whose location round-trips through `definition_at` (i.e. the click resolves). `based-sema`
+  lints conformance golden re-blessed for the reworded `W0104`.

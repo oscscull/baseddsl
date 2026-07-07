@@ -1,7 +1,7 @@
 DIAGNOSTICS
   W0100: `list` query `widgets` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
   W0101: unknown decorator `@frobnicate` (ignored)
-  W0104: no query filters, sorts, or joins on `color` — this index is pure write tax; drop it or add the query that needs it
+  W0104: index on `color` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
 SCHEMA
 model Widget  table=widget
   id: Id
