@@ -37,7 +37,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
-  filter go-to-def)
+  filter go-to-def), D53 (rename + prepareRename)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger)
 
@@ -1756,3 +1756,28 @@ Track C4 "find references", user-raised as the "back-follow": from a forward rel
   `Order.items`, plus the decl with `include_declaration`); a hermetic filter test (go-to-def on a
   `big(5)` call → `filter big`; find-references on `filter big` → the call site; find-references on a
   field → its `where` use).
+
+## D53 — rename + prepareRename (`based-lsp`)
+Track C4 "rename", the natural pair of find-references. A rename must rewrite the symbol's
+declaration and every reference that *spells its name*, across files. Advertised `rename_provider`
+with `prepare_provider: true` so the editor pre-validates the token and highlights its extent before
+prompting.
+- **`Snapshot::rename_edits(fid, offset, new_name)`** reuses the D52 reference index rather than a
+  second walk: `references_at(fid, offset, /*include_decl=*/true)` gives every resolving site, then
+  each is filtered to those whose current source text equals the declaration's text and rewritten to
+  `new_name` (grouped by owning file → `WorkspaceEdit.changes`). The text filter is the load-bearing
+  distinction from find-references: the **inverse back-edge** (`Fact.nav`) is a *differently-named*
+  field (`Order.items` pairing through `OrderItem.order`) — correct to *list* as a reference, wrong to
+  *rename* — so it is excluded because it spells `items`, not the old name. All other reference sites
+  (type refs, scope refs, filter calls, field path segments, explicit `(Model.field)` inverses) spell
+  the target name by construction, so the filter only ever drops the back-edge. `None` when the cursor
+  is on no renameable symbol (gated on `definition_at`) or `new_name` is not a valid identifier
+  (`is_ident`; casing rules like models-UpperName are left to sema, which re-flags a bad rename inline).
+- **`Snapshot::prepare_rename_range(fid, offset)`** returns the identifier extent under the cursor for
+  prepareRename, gated on the same `definition_at` resolver so keywords / primitives / literals /
+  whitespace decline. The extent is a byte walk over identifier characters (identifiers are ASCII; a
+  non-ASCII byte stops the scan).
+- **Tests (`based-lsp`).** Cross-file model rename (`Org` → `Organization` edits both the decl in
+  org.bsl and the type ref in user.bsl; exactly the `Org`-spelled sites, none else); forward-edge
+  rename over commerce leaves the `items` back-edge untouched; rejection of a non-identifier new name
+  and of a cursor on a primitive keyword; prepareRename offers the declaration's identifier extent.

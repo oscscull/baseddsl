@@ -81,6 +81,9 @@ code --install-extension based-vscode-0.1.0.vsix
 - **Find references** — every use of the symbol under the cursor: a model/shape/scope's
   references, a filter's call sites, a field's uses across shapes/queries/mutations, and —
   for a forward relation edge — the inverse `Model[]` that pairs through it (the back-follow).
+- **Rename** (with a prepare step) — rewrites the symbol's declaration and every reference
+  spelling its name across files; the inverse back-edge (a differently-named field that only
+  pairs through it) is *not* renamed, unlike the find-references listing.
 - **Document symbols** — the outline / breadcrumbs (⇧⌘O): models (fields nested),
   shapes, queries, mutations, filters.
 - **Completion** — model names in a type annotation (after `:`) or return type
@@ -103,7 +106,7 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 | Syntax highlighting (TextMate) | **have** | models vs. builtins; type-name coloring (D43) |
 | Completion (`completion`) | **have** | model names in type position, fields after a resolvable `.`, keyword/decorator set (D45) |
 | Workspace symbols (`workspaceSymbol`) | **missing** | jump to any model/callable by name across the project |
-| Rename (`rename`) | **missing** | the natural pair of find-references — the `references_at` collector is the index it needs (D52) |
+| Rename (`rename`) + prepare (`prepareRename`) | **have** | rewrites every occurrence spelling the old name across files (reuses the D52 `references_at` index); leaves the differently-named inverse back-edge untouched (D53) |
 | Folding ranges (`foldingRange`) | **missing** | block folding — cheap, expected |
 | Selection ranges (`selectionRange`) | **missing** | expand/shrink selection — cheap, expected |
 | Code actions (`codeAction`) | **missing** | lint quick-fixes (e.g. `W0103` → add `@index`) — borderline, include only if cheap |

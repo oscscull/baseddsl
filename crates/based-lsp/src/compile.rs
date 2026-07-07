@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, InlayHint, InlayHintKind, InlayHintLabel,
-    InlayHintLabelPart, InlayHintTooltip, Location, Position, Range, SymbolKind, Url,
+    InlayHintLabelPart, InlayHintTooltip, Location, Position, Range, SymbolKind, TextEdit, Url,
 };
 
 /// A compiled view of the project the server answers requests from.
@@ -177,6 +177,75 @@ impl Snapshot {
         out.sort_by_key(|s| (s.file.0, s.start, s.end));
         out.dedup();
         out
+    }
+
+    /// The workspace edit renaming the symbol under the cursor to `new_name`, grouped
+    /// by owning file. One text edit per occurrence that *textually* spells the old
+    /// name — so the inverse back-edge (a differently-named field that merely pairs
+    /// through the symbol, e.g. `Order.items` for `OrderItem.order`) is left untouched,
+    /// unlike find-references which lists it. `None` when the cursor is not on a
+    /// renameable symbol or `new_name` is not a valid identifier.
+    pub fn rename_edits(
+        &self,
+        fid: usize,
+        offset: u32,
+        new_name: &str,
+    ) -> Option<HashMap<Url, Vec<TextEdit>>> {
+        if !is_ident(new_name) {
+            return None;
+        }
+        let target = self.definition_at(fid, offset)?;
+        let old = self.span_text(target)?.to_string();
+        let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for span in self.references_at(fid, offset, true) {
+            // Rewrite only sites literally spelling the old name; a back-edge pairs
+            // through the symbol under a different name and must not be renamed.
+            if self.span_text(span) != Some(old.as_str()) {
+                continue;
+            }
+            let f = span.file.0 as usize;
+            let Ok(uri) = Url::from_file_path(&self.sources[f].0) else {
+                continue;
+            };
+            edits.entry(uri).or_default().push(TextEdit {
+                range: span_range(span, &self.lines[f]),
+                new_text: new_name.to_string(),
+            });
+        }
+        (!edits.is_empty()).then_some(edits)
+    }
+
+    /// The identifier range under the cursor to offer for rename (prepareRename), or
+    /// `None` when the cursor is not on a renameable symbol. The range is the extent of
+    /// the identifier the cursor sits in; renameability is gated on the same resolver
+    /// go-to-def uses, so keywords, literals, and whitespace decline.
+    pub fn prepare_rename_range(&self, fid: usize, offset: u32) -> Option<Range> {
+        self.definition_at(fid, offset)?;
+        let src = &self.sources[fid].1;
+        let bytes = src.as_bytes();
+        let off = (offset as usize).min(src.len());
+        // Identifiers are ASCII; a non-ASCII byte has its high bit set and stops the
+        // scan, so a byte walk over identifier characters is safe.
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut start = off;
+        while start > 0 && is_word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = off;
+        while end < bytes.len() && is_word(bytes[end]) {
+            end += 1;
+        }
+        if start == end {
+            return None;
+        }
+        let idx = &self.lines[fid];
+        Some(Range::new(idx.position(start), idx.position(end)))
+    }
+
+    /// The source text a span covers, within its owning file.
+    fn span_text(&self, span: Span) -> Option<&str> {
+        let (_, src) = self.sources.get(span.file.0 as usize)?;
+        src.get(span.start as usize..span.end as usize)
     }
 
     /// Resolve an explicit inverse's `(Model.field)` to that field's name span.
@@ -758,6 +827,15 @@ fn trailing_path(head: &str) -> Vec<String> {
     }
     segs.reverse();
     segs
+}
+
+/// Whether `s` is a well-formed identifier — a rename target must be one, else the
+/// edit would produce unparseable source. (Casing rules, e.g. models UpperName, are
+/// left to sema, which re-flags a bad rename inline.)
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// One completion item with just a label + kind (no snippet / fuzzy detail).
@@ -1642,6 +1720,114 @@ mod tests {
                 .iter()
                 .any(|s| s.start as usize == src.find("active and").unwrap()),
             "the `where` use of active: {arefs:?}"
+        );
+    }
+
+    /// Rename rewrites every occurrence spelling the old name across files — a model's
+    /// declaration and its cross-file type references — but never the differently-named
+    /// inverse back-edge that only pairs through it.
+    fn rename_texts(snap: &Snapshot, changes: &HashMap<Url, Vec<TextEdit>>) -> Vec<String> {
+        changes
+            .iter()
+            .flat_map(|(uri, edits)| {
+                let fid = snap.file_id_of(&uri.to_file_path().unwrap()).unwrap();
+                let src = snap.sources[fid].1.clone();
+                let idx = &snap.lines[fid];
+                edits.iter().map(move |e| {
+                    let s = idx.offset(e.range.start);
+                    let en = idx.offset(e.range.end);
+                    src[s..en].to_string()
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rename_model_rewrites_declaration_and_cross_file_refs() {
+        let ws = TempWorkspace::new("rename_model");
+        ws.write("based.toml", "");
+        ws.write("org.bsl", "Org { name: text }\n");
+        ws.write("user.bsl", "User {\n  org: Org\n  name: text\n}\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // Cursor on the `Org` reference in user.bsl → rename to `Organization`.
+        let ufid = snap.file_id_of(&ws.path("user.bsl")).unwrap();
+        let off = (snap.sources[ufid].1.find("Org").unwrap() + 1) as u32;
+        let changes = snap
+            .rename_edits(ufid, off, "Organization")
+            .expect("model reference is renameable");
+
+        // Both files carry an edit: the decl (org.bsl) and the type ref (user.bsl).
+        let ofid = snap.file_id_of(&ws.path("org.bsl")).unwrap();
+        let ouri = Url::from_file_path(&snap.sources[ofid].0).unwrap();
+        let uuri = Url::from_file_path(&snap.sources[ufid].0).unwrap();
+        assert!(changes.contains_key(&ouri), "declaration file edited");
+        assert!(changes.contains_key(&uuri), "reference file edited");
+
+        // Every rewritten site spelled the old name `Org` (never `name`, `User`, …).
+        let texts = rename_texts(&snap, &changes);
+        assert_eq!(texts.len(), 2, "decl + one reference: {texts:?}");
+        assert!(texts.iter().all(|t| t == "Org"), "{texts:?}");
+        // The new text is the requested name.
+        assert!(changes
+            .values()
+            .flatten()
+            .all(|e| e.new_text == "Organization"));
+    }
+
+    #[test]
+    fn rename_forward_edge_leaves_inverse_back_edge_untouched() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // Rename the `order` forward edge on OrderItem. Find-references lists the
+        // inverse `Order.items` as a related site, but rename must not touch it (it
+        // spells `items`, a different name).
+        let oi_fid = snap.file_id_of(&root.join("order_item/model.bsl")).unwrap();
+        let off = (snap.sources[oi_fid].1.find("order:").unwrap() + 1) as u32;
+        let changes = snap
+            .rename_edits(oi_fid, off, "parent")
+            .expect("forward edge is renameable");
+        let texts = rename_texts(&snap, &changes);
+        assert!(
+            texts.iter().all(|t| t == "order"),
+            "only `order` sites rewritten, not the `items` back-edge: {texts:?}"
+        );
+        assert!(
+            !texts.is_empty() && texts.iter().any(|t| t == "order"),
+            "the declaration itself is rewritten: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn rename_rejects_bad_target_and_non_symbol_cursor() {
+        let ws = TempWorkspace::new("rename_reject");
+        ws.write("based.toml", "");
+        ws.write("org.bsl", "Org { name: text }\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let fid = snap.file_id_of(&ws.path("org.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // A non-identifier new name is refused (would produce unparseable source).
+        let decl = (src.find("Org").unwrap() + 1) as u32;
+        assert!(snap.rename_edits(fid, decl, "1bad").is_none());
+        assert!(snap.rename_edits(fid, decl, "has space").is_none());
+
+        // The cursor on a primitive keyword (`text`) is not a renameable symbol.
+        let prim = (src.find("text").unwrap() + 1) as u32;
+        assert!(snap.rename_edits(fid, prim, "blob").is_none());
+        assert!(snap.prepare_rename_range(fid, prim).is_none());
+
+        // prepareRename offers the identifier extent on the declaration.
+        let r = snap
+            .prepare_rename_range(fid, decl)
+            .expect("Org is renameable");
+        assert_eq!(snap.lines[fid].offset(r.start), src.find("Org").unwrap());
+        assert_eq!(
+            snap.lines[fid].offset(r.end),
+            src.find("Org").unwrap() + "Org".len()
         );
     }
 

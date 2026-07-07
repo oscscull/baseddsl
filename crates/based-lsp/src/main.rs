@@ -165,6 +165,12 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                // Rename with a prepare step: the editor pre-validates the token and
+                // highlights its extent before prompting for the new name.
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // `.` opens field completion, `@` the decorator set (see
                 // `Snapshot::completions`); other contexts trigger on identifier chars.
@@ -298,6 +304,50 @@ impl LanguageServer for Backend {
             })
             .collect();
         Ok(Some(locations))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let st = self.state.lock().unwrap();
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        let offset = snapshot.lines[fid].offset(params.position) as u32;
+        Ok(snapshot
+            .prepare_rename_range(fid, offset)
+            .map(PrepareRenameResponse::Range))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let st = self.state.lock().unwrap();
+        let pos = params.text_document_position;
+        let Ok(path) = pos.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        let offset = snapshot.lines[fid].offset(pos.position) as u32;
+        // Every occurrence spelling the old name (declaration + references), rewritten
+        // to `new_name` and grouped by file into a workspace edit.
+        Ok(snapshot
+            .rename_edits(fid, offset, &params.new_name)
+            .map(|changes| WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }))
     }
 
     async fn document_symbol(
