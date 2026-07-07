@@ -62,19 +62,22 @@ impl Snapshot {
             id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
         };
         // A model/shape type reference → that decl's name.
-        if let Some(target) = collect_type_refs(&self.decls).into_iter().find(under) {
-            return self.decls.iter().find_map(|d| match d {
-                Decl::Model(m) if m.name.node == target.node => Some(m.name.span),
-                Decl::Shape(s) if s.name.node == target.node => Some(s.name.span),
-                _ => None,
-            });
+        if let Some(id) = collect_type_refs(&self.decls).into_iter().find(under) {
+            if let Some(s) = self.type_ref_target(id) {
+                return Some(s);
+            }
         }
         // A `@scope Name` / `scoped Name` reference → the `scope Name (…)` decl's name.
-        if let Some(target) = collect_scope_refs(&self.decls).into_iter().find(under) {
-            return self.decls.iter().find_map(|d| match d {
-                Decl::Scope(s) if s.name.node == target.node => Some(s.name.span),
-                _ => None,
-            });
+        if let Some(id) = collect_scope_refs(&self.decls).into_iter().find(under) {
+            if let Some(s) = self.scope_ref_target(id) {
+                return Some(s);
+            }
+        }
+        // A `filter(...)` call → the `filter Name(…)` decl's name.
+        if let Some(id) = collect_filter_refs(&self.decls).into_iter().find(under) {
+            if let Some(s) = self.filter_ref_target(id) {
+                return Some(s);
+            }
         }
         // A field-reference path segment (`placed_by`, `placed_by.name`, a `where`/
         // `order`/write-assign column) → the field it names, walked through relations
@@ -87,6 +90,102 @@ impl Snapshot {
         // part's `location` by running go-to-def *at* it (LSP 3.17), and that location
         // is the forward edge's declaration — so it must resolve, or the click is inert.
         self.decl_name_at(fid, offset)
+    }
+
+    /// The declaration-name span a model/shape type reference names, if declared here.
+    fn type_ref_target(&self, id: &Ident) -> Option<Span> {
+        self.decls.iter().find_map(|d| match d {
+            Decl::Model(m) if m.name.node == id.node => Some(m.name.span),
+            Decl::Shape(s) if s.name.node == id.node => Some(s.name.span),
+            _ => None,
+        })
+    }
+
+    /// The `scope` decl-name span a `@scope`/`scoped` reference names.
+    fn scope_ref_target(&self, id: &Ident) -> Option<Span> {
+        self.decls.iter().find_map(|d| match d {
+            Decl::Scope(s) if s.name.node == id.node => Some(s.name.span),
+            _ => None,
+        })
+    }
+
+    /// The `filter` decl-name span a `filter(...)` call names.
+    fn filter_ref_target(&self, id: &Ident) -> Option<Span> {
+        self.decls.iter().find_map(|d| match d {
+            Decl::Filter(f) if f.name.node == id.node => Some(f.name.span),
+            _ => None,
+        })
+    }
+
+    /// Every reference site that resolves to the same declaration as the symbol under
+    /// the cursor — the inverse of `definition_at`. Powers find-references and (later)
+    /// rename. Covers model/shape type references, `@scope`/`scoped` references, filter
+    /// calls, field-reference path segments (walked through relations), and the inverse
+    /// back-edges that pair through a forward field (so a forward edge's references
+    /// include the `Model[]` inverse that joins through it — the "back-follow"). With
+    /// `include_decl`, the declaration's own name is included. Deduped, span-ordered.
+    pub fn references_at(&self, fid: usize, offset: u32, include_decl: bool) -> Vec<Span> {
+        let Some(target) = self.definition_at(fid, offset) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+
+        // Model / shape type references naming the same declaration.
+        for id in collect_type_refs(&self.decls) {
+            if self.type_ref_target(id) == Some(target) {
+                out.push(id.span);
+            }
+        }
+        // Scope references (`@scope` / `scoped`).
+        for id in collect_scope_refs(&self.decls) {
+            if self.scope_ref_target(id) == Some(target) {
+                out.push(id.span);
+            }
+        }
+        // Filter calls.
+        for id in collect_filter_refs(&self.decls) {
+            if self.filter_ref_target(id) == Some(target) {
+                out.push(id.span);
+            }
+        }
+        // Field-reference path segments resolving to the target field.
+        for (root, segs) in self.field_paths() {
+            for (i, seg) in segs.iter().enumerate() {
+                if self.walk_path(root, &segs[..=i]).map(|f| f.name.span) == Some(target) {
+                    out.push(seg.span);
+                }
+            }
+        }
+        // Inverse back-edges: an inferred inverse's `nav` is its paired forward edge,
+        // so a forward field's references include the `Model[]` inverse joining through
+        // it. (Explicit `(Model.field)` inverses are picked up as field refs below.)
+        for f in &self.facts {
+            if f.nav == Some(target) {
+                out.push(f.span);
+            }
+        }
+        // Explicit inverse pairings `(Model.field)`: the `field` part references it.
+        for id in collect_explicit_inverse_fields(&self.decls) {
+            if self.explicit_inverse_target(id.0, id.1) == Some(target) {
+                out.push(id.1.span);
+            }
+        }
+
+        if include_decl {
+            out.push(target);
+        }
+        out.sort_by_key(|s| (s.file.0, s.start, s.end));
+        out.dedup();
+        out
+    }
+
+    /// Resolve an explicit inverse's `(Model.field)` to that field's name span.
+    fn explicit_inverse_target(&self, model: &Ident, field: &Ident) -> Option<Span> {
+        let m = self.model_by_name(&model.node)?;
+        m.members.iter().find_map(|mem| match mem {
+            Member::Field(f) if f.name.node == field.node => Some(f.name.span),
+            _ => None,
+        })
     }
 
     /// The name span of a declaration whose own name the cursor sits on: a model, one
@@ -791,6 +890,82 @@ fn collect_type_expr<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Ident>) {
     }
 }
 
+/// Every `filter(...)` call-name identifier across the AST — the sites a name *invokes*
+/// a declared filter (`Predicate::FilterCall`), found by walking every predicate a
+/// query/mutation/filter carries. The reference-collection twin for filters.
+fn collect_filter_refs(decls: &[Decl]) -> Vec<&Ident> {
+    let mut out = Vec::new();
+    for d in decls {
+        match d {
+            Decl::Query(q) => match &q.body {
+                QueryBody::Inline(cs) => cs.iter().for_each(|c| clause_filter_refs(c, &mut out)),
+                QueryBody::Block(stmt) => stmt
+                    .clauses
+                    .iter()
+                    .for_each(|c| clause_filter_refs(c, &mut out)),
+                QueryBody::Bare => {}
+            },
+            Decl::Mutation(m) => write_filter_refs(&m.body, &mut out),
+            Decl::Filter(f) => pred_filter_refs(&f.pred, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Filter-call names in a query clause's `where` predicate.
+fn clause_filter_refs<'a>(c: &'a Clause, out: &mut Vec<&'a Ident>) {
+    if let Clause::Where(p) = c {
+        pred_filter_refs(p, out);
+    }
+}
+
+/// Filter-call names in a mutation write body's `where` predicates (recursing `tx`).
+fn write_filter_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
+    for w in body {
+        match w {
+            WriteStmt::Update { where_, .. }
+            | WriteStmt::Delete { where_, .. }
+            | WriteStmt::Restore { where_, .. }
+            | WriteStmt::HardDelete { where_, .. } => pred_filter_refs(where_, out),
+            WriteStmt::Tx(inner) => write_filter_refs(inner, out),
+            WriteStmt::Create { .. } | WriteStmt::Raw(_) => {}
+        }
+    }
+}
+
+/// Filter-call names anywhere in a predicate tree.
+fn pred_filter_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a Ident>) {
+    match p {
+        Predicate::Or(a, b) | Predicate::And(a, b) => {
+            pred_filter_refs(a, out);
+            pred_filter_refs(b, out);
+        }
+        Predicate::Not(inner) => pred_filter_refs(inner, out),
+        Predicate::FilterCall { name, .. } => out.push(name),
+        Predicate::Cmp { .. } | Predicate::Bare(_) | Predicate::Raw(_) => {}
+    }
+}
+
+/// Every explicit inverse pairing `(Model.field)` as its `(model, field)` idents — the
+/// `field` part references a forward edge on `model`. Inferred inverses carry no such
+/// written pairing (they surface via `Fact.nav` instead).
+fn collect_explicit_inverse_fields(decls: &[Decl]) -> Vec<(&Ident, &Ident)> {
+    let mut out = Vec::new();
+    for d in decls {
+        if let Decl::Model(m) = d {
+            for mem in &m.members {
+                if let Member::Field(f) = mem {
+                    if let Some(inv) = &f.inverse {
+                        out.push((&inv.model, &inv.field));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Write-target models, recursing through `tx` blocks; `raw` carries no target.
 fn collect_write_targets<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
     for w in body {
@@ -1385,6 +1560,89 @@ mod tests {
             .expect("scoped resolves");
         assert_eq!(&src[d2.start as usize..d2.end as usize], "Tenant");
         assert_eq!(d2.start as usize, decl_at);
+    }
+
+    /// Find-references on a forward edge includes the inverse that pairs through it —
+    /// the "back-follow". `OrderItem.order`'s references include `Order.items` (the
+    /// inferred inverse joining via `order`), plus the declaration itself when asked.
+    #[test]
+    fn references_include_inverse_back_edge() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // Cursor on the `order` forward-edge declaration in order_item/model.bsl.
+        let oi_fid = snap.file_id_of(&root.join("order_item/model.bsl")).unwrap();
+        let oi_src = &snap.sources[oi_fid].1;
+        let off = (oi_src.find("order:").unwrap() + 1) as u32;
+
+        let refs = snap.references_at(oi_fid, off, true);
+        // The inverse `Order.items` (in order/model.bsl) is among the references.
+        let model_fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
+        let model_src = &snap.sources[model_fid].1;
+        assert!(
+            refs.iter().any(|s| s.file.0 as usize == model_fid
+                && &model_src[s.start as usize..s.end as usize] == "items"),
+            "inverse back-edge `Order.items` should be a reference: {refs:?}"
+        );
+        // With include_declaration, the `order` field's own name is present too.
+        assert!(
+            refs.iter().any(|s| s.file.0 as usize == oi_fid
+                && &oi_src[s.start as usize..s.end as usize] == "order"),
+            "the declaration itself: {refs:?}"
+        );
+    }
+
+    /// Find-references + go-to-def reach into query/mutation bodies: a field used in a
+    /// query `where` and a `filter(...)` call are both resolved.
+    #[test]
+    fn references_reach_query_bodies_and_filters() {
+        let ws = TempWorkspace::new("refs");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Widget { active: bool  qty: int? }\n\
+             filter big(n: int) = qty > $n;\n\
+             shape W from Widget { active }\n\
+             query find() -> W[] { list Widget where (active and big(5)); }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // Go-to-def on the `big(5)` filter call → the `filter big` declaration.
+        let call = (src.find("big(5)").unwrap() + 1) as u32;
+        let def = snap.definition_at(fid, call).expect("filter call resolves");
+        assert_eq!(&src[def.start as usize..def.end as usize], "big");
+        assert_eq!(def.start as usize, src.find("big(n").unwrap());
+
+        // Find-references on the `filter big` declaration → the call site.
+        let decl = (src.find("big(n").unwrap() + 1) as u32;
+        let frefs = snap.references_at(fid, decl, false);
+        assert!(
+            frefs
+                .iter()
+                .any(|s| s.start as usize == src.find("big(5)").unwrap()),
+            "the filter call site: {frefs:?}"
+        );
+
+        // Find-references on the `active` field → its use in the query `where`.
+        let afield = (src.find("active: bool").unwrap() + 1) as u32;
+        let arefs = snap.references_at(fid, afield, false);
+        assert!(
+            arefs
+                .iter()
+                .any(|s| s.start as usize == src.find("active and").unwrap()),
+            "the `where` use of active: {arefs:?}"
+        );
     }
 
     /// The inferred-inverse inlay is a *clickable* label part: `via OrderItem.order`

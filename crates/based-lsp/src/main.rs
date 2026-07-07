@@ -164,6 +164,7 @@ impl LanguageServer for Backend {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // `.` opens field completion, `@` the decorator set (see
                 // `Snapshot::completions`); other contexts trigger on identifier chars.
@@ -266,6 +267,37 @@ impl LanguageServer for Backend {
             uri,
             range,
         })))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let st = self.state.lock().unwrap();
+        let pos = params.text_document_position;
+        let Ok(path) = pos.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        let offset = snapshot.lines[fid].offset(pos.position) as u32;
+
+        // Every site resolving to the same declaration as the symbol under the cursor,
+        // each mapped to its owning file's `Location`.
+        let spans = snapshot.references_at(fid, offset, params.context.include_declaration);
+        let locations = spans
+            .into_iter()
+            .filter_map(|s| {
+                let f = s.file.0 as usize;
+                let uri = Url::from_file_path(&snapshot.sources[f].0).ok()?;
+                Some(Location {
+                    uri,
+                    range: span_to_range(s, &snapshot.lines[f]),
+                })
+            })
+            .collect();
+        Ok(Some(locations))
     }
 
     async fn document_symbol(

@@ -36,7 +36,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
-  D51 (field-reference go-to-def + broad hover + clickable inverse inlay)
+  D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
+  filter go-to-def)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger)
 
@@ -1729,3 +1730,29 @@ already advertise all three.
   signatures for both references and declaration sites; an inlay test asserting the inverse hint is a
   `LabelParts` whose location round-trips through `definition_at` (i.e. the click resolves). `based-sema`
   lints conformance golden re-blessed for the reworded `W0104`.
+
+## D52 — find-references + filter go-to-def (`based-lsp`)
+Track C4 "find references", user-raised as the "back-follow": from a forward relation edge
+(`OrderItem.order`), navigate to what uses it — the inverse `Order.items` that pairs through it.
+`⌘`-clicking a *declaration* makes VS Code run find-references (not go-to-def), so this needs the
+`references` capability; without it the click reports "no references found". Advertised
+`references_provider`.
+- **`Snapshot::references_at(fid, offset, include_decl)`** — the inverse of `definition_at`: resolve
+  the cursor to its target declaration span (`definition_at` already returns that for a reference *or*
+  a declaration name), then collect every site that resolves to the same span. It reuses the existing
+  reference collectors (D43/D50/D51) rather than a second index: model/shape type refs
+  (`collect_type_refs` + `type_ref_target`), `@scope`/`scoped` refs (`collect_scope_refs`), filter
+  calls (new `collect_filter_refs`, walking every predicate for `Predicate::FilterCall` names),
+  field-reference path segments (`field_paths` + `walk_path`, so a field's uses across shapes / query
+  `where`+`order` / mutation writes all count), the **inverse back-edge** (any `Fact` whose `nav` is
+  the target field — an inferred inverse's paired forward edge — contributes its own span, giving the
+  back-follow), and explicit `(Model.field)` inverse pairings. Deduped, span-ordered; the declaration
+  itself is appended when `include_declaration` is set.
+- **Filter go-to-def (`definition_at`).** A cursor on a `filter(...)` call now resolves to the `filter`
+  decl (the callable actually referenced from other `.bsl`, unlike queries/mutations which are wire
+  endpoints). The three ref resolvers in `definition_at` were factored into `type_ref_target` /
+  `scope_ref_target` / `filter_ref_target` so both go-to-def and `references_at` share them.
+- **Tests (`based-lsp`).** The back-follow over commerce (`OrderItem.order`'s references include
+  `Order.items`, plus the decl with `include_declaration`); a hermetic filter test (go-to-def on a
+  `big(5)` call → `filter big`; find-references on `filter big` → the call site; find-references on a
+  field → its `where` use).

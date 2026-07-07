@@ -75,9 +75,12 @@ code --install-extension based-vscode-0.1.0.vsix
   and each query's resolved verb/target/cardinality/pagination.
 - **Hover** — the declaration of the symbol under the cursor (a field's `name: Type`, a
   model/shape/scope/callable signature), plus the fuller "why" behind any derived fact.
-- **Go-to-definition** — jump from a model/shape/scope reference *or a field-reference
-  path* (`placed_by`, `placed_by.name`, a `where`/`order`/write-assign column) to its
-  declaration, walking through relations from the statically-known root.
+- **Go-to-definition** — jump from a model/shape/scope reference, a `filter(...)` call,
+  *or a field-reference path* (`placed_by`, `placed_by.name`, a `where`/`order`/write-assign
+  column) to its declaration, walking through relations from the statically-known root.
+- **Find references** — every use of the symbol under the cursor: a model/shape/scope's
+  references, a filter's call sites, a field's uses across shapes/queries/mutations, and —
+  for a forward relation edge — the inverse `Model[]` that pairs through it (the back-follow).
 - **Document symbols** — the outline / breadcrumbs (⇧⌘O): models (fields nested),
   shapes, queries, mutations, filters.
 - **Completion** — model names in a type annotation (after `:`) or return type
@@ -94,13 +97,13 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 | Diagnostics (`publishDiagnostics`) | **have** | parse/sema errors + lints, pushed on edit |
 | Inlay hints (`inlayHint`) | **have** | engine-derived facts (principle 8) — not a standard-language feature, a DSL bonus |
 | Hover (`hover`) | **have** | the symbol's declaration ("what": field `name: Type`, model/shape/scope/callable signature) + the derived-fact "why" (C4a) |
-| Go-to-definition (`definition`) | **have** | model/shape/scope references + field-reference paths (shape/`where`/`order`/write columns, walked through relations) → declaration (D43, C4a) |
+| Go-to-definition (`definition`) | **have** | model/shape/scope refs, filter calls, field-reference paths (shape/`where`/`order`/write columns, walked through relations) → declaration (D43, C4a) |
+| Find references (`references`) | **have** | every use of the symbol under the cursor — model/shape/scope refs, filter calls, field uses across bodies, and a forward edge's inverse back-edge (D52) |
 | Document symbols (`documentSymbol`) | **have** | outline / breadcrumbs (D44) |
 | Syntax highlighting (TextMate) | **have** | models vs. builtins; type-name coloring (D43) |
 | Completion (`completion`) | **have** | model names in type position, fields after a resolvable `.`, keyword/decorator set (D45) |
 | Workspace symbols (`workspaceSymbol`) | **missing** | jump to any model/callable by name across the project |
-| Find references (`references`) | **missing** | reference-site index (superset of the go-to-def collector) |
-| Rename (`rename`) | **missing** | the natural pair of find-references |
+| Rename (`rename`) | **missing** | the natural pair of find-references — the `references_at` collector is the index it needs (D52) |
 | Folding ranges (`foldingRange`) | **missing** | block folding — cheap, expected |
 | Selection ranges (`selectionRange`) | **missing** | expand/shrink selection — cheap, expected |
 | Code actions (`codeAction`) | **missing** | lint quick-fixes (e.g. `W0103` → add `@index`) — borderline, include only if cheap |
