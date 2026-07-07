@@ -1662,3 +1662,168 @@ fn custom_join_param_rejected() {
     );
     assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
 }
+
+// ---------- multi-scope DNF: alternatives, E0185, E0186 (D47) --------------
+
+#[test]
+fn or_model_query_injects_only_its_named_alternative() {
+    // A model with two stacked `@scope` decorators is an OR of alternatives; each
+    // query names one and injects only that axis (auth.md worked example).
+    let (schema, diags) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page
+        @scope Author
+        @sort(created desc)
+        Post {
+          page:    Page
+          author:  User
+          body:    text
+          created: timestamp
+        }
+        shape PostCard from Post { body }
+        query posts_on_page() -> PostCard[] scoped Page   { list Post order (created desc); }
+        query my_posts()      -> PostCard[] scoped Author { list Post order (created desc); }
+        "#,
+    );
+    assert!(errors(&diags).is_empty(), "{:?}", codes(&diags));
+    let by_page = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "posts_on_page")
+        .unwrap();
+    let by_author = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "my_posts")
+        .unwrap();
+    // Each query resolved a *different* alternative for the same model.
+    assert_eq!(by_page.scope_inject.len(), 1);
+    assert_eq!(
+        by_page.scope_inject[0].terms,
+        vec![("page".into(), "page".into())]
+    );
+    assert_eq!(by_author.scope_inject.len(), 1);
+    assert_eq!(
+        by_author.scope_inject[0].terms,
+        vec![("author".into(), "user".into())]
+    );
+}
+
+#[test]
+fn and_model_naming_one_axis_is_e0185() {
+    // `@scope Page, Author` is a single two-axis alternative; a callable naming just
+    // `Page` doesn't ⊇ it → E0185.
+    let (_, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page, Author
+        @sort(created desc)
+        Comment {
+          page:    Page
+          author:  User
+          body:    text
+          created: timestamp
+        }
+        shape CommentCard from Comment { body }
+        query my_comments() -> CommentCard[] scoped Page {
+          list Comment order (created desc);
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0185"), "{:?}", codes(&d));
+}
+
+#[test]
+fn and_model_naming_both_axes_is_clean() {
+    let (schema, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page, Author
+        @sort(created desc)
+        Comment {
+          page:    Page
+          author:  User
+          body:    text
+          created: timestamp
+        }
+        shape CommentCard from Comment { body }
+        query my_comments() -> CommentCard[] scoped Page, Author {
+          list Comment order (created desc);
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let q = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "my_comments")
+        .unwrap();
+    // Both axes injected (the single alternative), in decl order.
+    assert_eq!(
+        q.scope_inject[0].terms,
+        vec![
+            ("page".into(), "page".into()),
+            ("author".into(), "user".into())
+        ]
+    );
+}
+
+#[test]
+fn create_not_satisfying_any_alternative_is_e0186() {
+    // A `create` on an AND model whose mutation names only one axis can satisfy no
+    // alternative — the other scope column would be left unset → E0186.
+    let (_, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page, Author
+        Comment {
+          page:   Page
+          author: User
+          body:   text
+        }
+        shape CommentCard from Comment { body }
+        mutation add_comment(body: text) -> CommentCard scoped Page {
+          create Comment { body = $body };
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0186"), "{:?}", codes(&d));
+}
+
+#[test]
+fn create_satisfying_an_alternative_has_no_e0186() {
+    // Naming the full alternative (`scoped Page, Author`) lets the engine auto-set both
+    // scope columns from $ctx — no E0186.
+    let (_, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page, Author
+        Comment {
+          page:   Page
+          author: User
+          body:   text
+        }
+        shape CommentCard from Comment { body }
+        mutation add_comment(body: text) -> CommentCard scoped Page, Author {
+          create Comment { body = $body };
+        }
+        "#,
+    );
+    assert!(!codes(&d).contains(&"E0186"), "{:?}", codes(&d));
+}

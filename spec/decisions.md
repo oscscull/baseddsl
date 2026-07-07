@@ -1561,3 +1561,43 @@ codegen + runtime are unchanged in *effect*. Multi-scope DNF (D47) is the next i
   predicate onto `RModel.scope`); `E0186` (create satisfies ≥1 alternative); the migration `schema.snap`
   serializer (record scopes by name + a model's alternative set — the E-track snapshot change flagged in
   D46/G5); facts/LSP go-to-def/rename/hover over scope refs.
+
+## D49 — multi-scope DNF made real: per-callable alternative injection + E0186
+Implements D47 (Track G, iteration 2): a model's stacked `@scope` decorators are now a live DNF —
+codegen injects the *alternative the callable chose*, not the one synthesized predicate D48 parked on
+`RModel.scope`. Codegen/runtime output for a single-alternative model is **byte-identical** to D48 (the
+commerce/codegen goldens are unchanged — the regression proof); only multi-alternative schemas differ.
+- **Per-callable resolved injection (sema → codegen).** Sema resolves, per callable, a
+  `Vec<ScopeInject>` (`{ model, terms: Vec<(column, ctx_field)> }`) — one entry per *touched* scoped
+  model (root + every D34 joined reach), threaded onto `RQuery`/`RMutation.scope_inject`.
+  `scope::resolve_inject` computes each entry's terms as the callable's named axes (`scoped …`) that the
+  model carries, expanded through the `scope` decls, deduped in decl order. `E0185`'s superset rule
+  guarantees the terms include ≥1 whole alternative, so a model is never left unfiltered; naming extra
+  axes only narrows (never leaks). `unscoped` → empty (no injection).
+- **Codegen consumes the map, not `RModel.scope`.** `Select` carries the callable's `&[ScopeInject]`
+  (`with_scope_terms`); a new `Select::scope_where(alias, model)` builds `<alias>.<col> = :ctx_<field>`
+  ANDed from the chosen terms, replacing every prior read of `RModel.scope`/`scope_terms()` in the SQL
+  path — root `WHERE` (`dml`), joined `ON` (`scope_join_pred`), the create auto-set, the write-`WHERE`
+  guards (`inject_guards`), restore, and the D12 re-select. For a single-axis single-alternative model
+  the emitted string is identical to the old `sel.predicate(&root.scope, …)` (same `physical_col` + the
+  same `:ctx_<field>` bind), so nothing in `based gen sql` moves. `RModel.scope`/`scope_terms()` stay —
+  still the source for `shard_key_ctx_field` (D33) and the create-time `E0181` guard.
+- **`E0186` (create satisfies an alternative), `scope::check_create_sat`.** A `create M` on a scoped
+  model must name a **full** `@scope` alternative of `M` so the engine can auto-set all its columns from
+  `$ctx` (no half-owned row). Trigger: the mutation's `scoped …` set is a superset of *no* alternative of
+  `M` — e.g. an AND model `@scope Page, Author` whose create names only `Page`, leaving `Author`'s column
+  with no `$ctx` value. Fires at the create's model span; skipped for `unscoped` (auto-set dropped, caller
+  owns the columns). It co-fires with `E0185` on a scoped-but-insufficient mutation (auth.md endorses
+  this — the AND worked example shows both), and is clean when a whole alternative is named. Registered
+  code `SCOPE_CREATE_UNSAT` is now wired.
+- **Fixtures.** A worked OR + AND pair proves it: an OR model (`@scope Page` + `@scope Author`) where
+  `posts_on_page scoped Page` injects `` `post`.`page_id` = :ctx_page `` and `my_posts scoped Author`
+  injects `` `post`.`author_id` = :ctx_user `` — the *same model*, a *different* predicate per callable;
+  an AND model (`@scope Page, Author`) injects both axes ANDed, and its create auto-sets both scope
+  columns; `scoped Page` alone on the AND model is `E0185`, and an AND-model create naming one axis is
+  `E0186`. (Codegen `tests/dml.rs`/`tests/mutations.rs` + sema `tests/check.rs`.)
+- **Deferred to iteration 3 (unchanged from D48).** The `schema.snap` migration serializer for
+  multi-alternative scopes (record scopes by name + each model's alternative set — the E-track change,
+  G5); facts/LSP go-to-def/rename/hover over scope refs + the D4/D5-hover-scrub. The shard key stays the
+  model's first scope term (D33); a per-callable-alternative shard key is not needed until multi-owner
+  routing is exercised.

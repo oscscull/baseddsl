@@ -144,6 +144,22 @@ pub struct RScopeTerm {
     pub ty: CtxField,
 }
 
+/// The scope injection a single callable chose for one touched scoped model (D47).
+/// A model may declare several `@scope` alternatives (DNF); the callable's `scoped …`
+/// clause selects which axes confine *this* callable. `terms` is the flattened
+/// `(column_field, ctx_field)` set of the chosen axes — exactly the equalities codegen
+/// ANDs into the root `WHERE`, the joined `ON`, and the create auto-set for `model`.
+/// Two callables naming different alternatives of the same model therefore inject
+/// different predicates. For a single-alternative model this is that model's whole
+/// scope, so the emitted SQL is unchanged from iteration 1 (D48).
+#[derive(Debug, Clone)]
+pub struct ScopeInject {
+    /// The touched scoped model this injection confines (by name).
+    pub model: String,
+    /// The `(column_field, ctx_field)` terms to inject, in scope-decl order, deduped.
+    pub terms: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RModel {
     pub name: String,
@@ -342,6 +358,12 @@ pub struct RQuery {
     /// owning shard, so it must route explicitly, never by a scope it disabled). The
     /// runtime pulls this field out of the request `$ctx` to route to one shard.
     pub shard_key: Option<String>,
+    /// The per-touched-model scope injection this query chose (auth.md / D47): for
+    /// each scoped model it reads (root + every D34 joined reach), the terms of the
+    /// alternative its `scoped …` clause satisfied. Empty when `unscoped` or nothing
+    /// scoped is touched. Codegen injects exactly these, so a callable naming one
+    /// alternative and another naming a different one filter by different predicates.
+    pub scope_inject: Vec<ScopeInject>,
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +385,12 @@ pub struct RMutation {
     /// the whole mutation routes on this one field (the return model is the primary
     /// written model). The runtime pulls it out of the request `$ctx` to pick a shard.
     pub shard_key: Option<String>,
+    /// The per-touched-model scope injection this mutation chose (auth.md / D47): the
+    /// twin of [`RQuery::scope_inject`] for the write side — the chosen alternative's
+    /// terms per written/joined scoped model, injected into every write `WHERE`, the
+    /// joined `ON`, the create auto-set, and the declared-shape re-select. Empty when
+    /// `unscoped`.
+    pub scope_inject: Vec<ScopeInject>,
 }
 
 #[derive(Debug, Clone)]

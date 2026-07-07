@@ -530,3 +530,63 @@ fn pg_hard_delete_across_relation_uses_using_clause() {
         "\n{out}"
     );
 }
+
+// ---------- multi-scope DNF: create auto-set of the named alternative (D47) ---
+
+/// A `create` on an AND model (`@scope Page, Author`) auto-sets *both* scope columns
+/// from `$ctx` — every axis of the alternative the mutation's `scoped …` named — so a
+/// row can never be created half-owned (E0186 guards the missing-axis case).
+#[test]
+fn and_scope_create_auto_sets_every_named_axis() {
+    let out = gen(r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page, Author
+        Comment {
+          page:   Page
+          author: User
+          body:   text
+        }
+        shape CommentCard from Comment { body }
+        mutation add_comment(body: text) -> CommentCard scoped Page, Author {
+          create Comment { body = $body };
+        }
+        "#);
+    assert!(out.contains("INSERT INTO `comment`"), "\n{out}");
+    // both engine-managed scope columns are set from $ctx, alongside the caller's body.
+    assert!(out.contains("`page_id`"), "\n{out}");
+    assert!(out.contains("`author_id`"), "\n{out}");
+    assert!(out.contains(":ctx_page"), "\n{out}");
+    assert!(out.contains(":ctx_user"), "\n{out}");
+}
+
+/// An OR model create names *one* alternative; only that axis's column is auto-set
+/// (the other alternative's column is left to whatever the model allows). Proves the
+/// create auto-set follows the callable's chosen alternative, not the whole model.
+#[test]
+fn or_scope_create_auto_sets_only_the_named_alternative() {
+    let out = gen(r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page
+        @scope Author
+        Post {
+          page:    Page?
+          author:  User?
+          body:    text
+        }
+        shape PostCard from Post { body }
+        mutation post_to_page(body: text) -> PostCard scoped Page {
+          create Post { body = $body };
+        }
+        "#);
+    assert!(out.contains("`page_id`"), "\n{out}");
+    assert!(out.contains(":ctx_page"), "\n{out}");
+    // the un-named alternative's column is NOT auto-set by this create.
+    assert!(!out.contains("`author_id`"), "\n{out}");
+    assert!(!out.contains(":ctx_user"), "\n{out}");
+}

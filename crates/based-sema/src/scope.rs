@@ -298,6 +298,115 @@ pub fn check_ack(
     }
 }
 
+// ---------- per-callable chosen-alternative injection (D47) ----------------
+
+/// Resolve the scope a callable injects **per touched scoped model** (auth.md / D47):
+/// the alternative its `scoped …` clause satisfied, expanded to that alternative's
+/// `(column, ctx_field)` terms. For model `M`, the chosen axes are the callable's named
+/// axes that `M` declares a `@scope` for (a superset of ≥1 of `M`'s alternatives, which
+/// `check_ack`/`E0185` guarantees), so `M` is always fully confined and naming extra
+/// axes only narrows (never leaks). `unscoped` → empty (no injection). For a single-
+/// alternative model this is that model's whole scope — byte-identical to iteration 1.
+pub fn resolve_inject(
+    scoped: Option<&Scoped>,
+    unscoped_present: bool,
+    touched: &[usize],
+    cx: &Cx,
+) -> Vec<ScopeInject> {
+    if unscoped_present {
+        return Vec::new();
+    }
+    let named: Vec<&str> = scoped
+        .map(|s| s.names.iter().map(|n| n.node.as_str()).collect())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for &mi in touched {
+        let model = cx.model(mi);
+        let mut terms: Vec<(String, String)> = Vec::new();
+        let mut seen_axis: Vec<&str> = Vec::new();
+        // Walk the model's alternatives in decl order; include each named axis it
+        // carries, expanding the `scope` decl's terms (deduped by column).
+        for alt in &model.scope_alts {
+            for axis in alt {
+                if !named.contains(&axis.as_str()) || seen_axis.contains(&axis.as_str()) {
+                    continue;
+                }
+                seen_axis.push(axis.as_str());
+                if let Some(scope) = cx.scope(axis) {
+                    for t in &scope.terms {
+                        let pair = (t.column.clone(), t.ctx_field.clone());
+                        if !terms.contains(&pair) {
+                            terms.push(pair);
+                        }
+                    }
+                }
+            }
+        }
+        if !terms.is_empty() {
+            out.push(ScopeInject {
+                model: model.name.clone(),
+                terms,
+            });
+        }
+    }
+    out
+}
+
+/// `E0186` — every `create` on a scoped model must set a full `@scope` alternative:
+/// the mutation's `scoped …` set must be a superset of ≥1 of the created model's
+/// alternatives, so the engine can auto-set all of that alternative's columns from
+/// `$ctx` and no row is ever created unowned (auth.md). Fires at the create when the
+/// named set satisfies no alternative — e.g. an `@scope A, B` (AND) model whose create
+/// names only `A`, leaving `B`'s column with no `$ctx` value. Skipped for `unscoped`
+/// (the auto-set is dropped and the caller owns the columns, E0181 no longer applies).
+pub fn check_create_sat(m: &Mutation, cx: &Cx, sink: &mut Sink) {
+    if m.unscoped.is_some() {
+        return;
+    }
+    let named: Vec<&str> = m
+        .scoped
+        .as_ref()
+        .map(|s| s.names.iter().map(|n| n.node.as_str()).collect())
+        .unwrap_or_default();
+    for stmt in &m.body {
+        check_create_sat_stmt(stmt, &named, cx, sink);
+    }
+}
+
+fn check_create_sat_stmt(stmt: &WriteStmt, named: &[&str], cx: &Cx, sink: &mut Sink) {
+    match stmt {
+        WriteStmt::Create { model, .. } => {
+            let Some(mi) = cx.find(&model.node) else {
+                return;
+            };
+            let alts = &cx.model(mi).scope_alts;
+            if alts.is_empty() {
+                return;
+            }
+            let satisfiable = alts
+                .iter()
+                .any(|alt| alt.iter().all(|axis| named.contains(&axis.as_str())));
+            if !satisfiable {
+                sink.error_note(
+                    code::SCOPE_CREATE_UNSAT,
+                    model.span,
+                    format!(
+                        "`create {}` can satisfy no `@scope` alternative — a scope column would be left unset",
+                        model.node
+                    ),
+                    "name every axis of one `@scope` alternative in the mutation's `scoped …` so the engine auto-sets it from `$ctx`",
+                );
+            }
+        }
+        WriteStmt::Tx(inner) => {
+            for s in inner {
+                check_create_sat_stmt(s, named, cx, sink);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Scoped model indices a query touches: the root (if scoped) plus every scoped model
 /// reached through a relation (D34 joined `ON`). Mirrors codegen's join sources — the
 /// same reaches `ctx::collect_joined_scope` walks (a `Nest` sub-object produces no join).

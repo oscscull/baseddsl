@@ -190,6 +190,12 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         cx.model(ti).shard_key_ctx_field()
     };
 
+    // The alternative this query injects per touched scoped model (D47) — threaded to
+    // codegen so a callable naming one `@scope` alternative filters differently from one
+    // naming another. Single-alternative models resolve to the same terms as before.
+    let scope_inject =
+        crate::scope::resolve_inject(q.scoped.as_ref(), q.unscoped.is_some(), &touched, cx);
+
     Some(RQuery {
         name: q.name.node.clone(),
         span: q.span,
@@ -200,6 +206,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         paginated,
         ctx_requires,
         shard_key,
+        scope_inject,
     })
 }
 
@@ -425,6 +432,9 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
     let touched = crate::scope::touched_mutation(m, ret.shape.as_deref(), &ret.model, cx);
     crate::scope::check_ack(m.scoped.as_ref(), unscoped, &touched, cx, m.span, sink);
+    // E0186: each `create` on a scoped model must name a full `@scope` alternative so the
+    // engine can auto-set its columns from `$ctx` (no unowned row). Skipped for `unscoped`.
+    crate::scope::check_create_sat(m, cx, sink);
     // `unscoped` on a mutation touching no scope is stale (W0106).
     if let Some(u) = &m.unscoped {
         if touched.is_empty() {
@@ -448,6 +458,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         cx.find(&ret.model)
             .and_then(|mi| cx.model(mi).shard_key_ctx_field())
     };
+    let scope_inject = crate::scope::resolve_inject(m.scoped.as_ref(), unscoped, &touched, cx);
     Some(RMutation {
         name: m.name.node.clone(),
         span: m.span,
@@ -455,6 +466,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         ret_model: ret.model,
         ret_shape: ret.shape,
         shard_key,
+        scope_inject,
     })
 }
 

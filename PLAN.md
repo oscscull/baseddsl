@@ -128,10 +128,12 @@ stay deferred — worked only if they land on the critical path or a user would 
 > model, `scoped Name` on the callable). The user's framing (2026-07-07): "a scope contract this important must
 > be *written, not implied*" — the old `@scope(pred)` inferred the `$ctx` type per callable and only *showed* it
 > as an editor hint (D4/D5), which principle 2 forbids for a consequential contract. **✅ Iteration 1 (named
-> scope, single-scope semantics) landed as D48** — parser/AST/sema ship, codegen/runtime unchanged in effect,
-> commerce migrated + clean. **Remaining: iteration 2 (multi-scope DNF — codegen picks the callable-chosen
-> alternative, `E0186`, snapshot serializer) + iteration 3 (facts/LSP over scope refs + D-number hover scrub).**
-> See Track G below. Higher priority than the remaining C4 gaps.
+> scope, single-scope semantics) landed as D48**; **✅ iteration 2 (multi-scope DNF) landed as D49** — codegen
+> now injects the *callable-chosen* alternative per touched model (`RQuery`/`RMutation.scope_inject` →
+> `Select::scope_where`), `E0186` (create satisfies ≥1 alternative) fires, single-alternative goldens
+> byte-identical, an OR/AND fixture proves per-callable predicate divergence. **Remaining: iteration 3 —
+> facts/LSP go-to-def/rename/hover over scope refs + the D4/D5-hover scrub + the `schema.snap` multi-alternative
+> scope serializer (G5, E-track).** See Track G below. Higher priority than the remaining C4 gaps.
 >
 > **Track C4 (VS Code feature-parity fill-in)** is queued *behind* Track G — remaining: workspace symbols,
 > find-refs, rename, folding (document symbols D44 + completion D45 done). The **D4/D5-hover scrub** (strip
@@ -376,11 +378,20 @@ the user; see the decision block below. `spec/syntax/migrations.md` is written b
 > **synthesizes `RModel.scope: Option<Predicate>` from the chosen alternative** so codegen/runtime are
 > untouched (golden SQL unchanged; sema conformance golden byte-identical). Scope-field `$ctx` type sourced
 > from the decl (ends D4/D5 for it; coherence structural). Commerce migrated (`scope Tenant`, `@scope
-> Tenant` on `Order`, `scoped Tenant` on its callables) and checks clean. **`E0186` deferred** (unreachable
-> single-scope; code registered). **Iteration 2 (multi-scope DNF) remaining:** codegen injects the
-> *callable-chosen* alternative (not the single synthesized `RModel.scope`); `E0186` (create satisfies ≥1
-> alternative); the `schema.snap` serializer (scopes by name + a model's alternative set, G5); the OR
-> commerce example. **Iteration 3:** facts/LSP go-to-def/rename/hover over scope refs + D-number hover scrub.
+> Tenant` on `Order`, `scoped Tenant` on its callables) and checks clean.
+>
+> ✅ **Iteration 2 (multi-scope DNF) landed as D49.** Codegen now injects the *callable-chosen* alternative,
+> not the single synthesized `RModel.scope`: sema resolves `RQuery`/`RMutation.scope_inject: Vec<ScopeInject>`
+> (per touched scoped model, the chosen axes' `(column, ctx_field)` terms — `scope::resolve_inject`), threaded
+> into `Select::scope_where`, which replaces every read of `RModel.scope`/`scope_terms()` in the SQL path
+> (root `WHERE`, joined `ON`, create auto-set, write guards, restore, D12 re-select). Single-alternative output
+> is byte-identical (goldens unchanged). **`E0186`** (`scope::check_create_sat`): a `create` on a scoped model
+> whose mutation's `scoped …` set ⊇ no alternative → the create can't auto-set a full alternative; co-fires
+> with `E0185`, skipped for `unscoped`. A dedicated OR (`@scope Page`/`@scope Author`) + AND (`@scope Page,
+> Author`) fixture (codegen `tests/dml.rs`/`tests/mutations.rs` + sema `tests/check.rs`) proves per-callable
+> predicate divergence and the E0185/E0186 triggers. `RModel.scope` retained (shard key D33 + E0181 guard).
+> **Iteration 3 remaining:** facts/LSP go-to-def/rename/hover over scope refs + the D4/D5 hover scrub; the
+> `schema.snap` multi-alternative scope serializer (scopes by name + a model's alternative set, G5 — E-track).
 >
 *Spec settled in **D46** (named) + **D47** (multi-scope) + rewritten auth.md Handle 2 + grammar
 (`scope_decl`, `scope_deco`, `scoped_clause`).* Scope is a first-class **named** declaration referenced by
@@ -410,13 +421,16 @@ its own `cargo test`/`fmt`/`clippy`-green commit):
     becomes structural for the scope field (still fires for non-scope `$ctx`). `E0181` (create assigns scope
     col) + `W0106` (stale unscoped) carry over. Duplicate `scope` name via the general duplicate-decl path.
     Retarget `RModel.scope`/`scope_terms()` onto the named decl → a `Vec` of alternatives.
-  - G3. **Codegen + runtime.** Inject the **conjunction of the callable's named axes** (the chosen
-    alternative) off the resolved decls — the *same* root-`WHERE` / write-`WHERE` / joined-`ON` /
-    create-auto-set injection D32/D34 already emit, now sourced from the `scope` decls and generalized:
-    reads/writes AND every named axis's `col = $ctx.field`; **create auto-sets every scope column of the
-    satisfied alternative** (all its axes), not one fixed column. Binds stay `:ctx_<field>` (shard key D33
-    reads the owning axis). For a single-alternative single-axis schema the SQL is unchanged vs. today's
-    inline form (a good regression check).
+  - G3. ✅ **done (D49). Codegen + runtime — per-callable alternative injection.** Sema resolves
+    `RQuery`/`RMutation.scope_inject: Vec<ScopeInject>` (per touched scoped model, the chosen axes' terms —
+    `scope::resolve_inject`), threaded into `Select` (`with_scope_terms`); `Select::scope_where(alias, model)`
+    builds the ANDed `col = :ctx_<field>` and replaces every prior read of `RModel.scope`/`scope_terms()` in
+    the SQL path (root `WHERE`, joined `ON` via `scope_join_pred`, create auto-set, write guards, restore, D12
+    re-select). **`E0186`** (`scope::check_create_sat`): a `create` whose mutation's `scoped …` set ⊇ no
+    alternative of the created model → can't auto-set a full alternative; co-fires with `E0185`, skipped for
+    `unscoped`. Single-alternative single-axis SQL is byte-identical (goldens unchanged — the regression
+    proof). OR/AND fixtures (codegen + sema) prove per-callable predicate divergence. `RModel.scope` retained
+    (shard key D33 + E0181 guard). Binds stay `:ctx_<field>`.
   - G4. **Commerce migration to the new syntax.** Rewrite `spec/examples/commerce` `.bsl`: add
     `scope Tenant (org: Org = $ctx.org)`, put `@scope Tenant` on `Order` (and a second scoped model —
     OrderItem gains `org: Org` — to exercise multi-model composition + joined-`ON`), and add an **OR**
@@ -424,8 +438,10 @@ its own `cargo test`/`fmt`/`clippy`-green commit):
     the DNF path; annotate every callable with the right `scoped …` alternative (or `unscoped(…)` for the
     admin lookup). Re-bless conformance goldens + the sema commerce-clean test. **Do this only once G1–G3
     land** (the parser must accept the new syntax first — this iteration deliberately left commerce on the
-    old `@scope(pred)`).
-  - G5. **Facts/LSP + migration snapshot.** Facts/LSP: go-to-def from `@scope Name` / `scoped Name` to the
+    old `@scope(pred)`). ✅ **Core done (D48):** commerce carries `scope Tenant` / `@scope Tenant` /
+    `scoped Tenant` and checks clean. The **DNF proof** (OR + AND) is a dedicated codegen+sema fixture (D49),
+    not commerce — adding an OR model to commerce is optional polish, still open.
+  - G5. **🔴 NEXT (iteration 3). Facts/LSP + migration snapshot.** Facts/LSP: go-to-def from `@scope Name` / `scoped Name` to the
     `scope` decl, rename across refs, hover naming the scope (and, for a multi-alternative model, the DNF)
     — and **scrub all D-numbers from editor-facing strings** (the `(D4/D5)` hover leak the user reported;
     this design removes its source, the impl must not reintroduce it). Migration snapshot (E-track

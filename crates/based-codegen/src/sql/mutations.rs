@@ -44,7 +44,7 @@
 //! also forbids the target alias in `SET`, so a SET column is emitted bare there.
 
 use based_ast::*;
-use based_sema::{CheckedSchema, RModel, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, RModel, ScopeInject, SoftDelete, SoftMode};
 
 use crate::sql::dml::{
     physical_col, project_return, push_joins, render_raw, soft_pred, BackCtx, Select,
@@ -147,10 +147,18 @@ fn lower_mutation<'a>(
     // `unscoped(...)` (D32) drops `@scope` from every write in this mutation *and* the
     // create-time auto-set — the greppable, linted cross-scope escape hatch (auth.md).
     let unscoped = m.unscoped.is_some();
+    // The per-touched-model scope this mutation injects (the chosen alternative, D47),
+    // resolved by sema. Empty when `unscoped`. Threaded into every write's `Select`.
+    let inject: &[ScopeInject] = schema
+        .mutations
+        .iter()
+        .find(|rm| rm.name == m.name.node)
+        .map(|rm| rm.scope_inject.as_slice())
+        .unwrap_or(&[]);
     let mut stmts = Vec::new();
     for stmt in &m.body {
         lower_write(
-            schema, decls, stmt, "id", None, unscoped, dialect, &mut stmts,
+            schema, decls, stmt, "id", None, unscoped, inject, dialect, &mut stmts,
         );
     }
     // Re-select the declared shape (D12) only when the mutation *creates* its return
@@ -173,6 +181,7 @@ fn lower_mutation<'a>(
                 &rm.ret_model,
                 rm.ret_shape.as_deref(),
                 unscoped,
+                inject,
                 dialect,
             )
         });
@@ -195,12 +204,15 @@ fn lower_ret_select(
     ret_model: &str,
     ret_shape: Option<&str>,
     unscoped: bool,
+    inject: &[ScopeInject],
     dialect: Dialect,
 ) -> String {
     let model = schema
         .model(ret_model)
         .expect("return model resolved by sema");
-    let mut sel = Select::new(schema, decls, model, dialect).with_scope_inject(!unscoped);
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_scope_inject(!unscoped)
+        .with_scope_terms(inject);
 
     // Projection first (it seeds joins for reached columns), then scope (may seed more).
     let projection = project_return(&mut sel, decls, ret_shape, ret_model, model);
@@ -208,10 +220,8 @@ fn lower_ret_select(
     if let Some(sd) = &model.soft_delete {
         wheres.push(soft_pred(dialect, &sel.root_alias, model, sd));
     }
-    if !unscoped {
-        if let Some(scope) = &model.scope {
-            wheres.push(sel.predicate(scope, model));
-        }
+    if let Some(scope) = sel.scope_where(&sel.root_alias, model) {
+        wheres.push(scope);
     }
 
     let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&model.table));
@@ -237,6 +247,7 @@ fn lower_write<'a>(
     id_param: &str,
     back: Option<BackCtx<'a>>,
     unscoped: bool,
+    inject: &'a [ScopeInject],
     dialect: Dialect,
     out: &mut Vec<LoweredWrite>,
 ) {
@@ -244,7 +255,7 @@ fn lower_write<'a>(
         WriteStmt::Create { model, assigns } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_create(
-                    schema, decls, m, assigns, id_param, back, unscoped, dialect,
+                    schema, decls, m, assigns, id_param, back, unscoped, inject, dialect,
                 ));
             }
         }
@@ -255,27 +266,29 @@ fn lower_write<'a>(
         } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_update(
-                    schema, decls, m, where_, assigns, back, unscoped, dialect,
+                    schema, decls, m, where_, assigns, back, unscoped, inject, dialect,
                 ));
             }
         }
         WriteStmt::Delete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_delete(
-                    schema, decls, m, where_, false, unscoped, dialect,
+                    schema, decls, m, where_, false, unscoped, inject, dialect,
                 ));
             }
         }
         WriteStmt::HardDelete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_delete(
-                    schema, decls, m, where_, true, unscoped, dialect,
+                    schema, decls, m, where_, true, unscoped, inject, dialect,
                 ));
             }
         }
         WriteStmt::Restore { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_restore(schema, decls, m, where_, unscoped, dialect));
+                out.push(lower_restore(
+                    schema, decls, m, where_, unscoped, inject, dialect,
+                ));
             }
         }
         WriteStmt::Tx(inner) => {
@@ -296,6 +309,7 @@ fn lower_write<'a>(
                     &idp,
                     prev.clone(),
                     unscoped,
+                    inject,
                     dialect,
                     out,
                 );
@@ -339,11 +353,13 @@ fn lower_create<'a>(
     id_param: &str,
     back: Option<BackCtx<'a>>,
     unscoped: bool,
+    inject: &'a [ScopeInject],
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect)
         .with_back(back)
-        .with_scope_inject(!unscoped);
+        .with_scope_inject(!unscoped)
+        .with_scope_terms(inject);
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
@@ -355,18 +371,18 @@ fn lower_create<'a>(
         assigned.push(col);
     }
 
-    // `@scope` columns are engine-managed on create (D32): auto-set from `:ctx_<field>`
-    // so a caller cannot plant a row outside their own scope (cross-scope create is
-    // inexpressible). Sema forbids the caller assigning one (E0181), so on a clean schema
-    // `assigned` never contains it — the guard is defensive. Skipped when `unscoped`.
-    if !unscoped {
-        for (field, ctx_field) in model.scope_terms() {
-            let col = physical_col(model, &field);
-            if !assigned.contains(&col) {
-                cols.push(dialect.quote(&col));
-                vals.push(format!(":ctx_{ctx_field}"));
-                assigned.push(col);
-            }
+    // `@scope` columns are engine-managed on create (D32/D47): auto-set from
+    // `:ctx_<field>` for every axis of the alternative this mutation named (sema's
+    // per-callable `scope_inject`), so a caller cannot plant a row outside their own
+    // scope (cross-scope create is inexpressible; E0186 guarantees a full alternative is
+    // named). Sema forbids the caller assigning one (E0181), so on a clean schema
+    // `assigned` never contains it — the guard is defensive. Empty when `unscoped`.
+    for (field, ctx_field) in sel.scope_terms_for(&model.name).to_vec() {
+        let col = physical_col(model, &field);
+        if !assigned.contains(&col) {
+            cols.push(dialect.quote(&col));
+            vals.push(format!(":ctx_{ctx_field}"));
+            assigned.push(col);
         }
     }
 
@@ -413,11 +429,13 @@ fn lower_update<'a>(
     assigns: &'a [Assign],
     back: Option<BackCtx<'a>>,
     unscoped: bool,
+    inject: &'a [ScopeInject],
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect)
         .with_back(back)
-        .with_scope_inject(!unscoped);
+        .with_scope_inject(!unscoped)
+        .with_scope_terms(inject);
     let mut sets: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
 
@@ -432,13 +450,7 @@ fn lower_update<'a>(
     }
 
     let mut wheres = vec![sel.predicate(where_, model)];
-    inject_guards(
-        &mut sel,
-        model,
-        &mut wheres,
-        /* live = */ true,
-        unscoped,
-    );
+    inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
     LoweredWrite {
         header: String::new(),
         sql: update_stmt(&sel, model, &sets, &wheres),
@@ -449,6 +461,7 @@ fn lower_update<'a>(
 
 // ---------- delete / hard delete -------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn lower_delete(
     schema: &CheckedSchema,
     decls: &[Decl],
@@ -456,9 +469,12 @@ fn lower_delete(
     where_: &Predicate,
     hard: bool,
     unscoped: bool,
+    inject: &[ScopeInject],
     dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect).with_scope_inject(!unscoped);
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_scope_inject(!unscoped)
+        .with_scope_terms(inject);
 
     // Soft model + plain `delete` -> tombstone UPDATE, never a real DELETE.
     if let (Some(sd), false) = (&model.soft_delete, hard) {
@@ -467,13 +483,7 @@ fn lower_delete(
             sets.push(bump);
         }
         let mut wheres = vec![sel.predicate(where_, model)];
-        inject_guards(
-            &mut sel,
-            model,
-            &mut wheres,
-            /* live = */ true,
-            unscoped,
-        );
+        inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
         return LoweredWrite {
             header: "-- delete (soft): tombstone, never a real DELETE\n".to_string(),
             sql: update_stmt(&sel, model, &sets, &wheres),
@@ -484,13 +494,7 @@ fn lower_delete(
 
     // Plain model, or the loud `hard delete` opt-out -> real DELETE.
     let mut wheres = vec![sel.predicate(where_, model)];
-    inject_guards(
-        &mut sel,
-        model,
-        &mut wheres,
-        /* live = */ false,
-        unscoped,
-    );
+    inject_guards(&mut sel, model, &mut wheres, /* live = */ false);
     let header = if hard {
         "-- hard delete: real DELETE (explicit soft-delete opt-out)\n".to_string()
     } else {
@@ -512,9 +516,12 @@ fn lower_restore(
     model: &RModel,
     where_: &Predicate,
     unscoped: bool,
+    inject: &[ScopeInject],
     dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect).with_scope_inject(!unscoped);
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_scope_inject(!unscoped)
+        .with_scope_terms(inject);
     // sema (E-restore) guarantees a soft-delete model here; fall back defensively.
     let mut sets = match &model.soft_delete {
         Some(sd) => vec![tombstone_set(&sel, model, sd, /* deleting = */ false)],
@@ -526,10 +533,8 @@ fn lower_restore(
     // Restore targets the *deleted* rows, so the live predicate is NOT injected;
     // `@scope` still applies (you can only restore within your scope) unless `unscoped`.
     let mut wheres = vec![sel.predicate(where_, model)];
-    if !unscoped {
-        if let Some(scope) = &model.scope {
-            wheres.push(sel.predicate(scope, model));
-        }
+    if let Some(scope) = sel.scope_where(&sel.root_alias, model) {
+        wheres.push(scope);
     }
     LoweredWrite {
         header: "-- restore: clear the tombstone\n".to_string(),
@@ -638,25 +643,19 @@ fn push_where(s: &mut String, wheres: &[String]) {
 
 // ---------- injected guards + engine columns -------------------------------
 
-/// Append the soft-delete live predicate (when `live`) and `@scope` to a write's
-/// `WHERE`, so a mutation can't touch a tombstoned or out-of-scope row. `unscoped` (D32)
-/// drops the `@scope` guard only — soft-delete still applies (it's a separate guarantee).
-fn inject_guards(
-    sel: &mut Select,
-    model: &RModel,
-    wheres: &mut Vec<String>,
-    live: bool,
-    unscoped: bool,
-) {
+/// Append the soft-delete live predicate (when `live`) and the callable's chosen
+/// `@scope` (D47) to a write's `WHERE`, so a mutation can't touch a tombstoned or
+/// out-of-scope row. An `unscoped` callable injects no scope (`scope_where` returns
+/// `None` — its `scope_inject` is empty); soft-delete still applies (a separate
+/// guarantee).
+fn inject_guards(sel: &mut Select, model: &RModel, wheres: &mut Vec<String>, live: bool) {
     if live {
         if let Some(sd) = &model.soft_delete {
             wheres.push(soft_pred(sel.dialect, &sel.root_alias, model, sd));
         }
     }
-    if !unscoped {
-        if let Some(scope) = &model.scope {
-            wheres.push(sel.predicate(scope, model));
-        }
+    if let Some(scope) = sel.scope_where(&sel.root_alias, model) {
+        wheres.push(scope);
     }
 }
 

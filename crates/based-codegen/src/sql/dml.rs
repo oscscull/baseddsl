@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 
 use based_ast::*;
-use based_sema::{CheckedSchema, MemberKind, RModel, RQuery, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, MemberKind, RModel, RQuery, ScopeInject, SoftDelete, SoftMode};
 
 use crate::Dialect;
 
@@ -143,7 +143,9 @@ fn lower_query(
     let root = schema.model(&rq.target).expect("target resolved by sema");
     // `unscoped` (D32) opts the whole query out of scope handling — the joined
     // tables' `@scope` (D34) as well as the root's, kept in one decision (P4).
-    let mut sel = Select::new(schema, decls, root, dialect).with_scope_inject(q.unscoped.is_none());
+    let mut sel = Select::new(schema, decls, root, dialect)
+        .with_scope_inject(q.unscoped.is_none())
+        .with_scope_terms(&rq.scope_inject);
 
     // 1. Projection (drives the SELECT list; also seeds joins for reached columns).
     let projection = build_projection(&mut sel, decls, rq, root);
@@ -155,11 +157,10 @@ fn lower_query(
         wheres.push(soft_pred(dialect, &sel.root_alias, root, sd));
     }
     // `@scope` rides into every query on the model (auth.md) unless the query opts out
-    // with `unscoped(...)` (D32) — the greppable, linted cross-scope escape hatch.
-    if q.unscoped.is_none() {
-        if let Some(scope) = &root.scope {
-            wheres.push(sel.predicate(scope, root));
-        }
+    // with `unscoped(...)` (D32). The injected predicate is the *chosen alternative*
+    // (D47) — the axes this query named — resolved by sema per callable.
+    if let Some(scope) = sel.scope_where(&sel.root_alias, root) {
+        wheres.push(scope);
     }
 
     // 3. Sort cascade + keyset tiebreaker.
@@ -422,6 +423,13 @@ pub(crate) struct Select<'a> {
     /// / `lower_write`), which already honours `unscoped`; this flag governs only the
     /// join-`ON` injection the resolver performs as it materializes each join.
     inject_scope: bool,
+    /// The per-touched-model scope the *current callable* injects (auth.md / D47),
+    /// from `RQuery`/`RMutation.scope_inject`. Keyed by model name; each entry is the
+    /// chosen alternative's `(column, ctx_field)` terms. The root `WHERE`, the joined
+    /// `ON`, and the create auto-set all read the terms for their model from here, so a
+    /// callable naming one alternative injects a different predicate than one naming
+    /// another. Empty for an `unscoped` callable (sema returns no injection).
+    scope_inject: &'a [ScopeInject],
 }
 
 /// What a `^.field` back-reference resolves to: the preceding `create`'s bound `id`
@@ -458,6 +466,7 @@ impl<'a> Select<'a> {
             filter_stack: Vec::new(),
             back: None,
             inject_scope: true,
+            scope_inject: &[],
         }
     }
 
@@ -486,28 +495,54 @@ impl<'a> Select<'a> {
         self
     }
 
-    /// The `@scope` conjunction for a *joined* model, anchored at its join alias:
-    /// each D32 term `col = $ctx.field` becomes `<alias>.<col> = :ctx_<field>`,
-    /// ANDed. Empty (returns `None`) for an unscoped model or when scope injection is
-    /// off (`unscoped` callable). The bind name `:ctx_<field>` is the *same* one the
-    /// root scope + create auto-set use (mutations.rs), so the runtime binds it once
-    /// from the request `$ctx` — no new bind surface (P4). Sema (D34) makes the
-    /// callable *require* this field so the bind is always present.
-    fn scope_join_pred(&self, alias: &str, model: &RModel) -> Option<String> {
-        if !self.inject_scope {
-            return None;
-        }
-        let terms: Vec<String> = model
-            .scope_terms()
-            .into_iter()
+    /// Attach the current callable's per-model chosen scope injection (D47), from
+    /// `RQuery`/`RMutation.scope_inject`. Every scope predicate this `Select` emits —
+    /// root `WHERE`, joined `ON`, create auto-set — reads its terms from here.
+    pub(crate) fn with_scope_terms(mut self, inject: &'a [ScopeInject]) -> Self {
+        self.scope_inject = inject;
+        self
+    }
+
+    /// The scope `(column, ctx_field)` terms the current callable injects for `model`
+    /// (the alternative it chose, D47), or `&[]` when the callable confines this model
+    /// by no scope (unscoped, or the model isn't touched).
+    pub(crate) fn scope_terms_for(&self, model: &str) -> &[(String, String)] {
+        self.scope_inject
+            .iter()
+            .find(|si| si.model == model)
+            .map(|si| si.terms.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The `@scope` conjunction the current callable injects for `model`, anchored at
+    /// `alias`: each chosen term `col = $ctx.field` becomes `<alias>.<col> =
+    /// :ctx_<field>`, ANDed. `None` when the callable confines this model by no scope
+    /// (unscoped callable, or a model carrying none of the named axes). The bind name
+    /// `:ctx_<field>` is the *same* one every scope site uses, so the runtime binds it
+    /// once from the request `$ctx` (P4). For a single-alternative model this is the
+    /// model's whole scope — byte-identical to iteration 1 (D48).
+    pub(crate) fn scope_where(&self, alias: &str, model: &RModel) -> Option<String> {
+        let terms: Vec<String> = self
+            .scope_terms_for(&model.name)
+            .iter()
             .map(|(field, ctx_field)| {
                 format!(
                     "{} = :ctx_{ctx_field}",
-                    self.qcol(alias, &physical_col(model, &field))
+                    self.qcol(alias, &physical_col(model, field))
                 )
             })
             .collect();
         (!terms.is_empty()).then(|| terms.join(" AND "))
+    }
+
+    /// The joined-`ON` scope injection (D34): the callable's chosen `@scope` for the
+    /// joined `model`, or `None` when scope injection is off (`unscoped` callable) —
+    /// the join-`ON` twin of the root `scope_where`.
+    fn scope_join_pred(&self, alias: &str, model: &RModel) -> Option<String> {
+        if !self.inject_scope {
+            return None;
+        }
+        self.scope_where(alias, model)
     }
 
     /// Resolve a dotted path from `root` to `(table_alias, column)`, materializing
