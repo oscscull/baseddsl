@@ -36,9 +36,9 @@
 //! contract instead of smuggling `$ctx` on the side.
 //!
 //! ## Deferred (documented, not silently wrong)
-//! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct, matching the
-//!   read side. To-**many** nested arrays are still skipped (they need JSON aggregation
-//!   / a companion query; PLAN L1 follow-up).
+//! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct; a to-**many**
+//!   nest (`items { … }`) emits a nested struct wrapped in `Vec<…>`, both matching the
+//!   read side (the runtime decodes the SQL JSON array into it).
 //! - A `sql`…`` shape field has no statically known type, so it maps to `Json`.
 //! - The keyset cursor is an opaque `Option<String>` in `Page<T>`; its encoding is a
 //!   runtime concern (pagination.md).
@@ -322,8 +322,13 @@ mod rust {
                         };
                         fields.push((field.node.clone(), ty));
                         nested.push(sub);
+                    } else if let Some(target) = to_many_relation(schema, model, &field.node) {
+                        // A to-many nest is a JSON array of the element struct: `Vec<Sub>`.
+                        let sub_name = format!("{name}{}", pascal(&field.node));
+                        let sub = build_struct(schema, sub_name.clone(), body, Some(target));
+                        fields.push((field.node.clone(), format!("Vec<{sub_name}>")));
+                        nested.push(sub);
                     }
-                    // to-many nest: deferred (L1 array follow-up) — skipped.
                 }
             }
         }
@@ -352,6 +357,23 @@ mod rust {
                 t.is_unique(via).then_some((t, true))
             }
             MemberKind::Scalar { .. } => None,
+        }
+    }
+
+    /// The target model of a to-**many** relation field (an Inverse collection — its
+    /// paired forward FK is *not* unique), or `None` for a scalar / to-one edge. Mirrors
+    /// the SQL side's `to_many_edge`; the client renders it `Vec<Sub>`.
+    fn to_many_relation<'a>(
+        schema: &'a CheckedSchema,
+        model: Option<&RModel>,
+        field: &str,
+    ) -> Option<&'a RModel> {
+        match model?.member(field).map(|m| &m.kind)? {
+            MemberKind::Inverse { target, via } => {
+                let t = schema.model(target)?;
+                (!t.is_unique(via)).then_some(t)
+            }
+            _ => None,
         }
     }
 

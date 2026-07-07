@@ -16,7 +16,7 @@ use crate::plan::{
     Stmt,
 };
 use crate::value::SqlValue;
-use based_codegen::sql::KEYSET_PREFIX;
+use based_codegen::sql::{ARRAY_MARK, KEYSET_PREFIX};
 
 /// One returned row: column alias → JSON value (the SELECT aliases each projection
 /// to its output name, so a row is already the response object).
@@ -233,14 +233,17 @@ fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbEr
     Ok(response)
 }
 
-/// Reassemble a flat result row into the response object, nesting to-one sub-objects.
+/// Reassemble a flat result row into the response object, nesting sub-objects/arrays.
 ///
 /// A nested to-one shape sub-object (`buyer { name, email }`) is projected by codegen
 /// as columns aliased `buyer.name`, `buyer.email` ([`based_codegen::sql::NEST_SEP`] is
 /// the `.`); this splits each such key back into a nested object, recursing for
-/// nested-within-nested (`buyer.org.name`). A `.` cannot occur in a BSL identifier, so
-/// a flat query (no nest) has no dotted key and passes through unchanged — the
-/// transform is a no-op there. One convention, owned by codegen, read here (principle 4).
+/// nested-within-nested (`buyer.org.name`). A to-**many** nest (`items { … }`) is
+/// projected as a single JSON-array *string* column aliased `items[]`
+/// ([`based_codegen::sql::ARRAY_MARK`]); this parses the string into a real JSON array of
+/// sub-objects (their own nesting already fully formed by the SQL JSON aggregation). A
+/// `.`/`[`/`]` cannot occur in a BSL identifier, so a flat query (no nest) has no such key
+/// and passes through unchanged. One convention, owned by codegen, read here (principle 4).
 fn nest_row(row: Row) -> serde_json::Value {
     let mut root = serde_json::Map::new();
     for (key, val) in row {
@@ -249,17 +252,38 @@ fn nest_row(row: Row) -> serde_json::Value {
     serde_json::Value::Object(root)
 }
 
+/// Parse a to-many array column's value into a JSON array. The DB returns the aggregated
+/// column as a JSON-array *string* (SQLite/MariaDB text); a driver that decodes the JSON
+/// type natively hands back an array already, and an empty group may arrive as NULL — all
+/// three normalize to an array here (a malformed string, which the engine never emits,
+/// degrades to `[]` rather than panicking).
+fn parse_array(val: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    match val {
+        J::String(s) => serde_json::from_str(&s).unwrap_or(J::Array(Vec::new())),
+        arr @ J::Array(_) => arr,
+        _ => J::Array(Vec::new()),
+    }
+}
+
 /// Insert `val` at a possibly-dotted `key` into `obj`, creating intermediate objects for
-/// each `NEST_SEP` segment (`buyer.org.name` → `{buyer:{org:{name:val}}}`).
+/// each `NEST_SEP` segment (`buyer.org.name` → `{buyer:{org:{name:val}}}`). A leaf key
+/// suffixed with `ARRAY_MARK` (`items[]`) is a to-many array: its string value is parsed
+/// into a JSON array and stored under the field name without the marker.
 fn insert_path(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
     val: serde_json::Value,
 ) {
     match key.split_once(based_codegen::sql::NEST_SEP) {
-        None => {
-            obj.insert(key.to_string(), val);
-        }
+        None => match key.strip_suffix(ARRAY_MARK) {
+            Some(name) => {
+                obj.insert(name.to_string(), parse_array(val));
+            }
+            None => {
+                obj.insert(key.to_string(), val);
+            }
+        },
         Some((head, rest)) => {
             let entry = obj
                 .entry(head.to_string())

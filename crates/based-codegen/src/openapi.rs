@@ -35,8 +35,8 @@
 //!
 //! ## Deferred (documented, not silently wrong — same gaps as the client)
 //! - A to-**one** nested sub-object (`buyer { … }`) is emitted as an inline nested
-//!   object schema, matching the client + SQL sides. To-**many** nested arrays are
-//!   still skipped (they need JSON aggregation; PLAN L1 follow-up).
+//!   object schema; a to-**many** nest (`items { … }`) as an `array` of that object
+//!   schema — both matching the client + SQL sides.
 //! - A `sql`…`` shape field has no statically known type -> the open-object `Json`.
 //! - A **pure** update/delete mutation still responds `{ id }` (its declared-shape
 //!   re-select is deferred, D12), so its `200` schema is the `MutationResult` `{ id }`
@@ -402,8 +402,13 @@ fn shape_fields(
                 if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
                     let nested = shape_fields(schema, body, Some(target));
                     fields.push((field.node.clone(), object_schema(&nested), !optional));
+                } else if let Some(target) = to_many_relation(schema, model, &field.node) {
+                    // A to-many nest is an array of the element object schema; always
+                    // present (empty array when there are no children), so `required`.
+                    let nested = shape_fields(schema, body, Some(target));
+                    let arr = json!({ "type": "array", "items": object_schema(&nested) });
+                    fields.push((field.node.clone(), arr, true));
                 }
-                // to-many nest: deferred (L1 array follow-up) — skipped.
             }
         }
     }
@@ -429,6 +434,23 @@ fn to_one_relation<'a>(
             t.is_unique(via).then_some((t, true))
         }
         MemberKind::Scalar { .. } => None,
+    }
+}
+
+/// The target model of a to-**many** relation field (an Inverse collection — paired
+/// forward FK not unique), or `None` for a scalar / to-one edge. The OpenAPI twin of the
+/// SQL side's `to_many_edge`; the field emits as an array of the element object schema.
+fn to_many_relation<'a>(
+    schema: &'a CheckedSchema,
+    model: Option<&RModel>,
+    field: &str,
+) -> Option<&'a RModel> {
+    match model?.member(field).map(|m| &m.kind)? {
+        MemberKind::Inverse { target, via } => {
+            let t = schema.model(target)?;
+            (!t.is_unique(via)).then_some(t)
+        }
+        _ => None,
     }
 }
 

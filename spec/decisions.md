@@ -25,7 +25,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **SQL codegen — mutations/writes** — D12 (mutation writes), D16 (tx back-refs `^`)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
-- **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects)
+- **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
+  D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client)
@@ -1882,3 +1883,59 @@ principle 8: the tiebreaker is shown, not written).
   columns stripped), and asserts a tampered cursor → 400. Plus codegen unit tests (the guarded
   comparison, `__keyset_` columns, offset-emits-no-keyset) and `cursor.rs` round-trip/tamper/arity
   unit tests.
+
+## D57 — to-many nested arrays in shapes (`items { … }`, self-referential `invited_users`)
+Track L1, final slice — closes L1 (to-**one** nests landed in D55). A shape may expand a
+**to-many** relation (an Inverse collection edge) into a nested **array** of sub-objects
+(`shape OrderCard from Order { total, items { sku, qty } }` → `{ total, items: [{ sku, qty },
+…] }`), including the flagship self-referential `shape UserCard from User { name, invited_users
+{ name } }`. Sema already type-checked the nested body (D55's `check_shape_body` Inverse
+branch); every emit surface skipped a to-many nest cleanly (guarded by the cardinality check).
+Now built end-to-end across all three dialects. Governed by shapes.md (nesting = brace block)
++ relations.md (inverse collections); principle 4 (one alias convention, codegen owns it,
+runtime reads it).
+- **SQL: correlated subquery, not a join (`sql/dml.rs`).** A to-many nest lowers to a scalar
+  **correlated subquery** in the SELECT list: `(SELECT <json-agg>(<json-object of the element
+  body>) FROM <child> AS <s-alias> WHERE <child.back_fk> = <outer>.id AND <child soft-delete /
+  @scope>)`. A subquery (not a `LEFT JOIN` + `GROUP BY`) is used because it never multiplies the
+  outer rows, needs no grouping over every projected column, and composes with `LIMIT`
+  pagination unchanged. The output alias carries the [`ARRAY_MARK`] `[]` suffix (`items[]`) — a
+  sibling convention to D55's `.` [`NEST_SEP`] — so the runtime knows to parse the column's
+  string as a JSON array; `[`/`]` cannot occur in a BSL identifier, so it never collides.
+- **Per-dialect JSON aggregation (the `Dialect` seam).** `Dialect::json_object_fn` +
+  `json_array_agg`: SQLite `json_group_array(json_object(…))`, MariaDB
+  `COALESCE(JSON_ARRAYAGG(JSON_OBJECT(…)), JSON_ARRAY())`, Postgres
+  `COALESCE(json_agg(json_build_object(…)), '[]'::json)`. The coalesce yields `[]` for a
+  childless parent (MariaDB/Postgres aggregate NULL over zero rows; SQLite already yields `[]`,
+  so it's a harmless no-op there). Reuses the existing quoting seam; nothing else branches.
+- **Self-ref aliasing.** Each to-many subquery mints a distinct child root alias `s<n>_<table>`
+  from a monotonic `Select.sub_counter`, so a self-referential edge (`User.invited_users` joined
+  to `User`) never collides with the outer `user` row — the correlation `s1_user.invited_by_id =
+  user.id` is unambiguous. The counter threads through nested subqueries so siblings stay unique.
+- **Recursive element builder.** `Select::json_object_expr` builds a JSON object for the element
+  body over a *fresh* sub-`Select` (its own join scope, so reaches/to-one nests inside an element
+  accumulate their joins into the subquery, not the outer SELECT): bare/reach fields → `'key',
+  <col>` pairs, a to-one nest → a nested `json_object`, a to-many nest → a nested correlated
+  subquery. Nesting composes to any depth (to-many-in-to-one aliases as `parent.items[]`).
+- **Runtime parse (`run.rs`).** `nest_row`/`insert_path` gained an array-leaf case: a key ending
+  in [`ARRAY_MARK`] is a to-many array — its value (a JSON-array *string* from the driver, or an
+  already-decoded array, or NULL) is normalized to a JSON array and stored under the field name
+  without the marker. The element sub-objects arrive fully formed (their own nesting done by the
+  SQL JSON functions), so no further reassembly is needed inside the array. A flat query has no
+  such key, so the transform stays a no-op there.
+- **Client + OpenAPI.** The client emits the element struct `<Parent><Field>` and the parent
+  field takes `Vec<…>` (deduped like the to-one nested structs); OpenAPI emits an `array` schema
+  whose `items` are the element object schema, always `required` (empty array when childless).
+  Both mirror the SQL cardinality rule via a `to_many_relation` helper (Inverse, paired FK not
+  unique) — the twin of the SQL side's `to_many_edge`.
+- **Array element order is unspecified.** Portable JSON aggregation offers no cross-dialect
+  ordered form (MySQL/MariaDB `JSON_ARRAYAGG` takes no `ORDER BY`; only Postgres/newer SQLite
+  do), so the array is treated as a **set**. An ordered form is a future refinement if a use case
+  needs it; documented rather than silently order-dependent.
+- **Verified live.** Self-contained SQLite integration tests (`sqlite_integration.rs`) seed an
+  Order with items (one soft-deleted → excluded) + a childless order (→ `[]`) and the
+  self-referential `invited_users` (Ada invited Bob + Cy → nested array; a leaf → `[]`),
+  dispatching real `get`/`list` requests through the engine and asserting the reassembled nested
+  JSON — not compile-verified. Plus codegen unit tests: the MariaDB + Postgres aggregation SQL,
+  the `s<n>_` self-ref alias, the `items[]` output alias, subquery-not-join; the client `Vec<Sub>`
+  struct; the OpenAPI array-of-object schema.

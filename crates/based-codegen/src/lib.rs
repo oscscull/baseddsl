@@ -106,6 +106,29 @@ impl Dialect {
             }
         }
     }
+
+    /// The JSON-object constructor for this dialect, taking `'key', value, …` pairs:
+    /// `json_object` (SQLite), `JSON_OBJECT` (MariaDB), `json_build_object` (Postgres).
+    /// One element of a to-many nested shape array (L1) is built with it.
+    pub fn json_object_fn(self) -> &'static str {
+        match self {
+            Dialect::Sqlite => "json_object",
+            Dialect::MariaDb => "JSON_OBJECT",
+            Dialect::Postgres => "json_build_object",
+        }
+    }
+
+    /// Aggregate a per-row JSON object `elem` into a JSON array — the value of a to-many
+    /// nested shape edge (`items { … }`, L1). Coalesced to `[]` for an empty group, since
+    /// MariaDB/Postgres aggregate a NULL over zero rows (SQLite's `json_group_array`
+    /// already yields `[]`, so the coalesce there is a harmless no-op).
+    pub fn json_array_agg(self, elem: &str) -> String {
+        match self {
+            Dialect::Sqlite => format!("json_group_array({elem})"),
+            Dialect::MariaDb => format!("COALESCE(JSON_ARRAYAGG({elem}), JSON_ARRAY())"),
+            Dialect::Postgres => format!("COALESCE(json_agg({elem}), '[]'::json)"),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -48,9 +48,10 @@ resumes it:
 dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — but the **language itself is not yet
 feature-complete**. A 2026-07-07 audit found that normal-workday query surface parses and type-checks
 yet emits *nothing*: nested/relation projection in shapes (`items { … }`, `invited_users`) and
-keyset-cursor pagination both stub out in codegen/runtime. (Since then: to-**one** nested shape
-sub-objects emit end-to-end — D55 — and keyset-cursor pagination is fully built + proven live — D56 —
-leaving **to-many nested arrays (L1) the last open language gap**.)
+keyset-cursor pagination both stub out in codegen/runtime. (Since then those gaps closed: to-**one**
+nested shape sub-objects — D55 — and to-**many** nested arrays incl. self-ref — D57 — emit end-to-end,
+and keyset-cursor pagination is fully built + proven live — D56. **L1 + L2 are done; L3
+(update/delete declared-shape re-select) is the last open Track L gap.**)
 **The top priority is finishing the language**
 (Track L) — a complete, functional, usable BSL covering ordinary GET/PUT queries end-to-end. Everything
 else is subordinate: **DB-verification hardening (A) and example projects (B) *follow* feature
@@ -111,18 +112,21 @@ read/write *core* is built and proven live — get/list, `where`/operators/named
 sort cascade, offset pagination, create/update/delete/restore/`tx`/single-level `^`, soft-delete,
 `@scope` injection, raw SQL, idempotency. These are the *specified, normal-workday* gaps the 2026-07-07
 audit found where source parses + type-checks but codegen/runtime emit nothing or only part:
-  - **L1. 🟡 PARTIAL. Nested / relation projection in shapes.** To-**one** sub-objects are **done
-    (D55)**: `field { … }` over a Forward (or unique one-to-one Inverse) relation nests the target's
-    columns end-to-end — SQL prefixes them under a `field.<col>` alias (reusing the reach-rename JOIN),
-    the runtime `nest_row` reassembles the flat row into a sub-object, and the client/OpenAPI emit the
-    nested type; recurses for nested-within-nested. Verified live against SQLite. **Remaining follow-up:
-    to-many nested ARRAYS** (`OrderCard.items`, `User.invited_users`). These need JSON aggregation (a
-    per-dialect JSON_ARRAYAGG / a companion query per nested edge) and, for the flagship self-referential
-    `User.invited_users`, **self-ref join aliasing** — the same model joined to itself under distinct
-    aliases. The emit surfaces already *skip* to-many nests cleanly (guarded by the to-one cardinality
-    check: `enter_to_one`/`to_one_relation` return `None` for a collection), so this is additive. Resume:
-    extend `project_body`'s Nest arm to aggregate a to-many edge into a JSON array column, teach `nest_row`
-    to parse it, and emit the `Vec<…>` client/OpenAPI type. Verify end-to-end against a live DB.
+  - **L1. ✅ done (D55 to-one + D57 to-many). Nested / relation projection in shapes.** To-**one**
+    sub-objects (D55): `field { … }` over a Forward (or unique one-to-one Inverse) relation nests the
+    target's columns end-to-end — SQL prefixes them under a `field.<col>` alias (reusing the reach-rename
+    JOIN), the runtime `nest_row` reassembles the flat row, client/OpenAPI emit the nested type; recurses.
+    To-**many** arrays (D57): `field { … }` over an Inverse collection (`OrderCard.items`, the
+    self-referential `User.invited_users`) lowers to a **correlated subquery** in the SELECT list
+    aggregating the child rows into a JSON-array column aliased `field[]` (per-dialect: SQLite
+    `json_group_array`, MariaDB `JSON_ARRAYAGG`, Postgres `json_agg`, all three coalesced to `[]`); the
+    child gets a distinct `s<n>_<table>` alias so a **self-ref** edge never collides with the outer row;
+    the runtime parses the array string into real sub-objects; client emits `Vec<Sub>`, OpenAPI an array
+    schema. Child soft-delete + `@scope` ride the subquery WHERE (D34). Nests compose to any depth
+    (to-many-in-to-one, to-one-in-to-many). Verified live against SQLite (order→items with a soft-deleted
+    child excluded + a childless parent → `[]`; self-ref `invited_users`). All 3 dialects unit-covered.
+    Array element **order is unspecified** (portable JSON aggregation has no cross-dialect ordered form) —
+    documented; an ordered form is a future refinement if a use case needs it.
   - **L2. ✅ done (D56). Keyset-cursor pagination.** A keyset `page` now walks the whole set: codegen
     emits the lexicographic "strictly after the cursor" `WHERE` (guarded by `:keyset_active`, a no-op on
     page 1) over the resolved sort keys + hidden `__keyset_<i>` cursor-basis columns; the runtime decodes
@@ -271,10 +275,10 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | based-sema | ✅ stable | resolution + checks + lints + `CheckedSchema` IR. Detailed behaviour in the next section. |
 | based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
-| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; nested to-one shape sub-objects (D55) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (paginated inputs carry `cursor`/`offset`, D56); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
+| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
-| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select (D12); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
+| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select (D12); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
 

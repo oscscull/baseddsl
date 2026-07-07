@@ -319,3 +319,32 @@ fn nested_to_one_shape_emits_inline_object_schema() {
     assert!(required.iter().any(|v| v == "placed_by"));
     assert!(!required.iter().any(|v| v == "fulfilled_by"));
 }
+
+#[test]
+fn nested_to_many_shape_emits_array_of_object_schema() {
+    // A to-many `items { … }` nest becomes an `array` property whose items are the
+    // element object schema; always present (empty array when childless) → required.
+    let doc = gen(r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        @sort(id asc)
+        OrderItem { order: Order, sku: text, qty: int }
+        shape OrderCard from Order { total, items { sku, qty } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    let props = &doc["components"]["schemas"]["OrderCard"]["properties"];
+    assert_eq!(props["items"]["type"], "array");
+    assert_eq!(props["items"]["items"]["type"], "object");
+    assert_eq!(
+        props["items"]["items"]["properties"]["sku"]["type"],
+        "string"
+    );
+    assert_eq!(
+        props["items"]["items"]["properties"]["qty"]["type"],
+        "integer"
+    );
+    let required = doc["components"]["schemas"]["OrderCard"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(required.iter().any(|v| v == "items"));
+}

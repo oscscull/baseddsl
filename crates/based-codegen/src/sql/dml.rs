@@ -13,7 +13,11 @@
 //!   sql`…`` is an inline expression. A bare-model return projects every stored
 //!   column. A to-one relation `field { … }` nests the target's projected columns
 //!   under a `field`-prefixed alias (`field.<col>`, [`NEST_SEP`]-joined), which the
-//!   runtime reassembles into a sub-object; to-many arrays are still deferred (L1).
+//!   runtime reassembles into a sub-object. A to-**many** relation `field { … }`
+//!   aggregates the child rows into a JSON-array column (`field[]`, [`ARRAY_MARK`])
+//!   via a correlated subquery + per-dialect JSON aggregation, which the runtime parses
+//!   into an array of sub-objects; self-referential to-many (`invited_users`) works
+//!   because the subquery aliases the child table distinctly from the outer row.
 //! - WHERE from the query filter (bare-param same-name equality, per-param
 //!   bindings, or an explicit `where`), then the injected soft-delete + scope.
 //!   A named-filter call in `where` is inlined: its body is substituted with the
@@ -35,10 +39,16 @@
 //! `"x"`), the bare-bool literal (`= TRUE` vs SQLite's `= 1`), and JSON containment
 //! (`has` -> MySQL's `MEMBER OF` vs Postgres's `@>`). Everything else is portable.
 //!
-//! ## Deferred (documented, not silently wrong)
-//! - To-**many** nested arrays (`items: OrderItem[]`, a self-referential
-//!   `invited_users`): need JSON aggregation / a companion query + self-ref join
-//!   aliasing; skipped in projection for now. To-one nests are handled (above).
+//! ## To-many nested arrays (`items { … }`, self-referential `invited_users`)
+//! A to-many nest lowers to a **correlated subquery** in the SELECT list, not a join:
+//! `(SELECT <json-agg>(<json-object of the element body>) FROM <child> AS <s-alias>
+//! WHERE <child.back_fk> = <outer>.id AND <child soft-delete/scope>)`. The child gets a
+//! distinct `s<n>_<table>` alias, so a **self-referential** edge (`User.invited_users`
+//! joined to `User`) never collides with the outer row. The element body recurses through
+//! [`Select::json_object_expr`] — scalars/reaches become `'key', value` pairs, a to-one
+//! nest a nested JSON object, a to-many nest a nested correlated subquery — so nesting
+//! composes to any depth. Array element order is unspecified (portable JSON aggregation
+//! offers no cross-dialect ordered form); callers treat the array as a set.
 
 use std::collections::HashMap;
 
@@ -54,6 +64,16 @@ use crate::Dialect;
 /// into a sub-object. One source of truth for the convention (principle 4): codegen
 /// emits it, the runtime reads it.
 pub const NEST_SEP: char = '.';
+
+/// The output-alias suffix marking a to-**many** nested array (`items { … }` → alias
+/// `items[]`). The column's value is a JSON-array *string* (per-dialect JSON aggregation,
+/// [`crate::Dialect::json_array_agg`]) of the nested sub-objects; the runtime (`run.rs`)
+/// sees the `[]` suffix, parses the string into a real JSON array, and stores it under
+/// the field name without the suffix. `[`/`]` cannot occur in a BSL identifier, so the
+/// marker never collides with a projected field. One source of the convention (principle
+/// 4): codegen emits it, the runtime reads it. Composes with [`NEST_SEP`] — a to-many
+/// inside a to-one nests as `parent.items[]`.
+pub const ARRAY_MARK: &str = "[]";
 
 /// The output-alias prefix for a keyset query's hidden cursor-basis columns. Each
 /// sort key `k_i` is projected an extra time as `<k_i> AS __keyset_<i>` so the runtime
@@ -402,9 +422,9 @@ fn project_body<'a>(
                 }
             },
             // A to-**one** relation nests the target's columns under a `field.`-prefixed
-            // alias (reassembled by the runtime). To-many arrays are still deferred (L1),
-            // so `enter_to_one` returns `None` for them and the field is skipped rather
-            // than emitting wrong SQL.
+            // alias (reassembled by the runtime). A to-**many** relation aggregates the
+            // child rows into a single JSON-array column (`field[]`) via a correlated
+            // subquery, parsed back into an array by the runtime.
             ShapeField::Nest { field, body } => {
                 if let Some((child_alias, child_prefix, child_model)) =
                     sel.enter_to_one(&field.node, alias, prefix, model)
@@ -419,6 +439,10 @@ fn project_body<'a>(
                         &nested_out,
                         cols,
                     );
+                } else if let Some((child_model, via_fk)) = sel.to_many_edge(&field.node, model) {
+                    let arr = sel.json_array_subquery(body, child_model, &via_fk, alias);
+                    let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
+                    cols.push(format!("{arr} AS {}", sel.q(&out)));
                 }
             }
         }
@@ -584,6 +608,11 @@ pub(crate) struct Select<'a> {
     /// callable naming one alternative injects a different predicate than one naming
     /// another. Empty for an `unscoped` callable (sema returns no injection).
     scope_inject: &'a [ScopeInject],
+    /// Monotonic counter minting a distinct root alias (`s<n>_<table>`) for each to-many
+    /// nested-array subquery, so a self-referential edge's child table never collides
+    /// with the outer row's alias. Threaded through nested subqueries so siblings stay
+    /// unique.
+    sub_counter: usize,
 }
 
 /// What a `^.field` back-reference resolves to: the preceding `create`'s bound `id`
@@ -621,6 +650,7 @@ impl<'a> Select<'a> {
             back: None,
             inject_scope: true,
             scope_inject: &[],
+            sub_counter: 0,
         }
     }
 
@@ -744,6 +774,136 @@ impl<'a> Select<'a> {
             }
             MemberKind::Scalar { .. } => None,
         }
+    }
+
+    /// A to-**many** relation edge `field` on `model` (an Inverse whose paired forward FK
+    /// is *not* unique — a genuine collection), as `(child_model, back_fk_column)`. `None`
+    /// for a scalar, a forward relation, or a to-one inverse (those are `enter_to_one`'s).
+    /// The back FK is the column on the child carrying the relation back to `model`
+    /// (`OrderItem.order` → `order_id`), used to correlate the aggregating subquery.
+    pub(crate) fn to_many_edge(&self, field: &str, model: &RModel) -> Option<(&'a RModel, String)> {
+        match &model.member(field)?.kind {
+            MemberKind::Inverse { target, via } => {
+                let tmodel = self.schema.model(target)?;
+                if tmodel.is_unique(via) {
+                    return None; // to-one back edge — handled by `enter_to_one`.
+                }
+                let via_fk = match tmodel.member(via).map(|m| &m.kind) {
+                    Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
+                    _ => format!("{via}_id"),
+                };
+                Some((tmodel, via_fk))
+            }
+            _ => None,
+        }
+    }
+
+    /// Build the correlated-subquery expression that aggregates a to-many child edge into
+    /// a JSON array of the projected element bodies (L1). The child gets a fresh
+    /// `s<n>_<table>` root alias (distinct from `outer_alias`, so a self-referential edge
+    /// works), the element body is projected as a per-dialect JSON object, and the
+    /// subquery correlates the child's back FK to `outer_alias.id`, applying the child's
+    /// soft-delete tombstone + `@scope` exactly as a join would (D34).
+    fn json_array_subquery(
+        &mut self,
+        body: &[ShapeField],
+        child: &'a RModel,
+        via_fk: &str,
+        outer_alias: &str,
+    ) -> String {
+        self.sub_counter += 1;
+        let child_alias = format!("s{}_{}", self.sub_counter, child.table);
+        // Fresh join scope for the subquery: its reaches/to-one nests accumulate joins
+        // into `sub`, not the outer SELECT. The counter is threaded through so nested
+        // subqueries keep minting distinct aliases.
+        let mut sub = Select {
+            schema: self.schema,
+            dialect: self.dialect,
+            root_alias: child_alias.clone(),
+            joins: Vec::new(),
+            seen: HashMap::new(),
+            filters: self.filters.clone(),
+            filter_stack: Vec::new(),
+            back: None,
+            inject_scope: self.inject_scope,
+            scope_inject: self.scope_inject,
+            sub_counter: self.sub_counter,
+        };
+        let elem = sub.json_object_expr(body, child, &child_alias, "");
+        self.sub_counter = sub.sub_counter;
+
+        let mut wheres = vec![format!(
+            "{} = {}",
+            self.qcol(&child_alias, via_fk),
+            self.qcol(outer_alias, "id")
+        )];
+        if let Some(sd) = &child.soft_delete {
+            wheres.push(soft_pred(self.dialect, &child_alias, child, sd));
+        }
+        if let Some(scope) = sub.scope_join_pred(&child_alias, child) {
+            wheres.push(scope);
+        }
+
+        let mut sql = format!(
+            "(SELECT {} FROM {} AS {}",
+            self.dialect.json_array_agg(&elem),
+            self.q(&child.table),
+            self.q(&child_alias)
+        );
+        push_joins(&mut sql, self.dialect, &sub.joins);
+        sql.push_str(&format!(" WHERE {})", wheres.join(" AND ")));
+        sql
+    }
+
+    /// Build a per-dialect JSON-object expression (`json_object('k', v, …)`) for a shape
+    /// body over `model` at `alias`/`prefix` — one element of a to-many nested array. A
+    /// bare field / reach becomes a `'key', <col>` pair; a to-one nest a nested JSON
+    /// object; a to-many nest a nested correlated-subquery array. Reaches and to-one nests
+    /// materialize their joins into this (sub-)`Select`'s join scope.
+    fn json_object_expr(
+        &mut self,
+        body: &[ShapeField],
+        model: &'a RModel,
+        alias: &str,
+        prefix: &str,
+    ) -> String {
+        let mut pairs: Vec<String> = Vec::new();
+        for f in body {
+            match f {
+                ShapeField::Bare(id) => {
+                    let (a, col) = self.resolve_from(&single(&id.node), alias, prefix, model);
+                    pairs.push(format!("'{}', {}", id.node, self.qcol(&a, &col)));
+                }
+                ShapeField::Rename { out, value } => match value {
+                    ShapeValue::Path(p) => {
+                        let (a, col) = self.resolve_from(p, alias, prefix, model);
+                        pairs.push(format!("'{}', {}", out.node, self.qcol(&a, &col)));
+                    }
+                    ShapeValue::Raw(raw) => {
+                        pairs.push(format!(
+                            "'{}', ({})",
+                            out.node,
+                            render_raw(self.dialect, raw, alias, &model.table)
+                        ));
+                    }
+                },
+                ShapeField::Nest { field, body } => {
+                    if let Some((child_alias, child_prefix, child_model)) =
+                        self.enter_to_one(&field.node, alias, prefix, model)
+                    {
+                        let nested =
+                            self.json_object_expr(body, child_model, &child_alias, &child_prefix);
+                        pairs.push(format!("'{}', {}", field.node, nested));
+                    } else if let Some((child_model, via_fk)) =
+                        self.to_many_edge(&field.node, model)
+                    {
+                        let arr = self.json_array_subquery(body, child_model, &via_fk, alias);
+                        pairs.push(format!("'{}', {}", field.node, arr));
+                    }
+                }
+            }
+        }
+        format!("{}({})", self.dialect.json_object_fn(), pairs.join(", "))
     }
 
     /// Resolve a dotted path starting from `start_model` (aliased `start_alias`, at join

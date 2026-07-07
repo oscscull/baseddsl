@@ -445,3 +445,131 @@ fn keyset_pagination_walks_the_set_end_to_end() {
     assert_eq!(bad.status, 400, "{:?}", bad.body);
     assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
 }
+
+/// A to-**many** nested shape array (`items { … }`, L1) returns a JSON array of
+/// sub-objects end-to-end: codegen aggregates the child rows into an `items[]` JSON-array
+/// column (correlated subquery + SQLite `json_group_array`), the live SELECT returns it as
+/// a string, and the runtime parses it into a real JSON array — proven against a real
+/// engine. Also asserts a parent with no children returns `[]`, and the child's soft-delete
+/// tombstone is respected (a deleted item is excluded from the array).
+#[test]
+fn nested_to_many_query_returns_json_array() {
+    let c = compile_sqlite(
+        r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        @sort(id asc)
+        @soft_delete(deleted_at)
+        OrderItem { order: Order, sku: text, qty: int, deleted_at: timestamp? }
+        shape OrderCard from Order { total, items { sku, qty } }
+        query order_by_id(id) -> OrderCard;
+        query orders() -> OrderCard[];
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `order` (`id`, `total`) VALUES ('o1', 500), ('o2', 0);
+            INSERT INTO `order_item` (`id`, `order_id`, `sku`, `qty`) VALUES
+                ('i1', 'o1', 'ABC', 2), ('i2', 'o1', 'XYZ', 5);
+            -- a soft-deleted item on o1 must be excluded from the array.
+            INSERT INTO `order_item` (`id`, `order_id`, `sku`, `qty`, `deleted_at`)
+                VALUES ('i3', 'o1', 'GONE', 9, '2020-01-01 00:00:00');
+            "#,
+        )
+        .expect("seed");
+
+    // `get`: the child rows ride back nested under `items`, not as a flat string column.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "o1" }),
+        json!({}),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({
+            "total": 500,
+            "items": [{ "sku": "ABC", "qty": 2 }, { "sku": "XYZ", "qty": 5 }]
+        }),
+        "soft-deleted item excluded, remaining children nested"
+    );
+
+    // `list`: o2 has no items → an empty array (not null, not a missing field).
+    let listed = call(&c, &backend, "POST", "/q/orders", json!({}), json!({}));
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(
+        listed.body,
+        json!([
+            { "total": 500, "items": [{ "sku": "ABC", "qty": 2 }, { "sku": "XYZ", "qty": 5 }] },
+            { "total": 0, "items": [] }
+        ])
+    );
+}
+
+/// The flagship **self-referential** to-many (`User.invited_users`, L1): a User joined to
+/// itself under a distinct subquery alias. Proven end-to-end against a real engine — the
+/// correlated subquery's `s<n>_user` alias never collides with the outer `user` row, so a
+/// user's invitees nest correctly.
+#[test]
+fn nested_self_referential_to_many_returns_json_array() {
+    let c = compile_sqlite(
+        r#"
+        @sort(id asc)
+        User {
+          name: text
+          invited_by: User?
+          invited_users: User[] (User.invited_by)
+        }
+        shape UserCard from User { name, invited_users { name } }
+        query user_by_id(id) -> UserCard;
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `user` (`id`, `name`, `invited_by_id`) VALUES
+                ('u1', 'Ada', NULL), ('u2', 'Bob', 'u1'), ('u3', 'Cy', 'u1');
+            "#,
+        )
+        .expect("seed");
+
+    // Ada (u1) invited Bob + Cy: both nest under `invited_users`.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/user_by_id",
+        json!({ "id": "u1" }),
+        json!({}),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({ "name": "Ada", "invited_users": [{ "name": "Bob" }, { "name": "Cy" }] })
+    );
+
+    // Bob invited no one → an empty array.
+    let leaf = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/user_by_id",
+        json!({ "id": "u2" }),
+        json!({}),
+    );
+    assert_eq!(leaf.body, json!({ "name": "Bob", "invited_users": [] }));
+}

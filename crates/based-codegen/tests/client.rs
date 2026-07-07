@@ -319,6 +319,23 @@ fn nested_to_one_shape_emits_nested_struct() {
     assert!(out.contains("pub name: String,"), "\n{out}");
     assert!(out.contains("pub email: String,"), "\n{out}");
     assert!(out.contains("pub struct OrderCardFulfilledBy {"), "\n{out}");
-    // to-many nests are still deferred: no struct for a collection field.
-    assert!(!out.contains("OrderCardItems"), "\n{out}");
+}
+
+#[test]
+fn nested_to_many_shape_emits_vec_of_nested_struct() {
+    // A to-many `items { … }` nest emits an element struct `<Parent><Field>` and the
+    // parent field takes `Vec<…>` (the runtime decodes the SQL JSON array into it).
+    let out = gen(r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        @sort(id asc)
+        OrderItem { order: Order, sku: text, qty: int }
+        shape OrderCard from Order { total, items { sku, qty } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(out.contains("pub struct OrderCard {"), "\n{out}");
+    assert!(out.contains("pub items: Vec<OrderCardItems>,"), "\n{out}");
+    assert!(out.contains("pub struct OrderCardItems {"), "\n{out}");
+    assert!(out.contains("pub sku: String,"), "\n{out}");
+    assert!(out.contains("pub qty: i64,"), "\n{out}");
 }

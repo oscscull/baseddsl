@@ -454,24 +454,73 @@ fn nested_to_one_recurses_and_reaches_inside_nest() {
 }
 
 #[test]
-fn nested_to_many_is_skipped() {
-    // A to-many nest (`items { … }`, an inverse collection) is deferred (L1 follow-up):
-    // it emits no projection rather than wrong SQL, so the SELECT lists only `total`.
+fn nested_to_many_aggregates_into_a_json_array_column() {
+    // A to-many nest (`items { … }`, an inverse collection) lowers to a correlated
+    // subquery aggregating the child rows into a JSON-array column aliased `items[]`
+    // (the runtime parses the string into an array). The child's soft-delete tombstone
+    // rides the subquery WHERE, and the subquery correlates on the child's back FK.
     let ddl = gen(r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        @sort(id asc)
+        @soft_delete(deleted_at)
+        OrderItem { order: Order, quantity: int, deleted_at: timestamp? }
+        shape OrderCard from Order { total, items { quantity } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(ddl.contains("`order`.`total` AS `total`"), "\n{ddl}");
+    // MariaDB JSON aggregation, coalesced to an empty array for a childless parent.
+    assert!(
+        ddl.contains("COALESCE(JSON_ARRAYAGG(JSON_OBJECT('quantity', `s1_order_item`.`quantity`)), JSON_ARRAY())"),
+        "\n{ddl}"
+    );
+    // correlated subquery over a distinctly-aliased child + the tombstone, aliased `items[]`.
+    assert!(
+        ddl.contains("FROM `order_item` AS `s1_order_item` WHERE `s1_order_item`.`order_id` = `order`.`id` AND `s1_order_item`.`deleted_at` IS NULL) AS `items[]`"),
+        "\n{ddl}"
+    );
+    // it is a subquery in the SELECT list, not a join into the FROM.
+    assert!(!ddl.contains("JOIN `order_item`"), "\n{ddl}");
+}
+
+#[test]
+fn nested_self_referential_to_many_aliases_child_distinctly() {
+    // The flagship self-ref case (`User.invited_users`): the subquery's child alias
+    // (`s1_user`) must differ from the outer `user` row so the correlation is unambiguous.
+    let ddl = gen(r#"
+        @sort(id asc)
+        User { name: text, invited_by: User?, invited_users: User[] (User.invited_by) }
+        shape UserCard from User { name, invited_users { name } }
+        query user_by_id(id) -> UserCard;
+        "#);
+    assert!(
+        ddl.contains("JSON_OBJECT('name', `s1_user`.`name`)"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("FROM `user` AS `s1_user` WHERE `s1_user`.`invited_by_id` = `user`.`id`) AS `invited_users[]`"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn pg_nested_to_many_uses_json_agg_and_double_quotes() {
+    // Postgres uses `json_agg`/`json_build_object` + `'[]'::json` coalesce, double-quoted.
+    let sql = gen_pg(
+        r#"
         @sort(id asc)
         Order { total: int, items: OrderItem[] }
         @sort(id asc)
         OrderItem { order: Order, quantity: int }
         shape OrderCard from Order { total, items { quantity } }
         query order_by_id(id) -> OrderCard;
-        "#);
-    assert!(ddl.contains("`order`.`total` AS `total`"), "\n{ddl}");
-    // no `items.` prefixed column, no join into order_item.
-    assert!(
-        !ddl.contains("items."),
-        "to-many nest must be skipped\n{ddl}"
+        "#,
     );
-    assert!(!ddl.contains("order_item"), "\n{ddl}");
+    assert!(
+        sql.contains("COALESCE(json_agg(json_build_object('quantity', \"s1_order_item\".\"quantity\")), '[]'::json)"),
+        "\n{sql}"
+    );
+    assert!(sql.contains("AS \"items[]\""), "\n{sql}");
 }
 
 #[test]
