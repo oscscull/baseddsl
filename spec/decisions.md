@@ -30,7 +30,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
   D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
-  opaque validated cursor)
+  opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
@@ -39,7 +39,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
 - **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
   scanner), D38 (Postgres driver + live suite)
-- **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite)
+- **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite), D59
+  (live pagination + soft-delete/restore coverage on MariaDB/Postgres; Postgres numeric text-bind fix)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
@@ -1991,3 +1992,37 @@ returning the (first) matching row's shape — mirroring how a create's re-selec
   the **new** status + the nested buyer (read-your-writes, one tx) — not `{ id }` — then a fresh
   `get` confirms the write committed. Plus codegen unit tests: where-keyed update re-select, soft-
   delete re-select without the live predicate, and a real delete emitting no re-select.
+
+## D59 — live pagination + soft-delete/restore coverage on MariaDB/Postgres (+ Postgres numeric text-bind fix)
+Track A4, DoD #1's remaining live-DB coverage that Track L unblocked. The keyset/offset pagination
+(D56) and soft-delete/restore read-back (D58, soft-delete.md) were proven live only on SQLite; this
+extends the **MariaDB and Postgres** Docker suites to prove them against real servers too, so DoD #1's
+per-DB coverage is symmetric across all three dialects.
+- **What was added (both live suites).** Three tests each in `mariadb_integration.rs` +
+  `postgres_integration.rs`, mirroring the SQLite live keyset test: (1) **keyset** paging a `page (2)`
+  query full→full→short (each full page mints an opaque cursor, the short last page a `null` cursor,
+  the hidden `__keyset_*` sort-basis columns stripped from the response) with a tampered cursor →
+  400; (2) **offset** paging `page (2) offset` full→full→short (the client-supplied `offset` binds
+  into `LIMIT … OFFSET …`; an offset page envelope carries a `null` cursor — offset is not keyset);
+  (3) **soft-delete + restore** — a soft `delete` rewrites to `deleted_at = now()` and reads the
+  tombstoned row back in shape (D58 drops the live predicate for a soft delete), the row then vanishes
+  from a live `list`, and `restore` clears the tombstone and reads it back live. Each suite grew a
+  `compile`/`live_schema` helper that lowers a small self-contained in-line schema for its dialect and
+  creates its tables from the generated DDL (so only the tested behaviour varies). Schemas declare an
+  explicit `id: text` (D2) so fixtures use plain string ids rather than uuids (`VARCHAR(255)` PK on
+  MariaDB, `TEXT` on Postgres — both valid, unlike a `TEXT` PK which MariaDB rejects).
+- **Real bug fixed: Postgres numeric binds are now text-format.** The keyset guard emits
+  `:keyset_active = 0`; Postgres infers the parameter's type from the bare literal `0` as **int4**,
+  but the runtime bound `keyset_active` as an i64 encoded in **binary** (8 bytes) → `22P03: incorrect
+  binary data format in bind parameter`. Root cause: `PgValue`'s `Int`/`Float` encoded in binary,
+  whose width must match the inferred OID exactly. Fix (`based-runtime/src/postgres.rs`): encode
+  `Int`/`Float` in **text format** (like the existing string-family mapping), so the server coerces
+  the decimal string into whatever width it inferred (int2/int4/int8/numeric/float) — the same
+  literal-coercion path `'…'::uuid` takes. `bool`/`null` keep binary (no width ambiguity). This is a
+  general driver-robustness fix (any parameter compared to an untyped integer literal would have hit
+  it), not a keyset special-case. Unit test updated + a decimal-text encoding test added.
+- **Gate.** Both live suites run **green** against real `mariadb:11.4` + `postgres:16` (OrbStack
+  Docker), 10 tests each; the harness still skips cleanly with no daemon. `cargo test --workspace
+  --all-features`, `fmt --check`, `clippy` all clean. This closes A4's pagination + soft-delete/restore
+  live coverage; A4's remaining hardening items (statement timeouts, deadlock-retry, pool-exhaustion →
+  503 under load) stay open.

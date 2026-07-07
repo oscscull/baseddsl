@@ -82,12 +82,24 @@ impl ToSql for PgValue {
         ty: &Type,
         out: &mut BytesMut,
     ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let _ = ty;
         match self {
             PgValue::Null => Ok(IsNull::Yes),
-            // Numbers/bools encode via the standard impls (binary format).
-            PgValue::Int(i) => i.to_sql(ty, out),
-            PgValue::Float(f) => f.to_sql(ty, out),
+            // `bool` has no width ambiguity → its native binary encoding.
             PgValue::Bool(b) => b.to_sql(ty, out),
+            // Numbers ride as **text**, like strings, so the server coerces them into the
+            // *inferred* width (int2/int4/int8/numeric/float). A binary i64 would be 8 bytes
+            // into whatever slot Postgres inferred — and an untyped integer literal (e.g. the
+            // keyset guard's `:keyset_active = 0`) infers `int4`, so a binary i64 is rejected
+            // (`22P03: incorrect binary data format`). Text sidesteps the width guess entirely.
+            PgValue::Int(i) => {
+                out.extend_from_slice(i.to_string().as_bytes());
+                Ok(IsNull::No)
+            }
+            PgValue::Float(f) => {
+                out.extend_from_slice(f.to_string().as_bytes());
+                Ok(IsNull::No)
+            }
             // A text-format string: write the UTF-8 bytes; the server coerces per the
             // inferred column type (`'…'::uuid` / `::jsonb` / …). See `encode_format`.
             PgValue::Text(s) => {
@@ -108,10 +120,12 @@ impl ToSql for PgValue {
 
     fn encode_format(&self, _ty: &Type) -> Format {
         match self {
-            // A string is sent in text format so Postgres applies string-literal coercion
-            // into the inferred type; numbers/bool use their native (binary) encoding.
-            PgValue::Text(_) => Format::Text,
-            _ => Format::Binary,
+            // Strings *and numbers* go in text format so Postgres applies string-literal
+            // coercion into the inferred type (uuid/jsonb for strings; the inferred integer
+            // width for numbers — sidestepping the binary-width mismatch, see `to_sql`).
+            // `bool`/`null` use their native (binary) encoding.
+            PgValue::Text(_) | PgValue::Int(_) | PgValue::Float(_) => Format::Text,
+            PgValue::Bool(_) | PgValue::Null => Format::Binary,
         }
     }
 
@@ -410,21 +424,43 @@ mod tests {
 
     #[test]
     fn text_values_encode_in_text_format() {
-        // A string binds in text format so Postgres string-coerces it into uuid/jsonb/…;
-        // numbers/bool keep native binary encoding. This is the crux of the value mapping.
-        // (`Format` isn't `PartialEq`, so we match on its variant.)
+        // Strings *and numbers* bind in text format so Postgres coerces each into its inferred
+        // type — uuid/jsonb for strings, the inferred integer width for numbers (a binary i64
+        // is rejected against an inferred `int4`, e.g. the keyset `= 0` guard). `bool` keeps
+        // native binary encoding. (`Format` isn't `PartialEq`, so we match on its variant.)
         assert!(matches!(
             PgValue::Text("x".into()).encode_format(&Type::UUID),
             Format::Text
         ));
         assert!(matches!(
-            PgValue::Int(1).encode_format(&Type::INT8),
-            Format::Binary
+            PgValue::Int(1).encode_format(&Type::INT4),
+            Format::Text
+        ));
+        assert!(matches!(
+            PgValue::Float(1.5).encode_format(&Type::FLOAT8),
+            Format::Text
         ));
         assert!(matches!(
             PgValue::Bool(true).encode_format(&Type::BOOL),
             Format::Binary
         ));
+    }
+
+    #[test]
+    fn number_values_write_decimal_text() {
+        // Int/Float render their decimal text (the bytes Postgres coerces into the inferred
+        // width), never a binary payload — so an i64 bind never mismatches an `int4` slot.
+        let mut buf = BytesMut::new();
+        assert!(matches!(
+            PgValue::Int(-42).to_sql(&Type::INT4, &mut buf).unwrap(),
+            IsNull::No
+        ));
+        assert_eq!(&buf[..], b"-42");
+        let mut fbuf = BytesMut::new();
+        PgValue::Float(1.5)
+            .to_sql(&Type::FLOAT8, &mut fbuf)
+            .unwrap();
+        assert_eq!(&fbuf[..], b"1.5");
     }
 
     #[test]

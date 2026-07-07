@@ -102,6 +102,45 @@ fn live() -> Option<(Compiled, PgRouter, PostgresContainer)> {
     Some((compiled, router, container))
 }
 
+/// Compile an in-line schema **lowered for Postgres** (skip disk). The pagination +
+/// soft-delete/restore suites need small, self-contained schemas rather than the whole commerce
+/// topology, so the tested behaviour is the only variable.
+fn compile(src: &str) -> Compiled {
+    let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
+    let (schema, diags) = check(&sf.decls);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == based_diagnostics::Severity::Error),
+        "schema must check clean: {diags:?}"
+    );
+    Compiled::from_checked(schema, sf.decls, Dialect::Postgres)
+}
+
+/// Bring up a live Postgres, compile an in-line schema for Postgres, and create its tables from
+/// the generated Postgres DDL — returning the router + schema + container for a test to seed and
+/// drive. Returns `None` when Docker is unavailable (the caller skips). The `id: text` columns
+/// these schemas declare map to `TEXT` (D2), so the fixtures use plain string ids.
+fn live_schema(src: &str) -> Option<(Compiled, PgRouter, PostgresContainer)> {
+    let container = PostgresContainer::start()?;
+    let compiled = compile(src);
+    let router = PgRouter::single(&container.url(), PoolConfig::default())
+        .unwrap_or_else(|e| panic!("connect to live Postgres: {e:?}"));
+    let ddl = sql::ddl(&compiled.schema, Dialect::Postgres);
+    let mut client = pg_connect(&container.url()).expect("setup client");
+    client
+        .batch_execute(&ddl)
+        .expect("create tables from generated DDL");
+    Some((compiled, router, container))
+}
+
+/// Run a fixture-seed script against the live server through a one-shot client (`batch_execute`
+/// handles a multi-statement script; the pooled driver's `execute` is single-statement).
+fn seed(container: &PostgresContainer, script: &str) {
+    let mut client = pg_connect(&container.url()).expect("seed client");
+    client.batch_execute(script).expect("seed fixtures");
+}
+
 /// Run one request through the real dispatch core against a connection checked out of the
 /// live router — the exact path `based serve` uses, minus the socket.
 fn call(
@@ -320,4 +359,181 @@ fn backend_ping_succeeds_on_a_live_server() {
         return;
     };
     assert!(router.ping().is_ok());
+}
+
+/// Keyset-cursor pagination (L2/D56), proven against a live Postgres — the Postgres twin of the
+/// SQLite live keyset test. A `page (2)` keyset query walks the whole set exactly once: each full
+/// page returns its window plus an opaque cursor, the final short page returns a `null` cursor,
+/// and the cursor works even though the sort basis (`rank`, `id`) is not projected (the runtime
+/// strips the hidden `__keyset_*` columns). A tampered cursor is a 400.
+#[test]
+fn keyset_pagination_walks_the_set() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @sort(id asc)
+        Item { id: text, name: text, rank: int }
+        shape ItemCard from Item { name, rank }
+        query items() -> ItemCard[] { list Item order (rank asc) page (2); }
+        "#,
+    ) else {
+        return;
+    };
+    seed(
+        &container,
+        "INSERT INTO \"item\" (\"id\", \"name\", \"rank\") VALUES \
+            ('i1', 'a', 10), ('i2', 'b', 20), ('i3', 'c', 30), \
+            ('i4', 'd', 40), ('i5', 'e', 50);",
+    );
+
+    let page = |args: serde_json::Value| call(&c, &router, "POST", "/q/items", args, json!({}));
+
+    // Page 1 (no cursor): the two lowest-ranked rows + a "more" cursor (a full page).
+    let p1 = page(json!({}));
+    assert_eq!(p1.status, 200, "{:?}", p1.body);
+    assert_eq!(
+        p1.body["rows"],
+        json!([{ "name": "a", "rank": 10 }, { "name": "b", "rank": 20 }])
+    );
+    let c1 = p1.body["cursor"]
+        .as_str()
+        .expect("page 1 cursor")
+        .to_string();
+
+    // Page 2 (cursor from page 1): the next window, another full page → another cursor.
+    let p2 = page(json!({ "cursor": c1 }));
+    assert_eq!(
+        p2.body["rows"],
+        json!([{ "name": "c", "rank": 30 }, { "name": "d", "rank": 40 }])
+    );
+    let c2 = p2.body["cursor"]
+        .as_str()
+        .expect("page 2 cursor")
+        .to_string();
+
+    // Page 3 (cursor from page 2): the final row. A short page (1 < 2) → no more cursor.
+    let p3 = page(json!({ "cursor": c2 }));
+    assert_eq!(p3.body["rows"], json!([{ "name": "e", "rank": 50 }]));
+    assert_eq!(p3.body["cursor"], json!(null), "last page has no cursor");
+
+    // A tampered cursor is rejected at the boundary (400), never fed to the query.
+    let bad = page(json!({ "cursor": "deadbeef.00" }));
+    assert_eq!(bad.status, 400, "{:?}", bad.body);
+    assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
+}
+
+/// Explicit offset pagination (`page (2) offset`, pagination.md), proven live against Postgres.
+/// The client supplies an `offset`; the runtime binds it into `LIMIT … OFFSET …`. Paging
+/// full→full→short walks the set, and an offset page envelope carries a `null` cursor (offset is
+/// not keyset).
+#[test]
+fn offset_pagination_pages_the_set() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @sort(id asc)
+        Item { id: text, name: text, rank: int }
+        shape ItemCard from Item { name, rank }
+        query items() -> ItemCard[] { list Item order (rank asc) page (2) offset; }
+        "#,
+    ) else {
+        return;
+    };
+    seed(
+        &container,
+        "INSERT INTO \"item\" (\"id\", \"name\", \"rank\") VALUES \
+            ('i1', 'a', 10), ('i2', 'b', 20), ('i3', 'c', 30), \
+            ('i4', 'd', 40), ('i5', 'e', 50);",
+    );
+
+    let page = |args: serde_json::Value| call(&c, &router, "POST", "/q/items", args, json!({}));
+
+    // Offset 0 (absent = first page): the first two rows, cursor null (offset is not keyset).
+    let p1 = page(json!({}));
+    assert_eq!(p1.status, 200, "{:?}", p1.body);
+    assert_eq!(
+        p1.body["rows"],
+        json!([{ "name": "a", "rank": 10 }, { "name": "b", "rank": 20 }])
+    );
+    assert_eq!(
+        p1.body["cursor"],
+        json!(null),
+        "offset pages carry no cursor"
+    );
+
+    // Offset 2: the next window.
+    let p2 = page(json!({ "offset": 2 }));
+    assert_eq!(
+        p2.body["rows"],
+        json!([{ "name": "c", "rank": 30 }, { "name": "d", "rank": 40 }])
+    );
+
+    // Offset 4: the final short page.
+    let p3 = page(json!({ "offset": 4 }));
+    assert_eq!(p3.body["rows"], json!([{ "name": "e", "rank": 50 }]));
+}
+
+/// Soft-delete + restore read-back (soft-delete.md / D58), proven live against Postgres. A soft
+/// `delete` rewrites to `deleted_at = now()` (never a real DELETE) and reads the tombstoned row
+/// back in its declared shape (D58 drops the live predicate for a soft delete); the row then
+/// vanishes from a live `list` (the soft-delete predicate is injected). `restore` clears the
+/// tombstone and reads the row back with the live predicate applied — visible again.
+#[test]
+fn soft_delete_and_restore_read_back() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @soft_delete(deleted_at)
+        @sort(id asc)
+        Widget { id: text, deleted_at: timestamp?, name: text }
+        shape WidgetCard from Widget { name }
+        query widgets() -> WidgetCard[] { list Widget; }
+        mutation remove_widget(id: text) -> WidgetCard { delete Widget where (id = $id); }
+        mutation restore_widget(id: text) -> WidgetCard { restore Widget where (id = $id); }
+        "#,
+    ) else {
+        return;
+    };
+    seed(
+        &container,
+        "INSERT INTO \"widget\" (\"id\", \"name\") VALUES ('w1', 'Alpha'), ('w2', 'Beta');",
+    );
+
+    let list = || call(&c, &router, "POST", "/q/widgets", json!({}), json!({}));
+
+    // Both live to start.
+    assert_eq!(
+        list().body,
+        json!([{ "name": "Alpha" }, { "name": "Beta" }])
+    );
+
+    // Soft delete w1: rewritten to a tombstone, read back in shape (D58 keeps the deleted row).
+    let del = call(
+        &c,
+        &router,
+        "POST",
+        "/m/remove_widget",
+        json!({ "id": "w1" }),
+        json!({}),
+    );
+    assert_eq!(del.status, 200, "{:?}", del.body);
+    assert_eq!(del.body, json!({ "name": "Alpha" }));
+
+    // The tombstone hides w1 from a live read (soft-delete predicate injected).
+    assert_eq!(list().body, json!([{ "name": "Beta" }]));
+
+    // Restore w1: tombstone cleared, read back live.
+    let res = call(
+        &c,
+        &router,
+        "POST",
+        "/m/restore_widget",
+        json!({ "id": "w1" }),
+        json!({}),
+    );
+    assert_eq!(res.status, 200, "{:?}", res.body);
+    assert_eq!(res.body, json!({ "name": "Alpha" }));
+
+    // w1 is visible again.
+    assert_eq!(
+        list().body,
+        json!([{ "name": "Alpha" }, { "name": "Beta" }])
+    );
 }
