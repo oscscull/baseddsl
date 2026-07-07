@@ -1367,3 +1367,25 @@ product calls (principle 8 neither requires nor forbids them), sequenced after t
   convention) → `entity.name.type`. Model refs get a distinct theme color from builtin scalars and from
   lowercase field names/keywords. Precision is intentionally the heuristic's, not the semantic analyzer's — a
   PascalCase word *is* a type reference by convention; the LSP already carries the exact diagnostics.
+
+## D44 — LSP document symbols + the Track C4 capability audit (Track C4)
+The extension's feature-parity fill-in (C4) opens with the explicit capability checklist (in
+`editors/vscode/README.md` — each standard LSP capability marked have / missing / N/A / deferred, so the gap
+set governing the remaining C4 iterations is reviewable) and the highest value-per-effort gap it names:
+document symbols.
+- **Document symbols = a flat pass over the retained AST, same source as go-to-def (D43).** `Snapshot::
+  document_symbols(fid)` walks the parsed `decls`, emits a `DocumentSymbol` for every decl *declared in the
+  requested file* (`span.file == fid` — a project snapshot spans many files, but the outline is per-file), and
+  anchors each to two spans LSP requires: `range` = the decl's whole extent, `selection_range` = its name (the
+  latter contained in the former, so the tree nests). Routed to the snapshot owning the file (nearest manifest,
+  D40) like every other position request.
+- **Symbol-kind mapping** (the resolvable design call): model → `STRUCT`, its fields → `FIELD` **children**
+  (nested under the model; indexes / soft-overrides are not symbols), shape → `INTERFACE`, query → `FUNCTION`,
+  mutation → `METHOD`, filter → `FUNCTION`. Chosen so the outline reads like the schema's own vocabulary — a
+  model is a record (Struct) of fields, a shape is a projection contract (Interface), a query reads (Function)
+  and a mutation writes (Method). Only fields nest; everything else is a flat top-level symbol (queries/
+  mutations/shapes/filters own no sub-declarations).
+- **Client-side: nothing to wire.** `document_symbol_provider` is advertised at `initialize`; `vscode-
+  languageclient` negotiates the outline automatically (verified — same as inlay/hover/definition). The
+  reference-site index that find-references + rename will reuse is still the deferred go-to-def resume point;
+  document symbols does not build it (it finds decl *sites*, not use *sites*).

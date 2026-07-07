@@ -73,6 +73,39 @@ code --install-extension based-vscode-0.1.0.vsix
 - **Inlay hints** — inferred inverse pairings, join-key indexes, per-callable `$ctx`
   requirement bags, and each query's resolved verb/target/cardinality/pagination.
 - **Hover** — the fuller "why" behind any derived fact under the cursor.
+- **Go-to-definition** — jump from a model/shape reference to its declaration.
+- **Document symbols** — the outline / breadcrumbs (⇧⌘O): models (fields nested),
+  shapes, queries, mutations, filters.
 
-Go-to-definition, completion, and rename are not implemented yet (the server doesn't
-serve them). See `PLAN.md` (M5 deferred / Track C).
+## LSP capability audit (Track C4)
+
+The baseline a general-purpose language extension is expected to provide, and where
+this one stands. This is the gap set the remaining Track C4 iterations close.
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Diagnostics (`publishDiagnostics`) | **have** | parse/sema errors + lints, pushed on edit |
+| Inlay hints (`inlayHint`) | **have** | engine-derived facts (principle 8) — not a standard-language feature, a DSL bonus |
+| Hover (`hover`) | **have** | the "why" behind a derived fact |
+| Go-to-definition (`definition`) | **have** | model/shape references → declaration (D43) |
+| Document symbols (`documentSymbol`) | **have** | outline / breadcrumbs (D44) |
+| Syntax highlighting (TextMate) | **have** | models vs. builtins; type-name coloring (D43) |
+| Completion (`completion`) | **missing** | model names in type position, fields after `.`, keyword/decorator set — next C4 |
+| Workspace symbols (`workspaceSymbol`) | **missing** | jump to any model/callable by name across the project |
+| Find references (`references`) | **missing** | reference-site index (superset of the go-to-def collector) |
+| Rename (`rename`) | **missing** | the natural pair of find-references |
+| Folding ranges (`foldingRange`) | **missing** | block folding — cheap, expected |
+| Selection ranges (`selectionRange`) | **missing** | expand/shrink selection — cheap, expected |
+| Code actions (`codeAction`) | **missing** | lint quick-fixes (e.g. `W0103` → add `@index`) — borderline, include only if cheap |
+| Semantic tokens (`semanticTokens`) | **N/A** | coloring is done via TextMate; a semantic-token re-do is out of scope |
+| Formatting (`formatting`) | **deferred** | no `based fmt` exists yet — out of scope for C4 |
+| Signature help (`signatureHelp`) | **deferred** | exotic for a declarative DSL — out of scope for C4 |
+| Call hierarchy (`callHierarchy`) | **deferred** | no call graph in a schema DSL — out of scope for C4 |
+| Debugging (DAP) | **N/A** | nothing to execute/step in a schema — not applicable |
+
+Static editing behaviour (bracket matching, auto-closing pairs, `#` comment toggling)
+is handled by `language-configuration.json`, not the server.
+
+The extension is a thin client: once the server advertises a capability at
+`initialize`, `vscode-languageclient` negotiates it automatically — no client-side
+change is needed to surface a newly served feature.

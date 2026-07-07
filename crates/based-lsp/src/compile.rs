@@ -18,7 +18,7 @@ use based_diagnostics::Diagnostic;
 use based_facts::Fact;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tower_lsp::lsp_types::Position;
+use tower_lsp::lsp_types::{DocumentSymbol, Position, Range, SymbolKind};
 
 /// A compiled view of the project the server answers requests from.
 pub struct Snapshot {
@@ -60,6 +60,84 @@ impl Snapshot {
             _ => None,
         })
     }
+
+    /// Document symbols for file `fid` — the outline the editor shows (breadcrumbs
+    /// / ⇧⌘O). Models nest their fields as `Field` children; queries, mutations,
+    /// shapes, and filters are flat top-level symbols. Each symbol's `range` is its
+    /// declaration extent and its `selection_range` the name (both required to nest,
+    /// LSP contains the latter in the former). Only decls declared in `fid` appear.
+    pub fn document_symbols(&self, fid: usize) -> Vec<DocumentSymbol> {
+        let idx = &self.lines[fid];
+        let here = |span: Span| span.file.0 as usize == fid;
+        let mut out = Vec::new();
+        for d in &self.decls {
+            match d {
+                // Model → Struct; its fields (not indexes / soft-overrides) → Field children.
+                Decl::Model(m) if here(m.span) => {
+                    let children = m
+                        .members
+                        .iter()
+                        .filter_map(|mem| match mem {
+                            Member::Field(f) => {
+                                Some(symbol(&f.name, SymbolKind::FIELD, f.span, idx, None))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    out.push(symbol(
+                        &m.name,
+                        SymbolKind::STRUCT,
+                        m.span,
+                        idx,
+                        Some(children),
+                    ));
+                }
+                Decl::Shape(s) if here(s.span) => {
+                    out.push(symbol(&s.name, SymbolKind::INTERFACE, s.span, idx, None))
+                }
+                Decl::Query(q) if here(q.span) => {
+                    out.push(symbol(&q.name, SymbolKind::FUNCTION, q.span, idx, None))
+                }
+                Decl::Mutation(m) if here(m.span) => {
+                    out.push(symbol(&m.name, SymbolKind::METHOD, m.span, idx, None))
+                }
+                Decl::Filter(f) if here(f.span) => {
+                    out.push(symbol(&f.name, SymbolKind::FUNCTION, f.span, idx, None))
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Build one `DocumentSymbol` from a declaration's name + extent span.
+#[allow(deprecated)] // `deprecated` is a required struct field, set to None.
+fn symbol(
+    name: &Ident,
+    kind: SymbolKind,
+    extent: Span,
+    idx: &LineIndex,
+    children: Option<Vec<DocumentSymbol>>,
+) -> DocumentSymbol {
+    DocumentSymbol {
+        name: name.node.clone(),
+        detail: None,
+        kind,
+        tags: None,
+        deprecated: None,
+        range: span_range(extent, idx),
+        selection_range: span_range(name.span, idx),
+        children,
+    }
+}
+
+/// A source `Span`'s byte range as an LSP `Range` via the owning file's index.
+fn span_range(span: Span, idx: &LineIndex) -> Range {
+    Range::new(
+        idx.position(span.start as usize),
+        idx.position(span.end as usize),
+    )
 }
 
 /// Every model/type-reference identifier across the AST, with its span — the sites
@@ -447,6 +525,55 @@ mod tests {
         // Whitespace (a non-reference offset) resolves to nothing.
         let ws_off = src.find("\n  name").unwrap() as u32;
         assert_eq!(snap.definition_at(user_fid, ws_off), None);
+    }
+
+    /// Document symbols for a file expose its models (with fields nested), shapes,
+    /// queries, and mutations with the right kinds — asserted over the real commerce
+    /// schema so nesting + kind mapping are proven end to end.
+    #[test]
+    fn document_symbols_over_commerce_order_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // order/model.bsl: the `Order` model (Struct) with its fields nested, plus
+        // the `OrderCard` shape (Interface) — both flat top-level symbols.
+        let model_fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
+        let syms = snap.document_symbols(model_fid);
+        let order = syms
+            .iter()
+            .find(|s| s.name == "Order")
+            .expect("Order symbol");
+        assert_eq!(order.kind, SymbolKind::STRUCT);
+        let fields = order.children.as_ref().expect("Order has field children");
+        assert!(fields.iter().all(|f| f.kind == SymbolKind::FIELD));
+        for want in ["org", "placed_by", "status", "total", "items"] {
+            assert!(fields.iter().any(|f| f.name == want), "field {want}");
+        }
+        // The name selection range sits inside the declaration extent.
+        assert!(order.selection_range.start >= order.range.start);
+        assert!(order.selection_range.end <= order.range.end);
+        let card = syms
+            .iter()
+            .find(|s| s.name == "OrderCard")
+            .expect("OrderCard shape");
+        assert_eq!(card.kind, SymbolKind::INTERFACE);
+
+        // order/queries.bsl: queries → Function, the mutation → Method.
+        let q_fid = snap.file_id_of(&root.join("order/queries.bsl")).unwrap();
+        let qsyms = snap.document_symbols(q_fid);
+        let q = qsyms
+            .iter()
+            .find(|s| s.name == "my_org_orders")
+            .expect("query symbol");
+        assert_eq!(q.kind, SymbolKind::FUNCTION);
+        let m = qsyms
+            .iter()
+            .find(|s| s.name == "place_order")
+            .expect("mutation symbol");
+        assert_eq!(m.kind, SymbolKind::METHOD);
+        // Symbols are file-scoped: no cross-file leakage into the query file.
+        assert!(qsyms.iter().all(|s| s.name != "Order"));
     }
 
     /// A throwaway workspace dir under the system temp, removed on drop.
