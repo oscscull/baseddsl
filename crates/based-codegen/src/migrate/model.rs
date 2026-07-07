@@ -1,0 +1,729 @@
+//! Neutral snapshot model: the diff baseline and its `schema.snap` text form.
+//!
+//! The dialect-neutral [`Snapshot`] type (tables, columns, indexes, scope decls),
+//! built from a resolved [`CheckedSchema`] ([`Snapshot::from_schema`]), rendered to the
+//! canonical `schema.snap` text ([`Snapshot::render`]), and parsed back
+//! ([`Snapshot::parse`]) so a stored baseline round-trips for the drift check. Names no
+//! dialect — SQL lives in [`super::sql`].
+
+use based_ast::{DefaultVal, Literal, Primitive, SortDir, SortTerm};
+use based_sema::{CheckedSchema, MemberKind, RModel, SoftDelete, SoftMode};
+use std::fmt::Write as _;
+
+// ---------- neutral snapshot model ----------------------------------------
+
+/// The canonical, dialect-neutral snapshot of a resolved schema: the diff baseline.
+/// Derived from a [`CheckedSchema`] ([`Snapshot::from_schema`]) or parsed back from
+/// `schema.snap` text ([`Snapshot::parse`]); a [`diff`] compares two of these.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    /// Named scope declarations (auth.md Handle 2), sorted by name and rendered above
+    /// the tables. A scope emits no DDL — it is an injected row-visibility filter in
+    /// generated code — but it is recorded here so a change to the contract (added,
+    /// dropped, renamed, or a term retyped) is captured in a reviewable migration and
+    /// caught by the offline drift check.
+    pub scopes: Vec<ScopeDeclSnap>,
+    /// Tables, sorted by name — the stable order that makes a git diff readable.
+    pub tables: Vec<TableSnap>,
+}
+
+/// A `scope Name (col: Type = $ctx.field, …)` decl, captured neutrally: the column, the
+/// declared type (a model name or a neutral primitive), and the `$ctx` field each term
+/// binds. The one place the scope column's — and `$ctx.field`'s — type lives (auth.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDeclSnap {
+    pub name: String,
+    /// Terms in declaration order.
+    pub terms: Vec<ScopeTermSnap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeTermSnap {
+    /// The scope column (the field a governed model must carry).
+    pub column: String,
+    /// The declared type — a model name (a relation) or a neutral primitive spelling.
+    pub ty: String,
+    /// The `$ctx.<field>` the column binds to.
+    pub ctx_field: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSnap {
+    pub name: String,
+    /// `@soft_delete` column + its neutral mode (`timestamp`/`bool`), if any.
+    pub soft_delete: Option<(String, String)>,
+    /// `@created` engine-managed column (set on insert, D2), if any.
+    pub created: Option<String>,
+    /// `@updated` engine-managed column (set on insert + every update, D2), if any.
+    pub updated: Option<String>,
+    /// The model's `@scope` alternatives, each a set of scope names (auth.md DNF). One
+    /// entry per `@scope` decorator — `@scope A, B` is one alternative `["A", "B"]`, two
+    /// stacked `@scope` decorators are two alternatives. Canonicalized (names sorted
+    /// within an alternative, alternatives sorted) so the diff is stable. Empty = unscoped.
+    pub scope_alts: Vec<Vec<String>>,
+    /// `@sort` terms as `(column, dir)` where dir is `asc`/`desc`, in declaration order.
+    pub sort: Vec<(String, String)>,
+    /// Columns, sorted by name.
+    pub columns: Vec<ColumnSnap>,
+    /// Indexes (declared + inferred), sorted by name.
+    pub indexes: Vec<IndexSnap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSnap {
+    pub name: String,
+    /// Neutral type family (`int`/`text`/`uuid`/`timestamp`/`date`/`bool`/`json`), a
+    /// `[]` suffix for a to-many scalar.
+    pub ty: String,
+    pub nullable: bool,
+    /// A `(default …)` value rendered as a neutral literal, if declared.
+    pub default: Option<String>,
+    pub unique: bool,
+    /// The related model when this column is a forward relation's FK (`fk=<Model>`).
+    pub fk: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSnap {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    /// An engine-inferred join-key baseline index (D15) vs. a declared `@index`.
+    pub inferred: bool,
+}
+
+impl Snapshot {
+    /// Build the neutral snapshot from a resolved schema. Pure and deterministic:
+    /// tables, columns, and indexes are all sorted by name so nothing map-ordered
+    /// leaks in.
+    pub fn from_schema(schema: &CheckedSchema) -> Snapshot {
+        let mut tables: Vec<TableSnap> = schema
+            .models
+            .iter()
+            .map(|m| table_snap(schema, m))
+            .collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut scopes: Vec<ScopeDeclSnap> = schema.scopes.iter().map(scope_decl_snap).collect();
+        scopes.sort_by(|a, b| a.name.cmp(&b.name));
+        Snapshot { scopes, tables }
+    }
+
+    pub fn scope(&self, name: &str) -> Option<&ScopeDeclSnap> {
+        self.scopes.iter().find(|s| s.name == name)
+    }
+
+    pub fn table(&self, name: &str) -> Option<&TableSnap> {
+        self.tables.iter().find(|t| t.name == name)
+    }
+}
+
+impl TableSnap {
+    pub fn column(&self, name: &str) -> Option<&ColumnSnap> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+    pub fn index(&self, name: &str) -> Option<&IndexSnap> {
+        self.indexes.iter().find(|i| i.name == name)
+    }
+}
+
+/// Is this column the universally-implicit default `id` (D2)? Such a column is elided
+/// from the snapshot's column list and carried as an invariant; a model that declares a
+/// non-default `id` (a different type, nullable, or unique) records it explicitly.
+fn is_default_id(c: &ColumnSnap) -> bool {
+    c.name == "id" && c.ty == "uuid" && !c.nullable && !c.unique && c.fk.is_none()
+}
+
+fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
+    let mut columns: Vec<ColumnSnap> = Vec::new();
+    for mem in &model.members {
+        match &mem.kind {
+            MemberKind::Scalar {
+                ty,
+                optional,
+                many,
+                column,
+                unique,
+                default,
+            } => columns.push(ColumnSnap {
+                name: column.clone(),
+                ty: neutral_type(*ty, *many),
+                nullable: *optional,
+                default: default.as_ref().map(render_default),
+                unique: *unique,
+                fk: None,
+            }),
+            MemberKind::Forward {
+                target,
+                optional,
+                fk_col,
+                ..
+            } => columns.push(ColumnSnap {
+                // A relation is its FK column (D3): its physical type is the target's
+                // key type (default uuid), and it carries the related model so a
+                // retyped/dropped relation reads as an add/drop/alter of `<field>_id`.
+                name: fk_col.clone(),
+                ty: fk_type(schema, target),
+                nullable: *optional,
+                default: None,
+                unique: false,
+                fk: Some(target.clone()),
+            }),
+            // Inverse edges own no column — they emit no DDL, so no snapshot row.
+            MemberKind::Inverse { .. } => {}
+        }
+    }
+    columns.retain(|c| !is_default_id(c));
+    columns.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut indexes = index_snaps(model);
+    indexes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    TableSnap {
+        name: model.table.clone(),
+        soft_delete: model.soft_delete.as_ref().map(soft_delete_snap),
+        created: model.created.clone(),
+        updated: model.updated.clone(),
+        scope_alts: canonical_scope_alts(&model.scope_alts),
+        sort: model.sort.iter().map(sort_term).collect(),
+        columns,
+        indexes,
+    }
+}
+
+/// A resolved scope decl → its neutral snapshot form. The term type is a model name for a
+/// relation-typed scope column, or the neutral primitive spelling for a scalar one.
+fn scope_decl_snap(scope: &based_sema::RScope) -> ScopeDeclSnap {
+    ScopeDeclSnap {
+        name: scope.name.clone(),
+        terms: scope
+            .terms
+            .iter()
+            .map(|t| ScopeTermSnap {
+                column: t.column.clone(),
+                ty: scope_ty(&t.ty),
+                ctx_field: t.ctx_field.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// A scope term's declared type as neutral text: a relation is its model name; a scalar is
+/// the neutral primitive spelling (`Id` folds to `uuid`, matching the column type map).
+fn scope_ty(ty: &based_sema::CtxField) -> String {
+    match ty {
+        based_sema::CtxField::Relation(m) => m.clone(),
+        based_sema::CtxField::Scalar(p) => neutral_type(*p, false),
+    }
+}
+
+/// Canonicalize a model's `@scope` DNF alternatives for a stable, diff-friendly snapshot:
+/// sort names within each alternative, then sort and dedup the alternatives themselves.
+fn canonical_scope_alts(alts: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = alts
+        .iter()
+        .map(|alt| {
+            let mut a = alt.clone();
+            a.sort();
+            a
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Declared `@index`es + the inferred join-key baseline (D15), each resolved to
+/// physical columns and its stable `idx_`/`uq_`/`inf_` name. Mirrors `sql::ddl`'s
+/// naming so the snapshot's index identity matches the generated DDL exactly — the
+/// soft-delete column is prepended to an inferred index (predicate-leading, D15).
+fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
+    let mut out = Vec::new();
+    for idx in &model.indexes {
+        let cols: Vec<String> = idx.columns.iter().map(|c| physical_col(model, c)).collect();
+        out.push(IndexSnap {
+            name: index_name(if idx.unique { "uq" } else { "idx" }, &model.table, &cols),
+            columns: cols,
+            unique: idx.unique,
+            inferred: false,
+        });
+    }
+    for idx in &model.inferred_indexes {
+        let mut fields = idx.columns.clone();
+        if let Some(sd) = &model.soft_delete {
+            fields.insert(0, sd.field.clone());
+        }
+        let cols: Vec<String> = fields.iter().map(|c| physical_col(model, c)).collect();
+        out.push(IndexSnap {
+            name: index_name("inf", &model.table, &cols),
+            columns: cols,
+            unique: false,
+            inferred: true,
+        });
+    }
+    out
+}
+
+fn soft_delete_snap(sd: &SoftDelete) -> (String, String) {
+    let mode = match sd.mode {
+        SoftMode::Timestamp => "timestamp",
+        SoftMode::Bool => "bool",
+    };
+    (sd.field.clone(), mode.to_string())
+}
+
+fn sort_term(t: &SortTerm) -> (String, String) {
+    let col = t
+        .path
+        .segments
+        .iter()
+        .map(|s| s.node.clone())
+        .collect::<Vec<_>>()
+        .join(".");
+    let dir = match t.dir {
+        SortDir::Asc => "asc",
+        SortDir::Desc => "desc",
+    };
+    (col, dir.to_string())
+}
+
+/// Physical column for a field: a scalar's column, or a forward relation's FK.
+fn physical_col(model: &RModel, field: &str) -> String {
+    match model.member(field).map(|m| &m.kind) {
+        Some(MemberKind::Scalar { column, .. }) => column.clone(),
+        Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
+        _ => field.to_string(),
+    }
+}
+
+/// Stable, readable index name: `<prefix>_<table>_<col1>_<col2>` (mirrors `sql::ddl`).
+pub(crate) fn index_name(prefix: &str, table: &str, columns: &[String]) -> String {
+    let mut name = format!("{prefix}_{table}");
+    for c in columns {
+        name.push('_');
+        name.push_str(c);
+    }
+    name
+}
+
+/// Neutral type family for a primitive (`Id` folds to `uuid`, D1). A to-many scalar
+/// gets a `[]` suffix — it has no columnar form and rides as a JSON array in DDL, but
+/// the snapshot records the neutral intent so a change to it still diffs.
+fn neutral_type(ty: Primitive, many: bool) -> String {
+    let base = match ty {
+        Primitive::Text => "text",
+        Primitive::Int => "int",
+        Primitive::Bool => "bool",
+        Primitive::Timestamp => "timestamp",
+        Primitive::Date => "date",
+        Primitive::Json => "json",
+        Primitive::Uuid | Primitive::Id => "uuid",
+    };
+    if many {
+        format!("{base}[]")
+    } else {
+        base.to_string()
+    }
+}
+
+/// A relation FK's neutral type: the target model's key type (default uuid).
+fn fk_type(schema: &CheckedSchema, target: &str) -> String {
+    match schema
+        .model(target)
+        .and_then(|m| m.member("id"))
+        .map(|m| &m.kind)
+    {
+        Some(MemberKind::Scalar { ty, .. }) => neutral_type(*ty, false),
+        _ => "uuid".to_string(),
+    }
+}
+
+/// Render a `(default …)` value as a neutral literal for the snapshot. Dialect-neutral
+/// by construction: `now()` is the neutral `now()`, never `CURRENT_TIMESTAMP`.
+fn render_default(dv: &DefaultVal) -> String {
+    match dv {
+        DefaultVal::Lit(Literal::Str(s)) => format!("\"{}\"", s.replace('"', "\\\"")),
+        DefaultVal::Lit(Literal::Int(i)) => i.to_string(),
+        DefaultVal::Lit(Literal::Float(f)) => f.to_string(),
+        DefaultVal::Lit(Literal::Bool(b)) => b.to_string(),
+        DefaultVal::Lit(Literal::Null) => "null".to_string(),
+        DefaultVal::Func(f) => format!("{}()", f.name.node),
+    }
+}
+
+// ---------- serialization -------------------------------------------------
+
+/// Serialize a resolved schema to the canonical `schema.snap` text. Convenience over
+/// [`Snapshot::from_schema`] + [`Snapshot::render`].
+pub fn snapshot(schema: &CheckedSchema) -> String {
+    Snapshot::from_schema(schema).render()
+}
+
+impl Snapshot {
+    /// Render this snapshot to the canonical `schema.snap` text. Deterministic — the
+    /// same snapshot renders byte-identically every time (no wall-clock, no map order).
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# schema.snap — generated by `based migrate gen`; do not edit by hand.\n");
+        out.push_str("snapshot v1 dialect=neutral\n");
+        for s in &self.scopes {
+            out.push_str(&render_scope_decl(s));
+            out.push('\n');
+        }
+        for t in &self.tables {
+            out.push('\n');
+            render_table(&mut out, t);
+        }
+        out
+    }
+}
+
+/// One `scope Name (col: Type = $ctx.field, …)` decl line.
+pub(crate) fn render_scope_decl(s: &ScopeDeclSnap) -> String {
+    let terms = s
+        .terms
+        .iter()
+        .map(|t| format!("{}: {} = $ctx.{}", t.column, t.ty, t.ctx_field))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("scope {} ({terms})", s.name)
+}
+
+fn render_table(out: &mut String, t: &TableSnap) {
+    let mut header = format!("table {}", t.name);
+    if let Some((col, mode)) = &t.soft_delete {
+        let _ = write!(header, " soft_delete={col}:{mode}");
+    }
+    if let Some(col) = &t.created {
+        let _ = write!(header, " created={col}");
+    }
+    if let Some(col) = &t.updated {
+        let _ = write!(header, " updated={col}");
+    }
+    // One `scope=(A, B)` group per `@scope` alternative (DNF): the commas inside a group
+    // are the AND-conjunction, separate groups are the OR-alternatives (auth.md).
+    for alt in &t.scope_alts {
+        let _ = write!(header, " scope=({})", alt.join(", "));
+    }
+    if !t.sort.is_empty() {
+        let terms = t
+            .sort
+            .iter()
+            .map(|(c, d)| format!("{c} {d}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(header, " sort=({terms})");
+    }
+    header.push('\n');
+    out.push_str(&header);
+
+    for c in &t.columns {
+        let mut line = format!(
+            "  column {} {} {}",
+            c.name,
+            c.ty,
+            if c.nullable { "null" } else { "not_null" }
+        );
+        if let Some(d) = &c.default {
+            let _ = write!(line, " default={d}");
+        }
+        if c.unique {
+            line.push_str(" unique");
+        }
+        if let Some(fk) = &c.fk {
+            let _ = write!(line, " fk={fk}");
+        }
+        line.push('\n');
+        out.push_str(&line);
+    }
+    for i in &t.indexes {
+        let cols = i.columns.join(", ");
+        let mut line = format!("  index {} ({cols})", i.name);
+        if i.unique {
+            line.push_str(" unique");
+        }
+        if i.inferred {
+            line.push_str(" inferred");
+        }
+        line.push('\n');
+        out.push_str(&line);
+    }
+}
+
+// ---------- parsing (round-trip) ------------------------------------------
+
+/// A `schema.snap` that could not be parsed — the file is corrupt or hand-edited into
+/// an invalid state. Carries the 1-based line and a reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    pub line: usize,
+    pub message: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "schema.snap line {}: {}", self.line, self.message)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl Snapshot {
+    /// Parse a `schema.snap` back into the neutral model — the inverse of [`render`], so
+    /// the stored baseline can be diffed against the current schema. Whitespace-tolerant
+    /// on the leading indent; comments (`#…`) and the header line are skipped.
+    ///
+    /// [`render`]: Snapshot::render
+    pub fn parse(text: &str) -> Result<Snapshot, ParseError> {
+        let mut scopes: Vec<ScopeDeclSnap> = Vec::new();
+        let mut tables: Vec<TableSnap> = Vec::new();
+        for (i, raw) in text.lines().enumerate() {
+            let line_no = i + 1;
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("snapshot ") {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("scope ") {
+                scopes.push(parse_scope_decl(rest, line_no)?);
+            } else if let Some(rest) = line.strip_prefix("table ") {
+                tables.push(parse_table_header(rest, line_no)?);
+            } else if let Some(rest) = line.strip_prefix("column ") {
+                let t = tables.last_mut().ok_or_else(|| ParseError {
+                    line: line_no,
+                    message: "column before any table".to_string(),
+                })?;
+                t.columns.push(parse_column(rest, line_no)?);
+            } else if let Some(rest) = line.strip_prefix("index ") {
+                let t = tables.last_mut().ok_or_else(|| ParseError {
+                    line: line_no,
+                    message: "index before any table".to_string(),
+                })?;
+                t.indexes.push(parse_index(rest, line_no)?);
+            } else {
+                return Err(ParseError {
+                    line: line_no,
+                    message: format!("unrecognized line: {line}"),
+                });
+            }
+        }
+        Ok(Snapshot { scopes, tables })
+    }
+}
+
+/// Parse a top-level `scope Name (col: Type = $ctx.field, …)` decl line.
+fn parse_scope_decl(rest: &str, line: usize) -> Result<ScopeDeclSnap, ParseError> {
+    let open = rest.find('(').ok_or_else(|| ParseError {
+        line,
+        message: format!("scope decl has no term list: {rest}"),
+    })?;
+    let name = rest[..open].trim().to_string();
+    if name.is_empty() {
+        return Err(ParseError {
+            line,
+            message: "scope decl has no name".to_string(),
+        });
+    }
+    let close = rest.rfind(')').ok_or_else(|| ParseError {
+        line,
+        message: format!("scope decl term list is not closed: {rest}"),
+    })?;
+    let inner = rest[open + 1..close].trim();
+    let mut terms = Vec::new();
+    if !inner.is_empty() {
+        for t in inner.split(',') {
+            let (col_ty, ctx) = t.split_once(" = $ctx.").ok_or_else(|| ParseError {
+                line,
+                message: format!("malformed scope term: {t}"),
+            })?;
+            let (col, ty) = col_ty.split_once(':').ok_or_else(|| ParseError {
+                line,
+                message: format!("scope term has no type: {t}"),
+            })?;
+            terms.push(ScopeTermSnap {
+                column: col.trim().to_string(),
+                ty: ty.trim().to_string(),
+                ctx_field: ctx.trim().to_string(),
+            });
+        }
+    }
+    Ok(ScopeDeclSnap { name, terms })
+}
+
+/// Split off a `key=(a, b, c)` group after `key=`, returning the inner terms and the
+/// remaining tail. Returns `None` when `head` does not start with `key=(`.
+fn take_group<'a>(head: &'a str, key: &str) -> Option<(Vec<String>, &'a str)> {
+    let after = head.strip_prefix(key)?.strip_prefix("=(")?;
+    let close = after.find(')')?;
+    let inner = &after[..close];
+    let tail = after[close + 1..].trim_start();
+    let terms = if inner.trim().is_empty() {
+        Vec::new()
+    } else {
+        inner.split(',').map(|s| s.trim().to_string()).collect()
+    };
+    Some((terms, tail))
+}
+
+fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> {
+    let mut it = rest.splitn(2, char::is_whitespace);
+    let name = it.next().unwrap_or("").to_string();
+    if name.is_empty() {
+        return Err(ParseError {
+            line,
+            message: "table has no name".to_string(),
+        });
+    }
+    let mut head = it.next().unwrap_or("").trim_start();
+
+    let mut soft_delete = None;
+    let mut created = None;
+    let mut updated = None;
+    let mut scope_alts = Vec::new();
+    let mut sort = Vec::new();
+
+    while !head.is_empty() {
+        if let Some(after) = head.strip_prefix("soft_delete=") {
+            let mut sp = after.splitn(2, char::is_whitespace);
+            let spec = sp.next().unwrap_or("");
+            let (col, mode) = spec.split_once(':').ok_or_else(|| ParseError {
+                line,
+                message: format!("malformed soft_delete: {spec}"),
+            })?;
+            soft_delete = Some((col.to_string(), mode.to_string()));
+            head = sp.next().unwrap_or("").trim_start();
+        } else if let Some(after) = head.strip_prefix("created=") {
+            let mut sp = after.splitn(2, char::is_whitespace);
+            created = Some(sp.next().unwrap_or("").to_string());
+            head = sp.next().unwrap_or("").trim_start();
+        } else if let Some(after) = head.strip_prefix("updated=") {
+            let mut sp = after.splitn(2, char::is_whitespace);
+            updated = Some(sp.next().unwrap_or("").to_string());
+            head = sp.next().unwrap_or("").trim_start();
+        } else if let Some((names, tail)) = take_group(head, "scope") {
+            // Each `scope=(A, B)` group is one `@scope` alternative (a name set).
+            scope_alts.push(names);
+            head = tail;
+        } else if let Some((terms, tail)) = take_group(head, "sort") {
+            for t in terms {
+                let (col, dir) = t
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| ParseError {
+                        line,
+                        message: format!("malformed sort term: {t}"),
+                    })?;
+                sort.push((col.trim().to_string(), dir.trim().to_string()));
+            }
+            head = tail;
+        } else {
+            return Err(ParseError {
+                line,
+                message: format!("unrecognized table attribute: {head}"),
+            });
+        }
+    }
+
+    Ok(TableSnap {
+        name,
+        soft_delete,
+        created,
+        updated,
+        scope_alts,
+        sort,
+        columns: Vec::new(),
+        indexes: Vec::new(),
+    })
+}
+
+fn parse_column(rest: &str, line: usize) -> Result<ColumnSnap, ParseError> {
+    // A quoted `default="…"` is the one attribute that may hold spaces; pull it out of
+    // the raw text first so the rest tokenizes on whitespace cleanly.
+    let mut default = None;
+    let mut remainder = rest.to_string();
+    if let Some(idx) = rest.find("default=\"") {
+        let after = &rest[idx + "default=".len()..]; // starts at the opening quote
+        if let Some(close) = after[1..].find('"') {
+            let end = close + 2; // include both quotes
+            default = Some(after[..end].to_string());
+            remainder = format!("{}{}", &rest[..idx], &after[end..]);
+        }
+    }
+
+    let mut toks = remainder.split_whitespace();
+    let name = toks.next().ok_or_else(|| ParseError {
+        line,
+        message: "column has no name".to_string(),
+    })?;
+    let ty = toks.next().ok_or_else(|| ParseError {
+        line,
+        message: "column has no type".to_string(),
+    })?;
+    let nullability = toks.next().ok_or_else(|| ParseError {
+        line,
+        message: "column has no nullability".to_string(),
+    })?;
+    let nullable = match nullability {
+        "null" => true,
+        "not_null" => false,
+        other => {
+            return Err(ParseError {
+                line,
+                message: format!("expected null|not_null, got {other}"),
+            })
+        }
+    };
+
+    let mut unique = false;
+    let mut fk = None;
+    for tok in toks {
+        if let Some(d) = tok.strip_prefix("default=") {
+            default = Some(d.to_string());
+        } else if tok == "unique" {
+            unique = true;
+        } else if let Some(t) = tok.strip_prefix("fk=") {
+            fk = Some(t.to_string());
+        } else {
+            return Err(ParseError {
+                line,
+                message: format!("unrecognized column attribute: {tok}"),
+            });
+        }
+    }
+
+    Ok(ColumnSnap {
+        name: name.to_string(),
+        ty: ty.to_string(),
+        nullable,
+        default,
+        unique,
+        fk,
+    })
+}
+
+fn parse_index(rest: &str, line: usize) -> Result<IndexSnap, ParseError> {
+    let (name, after) = rest.split_once('(').ok_or_else(|| ParseError {
+        line,
+        message: format!("index missing column list: {rest}"),
+    })?;
+    let close = after.find(')').ok_or_else(|| ParseError {
+        line,
+        message: format!("index column list not closed: {rest}"),
+    })?;
+    let cols_inner = &after[..close];
+    let columns: Vec<String> = if cols_inner.trim().is_empty() {
+        Vec::new()
+    } else {
+        cols_inner
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect()
+    };
+    let flags = after[close + 1..].trim();
+    let unique = flags.split_whitespace().any(|f| f == "unique");
+    let inferred = flags.split_whitespace().any(|f| f == "inferred");
+
+    Ok(IndexSnap {
+        name: name.trim().to_string(),
+        columns,
+        unique,
+        inferred,
+    })
+}
