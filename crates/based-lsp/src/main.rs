@@ -232,23 +232,35 @@ impl LanguageServer for Backend {
             if f.span.file.0 as usize != fid {
                 continue;
             }
-            // An inverse hint sits after the field it annotates; an index hint (whose
-            // span is the whole model) reads best at the end of the model's header.
+            // Every derived-fact hint reads best at the end of its line: the inverse
+            // after the field's type, the model/callable-wide facts after the header.
             let position = match f.kind {
-                FactKind::InferredInverse => idx.position(f.span.end as usize),
-                // Model/callable-wide facts read best at the end of the header line.
-                FactKind::InferredIndex | FactKind::CtxRequirement | FactKind::ResolvedQuery => {
-                    idx.end_of_line(f.span.start as usize)
-                }
+                FactKind::InferredInverse
+                | FactKind::InferredIndex
+                | FactKind::CtxRequirement
+                | FactKind::ResolvedQuery => idx.end_of_line(f.span.start as usize),
                 // A scope is written, not derived — it needs no inlay hint (hover only).
                 FactKind::Scope => continue,
             };
             if position < params.range.start || position > params.range.end {
                 continue;
             }
+            // An inferred inverse links to the forward edge it pairs through, so the
+            // `via order` hint is command-clickable; other facts are plain text.
+            let label = match (f.kind, f.nav) {
+                (FactKind::InferredInverse, Some(nav)) => {
+                    InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
+                        value: f.label.clone(),
+                        location: nav_location(snapshot, nav),
+                        tooltip: None,
+                        command: None,
+                    }])
+                }
+                _ => InlayHintLabel::String(format!("{} {}", f.kind.tag(), f.label)),
+            };
             hints.push(InlayHint {
                 position,
-                label: InlayHintLabel::String(format!("{} {}", f.kind.tag(), f.label)),
+                label,
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: Some(InlayHintTooltip::String(f.detail.clone())),
@@ -351,26 +363,45 @@ impl LanguageServer for Backend {
         let idx = &snapshot.lines[fid];
         let offset = idx.offset(pos.position) as u32;
 
-        // Any fact whose anchor span covers the cursor contributes its "why".
-        let details: Vec<String> = snapshot
-            .facts
-            .iter()
-            .filter(|f| {
-                f.span.file.0 as usize == fid && f.span.start <= offset && offset < f.span.end
-            })
-            .map(|f| format!("**{}** — {}", f.kind.tag(), f.detail))
-            .collect();
-        if details.is_empty() {
+        // The "what": the declaration of the symbol under the cursor (field type,
+        // model/shape/scope/callable signature). Leads the hover, rust-analyzer-style.
+        let mut sections: Vec<String> = Vec::new();
+        if let Some(what) = snapshot.hover_at(fid, offset) {
+            sections.push(what);
+        }
+        // The "why": any derived fact whose anchor span covers the cursor.
+        sections.extend(
+            snapshot
+                .facts
+                .iter()
+                .filter(|f| {
+                    f.span.file.0 as usize == fid && f.span.start <= offset && offset < f.span.end
+                })
+                .map(|f| format!("**{}** — {}", f.kind.tag(), f.detail)),
+        );
+        if sections.is_empty() {
             return Ok(None);
         }
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: details.join("\n\n"),
+                value: sections.join("\n\n---\n\n"),
             }),
             range: None,
         }))
     }
+}
+
+/// A cross-file `Location` for a span, resolving its `FileId` to the owning URI —
+/// the command-click target of an inlay label part (e.g. an inverse's forward edge).
+fn nav_location(snapshot: &Snapshot, span: based_ast::Span) -> Option<Location> {
+    let fid = span.file.0 as usize;
+    let (path, _) = snapshot.sources.get(fid)?;
+    let uri = Url::from_file_path(path).ok()?;
+    Some(Location {
+        uri,
+        range: span_to_range(span, &snapshot.lines[fid]),
+    })
 }
 
 /// Map a source `Span`'s byte range onto an LSP `Range` via the owning file's index.

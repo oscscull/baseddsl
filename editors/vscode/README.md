@@ -70,10 +70,14 @@ code --install-extension based-vscode-0.1.0.vsix
 ## What the server surfaces today
 
 - **Diagnostics** — every parse/sema error and lint, inline.
-- **Inlay hints** — inferred inverse pairings, join-key indexes, per-callable `$ctx`
-  requirement bags, and each query's resolved verb/target/cardinality/pagination.
-- **Hover** — the fuller "why" behind any derived fact under the cursor.
-- **Go-to-definition** — jump from a model/shape reference to its declaration.
+- **Inlay hints** — inferred inverse pairings (a `via <edge>` hint that command-clicks
+  to the paired forward edge), join-key indexes, per-callable `$ctx` requirement bags,
+  and each query's resolved verb/target/cardinality/pagination.
+- **Hover** — the declaration of the symbol under the cursor (a field's `name: Type`, a
+  model/shape/scope/callable signature), plus the fuller "why" behind any derived fact.
+- **Go-to-definition** — jump from a model/shape/scope reference *or a field-reference
+  path* (`placed_by`, `placed_by.name`, a `where`/`order`/write-assign column) to its
+  declaration, walking through relations from the statically-known root.
 - **Document symbols** — the outline / breadcrumbs (⇧⌘O): models (fields nested),
   shapes, queries, mutations, filters.
 - **Completion** — model names in a type annotation (after `:`) or return type
@@ -89,8 +93,8 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 |------------|--------|-------|
 | Diagnostics (`publishDiagnostics`) | **have** | parse/sema errors + lints, pushed on edit |
 | Inlay hints (`inlayHint`) | **have** | engine-derived facts (principle 8) — not a standard-language feature, a DSL bonus |
-| Hover (`hover`) | **have** | the "why" behind a derived fact |
-| Go-to-definition (`definition`) | **have** | model/shape references → declaration (D43) |
+| Hover (`hover`) | **have** | the symbol's declaration ("what": field `name: Type`, model/shape/scope/callable signature) + the derived-fact "why" (C4a) |
+| Go-to-definition (`definition`) | **have** | model/shape/scope references + field-reference paths (shape/`where`/`order`/write columns, walked through relations) → declaration (D43, C4a) |
 | Document symbols (`documentSymbol`) | **have** | outline / breadcrumbs (D44) |
 | Syntax highlighting (TextMate) | **have** | models vs. builtins; type-name coloring (D43) |
 | Completion (`completion`) | **have** | model names in type position, fields after a resolvable `.`, keyword/decorator set (D45) |

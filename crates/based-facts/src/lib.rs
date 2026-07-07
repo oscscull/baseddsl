@@ -59,6 +59,11 @@ pub struct Fact {
     pub label: String,
     /// Fuller explanation — what an editor shows on hover, with the "why".
     pub detail: String,
+    /// A related declaration this fact's inlay can point at (command-click). For an
+    /// inferred inverse it is the paired forward edge's span — so the `via order`
+    /// hint on `Order.items` jumps to `OrderItem.order`. `None` for facts with
+    /// nowhere to follow.
+    pub nav: Option<Span>,
 }
 
 /// Compute every derived fact worth surfacing for a checked schema.
@@ -76,16 +81,24 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
         for mem in &model.members {
             if let MemberKind::Inverse { target, via } = &mem.kind {
                 if inverse_was_inferred(decls, &model.name, &mem.name) {
+                    // Point the inlay's command-click at the paired forward edge.
+                    let nav = schema
+                        .model(target)
+                        .and_then(|m| m.member(via))
+                        .map(|f| f.span);
                     out.push(Fact {
                         span: mem.span,
                         kind: FactKind::InferredInverse,
-                        label: format!("<- {target} via {via}"),
+                        // Terse: `OrderItem[]` is already on the line, so the hint only
+                        // adds the forward edge the engine paired through.
+                        label: format!("via {via}"),
                         detail: format!(
                             "inferred inverse: `{}.{}` pairs with the forward edge \
                              `{target}.{via}`, which the engine derived from the one \
                              forward relation between these models.",
                             model.name, mem.name,
                         ),
+                        nav,
                     });
                 }
             }
@@ -104,6 +117,7 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
                      `@index` only to override it.",
                     cols.join(", "),
                 ),
+                nav: None,
             });
         }
     }
@@ -146,6 +160,7 @@ fn scope_facts(schema: &CheckedSchema, decls: &[Decl], out: &mut Vec<Fact>) {
                 kind: FactKind::Scope,
                 label: label.clone(),
                 detail: detail.clone(),
+                nav: None,
             });
         };
         for d in decls {
@@ -248,6 +263,7 @@ fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
              generated client sends exactly these; each field's type is fixed by the \
              scope or column it binds to.",
         ),
+        nav: None,
     })
 }
 
@@ -302,6 +318,7 @@ fn resolved_query_fact(q: &RQuery) -> Fact {
                 ""
             },
         ),
+        nav: None,
     }
 }
 

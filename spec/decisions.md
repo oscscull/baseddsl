@@ -35,7 +35,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   scanner), D38 (Postgres driver + live suite)
 - **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
-  (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion)
+  (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
+  D51 (field-reference go-to-def + broad hover + clickable inverse inlay)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger)
 
@@ -1679,3 +1680,40 @@ editor-facing string. Closes Track G. Rename across scope refs stays deferred to
   `scoped`). `based-codegen`: a multi-alternative (OR) scope round-trip + diff test (serialize/parse/diff
   proven) + an init-omits-scope-steps test; commerce snapshot golden + round-trip updated. `based-lsp`: a
   go-to-def test resolving both `@scope Tenant` and `scoped Tenant` to the decl.
+
+## D51 — field-reference go-to-def + broad hover + clickable inverse inlay
+Track C4a (user-raised): three editor refinements the author noticed on the commerce `Order` model.
+Baseline navigation/hover depth a `.bsl` author expects from rust-analyzer, built on the D43 resolver.
+No new LSP capabilities — the existing `definition_provider`/`hover_provider`/`inlay_hint_provider`
+already advertise all three.
+- **Field-reference go-to-def (`based-lsp`).** `Snapshot::definition_at` gains a third resolver after the
+  D43 type refs and D50 scope refs: `field_ref_at` matches the cursor against *field-reference path
+  segments* and walks them to the field they name. Every `Path` in a shape body (`placed_by`,
+  `placed_by.name`, `org.name`), a query `where`/`order` clause, and a mutation write's `where`/assign
+  columns is collected by `field_paths` paired with its statically-known **root model** — the shape's
+  `from`, the block statement's target (or, for inline/bare queries, the return shape's `from` / return
+  model via `query_root`), and each write statement's model. `walk_path` resolves a segment prefix
+  against that root, advancing through relation edges (`placed_by` → `User`) so any segment — not just
+  the first — resolves, cross-file included. Filters are **out**: their root is the polymorphic call
+  site (no static root), consistent with the D14 call-site re-resolution. This is the reference-site
+  index find-references/rename (C4) will generalize to *all* sites of a target, not just the one under
+  the cursor.
+- **Broad hover ("what", `based-lsp`).** `Snapshot::hover_at` returns the *declaration* of the symbol
+  under the cursor, rust-analyzer-style: a field → `name: Type` (+ a to-one/to-many relation note), a
+  model/shape/scope/callable reference *or its own decl name* → a one-line signature (`model Order`,
+  `shape OrderCard from Order`, `query name(params) -> Ret[]`, `scope Tenant (org: Org = $ctx.org)`).
+  Reuses `field_ref_at` + the D43/D50 reference collectors, then falls back to `decl_site_hover` for a
+  cursor on a declaration's own name. The LSP `hover` handler leads with this "what" and appends the
+  existing derived-fact "why" (`---`-separated), so a field with an inferred inverse shows both.
+- **Clickable inverse inlay (`based-facts` + `based-lsp`).** The inferred-inverse inlay was
+  `inverse <- OrderItem via order` — wordy (the `OrderItem[]` type is already on the line) and inert.
+  Trimmed to **`via order`** and made command-clickable: `Fact` gains a `nav: Option<Span>` (the paired
+  forward edge's span, resolved from the checked schema — `OrderItem.order`), and the LSP renders the
+  inverse hint as an `InlayHintLabelPart` carrying that `Location`, positioned at end-of-line like the
+  model/callable-wide facts. Other fact kinds keep their plain `tag + label` string. The full "why"
+  stays on hover.
+- **Tests.** `based-facts`: the inverse label is now `via order` with a non-`None` `nav`. `based-lsp`:
+  field-reference go-to-def over commerce (`placed_by` → `Order.placed_by`, `placed_by.name` →
+  `User.name` cross-file, a bare shape field → its column) + a hermetic query-`where`/`order` +
+  mutation-assign column test; a hover test asserting field/model/shape signatures for both references
+  and declaration sites.

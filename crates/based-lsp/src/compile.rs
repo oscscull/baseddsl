@@ -14,7 +14,9 @@
 //! workspace stay independent. A file under no manifest keeps a single-file fallback.
 
 use based_ast::{
-    BaseType, Decl, FileId, Ident, Member, Model, QueryBody, Span, TypeExpr, WriteStmt,
+    Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Model, Mutation, NamedFilter,
+    Param, ParamRef, Predicate, Primitive, Query, QueryBody, ScopeDecl, Shape, ShapeField,
+    ShapeValue, Span, TypeExpr, Value, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::Fact;
@@ -72,6 +74,210 @@ impl Snapshot {
                 Decl::Scope(s) if s.name.node == target.node => Some(s.name.span),
                 _ => None,
             });
+        }
+        // A field-reference path segment (`placed_by`, `placed_by.name`, a `where`/
+        // `order`/write-assign column) → the field it names, walked through relations
+        // from the statically-known root.
+        if let Some(f) = self.field_ref_at(fid, offset) {
+            return Some(f.name.span);
+        }
+        None
+    }
+
+    /// Rich "what" for the symbol under the cursor — a field's `name: Type`, or a
+    /// model/shape/scope/callable signature — for hover (rust-analyzer's baseline).
+    /// `None` when the cursor is not on a resolvable symbol.
+    pub fn hover_at(&self, fid: usize, offset: u32) -> Option<String> {
+        let under = |id: &&Ident| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        };
+        // A field reference (path segment) → the field's signature.
+        if let Some(f) = self.field_ref_at(fid, offset) {
+            return Some(field_hover(f));
+        }
+        // A model/shape type reference → the referenced decl's signature.
+        if let Some(t) = collect_type_refs(&self.decls).into_iter().find(under) {
+            if let Some(h) = self.decl_hover_by_name(&t.node) {
+                return Some(h);
+            }
+        }
+        // A `@scope`/`scoped` reference → the scope contract's shape.
+        if let Some(t) = collect_scope_refs(&self.decls).into_iter().find(under) {
+            if let Some(h) = self.scope_hover(&t.node) {
+                return Some(h);
+            }
+        }
+        // Otherwise the cursor may sit on a declaration's own name.
+        self.decl_site_hover(fid, offset)
+    }
+
+    /// The field a reference path segment under the cursor names. Every path in a
+    /// shape body / query clause / mutation write is rooted at a statically-known
+    /// model (the shape's `from`, the statement target, the write model) and walked
+    /// segment-by-segment through relation edges; the segment the cursor is on
+    /// resolves to its declaring field. `None` off any such segment.
+    fn field_ref_at(&self, fid: usize, offset: u32) -> Option<&Field> {
+        let under = |id: &Ident| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        };
+        for (root, segs) in self.field_paths() {
+            if let Some(i) = segs.iter().position(under) {
+                return self.walk_path(root, &segs[..=i]);
+            }
+        }
+        None
+    }
+
+    /// Resolve a path prefix against `root`, returning the field its last segment
+    /// names. Intermediate segments must be relation edges (they advance the model);
+    /// the final segment may be a scalar or relation. `None` if any segment is not a
+    /// field of the model reached so far.
+    fn walk_path(&self, root: &str, segs: &[Ident]) -> Option<&Field> {
+        let mut model = self.model_by_name(root)?;
+        let mut last: Option<&Field> = None;
+        for seg in segs {
+            let field = model.members.iter().find_map(|m| match m {
+                Member::Field(f) if f.name.node == seg.node => Some(f),
+                _ => None,
+            })?;
+            last = Some(field);
+            if let BaseType::Model(t) = &field.ty.base {
+                match self.model_by_name(&t.node) {
+                    Some(m) => model = m,
+                    None => break,
+                }
+            }
+        }
+        last
+    }
+
+    /// Every field-reference path in the project, each paired with the model it is
+    /// rooted at. Covers shape bodies, query `where`/`order` clauses, and mutation
+    /// write `where`/assign columns — the contexts whose root model is statically
+    /// known. (Filters are omitted: their root is the polymorphic call site.)
+    fn field_paths(&self) -> Vec<(&str, &[Ident])> {
+        let mut out = Vec::new();
+        for d in &self.decls {
+            match d {
+                Decl::Shape(s) => self.shape_paths(s.from.node.as_str(), &s.body, &mut out),
+                Decl::Query(q) => match &q.body {
+                    // A block's clauses root at the explicit statement target.
+                    QueryBody::Block(stmt) => {
+                        for c in &stmt.clauses {
+                            clause_paths(c, stmt.model.node.as_str(), &mut out);
+                        }
+                    }
+                    // Inline clauses root at the query's inferred target (its return).
+                    QueryBody::Inline(clauses) => {
+                        if let Some(root) = self.query_root(q) {
+                            for c in clauses {
+                                clause_paths(c, root, &mut out);
+                            }
+                        }
+                    }
+                    QueryBody::Bare => {}
+                },
+                Decl::Mutation(m) => write_paths(&m.body, &mut out),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Collect a shape body's field paths (rooted at `from`), recursing into `field {
+    /// … }` sub-objects against the relation's target model.
+    fn shape_paths<'a>(
+        &'a self,
+        from: &'a str,
+        body: &'a [ShapeField],
+        out: &mut Vec<(&'a str, &'a [Ident])>,
+    ) {
+        for sf in body {
+            match sf {
+                ShapeField::Bare(id) => out.push((from, std::slice::from_ref(id))),
+                ShapeField::Rename {
+                    value: ShapeValue::Path(p),
+                    ..
+                } => out.push((from, &p.segments)),
+                ShapeField::Rename { .. } => {} // raw-SQL value: no field path
+                ShapeField::Nest { field, body } => {
+                    out.push((from, std::slice::from_ref(field)));
+                    if let Some(target) = self.relation_target(from, &field.node) {
+                        self.shape_paths(target, body, out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The model a relation `field` on `model` points at, if it is a relation edge.
+    fn relation_target(&self, model: &str, field: &str) -> Option<&str> {
+        let m = self.model_by_name(model)?;
+        m.members.iter().find_map(|mem| match mem {
+            Member::Field(f) if f.name.node == field => match &f.ty.base {
+                BaseType::Model(t) => Some(t.node.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// The model an inline/bare query reads from: its return shape's `from`, or the
+    /// return model itself when the return type is a bare model.
+    fn query_root(&self, q: &Query) -> Option<&str> {
+        let ret = q.ret.ty.node.as_str();
+        self.decls.iter().find_map(|d| match d {
+            Decl::Shape(s) if s.name.node == ret => Some(s.from.node.as_str()),
+            Decl::Model(m) if m.name.node == ret => Some(m.name.node.as_str()),
+            _ => None,
+        })
+    }
+
+    /// A model or shape decl's one-line hover, by name.
+    fn decl_hover_by_name(&self, name: &str) -> Option<String> {
+        self.decls.iter().find_map(|d| match d {
+            Decl::Model(m) if m.name.node == name => Some(model_hover(m)),
+            Decl::Shape(s) if s.name.node == name => Some(shape_hover(s)),
+            _ => None,
+        })
+    }
+
+    /// A scope decl's one-line hover (`scope Name (col: Type = $ctx.field, …)`).
+    fn scope_hover(&self, name: &str) -> Option<String> {
+        self.decls.iter().find_map(|d| match d {
+            Decl::Scope(s) if s.name.node == name => Some(scope_hover(s)),
+            _ => None,
+        })
+    }
+
+    /// Hover for a declaration's own name (the cursor sits on the thing being
+    /// declared, not a reference to it): the model/field/shape/callable/scope it
+    /// introduces.
+    fn decl_site_hover(&self, fid: usize, offset: u32) -> Option<String> {
+        let under = |id: &Ident| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        };
+        for d in &self.decls {
+            match d {
+                Decl::Model(m) => {
+                    if under(&m.name) {
+                        return Some(model_hover(m));
+                    }
+                    for mem in &m.members {
+                        if let Member::Field(f) = mem {
+                            if under(&f.name) {
+                                return Some(field_hover(f));
+                            }
+                        }
+                    }
+                }
+                Decl::Shape(s) if under(&s.name) => return Some(shape_hover(s)),
+                Decl::Query(q) if under(&q.name) => return Some(query_hover(q)),
+                Decl::Mutation(m) if under(&m.name) => return Some(mutation_hover(m)),
+                Decl::Filter(f) if under(&f.name) => return Some(filter_hover(f)),
+                Decl::Scope(s) if under(&s.name) => return Some(scope_hover(s)),
+                _ => {}
+            }
         }
         None
     }
@@ -505,6 +711,224 @@ fn collect_write_targets<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
     }
 }
 
+// ---- Field-reference path collectors (root model + its column paths) --------
+// Each pushes `(root_model, segments)` so a cursor on any segment resolves through
+// the relation walk in `Snapshot::walk_path`.
+
+/// A query clause's field paths, rooted at `root`: a `where` predicate's columns and
+/// an `order` clause's sort paths (a `page` clause carries none).
+fn clause_paths<'a>(c: &'a Clause, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    match c {
+        Clause::Where(p) => pred_paths(p, root, out),
+        Clause::Order(terms) => {
+            for t in terms {
+                out.push((root, &t.path.segments));
+            }
+        }
+        Clause::Page(_) | Clause::Unindexed(_) => {}
+    }
+}
+
+/// A predicate's field paths (both sides of a comparison, bare bool columns, filter-
+/// call value paths), all rooted at `root`. Filter *names* are not fields.
+fn pred_paths<'a>(p: &'a Predicate, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    match p {
+        Predicate::Or(a, b) | Predicate::And(a, b) => {
+            pred_paths(a, root, out);
+            pred_paths(b, root, out);
+        }
+        Predicate::Not(inner) => pred_paths(inner, root, out),
+        Predicate::Cmp { path, value, .. } => {
+            out.push((root, &path.segments));
+            value_paths(value, root, out);
+        }
+        Predicate::Bare(path) => out.push((root, &path.segments)),
+        Predicate::FilterCall { args, .. } => {
+            for v in args {
+                value_paths(v, root, out);
+            }
+        }
+        Predicate::Raw(_) => {}
+    }
+}
+
+/// A value's field path, when it is one (a column reference or a function argument
+/// that is itself a column); params, literals, and `^.field` back-refs carry none.
+fn value_paths<'a>(v: &'a Value, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    match v {
+        Value::Path(p) => out.push((root, &p.segments)),
+        Value::Func(fc) => {
+            for a in &fc.args {
+                value_paths(a, root, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A mutation write body's field paths, rooted at each statement's write model,
+/// recursing through `tx`. Covers `where` predicates and assign columns/values.
+fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>) {
+    for w in body {
+        match w {
+            WriteStmt::Create { model, assigns } => assign_paths(assigns, model.node.as_str(), out),
+            WriteStmt::Update {
+                model,
+                where_,
+                assigns,
+            } => {
+                pred_paths(where_, model.node.as_str(), out);
+                assign_paths(assigns, model.node.as_str(), out);
+            }
+            WriteStmt::Delete { model, where_ }
+            | WriteStmt::Restore { model, where_ }
+            | WriteStmt::HardDelete { model, where_ } => {
+                pred_paths(where_, model.node.as_str(), out)
+            }
+            WriteStmt::Tx(inner) => write_paths(inner, out),
+            WriteStmt::Raw(_) => {}
+        }
+    }
+}
+
+/// A create/update's assign paths: the target column and any column-valued RHS.
+fn assign_paths<'a>(assigns: &'a [Assign], model: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    for a in assigns {
+        out.push((model, std::slice::from_ref(&a.col)));
+        value_paths(&a.value, model, out);
+    }
+}
+
+// ---- Hover renderers ("what", rust-analyzer baseline) -----------------------
+
+/// A `TypeExpr` as source writes it: base spelling + `?` (optional) + `[]` (many).
+fn type_str(ty: &TypeExpr) -> String {
+    let mut s = match &ty.base {
+        BaseType::Primitive(p) => primitive_str(*p).to_string(),
+        BaseType::Model(id) => id.node.clone(),
+    };
+    if ty.optional {
+        s.push('?');
+    }
+    if ty.many {
+        s.push_str("[]");
+    }
+    s
+}
+
+/// Primitive → its DSL spelling (`Id` keeps its casing, the rest lowercase).
+fn primitive_str(p: Primitive) -> &'static str {
+    match p {
+        Primitive::Text => "text",
+        Primitive::Int => "int",
+        Primitive::Bool => "bool",
+        Primitive::Timestamp => "timestamp",
+        Primitive::Date => "date",
+        Primitive::Json => "json",
+        Primitive::Uuid => "uuid",
+        Primitive::Id => "Id",
+    }
+}
+
+/// `$ctx.org` and the like, from a `ParamRef` (`$` + name + dotted path).
+fn paramref_str(pr: &ParamRef) -> String {
+    let mut s = format!("${}", pr.name.node);
+    for seg in &pr.path {
+        s.push('.');
+        s.push_str(&seg.node);
+    }
+    s
+}
+
+/// A field's hover: its `name: Type` signature, plus a cardinality note for relations.
+fn field_hover(f: &Field) -> String {
+    let sig = format!("{}: {}", f.name.node, type_str(&f.ty));
+    match &f.ty.base {
+        BaseType::Model(m) => {
+            let card = if f.ty.many { "to-many" } else { "to-one" };
+            format!("```based\n{sig}\n```\n{card} relation to `{}`", m.node)
+        }
+        BaseType::Primitive(_) => format!("```based\n{sig}\n```"),
+    }
+}
+
+/// A model's hover: `model Name` and its declared-field count.
+fn model_hover(m: &Model) -> String {
+    let n = m
+        .members
+        .iter()
+        .filter(|mem| matches!(mem, Member::Field(_)))
+        .count();
+    let plural = if n == 1 { "" } else { "s" };
+    format!("```based\nmodel {}\n```\n{n} field{plural}", m.name.node)
+}
+
+/// A shape's hover: `shape Name from Model`.
+fn shape_hover(s: &Shape) -> String {
+    format!("```based\nshape {} from {}\n```", s.name.node, s.from.node)
+}
+
+/// A scope's hover: `scope Name (col: Type = $ctx.field, …)`.
+fn scope_hover(s: &ScopeDecl) -> String {
+    let terms = s
+        .terms
+        .iter()
+        .map(|t| {
+            format!(
+                "{}: {} = {}",
+                t.col.node,
+                type_str(&t.ty),
+                paramref_str(&t.ctx)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("```based\nscope {} ({terms})\n```", s.name.node)
+}
+
+/// A query's hover: `query name(params) -> Ret[]`.
+fn query_hover(q: &Query) -> String {
+    let card = if q.ret.many { "[]" } else { "" };
+    format!(
+        "```based\nquery {}({}) -> {}{card}\n```",
+        q.name.node,
+        params_str(&q.params),
+        q.ret.ty.node,
+    )
+}
+
+/// A mutation's hover: `mutation name(params) -> Ret[]`.
+fn mutation_hover(m: &Mutation) -> String {
+    let card = if m.ret.many { "[]" } else { "" };
+    format!(
+        "```based\nmutation {}({}) -> {}{card}\n```",
+        m.name.node,
+        params_str(&m.params),
+        m.ret.ty.node,
+    )
+}
+
+/// A filter's hover: `filter name(params)`.
+fn filter_hover(f: &NamedFilter) -> String {
+    format!(
+        "```based\nfilter {}({})\n```",
+        f.name.node,
+        params_str(&f.params)
+    )
+}
+
+/// A parameter list rendered `name: Type` (type dropped when the param is untyped).
+fn params_str(params: &[Param]) -> String {
+    params
+        .iter()
+        .map(|p| match &p.ty {
+            Some(t) => format!("{}: {}", p.name.node, type_str(t)),
+            None => p.name.node.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Walk up `file`'s ancestor directories to the nearest one holding a `based.toml`,
 /// returning that directory — the manifest root that *owns* the file (the
 /// rust-analyzer / tsserver project-marker model). `None` when no ancestor has a
@@ -864,6 +1288,123 @@ mod tests {
             .expect("scoped resolves");
         assert_eq!(&src[d2.start as usize..d2.end as usize], "Tenant");
         assert_eq!(d2.start as usize, decl_at);
+    }
+
+    /// Go-to-definition on a *field-reference* path resolves each segment to the
+    /// field it names, walking through relations from the shape's `from` root — even
+    /// when the walk crosses into another file's model (`placed_by.name` → `User.name`).
+    #[test]
+    fn goto_definition_resolves_field_reference_path() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // `buyer = placed_by.name` in OrderCard (order/model.bsl).
+        let model_fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
+        let src = &snap.sources[model_fid].1;
+        let base = src.find("placed_by.name").unwrap();
+
+        // Cursor on `placed_by` → the `Order.placed_by` field decl, same file.
+        let def = snap
+            .definition_at(model_fid, (base + 1) as u32)
+            .expect("placed_by resolves");
+        let (dp, ds) = &snap.sources[def.file.0 as usize];
+        assert!(dp.ends_with("order/model.bsl"), "{dp:?}");
+        assert_eq!(&ds[def.start as usize..def.end as usize], "placed_by");
+
+        // Cursor on the trailing `.name` → the `User.name` field, in user/model.bsl.
+        let name_off = base + "placed_by.".len() + 1;
+        let ndef = snap
+            .definition_at(model_fid, name_off as u32)
+            .expect("name resolves through the relation");
+        let (np, nsrc) = &snap.sources[ndef.file.0 as usize];
+        assert!(np.ends_with("user/model.bsl"), "{np:?}");
+        assert_eq!(&nsrc[ndef.start as usize..ndef.end as usize], "name");
+
+        // A bare shape field (`status`) resolves to the local column, too.
+        let st = src.find("\n  status\n").map(|p| p + 3).unwrap();
+        let sdef = snap.definition_at(model_fid, st as u32).unwrap();
+        assert_eq!(
+            &src[sdef.start as usize..sdef.end as usize],
+            "status",
+            "bare shape field resolves to its column"
+        );
+    }
+
+    /// Hover gives a rust-analyzer-style "what" for the symbol under the cursor: a
+    /// field's `name: Type` (+ relation note), and model/shape signatures — for both
+    /// references and the declarations themselves.
+    #[test]
+    fn hover_reports_field_and_decl_signatures() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        let fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // The `placed_by: User` field declaration → its signature + relation note.
+        let decl = src.find("placed_by:").unwrap() + 1;
+        let h = snap.hover_at(fid, decl as u32).expect("field decl hover");
+        assert!(h.contains("placed_by: User"), "{h}");
+        assert!(h.contains("to-one relation to `User`"), "{h}");
+
+        // A field *reference* in the shape (`placed_by.name`) → the walked field.
+        let refoff = src.find("placed_by.name").unwrap() + "placed_by.".len() + 1;
+        let hr = snap.hover_at(fid, refoff as u32).expect("field ref hover");
+        assert!(hr.contains("name: text"), "{hr}");
+
+        // A model type reference (`items: OrderItem[]`) → `model OrderItem`.
+        let mref = src.find("OrderItem[]").unwrap() + 1;
+        let hm = snap.hover_at(fid, mref as u32).expect("model ref hover");
+        assert!(hm.contains("model OrderItem"), "{hm}");
+
+        // The shape's own name → `shape OrderCard from Order`.
+        let sh = src.find("OrderCard from Order").unwrap() + 1;
+        let hs = snap.hover_at(fid, sh as u32).expect("shape decl hover");
+        assert!(hs.contains("shape OrderCard from Order"), "{hs}");
+    }
+
+    /// Field-reference go-to-def reaches beyond shapes: a query block's `where`/`order`
+    /// columns and a mutation's create-assign columns all resolve to the model field,
+    /// rooted at the statement target / write model.
+    #[test]
+    fn goto_definition_resolves_query_and_mutation_columns() {
+        let ws = TempWorkspace::new("colrefs");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Widget { label: text  qty: int? }\n\
+             shape W from Widget { label }\n\
+             query find() -> W[] { list Widget where (qty > 0) order (label asc); }\n\
+             mutation add(l: text) -> W { create Widget { label = $l }; }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+        let label_decl = src.find("label: text").unwrap();
+
+        // `where (qty > 0)` → the `qty` column.
+        let qty = src.find("qty > 0").unwrap() + 1;
+        let d = snap.definition_at(fid, qty as u32).expect("where column");
+        assert_eq!(&src[d.start as usize..d.end as usize], "qty");
+
+        // `order (label asc)` → the `label` column (its declaration).
+        let ord = src.find("label asc").unwrap() + 1;
+        let d = snap.definition_at(fid, ord as u32).expect("order column");
+        assert_eq!(d.start as usize, label_decl);
+
+        // `create Widget { label = $l }` → the `label` column.
+        let asg = src.find("label = $l").unwrap() + 1;
+        let d = snap.definition_at(fid, asg as u32).expect("assign column");
+        assert_eq!(d.start as usize, label_decl);
     }
 
     /// Document symbols for a file expose its models (with fields nested), shapes,

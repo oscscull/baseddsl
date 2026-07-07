@@ -32,12 +32,17 @@ fn inferred_inverse_is_shown() {
     let fs = facts_of(TRAVERSAL);
     let inv = of_kind(&fs, FactKind::InferredInverse);
     assert_eq!(inv.len(), 1, "{fs:#?}");
-    assert_eq!(inv[0].label, "<- OrderItem via order");
+    // Terse label (the type `OrderItem[]` is already on the line); the forward edge
+    // it pairs through is the command-click target carried in `nav`.
+    assert_eq!(inv[0].label, "via order");
     assert!(
         inv[0].detail.contains("OrderItem.order"),
         "{}",
         inv[0].detail
     );
+    // `nav` points at the paired forward edge `OrderItem.order` so the inlay is
+    // followable (the LSP renders it as a clickable label part).
+    assert!(inv[0].nav.is_some(), "inverse fact carries a nav target");
 }
 
 #[test]

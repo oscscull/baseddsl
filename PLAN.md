@@ -122,6 +122,21 @@ their D#; open items carry full resume context. Delivery detail: `PLAN-archive.m
     debugging. **Acceptance:** each agreed gap implemented, capability-advertised, unit-tested against
     the commerce fixture, binary rebuilt. The **`based fmt` formatter** + `format-document` LSP
     directive are queued behind C4.
+  - **C4a. ✅ done (D51) (user-raised 2026-07-07). Navigation + hover depth.** Three editor
+    refinements the author noticed on the commerce `Order` model:
+    - **Inverse inlay hint.** Was `inverse <- OrderItem via order` (wordy; `OrderItem[]` already on
+      the line). Trim to `via order`, pushed to end-of-line, with the hint command-clickable to the
+      forward edge it pairs with (`OrderItem.order`). Full "why" stays on hover. *(Fact gains a
+      `nav` span → the paired forward member; LSP renders it as a clickable `InlayHintLabelPart`.)*
+    - **Field-reference go-to-def.** Extend go-to-def past model/scope references to *field* paths:
+      every `Path` segment in a shape body (`placed_by`, `placed_by.name`, `org.name`), a query
+      `where`/`order`, and a mutation write's `where`/assign resolves to the field it names — each
+      segment walked through relations from the statically-known root (shape `from`, query/statement
+      target, write model). Filters (polymorphic call-site root) stay out. This is the reference-site
+      resolver find-refs/rename will generalize.
+    - **Broad hover ("what", rust-analyzer baseline).** Hovering any resolvable symbol shows its
+      declaration: a field → `name: Type` (+ relation note), a model/shape/scope/callable reference or
+      its own decl name → a one-line signature. Appended above the existing derived-fact "why".
 
 **Track E — migration generation (DoD #5, independent, spec-first).** *Design settled 2026-07-06;
 recorded in `spec/syntax/migrations.md` + D37. Model: declarative `.bsl` source, versioned artifacts
@@ -211,7 +226,7 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
 | based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; `client` → typed Rust client; `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
-| based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50). Remaining C4: workspace symbols, find-refs, rename, folding. |
+| based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51). Remaining C4: workspace symbols, find-refs, rename, folding. |
 | based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select (D12). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
