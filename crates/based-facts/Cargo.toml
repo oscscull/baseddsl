@@ -11,3 +11,4 @@ based-sema.workspace = true
 
 [dev-dependencies]
 based-parser.workspace = true
+based-diagnostics.workspace = true

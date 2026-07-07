@@ -157,6 +157,7 @@ name = "based-facts"
 version = "0.0.0"
 dependencies = [
  "based-ast",
+ "based-diagnostics",
  "based-parser",
  "based-sema",
 ]

@@ -55,14 +55,25 @@ impl Snapshot {
     /// `Location` the editor jumps to — or `None` if the cursor is not on a type
     /// reference, or the referenced type is undeclared in this project.
     pub fn definition_at(&self, fid: usize, offset: u32) -> Option<Span> {
-        let target = collect_type_refs(&self.decls).into_iter().find(|id| {
+        let under = |id: &&Ident| {
             id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
-        })?;
-        self.decls.iter().find_map(|d| match d {
-            Decl::Model(m) if m.name.node == target.node => Some(m.name.span),
-            Decl::Shape(s) if s.name.node == target.node => Some(s.name.span),
-            _ => None,
-        })
+        };
+        // A model/shape type reference → that decl's name.
+        if let Some(target) = collect_type_refs(&self.decls).into_iter().find(under) {
+            return self.decls.iter().find_map(|d| match d {
+                Decl::Model(m) if m.name.node == target.node => Some(m.name.span),
+                Decl::Shape(s) if s.name.node == target.node => Some(s.name.span),
+                _ => None,
+            });
+        }
+        // A `@scope Name` / `scoped Name` reference → the `scope Name (…)` decl's name.
+        if let Some(target) = collect_scope_refs(&self.decls).into_iter().find(under) {
+            return self.decls.iter().find_map(|d| match d {
+                Decl::Scope(s) if s.name.node == target.node => Some(s.name.span),
+                _ => None,
+            });
+        }
+        None
     }
 
     /// Document symbols for file `fid` — the outline the editor shows (breadcrumbs
@@ -444,6 +455,34 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
     out
 }
 
+/// Every scope-name reference identifier across the AST, with its span — the sites a name
+/// *points at* a `scope` decl: `@scope Name[, …]` on a model, `scoped Name[, …]` on a
+/// query or mutation. Used for go-to-definition into the `scope` decl.
+fn collect_scope_refs(decls: &[Decl]) -> Vec<&Ident> {
+    let mut out = Vec::new();
+    for d in decls {
+        match d {
+            Decl::Model(m) => {
+                for r in &m.scopes {
+                    out.extend(r.names.iter());
+                }
+            }
+            Decl::Query(q) => {
+                if let Some(s) = &q.scoped {
+                    out.extend(s.names.iter());
+                }
+            }
+            Decl::Mutation(m) => {
+                if let Some(s) = &m.scoped {
+                    out.extend(s.names.iter());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The model reference in a type expression, if its base is a model (not a primitive).
 fn collect_type_expr<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Ident>) {
     if let BaseType::Model(id) = &ty.base {
@@ -777,6 +816,54 @@ mod tests {
         // Whitespace (a non-reference offset) resolves to nothing.
         let ws_off = src.find("\n  name").unwrap() as u32;
         assert_eq!(snap.definition_at(user_fid, ws_off), None);
+    }
+
+    /// Go-to-definition from a `@scope Name` (model) or `scoped Name` (callable)
+    /// reference resolves to the `scope Name (…)` decl's name span — the both-sides
+    /// scope contract is navigable from either reference.
+    #[test]
+    fn goto_definition_resolves_scope_reference() {
+        let ws = TempWorkspace::new("gotoscope");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "scope Tenant (org: Org = $ctx.org)\n\
+             Org { name: text }\n\
+             @scope Tenant\n\
+             Widget { org: Org  name: text }\n\
+             query widgets() -> Widget[] scoped Tenant { list Widget; }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // The `scope Tenant` decl's own name span (the definition target).
+        let decl_at = src.find("scope Tenant").unwrap() + "scope ".len();
+        let def_span = src[decl_at..decl_at + "Tenant".len()].to_string();
+        assert_eq!(def_span, "Tenant");
+
+        // From the `@scope Tenant` reference on the model.
+        let deco_ref = (src.find("@scope Tenant").unwrap() + "@scope ".len() + 1) as u32;
+        let d1 = snap.definition_at(fid, deco_ref).expect("@scope resolves");
+        assert_eq!(&src[d1.start as usize..d1.end as usize], "Tenant");
+        assert_eq!(d1.start as usize, decl_at);
+
+        // From the `scoped Tenant` reference on the query.
+        let scoped_ref = (src.find("scoped Tenant").unwrap() + "scoped ".len() + 1) as u32;
+        let d2 = snap
+            .definition_at(fid, scoped_ref)
+            .expect("scoped resolves");
+        assert_eq!(&src[d2.start as usize..d2.end as usize], "Tenant");
+        assert_eq!(d2.start as usize, decl_at);
     }
 
     /// Document symbols for a file expose its models (with fields nested), shapes,

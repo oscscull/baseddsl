@@ -1601,3 +1601,48 @@ commerce/codegen goldens are unchanged — the regression proof); only multi-alt
   G5); facts/LSP go-to-def/rename/hover over scope refs + the D4/D5-hover-scrub. The shard key stays the
   model's first scope term (D33); a per-callable-alternative shard key is not needed until multi-owner
   routing is exercised.
+
+## D50 — scope editor surface + `schema.snap` scope serializer + UI decision-ref scrub
+Implements D46/D47's iteration 3 (Track G, G5): the facts/LSP surface for named scopes, the migration
+snapshot serialization of scopes, and the user-directed scrub of internal decision-record refs from every
+editor-facing string. Closes Track G. Rename across scope refs stays deferred to the C4 rename iteration
+(it needs the full reference-site index C4 builds).
+- **Go-to-definition on scope refs (`based-lsp`).** `collect_scope_refs` collects every scope-name
+  reference ident — `@scope Name[, …]` on a model, `scoped Name[, …]` on a query/mutation — as the
+  reference-collection twin of the D43 `collect_type_refs`. `Snapshot::definition_at` first tries a
+  model/shape type ref (→ that decl's name), then a scope ref (→ the `scope Name (…)` decl's name span),
+  routed to the file's owning project like every other position request. No new LSP capability — the
+  D43 `definition_provider` already covers it. Rename is *not* built (deferred, C4).
+- **Scope hover (`based-facts`).** A new `FactKind::Scope`: `scope_facts` emits one span-anchored fact at
+  the `scope` decl's name and at every `@scope`/`scoped` reference, so hovering any of them explains the
+  contract. The detail is self-contained — the scope name, its `col = $ctx.field [and …]` filter, the
+  models it governs, and the `scoped …` / `unscoped("reason")` opt-in — no decision-record refs. It is
+  hover-only: the LSP `inlay_hint` skips `FactKind::Scope` (a scope is *written*, not a derived fact, so
+  it needs no inlay). Consumed by `based facts` + LSP hover unchanged.
+- **`schema.snap` scope serialization (`based-codegen::migrate`, extends D39).** The snapshot now records
+  named scopes: `Snapshot.scopes: Vec<ScopeDeclSnap>` renders as top-level `scope <Name> (<col>: <Type>
+  = $ctx.<field>, …)` lines (sorted by name, before the tables — the one place a scope column's/`$ctx`
+  field's type lives), and each `TableSnap` carries `scope_alts: Vec<Vec<String>>` (the DNF), rendered as
+  one `scope=(A, B)` header group per `@scope` alternative (commas = AND within a group, separate groups =
+  OR). Both round-trip (`render`/`parse`), stable-ordered (names sorted within an alternative, alternatives
+  sorted). A scope emits **no DDL** (it is an injected filter in generated code), so a scope change surfaces
+  as `Step::ScopeChange(ScopeChange::{Add,Drop,Alter,Table})` — a neutral, non-destructive step that renders
+  as an `up.mig` note / an SQL comment and produces zero executable statements, but *does* advance the
+  snapshot so `based migrate gen` captures a scope change and `verify`'s full-snapshot-equality drift check
+  stays honest (without it, a scope-only change would deadlock: gen writes nothing, verify sees drift). A
+  from-scratch `0001_init` (empty prior) emits **no** `ScopeChange` steps — the scopes ride `schema.snap`
+  and each table's `scope_alts` rides its `CreateTable`, so init stays create-only (its `up.mig` still
+  matches `based gen sql` from scratch, which emits no scope SQL). Commerce golden re-blessed (single-scope
+  `Tenant`): gains the `scope Tenant (org: Org = $ctx.org)` line and Order's `scope=(Tenant)` by-name entry.
+- **UI decision-ref scrub (user directive).** Every editor-facing string in `based-facts` (the four `Fact`
+  `detail`s + the `CtxRequirement` variant doc) that referenced a decision record (`D<n>`), a principle,
+  or a spec-doc filename (`.md`) was rewritten into clean, self-contained user prose. The known leak — the
+  `$ctx` hover's "inferred per-callable … (D4/D5). Nothing in source declares them" — is now false (a scope
+  field is *declared*) and gone: it reads "each field's type is fixed by the scope decl or the column it
+  binds to." The public diagnostic codes (`E01xx`/`W01xx`) are kept — legitimate user-facing identifiers.
+  A regression test (`no_editor_string_leaks_a_decision_or_principle_ref`) asserts no `Fact` label/detail
+  matches a `D\d`/`P\d`/"principle"/`.md` pattern.
+- **Tests.** `based-facts`: the scrub guard + a scope-hover test (4 anchors: decl + `@scope` + two
+  `scoped`). `based-codegen`: a multi-alternative (OR) scope round-trip + diff test (serialize/parse/diff
+  proven) + an init-omits-scope-steps test; commerce snapshot golden + round-trip updated. `based-lsp`: a
+  go-to-def test resolving both `@scope Tenant` and `scoped Tenant` to the decl.

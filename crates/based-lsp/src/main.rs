@@ -240,6 +240,8 @@ impl LanguageServer for Backend {
                 FactKind::InferredIndex | FactKind::CtxRequirement | FactKind::ResolvedQuery => {
                     idx.end_of_line(f.span.start as usize)
                 }
+                // A scope is written, not derived — it needs no inlay hint (hover only).
+                FactKind::Scope => continue,
             };
             if position < params.range.start || position > params.range.end {
                 continue;

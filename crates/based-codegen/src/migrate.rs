@@ -25,11 +25,17 @@
 //! ## `schema.snap` grammar (finalizing migrations.md's TODO)
 //! ```text
 //! snapshot v1 dialect=neutral
+//! scope <Name> (<col>: <Type> = $ctx.<field>, …)
 //!
-//! table <name> [soft_delete=<col>:<mode>] [scope=(<col> = $ctx.<field>, …)] [sort=(<col> <dir>, …)]
+//! table <name> [soft_delete=<col>:<mode>] [scope=(<Name>, …)]* [sort=(<col> <dir>, …)]
 //!   column <name> <type> null|not_null [default=<lit>] [unique] [fk=<Model>]
 //!   index  <name> (<col>, …) [unique] [inferred]
 //! ```
+//! Named scopes (auth.md Handle 2) serialize once as top-level `scope` decls (sorted by
+//! name, before the tables — the one place a scope column's/`$ctx` field's type lives) and
+//! are referenced on each governed table by name: one `scope=(…)` group per `@scope`
+//! alternative (the DNF — commas inside a group are the AND, separate groups the OR). A
+//! scope emits no DDL, so this is header/decl metadata that round-trips for the drift check.
 //! Every table opens with a `table` line and closes at the next `table`/EOF; its
 //! `column`/`index` lines are indented two spaces. The `id` column is elided when it
 //! is the default (`uuid`, not-null, not-unique) — a universally implicit invariant
@@ -47,8 +53,34 @@ use std::fmt::Write as _;
 /// `schema.snap` text ([`Snapshot::parse`]); a [`diff`] compares two of these.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Snapshot {
+    /// Named scope declarations (auth.md Handle 2), sorted by name and rendered above
+    /// the tables. A scope emits no DDL — it is an injected row-visibility filter in
+    /// generated code — but it is recorded here so a change to the contract (added,
+    /// dropped, renamed, or a term retyped) is captured in a reviewable migration and
+    /// caught by the offline drift check.
+    pub scopes: Vec<ScopeDeclSnap>,
     /// Tables, sorted by name — the stable order that makes a git diff readable.
     pub tables: Vec<TableSnap>,
+}
+
+/// A `scope Name (col: Type = $ctx.field, …)` decl, captured neutrally: the column, the
+/// declared type (a model name or a neutral primitive), and the `$ctx` field each term
+/// binds. The one place the scope column's — and `$ctx.field`'s — type lives (auth.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDeclSnap {
+    pub name: String,
+    /// Terms in declaration order.
+    pub terms: Vec<ScopeTermSnap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeTermSnap {
+    /// The scope column (the field a governed model must carry).
+    pub column: String,
+    /// The declared type — a model name (a relation) or a neutral primitive spelling.
+    pub ty: String,
+    /// The `$ctx.<field>` the column binds to.
+    pub ctx_field: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +92,11 @@ pub struct TableSnap {
     pub created: Option<String>,
     /// `@updated` engine-managed column (set on insert + every update, D2), if any.
     pub updated: Option<String>,
-    /// `@scope` terms as `(column, ctx_field)` pairs (D32), in declaration order.
-    pub scope: Vec<(String, String)>,
+    /// The model's `@scope` alternatives, each a set of scope names (auth.md DNF). One
+    /// entry per `@scope` decorator — `@scope A, B` is one alternative `["A", "B"]`, two
+    /// stacked `@scope` decorators are two alternatives. Canonicalized (names sorted
+    /// within an alternative, alternatives sorted) so the diff is stable. Empty = unscoped.
+    pub scope_alts: Vec<Vec<String>>,
     /// `@sort` terms as `(column, dir)` where dir is `asc`/`desc`, in declaration order.
     pub sort: Vec<(String, String)>,
     /// Columns, sorted by name.
@@ -104,7 +139,13 @@ impl Snapshot {
             .map(|m| table_snap(schema, m))
             .collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
-        Snapshot { tables }
+        let mut scopes: Vec<ScopeDeclSnap> = schema.scopes.iter().map(scope_decl_snap).collect();
+        scopes.sort_by(|a, b| a.name.cmp(&b.name));
+        Snapshot { scopes, tables }
+    }
+
+    pub fn scope(&self, name: &str) -> Option<&ScopeDeclSnap> {
+        self.scopes.iter().find(|s| s.name == name)
     }
 
     pub fn table(&self, name: &str) -> Option<&TableSnap> {
@@ -178,11 +219,53 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
         soft_delete: model.soft_delete.as_ref().map(soft_delete_snap),
         created: model.created.clone(),
         updated: model.updated.clone(),
-        scope: model.scope_terms(),
+        scope_alts: canonical_scope_alts(&model.scope_alts),
         sort: model.sort.iter().map(sort_term).collect(),
         columns,
         indexes,
     }
+}
+
+/// A resolved scope decl → its neutral snapshot form. The term type is a model name for a
+/// relation-typed scope column, or the neutral primitive spelling for a scalar one.
+fn scope_decl_snap(scope: &based_sema::RScope) -> ScopeDeclSnap {
+    ScopeDeclSnap {
+        name: scope.name.clone(),
+        terms: scope
+            .terms
+            .iter()
+            .map(|t| ScopeTermSnap {
+                column: t.column.clone(),
+                ty: scope_ty(&t.ty),
+                ctx_field: t.ctx_field.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// A scope term's declared type as neutral text: a relation is its model name; a scalar is
+/// the neutral primitive spelling (`Id` folds to `uuid`, matching the column type map).
+fn scope_ty(ty: &based_sema::CtxField) -> String {
+    match ty {
+        based_sema::CtxField::Relation(m) => m.clone(),
+        based_sema::CtxField::Scalar(p) => neutral_type(*p, false),
+    }
+}
+
+/// Canonicalize a model's `@scope` DNF alternatives for a stable, diff-friendly snapshot:
+/// sort names within each alternative, then sort and dedup the alternatives themselves.
+fn canonical_scope_alts(alts: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = alts
+        .iter()
+        .map(|alt| {
+            let mut a = alt.clone();
+            a.sort();
+            a
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Declared `@index`es + the inferred join-key baseline (D15), each resolved to
@@ -318,12 +401,27 @@ impl Snapshot {
         let mut out = String::new();
         out.push_str("# schema.snap — generated by `based migrate gen`; do not edit by hand.\n");
         out.push_str("snapshot v1 dialect=neutral\n");
+        for s in &self.scopes {
+            out.push_str(&render_scope_decl(s));
+            out.push('\n');
+        }
         for t in &self.tables {
             out.push('\n');
             render_table(&mut out, t);
         }
         out
     }
+}
+
+/// One `scope Name (col: Type = $ctx.field, …)` decl line.
+fn render_scope_decl(s: &ScopeDeclSnap) -> String {
+    let terms = s
+        .terms
+        .iter()
+        .map(|t| format!("{}: {} = $ctx.{}", t.column, t.ty, t.ctx_field))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("scope {} ({terms})", s.name)
 }
 
 fn render_table(out: &mut String, t: &TableSnap) {
@@ -337,14 +435,10 @@ fn render_table(out: &mut String, t: &TableSnap) {
     if let Some(col) = &t.updated {
         let _ = write!(header, " updated={col}");
     }
-    if !t.scope.is_empty() {
-        let terms = t
-            .scope
-            .iter()
-            .map(|(c, f)| format!("{c} = $ctx.{f}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = write!(header, " scope=({terms})");
+    // One `scope=(A, B)` group per `@scope` alternative (DNF): the commas inside a group
+    // are the AND-conjunction, separate groups are the OR-alternatives (auth.md).
+    for alt in &t.scope_alts {
+        let _ = write!(header, " scope=({})", alt.join(", "));
     }
     if !t.sort.is_empty() {
         let terms = t
@@ -416,6 +510,7 @@ impl Snapshot {
     ///
     /// [`render`]: Snapshot::render
     pub fn parse(text: &str) -> Result<Snapshot, ParseError> {
+        let mut scopes: Vec<ScopeDeclSnap> = Vec::new();
         let mut tables: Vec<TableSnap> = Vec::new();
         for (i, raw) in text.lines().enumerate() {
             let line_no = i + 1;
@@ -423,7 +518,9 @@ impl Snapshot {
             if line.is_empty() || line.starts_with('#') || line.starts_with("snapshot ") {
                 continue;
             }
-            if let Some(rest) = line.strip_prefix("table ") {
+            if let Some(rest) = line.strip_prefix("scope ") {
+                scopes.push(parse_scope_decl(rest, line_no)?);
+            } else if let Some(rest) = line.strip_prefix("table ") {
                 tables.push(parse_table_header(rest, line_no)?);
             } else if let Some(rest) = line.strip_prefix("column ") {
                 let t = tables.last_mut().ok_or_else(|| ParseError {
@@ -444,8 +541,47 @@ impl Snapshot {
                 });
             }
         }
-        Ok(Snapshot { tables })
+        Ok(Snapshot { scopes, tables })
     }
+}
+
+/// Parse a top-level `scope Name (col: Type = $ctx.field, …)` decl line.
+fn parse_scope_decl(rest: &str, line: usize) -> Result<ScopeDeclSnap, ParseError> {
+    let open = rest.find('(').ok_or_else(|| ParseError {
+        line,
+        message: format!("scope decl has no term list: {rest}"),
+    })?;
+    let name = rest[..open].trim().to_string();
+    if name.is_empty() {
+        return Err(ParseError {
+            line,
+            message: "scope decl has no name".to_string(),
+        });
+    }
+    let close = rest.rfind(')').ok_or_else(|| ParseError {
+        line,
+        message: format!("scope decl term list is not closed: {rest}"),
+    })?;
+    let inner = rest[open + 1..close].trim();
+    let mut terms = Vec::new();
+    if !inner.is_empty() {
+        for t in inner.split(',') {
+            let (col_ty, ctx) = t.split_once(" = $ctx.").ok_or_else(|| ParseError {
+                line,
+                message: format!("malformed scope term: {t}"),
+            })?;
+            let (col, ty) = col_ty.split_once(':').ok_or_else(|| ParseError {
+                line,
+                message: format!("scope term has no type: {t}"),
+            })?;
+            terms.push(ScopeTermSnap {
+                column: col.trim().to_string(),
+                ty: ty.trim().to_string(),
+                ctx_field: ctx.trim().to_string(),
+            });
+        }
+    }
+    Ok(ScopeDeclSnap { name, terms })
 }
 
 /// Split off a `key=(a, b, c)` group after `key=`, returning the inner terms and the
@@ -477,7 +613,7 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     let mut soft_delete = None;
     let mut created = None;
     let mut updated = None;
-    let mut scope = Vec::new();
+    let mut scope_alts = Vec::new();
     let mut sort = Vec::new();
 
     while !head.is_empty() {
@@ -498,14 +634,9 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
             let mut sp = after.splitn(2, char::is_whitespace);
             updated = Some(sp.next().unwrap_or("").to_string());
             head = sp.next().unwrap_or("").trim_start();
-        } else if let Some((terms, tail)) = take_group(head, "scope") {
-            for t in terms {
-                let (col, ctx) = t.split_once(" = $ctx.").ok_or_else(|| ParseError {
-                    line,
-                    message: format!("malformed scope term: {t}"),
-                })?;
-                scope.push((col.trim().to_string(), ctx.trim().to_string()));
-            }
+        } else if let Some((names, tail)) = take_group(head, "scope") {
+            // Each `scope=(A, B)` group is one `@scope` alternative (a name set).
+            scope_alts.push(names);
             head = tail;
         } else if let Some((terms, tail)) = take_group(head, "sort") {
             for t in terms {
@@ -531,7 +662,7 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
         soft_delete,
         created,
         updated,
-        scope,
+        scope_alts,
         sort,
         columns: Vec::new(),
         indexes: Vec::new(),
@@ -669,6 +800,28 @@ pub enum Step {
     AddUnique { table: String, index: IndexSnap },
     /// `drop unique <name>`.
     DropUnique { table: String, name: String },
+    /// A scope-contract change (auth.md Handle 2): a scope decl added/dropped/retyped, or a
+    /// model joining/leaving a scope. A scope emits **no DDL** (it is an injected filter in
+    /// generated code, not a DB object), so this renders as a neutral note and produces no
+    /// SQL — it exists so the change lands in a reviewable migration and advances the
+    /// snapshot, keeping the offline drift check honest.
+    ScopeChange(ScopeChange),
+}
+
+/// The kinds of scope-contract change a diff surfaces (auth.md / DNF). None emit SQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeChange {
+    /// A new `scope Name (…)` decl.
+    Add(ScopeDeclSnap),
+    /// A `scope Name` decl removed.
+    Drop(String),
+    /// A surviving `scope Name` decl whose terms changed; carries the new state.
+    Alter(ScopeDeclSnap),
+    /// A surviving table's `@scope` alternative set changed (joined/left/re-shaped a scope).
+    Table {
+        table: String,
+        alts: Vec<Vec<String>>,
+    },
 }
 
 /// One field-level change inside an [`Step::AlterColumn`].
@@ -753,7 +906,45 @@ pub fn diff_snapshots(prev: &Snapshot, now: &Snapshot) -> Vec<Step> {
         }
     }
 
+    diff_scopes(prev, now, &mut steps);
+
     steps
+}
+
+/// Diff the scope contract (top-level decls + membership on surviving tables). Emits
+/// no-DDL [`Step::ScopeChange`] steps so a scope-only change still produces a reviewable
+/// migration. Skipped for a from-scratch `0001_init` (empty prior): the initial scopes ride
+/// in `schema.snap` and each table's `scope_alts` rides its `CreateTable`, so init stays
+/// create-only (its `up.mig` matches `based gen sql` from scratch, which emits no scope SQL).
+fn diff_scopes(prev: &Snapshot, now: &Snapshot, steps: &mut Vec<Step>) {
+    if prev.tables.is_empty() && prev.scopes.is_empty() {
+        return;
+    }
+    // Scope decls added / retyped (present now).
+    for s in &now.scopes {
+        match prev.scope(&s.name) {
+            None => steps.push(Step::ScopeChange(ScopeChange::Add(s.clone()))),
+            Some(old) if old != s => steps.push(Step::ScopeChange(ScopeChange::Alter(s.clone()))),
+            Some(_) => {}
+        }
+    }
+    // Scope decls dropped (present before, absent now).
+    for s in &prev.scopes {
+        if now.scope(&s.name).is_none() {
+            steps.push(Step::ScopeChange(ScopeChange::Drop(s.name.clone())));
+        }
+    }
+    // Surviving tables whose `@scope` membership changed (joined/left/re-shaped).
+    for now_t in &now.tables {
+        if let Some(prev_t) = prev.table(&now_t.name) {
+            if prev_t.scope_alts != now_t.scope_alts {
+                steps.push(Step::ScopeChange(ScopeChange::Table {
+                    table: now_t.name.clone(),
+                    alts: now_t.scope_alts.clone(),
+                }));
+            }
+        }
+    }
 }
 
 fn diff_table(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
@@ -939,6 +1130,29 @@ fn render_step(out: &mut String, step: &Step) {
         Step::DropUnique { name, .. } => {
             let _ = writeln!(out, "drop unique {name}");
         }
+        Step::ScopeChange(sc) => {
+            let _ = writeln!(out, "{}  # code-level; no DDL", scope_change_line(sc));
+        }
+    }
+}
+
+/// The neutral `up.mig` line for a scope-contract change (no SQL is emitted for it).
+fn scope_change_line(sc: &ScopeChange) -> String {
+    match sc {
+        ScopeChange::Add(s) => render_scope_decl(s),
+        ScopeChange::Alter(s) => format!("alter {}", render_scope_decl(s)),
+        ScopeChange::Drop(name) => format!("drop scope {name}"),
+        ScopeChange::Table { table, alts } => {
+            let rhs = if alts.is_empty() {
+                "unscoped".to_string()
+            } else {
+                alts.iter()
+                    .map(|a| format!("({})", a.join(", ")))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("scope table {table} = {rhs}")
+        }
     }
 }
 
@@ -1007,6 +1221,15 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
     );
     for step in steps {
         out.push('\n');
+        // A scope change alters generated code, not the database — render it as a note.
+        if let Step::ScopeChange(sc) = step {
+            let _ = writeln!(
+                out,
+                "-- scope contract change (no DDL): {}",
+                scope_change_line(sc)
+            );
+            continue;
+        }
         if step.destructive() {
             out.push_str(
                 "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
@@ -1072,6 +1295,8 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
         Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
             vec![drop_index_sql(dialect, table, name)]
         }
+        // A scope change is code-level (an injected filter), not DDL — no SQL to run.
+        Step::ScopeChange(_) => vec![],
     })
 }
 
@@ -1355,22 +1580,37 @@ mod tests {
             soft_delete: None,
             created: None,
             updated: None,
-            scope: Vec::new(),
+            scope_alts: Vec::new(),
             sort: Vec::new(),
             columns,
             indexes: Vec::new(),
         }
     }
 
+    fn scope_decl(name: &str, terms: &[(&str, &str, &str)]) -> ScopeDeclSnap {
+        ScopeDeclSnap {
+            name: name.to_string(),
+            terms: terms
+                .iter()
+                .map(|(c, t, f)| ScopeTermSnap {
+                    column: c.to_string(),
+                    ty: t.to_string(),
+                    ctx_field: f.to_string(),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn render_then_parse_round_trips_every_attribute() {
         let snap = Snapshot {
+            scopes: vec![scope_decl("Tenant", &[("org", "Org", "org")])],
             tables: vec![TableSnap {
                 name: "order".to_string(),
                 soft_delete: Some(("deleted_at".to_string(), "timestamp".to_string())),
                 created: Some("created_at".to_string()),
                 updated: Some("updated_at".to_string()),
-                scope: vec![("org".to_string(), "org".to_string())],
+                scope_alts: vec![vec!["Tenant".to_string()]],
                 sort: vec![("placed_at".to_string(), "desc".to_string())],
                 columns: vec![
                     ColumnSnap {
@@ -1408,6 +1648,7 @@ mod tests {
         let mut c = col("label", "text", false);
         c.default = Some("\"in progress\"".to_string());
         let snap = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("job", vec![c])],
         };
         let parsed = Snapshot::parse(&snap.render()).expect("parse");
@@ -1417,6 +1658,7 @@ mod tests {
     #[test]
     fn init_diff_from_empty_is_a_full_create_set() {
         let now = Snapshot {
+            scopes: Vec::new(),
             tables: vec![
                 table("a", vec![col("x", "int", false)]),
                 table("b", vec![col("y", "text", true)]),
@@ -1431,6 +1673,7 @@ mod tests {
     #[test]
     fn add_column_and_add_index_between_versions() {
         let prev = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("product", vec![col("name", "text", false)])],
         };
         let mut now_t = table(
@@ -1444,6 +1687,7 @@ mod tests {
             inferred: false,
         });
         let now = Snapshot {
+            scopes: Vec::new(),
             tables: vec![now_t],
         };
         let steps = diff_snapshots(&prev, &now);
@@ -1459,12 +1703,14 @@ mod tests {
     #[test]
     fn dropping_a_column_and_a_table_is_destructive() {
         let prev = Snapshot {
+            scopes: Vec::new(),
             tables: vec![
                 table("keep", vec![col("a", "int", false), col("b", "int", false)]),
                 table("gone", vec![col("c", "int", false)]),
             ],
         };
         let now = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("keep", vec![col("a", "int", false)])],
         };
         let steps = diff_snapshots(&prev, &now);
@@ -1482,10 +1728,12 @@ mod tests {
     #[test]
     fn narrowing_type_and_new_not_null_without_default_are_destructive() {
         let prev = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("t", vec![col("v", "text", true)])],
         };
         // text -> int (narrowing) AND null -> not_null with no default.
         let now = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("t", vec![col("v", "int", false)])],
         };
         let steps = diff_snapshots(&prev, &now);
@@ -1494,9 +1742,11 @@ mod tests {
 
         // The inverse — widening int -> text and relaxing not_null -> null — is safe.
         let prev2 = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("t", vec![col("v", "int", false)])],
         };
         let now2 = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("t", vec![col("v", "text", true)])],
         };
         let steps2 = diff_snapshots(&prev2, &now2);
@@ -1507,6 +1757,7 @@ mod tests {
     #[test]
     fn adding_a_unique_index_is_destructive_over_existing_data() {
         let prev = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("t", vec![col("email", "text", false)])],
         };
         let mut now_t = table("t", vec![col("email", "text", false)]);
@@ -1517,6 +1768,7 @@ mod tests {
             inferred: false,
         });
         let now = Snapshot {
+            scopes: Vec::new(),
             tables: vec![now_t],
         };
         let steps = diff_snapshots(&prev, &now);
@@ -1528,9 +1780,96 @@ mod tests {
     #[test]
     fn no_changes_yields_no_steps() {
         let snap = Snapshot {
+            scopes: Vec::new(),
             tables: vec![table("t", vec![col("a", "int", false)])],
         };
         assert!(diff_snapshots(&snap, &snap).is_empty());
+    }
+
+    /// A multi-alternative (OR) scope round-trips through render/parse and its addition,
+    /// term change, and a model joining a second alternative each surface as diff steps.
+    #[test]
+    fn multi_alternative_scope_serializes_parses_and_diffs() {
+        // `Post` is scoped either by page OR by author — two stacked `@scope` decorators.
+        let mut post = table("post", vec![col("body", "text", false)]);
+        post.columns.push(col("page_id", "uuid", false));
+        post.columns.push(col("author_id", "uuid", false));
+        post.scope_alts = vec![vec!["Author".to_string()], vec!["Page".to_string()]];
+        let now = Snapshot {
+            scopes: vec![
+                scope_decl("Author", &[("author", "User", "user")]),
+                scope_decl("Page", &[("page", "Page", "page")]),
+            ],
+            tables: vec![post.clone()],
+        };
+
+        // Round-trip: both the OR alternatives and the two top-level decls survive.
+        let text = now.render();
+        assert!(
+            text.contains("scope Author (author: User = $ctx.user)"),
+            "\n{text}"
+        );
+        assert!(
+            text.contains("scope Page (page: Page = $ctx.page)"),
+            "\n{text}"
+        );
+        assert!(text.contains("scope=(Author) scope=(Page)"), "\n{text}");
+        assert_eq!(Snapshot::parse(&text).expect("round-trip"), now, "\n{text}");
+
+        // From a prior with only the `Page` scope + a `Post` scoped by page alone: adding
+        // the `Author` scope decl and Post joining it both surface (no DDL, but stepped).
+        let mut prev_post = table("post", vec![col("body", "text", false)]);
+        prev_post.columns.push(col("page_id", "uuid", false));
+        prev_post.columns.push(col("author_id", "uuid", false));
+        prev_post.scope_alts = vec![vec!["Page".to_string()]];
+        let prev = Snapshot {
+            scopes: vec![scope_decl("Page", &[("page", "Page", "page")])],
+            tables: vec![prev_post],
+        };
+        let steps = diff_snapshots(&prev, &now);
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::ScopeChange(ScopeChange::Add(d)) if d.name == "Author")),
+            "{steps:?}"
+        );
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::ScopeChange(ScopeChange::Table { table, .. }) if table == "post")),
+            "{steps:?}"
+        );
+        // Scope changes are code-level, never destructive, and emit no SQL.
+        assert!(steps.iter().all(|s| !s.destructive()));
+        assert!(sql_statements(&steps, MariaDb).unwrap().is_empty());
+
+        // Dropping a scope and retyping a term both surface too.
+        let mut now2 = now.clone();
+        now2.scopes[0].terms[0].ctx_field = "actor".to_string(); // Author term retyped
+        now2.scopes.remove(1); // Page dropped
+        now2.tables[0].scope_alts = vec![vec!["Author".to_string()]];
+        let steps2 = diff_snapshots(&now, &now2);
+        assert!(steps2
+            .iter()
+            .any(|s| matches!(s, Step::ScopeChange(ScopeChange::Alter(d)) if d.name == "Author")));
+        assert!(steps2
+            .iter()
+            .any(|s| matches!(s, Step::ScopeChange(ScopeChange::Drop(n)) if n == "Page")));
+    }
+
+    /// A from-scratch `0001_init` stays create-only even with scopes: the scope contract
+    /// rides `schema.snap` + each `CreateTable`'s `scope_alts`, so no `ScopeChange` steps.
+    #[test]
+    fn init_diff_omits_scope_change_steps() {
+        let mut t = table("post", vec![col("body", "text", false)]);
+        t.scope_alts = vec![vec!["Page".to_string()]];
+        let now = Snapshot {
+            scopes: vec![scope_decl("Page", &[("page", "Page", "page")])],
+            tables: vec![t],
+        };
+        let steps = diff_snapshots(&Snapshot::default(), &now);
+        assert!(
+            steps.iter().all(|s| matches!(s, Step::CreateTable(_))),
+            "{steps:?}"
+        );
     }
 
     // ---- E3: per-dialect SQL rendering ----------------------------------
