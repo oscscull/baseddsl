@@ -39,8 +39,15 @@ member      = field | index_decl | soft_override ;
 (* predicate (the predicate lives in the `scope` decl — P4). Every other decorator *)
 (* takes the generic parenthesized-args form. `@scope Name(field)` — a per-model   *)
 (* scope-column override — is reserved but not yet accepted (D46).                 *)
+(* Multi-scope (D47): `@scope` is REPEATABLE and its names are comma-separated.     *)
+(* The stack is a disjunction of conjunctions (DNF): commas WITHIN one `@scope`     *)
+(* are an AND-conjunction (one alternative — all named axes required together);     *)
+(* the repeated decorators are OR-alternatives (each a valid confinement). So       *)
+(* `@scope Page, Author` = one alternative {Page ∧ Author}; `@scope Page` +         *)
+(* `@scope Author` on two lines = two alternatives {Page},{Author}. No new syntax:  *)
+(* comma = AND, new line = OR.                                                      *)
 model_deco  = scope_deco | decorator ;
-scope_deco  = '@scope' scope_name ;    (* @scope Tenant — mirrors @index barcode  *)
+scope_deco  = '@scope' scope_name { ',' scope_name } ;  (* one alternative (AND); repeatable = OR *)
 
 (* Decorators stack above the model, one per line; never positional on header. *)
 decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
@@ -124,10 +131,13 @@ query       = 'query' query_name '(' [ params ] ')' '->' ret_type
               [ scope_ack ] ( query_inline | query_block | ';' ) ;
 query_name  = lower_ident ;
 
-(* Per-callable scope acknowledgement (auth.md Handle 2 / D32 / D46). A callable      *)
+(* Per-callable scope acknowledgement (auth.md Handle 2 / D32 / D46 / D47). A callable *)
 (* whose target model is in a scope MUST carry exactly one of these (else E0182):     *)
-(*  - `scoped Name[, Name]*` accepts the standing scope(s) — one name per scoped       *)
-(*    model it touches (root + joined reaches, D34); the set must match exactly (E0185).*)
+(*  - `scoped Name[, Name]*` accepts standing scope(s). The named axis set must be a   *)
+(*    SUPERSET of ≥1 declared `@scope` alternative for EACH scoped model it touches     *)
+(*    (root + joined reaches, D34) — too few axes to satisfy any alternative, or an     *)
+(*    axis no touched model declares, is E0185 (D47). An AND model needs both axes; an  *)
+(*    OR model is satisfied by either.                                                  *)
 (*  - `unscoped("reason")` opts the one callable out of ALL scope handling (cross-scope *)
 (*    admin/support/jobs). Mandatory reason — an escape hatch is never silent (P6);    *)
 (*    greppable + linted (W0106). The two are mutually exclusive.                       *)

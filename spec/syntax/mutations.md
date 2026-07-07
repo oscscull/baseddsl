@@ -29,8 +29,10 @@ tx {
 ## Scope acknowledgement (`scoped` / `unscoped`)
 A mutation whose target model is in a scope **must** acknowledge it (auth.md Handle 2 / D46), exactly
 like a query — `scoped Name` (accept) or `unscoped("reason")` (opt out), else `E0182`. The clause sits
-after any `guard`, before the body. On a scoped `create` the scope column is engine-managed (auto-set
-from `$ctx`, never a param — assigning it is `E0181`):
+after any `guard`, before the body. A model with several `@scope` alternatives (OR, D47) is satisfied by
+naming **one**. On a scoped `create` the scope columns are engine-managed (auto-set from `$ctx`, never a
+param — assigning one is `E0181`); the create **must satisfy ≥1 alternative** (all axes of some `@scope`
+set, so no row lands unowned), else `E0186`:
 ```
 mutation place_order(buyer: Id, total: int) -> OrderCard scoped Tenant {
   create Order { placed_by = $buyer, total = $total };   # `org` auto-set from $ctx

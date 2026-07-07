@@ -1476,3 +1476,40 @@ consequential contract. This is **spec-only**; parser/sema/codegen follow in lat
   type on the column side (chosen: it doubles as the governed-model column contract) vs. annotating the
   ctx field (`col = $ctx.field: Type`); (2) whether the per-model column override (`@scope Name(field)`)
   should ship in v1 or stay reserved (chosen: reserved/deferred).
+
+## D47 — multi-scope: `@scope` repeatable; AND (one decorator) / OR (stacked) alternatives (DNF)
+Generalizes D46's single scope-per-model to a **set** of scopes, settled with the user 2026-07-07. The
+`scope` **decl** is unchanged (D46 — `scope Name (col: Type = $ctx.field, …)`, predicate a conjunction of
+`col = $ctx.field`, the one place a scope field's `$ctx` type is declared); only the *model reference*
+and the *callable/create semantics* generalize. Revises D46.
+- **`@scope` is repeatable; the stack is a disjunction of conjunctions (DNF).** Commas *within* one
+  `@scope` decorator are an AND-conjunction — **one alternative**, all named axes required together.
+  Stacked `@scope` decorators are OR-alternatives. `@scope Page, Author` = one alternative `{Page ∧
+  Author}`; `@scope Page` + `@scope Author` (two lines) = two alternatives `{Page}`, `{Author}`; mixing
+  gives `(Page ∧ Author) ∨ Admin`. No new syntax — comma is AND, new line is OR (grammar `scope_deco`
+  now `'@scope' scope_name { ',' scope_name }`, repeatable via the existing `{ model_deco }`).
+- **Syntax rationale.** Each `@scope` decorator declares *one valid way to be scoped* (one confinement).
+  Stacking = "any of these confinements is acceptable"; commas = "this confinement needs all of these
+  axes." Reads top-to-bottom as an enumeration of the sanctioned confinements — a static, greppable
+  contract, never a runtime disjunction.
+- **The uniform callable rule.** A callable must confine by a set of scope axes that is a **superset of
+  at least one** declared `@scope` alternative of *each* scoped model it touches (root + D34 joined
+  reaches) — else `unscoped("reason")`. AND model → `scoped` must name both axes; OR model → either
+  alternative's axes suffice. Naming extra/narrower axes is safe (more confinement never leaks); naming
+  an axis no touched model declares, or too few to satisfy any alternative, is `E0185` (revised from
+  D46's "set ≠ actual set" to "⊇ one alternative"). Reads inject the **conjunction of the named axes**
+  into every `WHERE` + joined `ON` (the chosen alternative). This vindicates the user's earlier
+  "input ⊇ allowed scopes" intuition, made precise to confinement axes.
+- **Create safety (`E0186`, new).** Scope columns stay engine-managed (`E0181` — a create can't assign
+  them). A create auto-sets every scope column whose `$ctx` field is available and **must satisfy ≥1 of
+  the target model's alternatives** (all axes of some `@scope` set), so no row is created unowned —
+  closing the accidentally-unfiltered hole on the *write* side. A create that can satisfy no alternative,
+  or whose required non-null scope column has no `$ctx` value, is `E0186`.
+- **Error set (revises D46).** `E0182`/`E0183`/`E0180`/`E0181`/`W0106` unchanged; `E0184` unchanged, now
+  checked per `@scope` decorator. `E0185` **revised** to the superset-of-an-alternative rule. `E0186`
+  **new** (create satisfies no alternative / required non-null scope col absent).
+- **Guard boundary (unchanged, sharpened).** Multiple `@scope` alternatives are still *static*
+  confinement — a callable picks **one** at author time, and the returned row set differs by which
+  (`posts_on_page` ≠ `my_posts`). A *runtime* `WHERE a OR b` where the returned data is identical and you
+  only check a credential stays Handle 3 (`guard`), NOT a scope. Rule: disjunction that changes *which
+  rows* → `@scope` alternatives; disjunction that only gates *whether the same rows* → `guard`.
