@@ -123,12 +123,18 @@ stay deferred — worked only if they land on the critical path or a user would 
 > ancestors and compiles one snapshot per project, so embedded schemas (the "ride along inside a Rust repo"
 > case) resolve cross-file references. See Track C3 below for the resume note.
 >
-> 🔴 **NEXT PRIORITY — Track C4 (VS Code extension feature-parity audit + fill-in).** The user's framing: the
-> LSP exists to *power* editor tooling, not the reverse — the extension was built bottom-up from what the engine
-> derived, so table-stakes IDE features got skipped (go-to-def was missing until a user hit it, now D43). Before
-> anything else on Track C, audit the extension against a normal language extension's baseline (document symbols,
-> completion, workspace symbols, find-refs/rename, folding) and fill the expected gaps — **nothing exotic**. Full
-> item under Track C4 below.
+> 🔴 **NEXT PRIORITY — Track G (named scope — a user-raised language change).** Scope becomes a first-class
+> **named** declaration referenced on both sides (`scope Name (col: Type = $ctx.field)`, `@scope Name` on the
+> model, `scoped Name` on the callable). The user's framing (2026-07-07): "a scope contract this important must
+> be *written, not implied*" — the old `@scope(pred)` inferred the `$ctx` type per callable and only *showed* it
+> as an editor hint (D4/D5), which principle 2 forbids for a consequential contract. **Spec landed (D46);
+> implementation follows in ordered iterations — see Track G below.** Higher priority than the remaining C4 gaps.
+>
+> **Track C4 (VS Code feature-parity fill-in)** is queued *behind* Track G — remaining: workspace symbols,
+> find-refs, rename, folding (document symbols D44 + completion D45 done). The **D4/D5-hover scrub** (strip
+> `(D4/D5)`/any D-number from editor-facing strings — D46 removes the scope-field inference that leaked it, but
+> the impl must not reintroduce D-numbers anywhere in hints/hover) and a **`based fmt` formatter** are queued
+> behind C4. Full item under Track C4 below.
 
 Five tracks. **A, C, and E are independent** (Rust drivers vs. TypeScript extension vs. the migration
 engine — no shared files) so a coordinator may run them as parallel batches. B depends on A. D closes
@@ -357,6 +363,47 @@ the user; see the decision block below. `spec/syntax/migrations.md` is written b
     apply half is met.** *Deferred:* multi-instance apply coordination (racing deployers — parallels D25);
     `@was` renames + the LSP drift diagnostic (E5); the `raw(dialect)` up step.
   - E5. **`@was` rename directive** (sema) + the **offline schema-vs-migrations LSP drift diagnostic**.
+
+**Track G — named scope (DoD-adjacent language change, NEXT PRIORITY; user-raised 2026-07-07).**
+*Spec settled in **D46** + rewritten auth.md Handle 2 + grammar (`scope_decl`, `scope_deco`, `scoped_clause`).*
+Scope is now a first-class **named** declaration referenced by name on both sides — the model
+(`@scope Name`) and every callable that touches it (`scoped Name`), the escape hatch `unscoped("reason")`
+unchanged. Motivation: a scope contract this important must be **written, not implied** (principle 2) —
+the old `@scope(pred)` inferred the `$ctx` type per callable (D4/D5) and only *showed* it as an editor
+hint, the exact anti-pattern the user objected to. Implementation iterations (top-down; each its own
+`cargo test`/`fmt`/`clippy`-green commit):
+  - G1. **Parser + AST.** New `Decl::Scope` (`scope Name (col: Type = $ctx.field, …)`, grammar
+    `scope_decl`); the `@scope Name` bare-name model-decorator form (grammar `scope_deco` — distinct from
+    the generic parenthesized decorator, like `@index barcode`); the callable `scoped Name[, Name]*`
+    clause (grammar `scoped_clause`) alongside the unchanged `unscoped_clause`; `scope`/`scoped` added to
+    the positional-keyword set (D8). Golden/unit parser tests.
+  - G2. **Sema — resolution + errors + coherence.** Resolve `scope` decls (predicate = the D32 restricted
+    conjunction, now checked at the decl site → `E0180`); resolve `@scope Name` / `scoped Name` refs
+    (`E0183` unknown scope); check each `@scope` model carries the scope's column at a conforming type
+    (`E0184`); enforce the **required-declaration rule** — a scoped callable with neither `scoped` nor
+    `unscoped` is `E0182`; check the `scoped` set equals the callable's actual scope set (root + D34 joined
+    reaches) → `E0185`. Source the scope field's `$ctx` **type from the decl** (ending the D4/D5 inference
+    for it); `E0161` coherence becomes structural for the scope field (still fires for non-scope `$ctx`).
+    `E0181` (create assigns scope col) + `W0106` (stale unscoped) carry over. Duplicate `scope` name via the
+    general duplicate-decl path. Retarget `RModel.scope`/`scope_terms()` onto the named decl.
+  - G3. **Codegen + runtime.** Inject each named scope's predicate off the resolved decl — the *same*
+    root-`WHERE` / write-`WHERE` / joined-`ON` / create-auto-set injection D32/D34 already emit, now sourced
+    from the `scope` decl instead of the inline `@scope(pred)`. Bind stays `:ctx_<field>` (shard key D33
+    reads the same field). No SQL should change vs. today's inline form for an equivalent schema (a good
+    regression check).
+  - G4. **Commerce migration to the new syntax.** Rewrite `spec/examples/commerce` `.bsl`: add
+    `scope Tenant (org: Org = $ctx.org)`, put `@scope Tenant` on `Order` (and a second scoped model —
+    OrderItem gains `org: Org` — to exercise multi-scope + joined-`ON`), annotate every Order/OrderItem
+    callable with `scoped Tenant` (or `unscoped(…)` for the admin lookup). Re-bless conformance goldens +
+    the sema commerce-clean test. **Do this only once G1–G3 land** (the parser must accept the new syntax
+    first — this iteration deliberately left commerce on the old `@scope(pred)`).
+  - G5. **Facts/LSP + migration snapshot.** Facts/LSP: go-to-def from `@scope Name` / `scoped Name` to the
+    `scope` decl, rename across refs, hover naming the scope — and **scrub all D-numbers from editor-facing
+    strings** (the `(D4/D5)` hover leak the user reported; this design removes its source, the impl must not
+    reintroduce it). Migration snapshot (E-track coordination, D46/D39): serialize the `scope` decls as
+    top-level `scope <Name> (…)` lines + record each table's scope **by name** (`scope=<Name>`) in
+    `schema.snap`, round-trippable so offline diff detects a scope rename / added term / model
+    joining-or-leaving a scope. **Flag to whoever owns Track E** — it is a `schema.snap` serializer change.
 
 **Track D — deploy + keep-proven (DoD #4, last).**
   - D1. Dockerfile / image for `based serve` (health/readiness + graceful drain behaviour already

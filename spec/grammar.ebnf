@@ -24,15 +24,23 @@
 (* enforced (decisions.md D6/D9).                                               *)
 
 file        = { decl } ;
-decl        = model | shape | query | mutation | named_filter ;
+decl        = model | shape | scope_decl | query | mutation | named_filter ;
 sep         = NEWLINE | ',' ;          (* item separator inside blocks/files   *)
 
 (* ---------- Models -------------------------------------------------------- *)
 
-model       = { decorator } model_name '{' { member sep } [ member ] '}' ;
+model       = { model_deco } model_name '{' { member sep } [ member ] '}' ;
 model_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
 
 member      = field | index_decl | soft_override ;
+
+(* A model header stacks decorators, one per line. `@scope Name` is a distinct    *)
+(* form (D46): it references a top-level `scope` decl by name, no parenthesized    *)
+(* predicate (the predicate lives in the `scope` decl — P4). Every other decorator *)
+(* takes the generic parenthesized-args form. `@scope Name(field)` — a per-model   *)
+(* scope-column override — is reserved but not yet accepted (D46).                 *)
+model_deco  = scope_deco | decorator ;
+scope_deco  = '@scope' scope_name ;    (* @scope Tenant — mirrors @index barcode  *)
 
 (* Decorators stack above the model, one per line; never positional on header. *)
 decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
@@ -99,16 +107,33 @@ bare_field  = lower_ident ;
 out_name    = lower_ident ;
 shape_value = path | raw_sql ;                 (* dotted traversal OR raw value*)
 
+(* ---------- Scopes (auth.md Handle 2, D46) -------------------------------- *)
+(* A named row-visibility contract, declared once and referenced by name on the     *)
+(* model it governs (`@scope Name`) and every callable that touches it (`scoped      *)
+(* Name`). The predicate is the D32 restricted form — a conjunction of `col =        *)
+(* $ctx.field` equalities — with the column's (and thus $ctx field's) type declared  *)
+(* here (D46), which sources the scope field's type instead of D4/D5 inference.      *)
+
+scope_decl  = 'scope' scope_name '(' scope_term { ',' scope_term } ')' ;
+scope_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
+scope_term  = column_name ':' type_expr '=' param_ref ;   (* col: Type = $ctx.field *)
+
 (* ---------- Queries ------------------------------------------------------- *)
 
 query       = 'query' query_name '(' [ params ] ')' '->' ret_type
-              [ unscoped_clause ] ( query_inline | query_block | ';' ) ;
+              [ scope_ack ] ( query_inline | query_block | ';' ) ;
 query_name  = lower_ident ;
 
-(* Per-callable `@scope` opt-out (auth.md Handle 2 / D32): cross-scope access        *)
-(* (admin/support/jobs). Mandatory reason string — an escape hatch is never silent   *)
-(* (principle 6). Greppable + linted (W0106). Sits after the return type on a query, *)
-(* after any `guard` on a mutation.                                                  *)
+(* Per-callable scope acknowledgement (auth.md Handle 2 / D32 / D46). A callable      *)
+(* whose target model is in a scope MUST carry exactly one of these (else E0182):     *)
+(*  - `scoped Name[, Name]*` accepts the standing scope(s) — one name per scoped       *)
+(*    model it touches (root + joined reaches, D34); the set must match exactly (E0185).*)
+(*  - `unscoped("reason")` opts the one callable out of ALL scope handling (cross-scope *)
+(*    admin/support/jobs). Mandatory reason — an escape hatch is never silent (P6);    *)
+(*    greppable + linted (W0106). The two are mutually exclusive.                       *)
+(* Sits after the return type on a query, after any `guard` on a mutation.            *)
+scope_ack       = scoped_clause | unscoped_clause ;
+scoped_clause   = 'scoped' scope_name { ',' scope_name } ;   (* mirrors `guard name` *)
 unscoped_clause = 'unscoped' '(' STRING ')' ;
 
 (* Bare/per-param/full all share the param list; binding rides each param.     *)
@@ -134,7 +159,7 @@ query_block = '{' statement '}' ;       (* one read statement, ';'-terminated  *
 (* ---------- Mutations ----------------------------------------------------- *)
 
 mutation    = 'mutation' query_name '(' [ params ] ')' '->' ret_type
-              [ 'guard' guard_name ] [ unscoped_clause ] mut_block ;
+              [ 'guard' guard_name ] [ scope_ack ] mut_block ;
 guard_name  = lower_ident ;             (* host-language fn (auth.md Handle 3)  *)
 mut_block   = '{' { write_stmt sep } [ write_stmt ] '}' ;
 
@@ -223,6 +248,8 @@ raw_char    = ? any char except '`' and an interp opener ? ;
 (* grammar expects one; elsewhere it is an ordinary ident. A field may thus be   *)
 (* named `order:` even though `order (...)` is a clause. Legacy keyword-named    *)
 (* columns/tables may also be aliased via (column "...") / @table("...").        *)
+(* Keyword-in-position set additionally includes `scope` (decl head + `@scope`)  *)
+(* and `scoped` (the callable acknowledgement) — D46; both contextual.           *)
 ident       = lower_ident | upper_ident ;
 lower_ident = lower_alpha { alnum | '_' } ;
 upper_ident = upper_alpha { alnum } ;   (* UpperCamel model references         *)

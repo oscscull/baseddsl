@@ -117,8 +117,8 @@ Keywords are recognized **positionally**: an identifier is read as a keyword onl
 grammar expects one, and may otherwise be used as an ordinary identifier. The set of words
 that are keyword-in-position:
 `get list create update delete restore hard tx where order page offset count with guard
-from shape query mutation filter unindexed unsafe unscoped on column table by has in not and or
-true false null now`.
+from shape scope scoped query mutation filter unindexed unsafe unscoped on column table by has in
+not and or true false null now`.
 
 Why not global reservation: the canonical `OrderItem` model names a field `order:` (a would-be
 reserved word), and the same word is the `order (...)` clause keyword — so the two coexist in
@@ -1420,3 +1420,59 @@ The gap the C4 audit calls the one an author feels constantly, and the next C4 f
 - **No fuzzy ranking / snippets** — each item is a bare label + kind; the client filters by the typed prefix.
   The reference-site index that find-references + rename will reuse is still the deferred go-to-def resume
   point (`collect_type_refs` finds one use under the cursor, not all uses of a symbol).
+
+## D46 — named scope: a `scope` decl referenced by `@scope Name` / `scoped Name` (spec-only)
+Promotes `@scope` from an inline, inferred, editor-hint-only predicate (D32) to a **first-class named
+declaration referenced on both sides** — the model it governs and every callable that touches it. The
+user's framing (2026-07-07): "declare it like a shape, reference it briefly on both sides; a scope
+contract this important must be **written, not implied**." The old form was implied (the `$ctx` type
+was *inferred* per callable and only *shown* as an editor hint, D4/D5) — principle 2 forbids that for a
+consequential contract. This is **spec-only**; parser/sema/codegen follow in later iterations (see PLAN).
+- **`scope Name (col: Type = $ctx.field, …)` — the decl** (grammar `scope_decl`, a new top-level `decl`).
+  The predicate keeps the D32 restricted form (a conjunction of `col = $ctx.field` equalities, `E0180`) —
+  that restriction is still what makes a scope injectable everywhere and auto-settable on `create`. What
+  is new: the column's type is **declared here** (`org: Org`), and by the equality it is *also* the
+  `$ctx.field` type. So the scope decl is the one source of truth (P4) for the scope field's type.
+- **`@scope Name` on a model** (grammar `scope_deco`, a distinct decorator form — bare name, no
+  parenthesized predicate, mirroring `@index barcode`). The predicate is no longer restated on the model
+  (P4). A governed model must declare the scope's column at a conforming type (`E0184`); a physical-name
+  divergence is aliased at the field (`(column "…")`, D3/D8). A per-model *field-name* override
+  (`@scope Tenant(owner_org)`) is **reserved but deferred** — v1 requires the field name to equal the
+  scope column name (minimal; the common case is a uniform column across models, which is the point).
+- **`scoped Name[, Name]*` on a callable** (grammar `scoped_clause`, sits where `unscoped_clause` sits —
+  after the return type / after any `guard`; mirrors `guard name`'s bare-name form). The
+  **required-declaration rule:** a callable whose target is scoped MUST write *either* `scoped …` *or*
+  `unscoped("reason")` — omitting **both** is a hard `E0182` (written, not implied). Multi-scope: a query
+  reaching a second scoped model via a relation (D34 joined-`ON`) names both, comma-separated; the
+  declared set must exactly match the callable's actual scope set (root + joined reaches) or `E0185`. This
+  makes D34's joined-scope enforcement *visible in source* — the reader sees every boundary crossed.
+- **`unscoped("reason")` unchanged** (D32): the cross-scope escape hatch, mutually exclusive with
+  `scoped`, mandatory reason, greppable, `W0106` when stale (target in no scope).
+- **Coherence shift:** because the scope field's type is declared once in the `scope` decl, the old
+  cross-callable `$ctx` coherence check for the scope field (`E0161`) becomes **structural** — one decl,
+  one type, no clash possible. `E0161` still guards non-scope `$ctx` fields (Handle-1 `where`s, guard
+  args) whose types are still inferred per callable (D4). This removes the inference that leaked
+  `(D4/D5)` into hover.
+- **Error set (E018x band, continuing D32's E0180/E0181):** `E0182` missing `scoped`/`unscoped`
+  acknowledgement on a scoped callable; `E0183` unknown scope name (`@scope`/`scoped` names no `scope`
+  decl); `E0184` scope column missing/non-conforming on a `@scope` model; `E0185` a callable's `scoped`
+  set ≠ its actual scope set. `E0180` (predicate form) now fires at the `scope` decl site; `E0181` (create
+  assigns scope col) and `W0106` (stale unscoped) unchanged. A duplicate `scope` name reuses the general
+  duplicate-decl mechanism (like a duplicate shape).
+- **Migration-snapshot note (E-track follow-up, do NOT drift E2/D39).** `schema.snap` today records each
+  table's scope inline in the header (`scope=(org_id = $ctx.org)`, D39). Under named scopes the snapshot
+  must instead: (a) serialize the `scope` **decls** as top-level `scope <Name> (<col>:<type> = $ctx.<f>, …)`
+  lines (stable-ordered, before the tables), and (b) record each table's scope **by name**
+  (`scope=<Name>`). Same DDL (a scope emits no column), so this is header/metadata only — but it must
+  round-trip so an offline diff can detect a scope rename, an added term, or a model joining/leaving a
+  scope. **Flagged as snapshot-format work for the E-track** (the serializer change lands with the sema
+  implementation, not this spec iteration).
+- **Facts/LSP acceptance note (impl iteration).** The scope contract must be surfaced as a *written,
+  referenceable* thing: go-to-def from `@scope Name` / `scoped Name` to the `scope` decl, rename across
+  all refs, hover naming the scope. **No decision-record references (D-numbers) may appear in any
+  editor-facing string** — the user reported `(D4/D5)` leaking into hover; this design removes the
+  inference that produced it, and the impl must not reintroduce D-numbers in hints/hover.
+- **Open sub-questions for the user (review checkpoint):** (1) the term form `col: Type = $ctx.field` —
+  type on the column side (chosen: it doubles as the governed-model column contract) vs. annotating the
+  ctx field (`col = $ctx.field: Type`); (2) whether the per-model column override (`@scope Name(field)`)
+  should ship in v1 or stay reserved (chosen: reserved/deferred).

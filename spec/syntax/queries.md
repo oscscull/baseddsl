@@ -57,6 +57,16 @@ Each clause's argument is bounded by `()`, same as field modifiers. Statement en
 - Body verb `get`/`list` = engine instruction.
 Contract/implementation split, not redundancy.
 
+## Scope acknowledgement (`scoped` / `unscoped`)
+If a query's target model is in a scope (`@scope Name`, auth.md Handle 2 / D46), the signature **must**
+say so — `scoped Name` to accept the standing filter, or `unscoped("reason")` to opt out. Writing
+neither is `E0182` (the contract is too important to be true by omission). Both sit after the return
+type; a query reaching a second scoped model names both (`scoped Tenant, Region`). See auth.md.
+```
+query order_by_id(id) -> OrderCard scoped Tenant;
+query orders_in_org(org) -> OrderCard[] unscoped("admin: cross-org order lookup");
+```
+
 ## Filters
 - Operators (small, closed): `= != > < >= <=`, `~` (like), `in`, `has` (array/json containment).
 - Compose `and`/`or`/`not` + parens. `and` binds tighter than `or`. No other precedence.

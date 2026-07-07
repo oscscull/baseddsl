@@ -1,9 +1,14 @@
 # syntax/auth.md
 
-Principles: 5 (enforcement is ours, decisions aren't), 7 (lend the intent).
+Principles: 2 (nothing consequential true by omission — an important contract is **written,
+not implied**), 4 (one source of truth; reference by name), 5 (enforcement is ours, decisions
+aren't), 7 (lend the intent).
 
 ## Boundary
-This layer does NOT make authz decisions (roles, policy, branching if/then) — that's caller logic, over the line, Turing-complete, depends on context we don't have. We only enforce a constraint the caller supplies, via the predicate-injection we already own (same mechanism as soft-delete). Three handles; in all three the complex/branching logic lives in the caller's host language.
+This layer does NOT make authz decisions (roles, policy, branching if/then) — that's caller logic,
+over the line, Turing-complete, depends on context we don't have. We only enforce a constraint the
+caller supplies, via the predicate-injection we already own (same mechanism as soft-delete). Three
+handles; in all three the complex/branching logic lives in the caller's host language.
 
 ## Handle 1 — caller-set context, queries consume
 Caller's auth code computes the decision and passes the result as context. Queries reference it as a param.
@@ -14,26 +19,118 @@ query my_orders() -> OrderCard[] {
 ```
 Not a decision — a filter value the caller produced.
 
-## Handle 2 — model scope predicate (auto-injected)
-A standing filter, parameterized by context, injected into every query **and write** on the model — exactly like soft-delete. Uniform, single-owner (D32).
-```
-@scope(org = $ctx.org)
-Order { ... }
-```
-We enforce the constraint shape; caller supplies the value. No branching.
+## Handle 2 — named scope (a written contract, referenced on both sides)
+A **scope** is a standing filter, parameterized by request context, injected into every query **and
+write** on a model — exactly like soft-delete. It is a contract important enough that it must be
+*written, not implied*: declared once as a top-level `scope` decl, then referenced **by name** on
+each side — the model it governs (`@scope Name`) and every callable that touches that model
+(`scoped Name`). We enforce the constraint shape; the caller supplies the value. No branching.
 
-Restricted to a conjunction of `col = $ctx.field` equalities (D32) — that is what makes it *uniform* and lets it be enforced on every operation:
-- **Reads + writes:** the predicate is ANDed into every `WHERE` (updates/deletes/restores can't touch an out-of-scope row).
-- **Create:** the scope column is **engine-managed** — auto-set from `$ctx`, never a caller param. A caller can't plant a row outside their own scope; a cross-scope `create` is *inexpressible* (assigning the column is an error). So `create Order { total = $t }` gets `org` from context automatically.
-- Not uniform (differs by op) or multi-owner (`org in $ctx.orgs`)? That's not scope — use a per-query `where` (Handle 1). Real decisions → Handle 3.
+### The `scope` declaration
+Declared once, like a shape (D46). Each term is `col: Type = $ctx.field`:
+```
+scope Tenant (org: Org = $ctx.org)
+```
+Read: "the *Tenant* scope filters on column `org` (type `Org`), bound to `$ctx.org`."
 
-**Escape hatch — `unscoped("reason")`.** Cross-scope access (admin/support/jobs/import) opts one callable out of scope entirely (read + write injection *and* the create auto-set), with a **mandatory reason** (never silent), greppable, and linted:
+- **The predicate keeps the exact restricted form** of the old inline `@scope` (D32): a conjunction
+  of `col = $ctx.field` equalities, nothing else — no `or`, `in`, range, literal RHS, multi-hop path,
+  or named filter (`E0180`). That restriction is what lets a scope be injected *everywhere* and, in
+  particular, **auto-set on `create`**; a non-equality/multi-owner rule has no create-time projection
+  and is not a scope (it is a Handle-1 filter, below). A conjunction is written comma-separated:
+  `scope Region (org: Org = $ctx.org, region: Region = $ctx.region)`.
+- **The scope decl is where `$ctx.<field>`'s type is declared** (D46). `org: Org` states the type of
+  both the column each governed model must carry *and* the `$ctx.org` request field — they are one
+  type by the equality, sourced once here (P4). This **ends the per-callable `$ctx` inference for the
+  scope field** (D4/D5): a scoped callable reads `$ctx.org`'s type from `Tenant`, not from whichever
+  column it happened to compare against. Coherence for the scope field is now structural — one decl,
+  one type — so it can never clash across callables. (`$ctx` fields used only in hand-written Handle-1
+  `where`s or `guard` args are still inferred per callable, D4.)
+
+### The model reference — `@scope Name`
+A model opts into a scope by naming it; the predicate is not restated (P4 — one source of truth):
+```
+@scope Tenant
+Order {
+  org:        Org          # the scope column — must exist, type must match the scope decl
+  placed_by:  User
+  total:      int
+  ...
+}
+```
+The governed model **must declare the scope's column(s)** at a conforming type (`org: Org`) — else
+`E0184`. A model whose *physical* column name differs aliases it at the field (`org: Org (column
+"legacy_org")`, D3/D8); the field name still matches the scope. (A per-model *field-name* override —
+`@scope Tenant(owner_org)` — is reserved but **deferred**; v1 requires the field name to match the
+scope column name. See D46.)
+
+### The callable reference — `scoped Name`
+Any query/mutation whose target model is in a scope **must** acknowledge it — either accept the scope
+(`scoped Name`) or opt out (`unscoped("reason")`). **Writing neither is a hard error (`E0182`)**:
+the contract is too important to be true by omission (principle 2). `scoped Name` sits where
+`unscoped(...)` sits — after the return type on a query, after any `guard` on a mutation:
+```
+query order_by_id(id) -> OrderCard scoped Tenant;
+query my_org_orders() -> OrderCard[] scoped Tenant { list Order; }
+
+mutation place_order(buyer: Id, total: int) -> OrderCard scoped Tenant {
+  create Order { placed_by = $buyer, total = $total };
+}
+```
+`scoped Tenant` names the standing filter that is injected; it does not restate the predicate
+(reference by name, P4). It is the visible half of the both-sides contract: `@scope Tenant` on the
+model, `scoped Tenant` on the callable.
+
+What the acknowledgement means, per operation (unchanged from D32):
+- **Reads + writes:** the predicate is ANDed into every `WHERE` (updates/deletes/restores can't touch
+  an out-of-scope row), and into every *joined* scoped table's `ON` (a relation reach can't read across
+  a scope boundary, D34).
+- **Create:** the scope column is **engine-managed** — auto-set from `$ctx`, never a caller param. A
+  cross-scope `create` is *inexpressible* (assigning the column is `E0181`). So `create Order { total
+  = $t }` gets `org` from context automatically.
+
+### Multi-scope callables
+A query reaching a *second* scoped model through a relation (D34 joined-`ON`) is in **both** scopes and
+must name both — one `scoped` clause, comma-separated:
+```
+query ticket_with_contact(id) -> TicketCard scoped Tenant, Region;
+```
+The declared set must **exactly** match the callable's actual scope set — the scopes of its target
+model plus every scoped model it reaches into. A missing scope (a joined scoped model left
+unacknowledged) or a surplus one (a scope none of the callable's models are in) is `E0185`. This makes
+D34's joined-scope enforcement *written*: the reader sees every tenant boundary the query crosses.
+
+### Escape hatch — `unscoped("reason")`
+Cross-scope access (admin/support/jobs/import) opts one callable out of scope entirely — read + write
+injection, the joined-`ON` injection, *and* the create auto-set — with a **mandatory reason** (never
+silent, principle 6), greppable, and linted:
 ```
 query orders_in_org(org) -> OrderCard[] unscoped("admin: cross-org order lookup");
 ```
-It forfeits *only* `@scope` — soft-delete still applies.
+It forfeits *only* scope — soft-delete still applies. `unscoped` and `scoped` are mutually exclusive
+(a callable does one or the other). `W0106` flags a stale `unscoped` (target is in no scope).
 
-**What the compiler guarantees / does not.** It guarantees the predicate is injected everywhere except explicit `unscoped` sites, and that cross-scope creates are inexpressible — killing accidental leaks. It does **not** verify the predicate is the *right* rule, or evaluate any role matrix (that's Handle 3). `@scope` is a row-visibility filter, not a checked authorization model.
+### What the compiler guarantees / does not
+It guarantees the scope predicate is injected everywhere — root `WHERE`, write-target `WHERE`, joined
+`ON`, and the create auto-set — except explicit `unscoped` sites, and that cross-scope creates are
+inexpressible; it kills accidental leaks and forces every crossing to be *named* in source. It does
+**not** verify the predicate is the *right* rule, or evaluate any role matrix (that's Handle 3). A
+scope is a row-visibility filter, not a checked authorization model.
+
+### Not a scope
+Not uniform (differs by operation) or multi-owner (`org in $ctx.orgs`)? That is not a scope — use a
+per-query `where` (Handle 1). Real decisions → Handle 3.
+
+### Error set (E018x band, D46)
+| Code | Triggers |
+|------|----------|
+| `E0180` | a `scope` decl's predicate isn't a conjunction of `col = $ctx.field` |
+| `E0181` | a `create` assigns a scope column (engine-managed — cross-scope create is inexpressible) |
+| `E0182` | a callable whose target is scoped writes *neither* `scoped …` *nor* `unscoped(…)` (the required-declaration rule) |
+| `E0183` | `@scope Name` / `scoped Name` references a `scope` decl that doesn't exist |
+| `E0184` | a `@scope` model lacks the scope's column, or declares it at a non-conforming type |
+| `E0185` | a callable's `scoped …` set ≠ its actual scope set (a scope missing, or one it isn't in) |
+| `W0106` | `unscoped(…)` on a callable whose target is in no scope (stale) |
 
 ## Handle 3 — guard hook into caller code
 For real decisions, we don't evaluate — we invoke the caller's host-language fn at the boundary and respect its verdict.
