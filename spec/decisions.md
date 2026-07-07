@@ -22,7 +22,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D49 (multi-scope DNF, impl + E0186), D50 (scope editor surface + snapshot serializer)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
-- **SQL codegen — mutations/writes** — D12 (mutation writes), D16 (tx back-refs `^`)
+- **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
+  back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
+  resolution)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
@@ -1939,3 +1941,53 @@ runtime reads it).
   JSON — not compile-verified. Plus codegen unit tests: the MariaDB + Postgres aggregation SQL,
   the `s<n>_` self-ref alias, the `items[]` output alias, subquery-not-join; the client `Vec<Sub>`
   struct; the OpenAPI array-of-object schema.
+
+## D58 — update/delete declared-shape re-select (where-keyed)
+Track L3, the last open Track L gap. Generalizes D12's re-select: a mutation now reads its written
+row back in its **declared shape** even when it only *updates / soft-deletes / restores* the row
+(not just when it *creates* it). Before, a pure `update`/`delete` returned `{ id }`/`{}` instead of
+its declared shape (`based-codegen mutations.rs`, `based-runtime run.rs`). D12 deferred this as
+"cardinality-ambiguous"; resolved here by keying the re-select off the write's own `where` and
+returning the (first) matching row's shape — mirroring how a create's re-select and `get` both take
+`.next()`.
+- **Two key forms, one `ret_select` (codegen).** `lower_mutation` picks the re-select key: a
+  **create-keyed** form (D12) when a write generates the return model's engine `id`
+  (`WHERE id = :result_id`), else a **where-keyed** form (D58) — the first `update` / soft `delete`
+  / `restore` on the return model, keyed on *that write's own `where`* (`SELECT <shape> FROM <model>
+  WHERE <write-where> [AND <live>] AND <scope>`). Both reuse the read side's `project_return`
+  (principle 4), so the projection can't drift from a `get` — nested to-one sub-objects (D55) and
+  to-many arrays (D57) work in a re-select exactly as in a query.
+- **Runs after the write, inside the tx (runtime).** `plan_mutation` binds the re-select whenever
+  codegen emitted one; a where-keyed re-select needs no `:result_id` — it reuses the write's
+  already-bound params/`$ctx` from the value environment. `apply` executes the writes then fetches
+  the re-select under the same transaction (read-your-writes: an update's re-select sees the *new*
+  values).
+- **The live predicate rides selectively.** For `update`/`restore` the row is live afterwards, so the
+  soft-delete live predicate (`deleted_at IS NULL`) is injected as in a normal read. For a soft
+  `delete` the row is now **tombstoned**, so the re-select drops the live predicate (else it would
+  read back as absent) — it still applies `@scope`. This is the read-side twin of the write-side
+  live/tombstone injection.
+- **Delete-shape resolution (documented).** A re-select can only read a **surviving** row. A soft
+  `delete` tombstones (row survives → read it back without the live predicate). A **real DELETE** — a
+  plain-model `delete` or a `hard delete` — physically removes the row, so there is no surviving row
+  to project: such a mutation emits **no** re-select and the response falls back to `{}` (a pre-write
+  capture would require reordering the write pipeline and buys little for the loud, destructive
+  opt-out `hard delete` already is). A mutation returning a shape but performing a real DELETE thus
+  returns `{}`; the `-> Shape` is honored only when the row survives.
+- **Cardinality.** An update/delete `where` may match a set; the mutation's declared return is
+  singular (`-> OrderCard`), so the re-select returns the *first* matching row (or `null` if none) —
+  the same `.next()` a create's re-select / a `get` uses. Keying off the (post-write) `where` is
+  correct whenever the write does not mutate a column its own `where` filters on — the norm, since
+  updates are keyed on `id` (immutable); an update that rewrites its own filter column reads back as
+  absent, an unusual pattern left documented rather than special-cased.
+- **Incidental fix (SQLite UPDATE `SET`).** Surfacing an update through the live SQLite suite (none
+  existed) exposed that `set_lhs` emitted a table-qualified `` `t`.`col` `` in `SET`, which SQLite
+  rejects (it has no inline-join UPDATE, so the target is unambiguous). `SET` now emits the bare
+  column on SQLite as it already did on Postgres; MySQL/MariaDB keep the qualifier (a multi-table
+  UPDATE may need it).
+- **Verified live.** A self-contained SQLite integration test (`sqlite_integration.rs`) seeds a
+  User + Order (`status='pending'`), dispatches `set_status` (an `update` returning `OrderCard {
+  status, total, placed_by { name } }`), and asserts the response is the **full** declared shape with
+  the **new** status + the nested buyer (read-your-writes, one tx) — not `{ id }` — then a fresh
+  `get` confirms the write committed. Plus codegen unit tests: where-keyed update re-select, soft-
+  delete re-select without the live predicate, and a real delete emitting no re-select.

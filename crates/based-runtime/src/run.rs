@@ -193,11 +193,11 @@ pub fn run_mutation(
 /// surfaced — a mutation is all-or-nothing, never a partial write (principle 7,
 /// dependability).
 ///
-/// The response is the created row read back in the mutation's **declared shape** (D12):
-/// when the plan carries a re-select, it runs inside the same transaction (read-your-
-/// writes, atomic with the writes) and its single row *is* the response — matching the
-/// client's decoded output type. A mutation that creates no return row (a pure
-/// update/delete) has no re-select and falls back to `{ id }` / `{}`.
+/// The response is the written row read back in the mutation's **declared shape** (D12
+/// create-keyed / D58 where-keyed): when the plan carries a re-select, it runs inside the
+/// same transaction (read-your-writes, atomic with the writes) and its single row *is* the
+/// response — matching the client's decoded output type. Only a mutation whose row does not
+/// survive the write (a real DELETE) has no re-select and falls back to `{ id }` / `{}`.
 fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
     db.begin()?;
@@ -218,8 +218,8 @@ fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbEr
                 return Err(e);
             }
         },
-        // No declared-shape re-select: identify the created row by its engine `id`,
-        // or an empty object when the mutation creates nothing.
+        // No declared-shape re-select (the row did not survive — a real DELETE): identify
+        // the created row by its engine `id`, or an empty object when nothing was created.
         None => match &plan.result_id {
             Some(id) => {
                 let mut obj = serde_json::Map::new();

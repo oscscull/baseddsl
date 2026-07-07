@@ -39,5 +39,15 @@ mutation place_order(buyer: Id, total: int) -> OrderCard scoped Tenant {
 }
 ```
 
+## Return shape (read-back)
+A mutation's `-> Shape` is the row it wrote, read back in that shape after the write, inside the
+same transaction (read-your-writes). A `create` reads back the created row; an `update` / soft
+`delete` / `restore` reads back the row it touched (an update sees the new values). The read-back
+projects the declared shape exactly as a `get` would — nested sub-objects and arrays included — and
+applies the same scope/soft-delete guards, so a row that lands or lives out of scope reads back as
+absent. A **real DELETE** (a plain-model `delete` or `hard delete`) removes the row, so there is no
+surviving row to return: those mutations return `{}` even if they declare a shape. (Implementation:
+D12 + D58.)
+
 ## Read-decide-write
 Not in the DSL. Use the host-language `transaction(closure)` seam: engine owns the boundary (commit on Ok, rollback on Err/panic, always release); caller writes logic; inside, queries are the same safe queries bound to the tx. See architecture docs.

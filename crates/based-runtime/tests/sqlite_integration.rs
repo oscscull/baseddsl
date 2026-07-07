@@ -227,6 +227,71 @@ fn backend_ping_succeeds_on_a_live_db() {
     assert!(seeded_backend(&c).ping().is_ok());
 }
 
+/// An `update` mutation reads its row back in the **full declared shape** (D58), not a bare
+/// `{ id }`, keyed off the write's own `where` and run inside the same transaction
+/// (read-your-writes) — proven against a real engine. The shape includes a nested to-one
+/// sub-object (`placed_by { name }`, D55), so the re-select exercises a relation join too.
+#[test]
+fn update_mutation_reselects_full_declared_shape_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        User { name: text }
+        @updated(updated_at)
+        Order { updated_at: timestamp, placed_by: User, status: text, total: int }
+        shape OrderCard from Order { status, total, placed_by { name } }
+        mutation set_status(id: Id, status: text) -> OrderCard {
+          update Order where (id = $id) { status = $status };
+        }
+        query order_by_id(id) -> OrderCard;
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `user` (`id`, `name`) VALUES ('u1', 'Ada');
+            INSERT INTO `order` (`id`, `updated_at`, `placed_by_id`, `status`, `total`)
+                VALUES ('o1', '2020-01-01 00:00:00', 'u1', 'pending', 99);
+            "#,
+        )
+        .expect("seed");
+
+    // Update the status; the response is the *updated* row in its full declared shape
+    // (new status, the unchanged total, and the nested buyer) — not `{ id }`.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/set_status",
+        json!({ "id": "o1", "status": "shipped" }),
+        json!({}),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({ "status": "shipped", "total": 99, "placed_by": { "name": "Ada" } }),
+        "read-your-writes: the re-select sees the new status under the same tx"
+    );
+
+    // The write committed: a fresh read sees the new status too.
+    let got = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "o1" }),
+        json!({}),
+    );
+    assert_eq!(
+        got.body,
+        json!({ "status": "shipped", "total": 99, "placed_by": { "name": "Ada" } })
+    );
+}
+
 /// Compile an in-line schema for SQLite (skip disk), mirroring `Compiled::load`.
 fn compile_sqlite(src: &str) -> Compiled {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));

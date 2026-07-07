@@ -44,20 +44,18 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-**Where things stand (as of D54):** the architecture milestones (M2–M6) are done and all three target
-dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — but the **language itself is not yet
-feature-complete**. A 2026-07-07 audit found that normal-workday query surface parses and type-checks
-yet emits *nothing*: nested/relation projection in shapes (`items { … }`, `invited_users`) and
-keyset-cursor pagination both stub out in codegen/runtime. (Since then those gaps closed: to-**one**
-nested shape sub-objects — D55 — and to-**many** nested arrays incl. self-ref — D57 — emit end-to-end,
-and keyset-cursor pagination is fully built + proven live — D56. **L1 + L2 are done; L3
-(update/delete declared-shape re-select) is the last open Track L gap.**)
-**The top priority is finishing the language**
-(Track L) — a complete, functional, usable BSL covering ordinary GET/PUT queries end-to-end. Everything
-else is subordinate: **DB-verification hardening (A) and example projects (B) *follow* feature
-completion** (you cannot prove a feature that isn't built), while the **independent non-feature tracks —
-the extension (C) and migrations (E) — may run in parallel** since they share no files with L.
-Batch-by-batch history is in `PLAN-archive.md`.
+**Where things stand (as of D58):** the architecture milestones (M2–M6) are done, all three target
+dialects (SQLite/MariaDB/Postgres) clear the real-DB bar, and **Track L — the language — is now
+feature-complete.** The 2026-07-07 audit's three normal-workday gaps are all closed and proven live:
+nested/relation projection in shapes (to-one D55, to-many incl. self-ref D57), keyset-cursor pagination
+(D56), and update/delete declared-shape re-select (D58). A complete, functional, usable BSL now covers
+ordinary GET/PUT end-to-end (get/list, filters, sort cascade, offset + keyset pagination,
+create/update/delete/restore/`tx`, soft-delete, `@scope`, raw SQL, idempotency, declared-shape
+read-back on every surviving write). **With the language done, the priority shifts to the subordinate
+tracks it gated: DB-verification hardening (A4 — keyset + soft-delete/restore + richer-shape coverage
+under the live MariaDB/Postgres suites) and example projects (B), now unblocked.** The independent
+non-feature tracks — the extension (C4) and migrations (E5) — may still run in parallel (they share no
+files with the rest). Deploy (D) closes it all out. Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -107,11 +105,13 @@ live coverage can't be proven until L builds them). **D** closes it all out (its
 Order *within* a track is top-down. Done items are one-liners with their D#; open items carry full
 resume context. Delivery detail: `PLAN-archive.md`.
 
-**Track L — language feature-completeness (TOP PRIORITY, critical path, DoD-spanning). 🔴 OPEN.** The
-read/write *core* is built and proven live — get/list, `where`/operators/named-filter inlining, the
-sort cascade, offset pagination, create/update/delete/restore/`tx`/single-level `^`, soft-delete,
-`@scope` injection, raw SQL, idempotency. These are the *specified, normal-workday* gaps the 2026-07-07
-audit found where source parses + type-checks but codegen/runtime emit nothing or only part:
+**Track L — language feature-completeness (TOP PRIORITY, critical path, DoD-spanning). ✅ COMPLETE
+(L1 D55/D57, L2 D56, L3 D58).** The read/write *core* is built and proven live — get/list,
+`where`/operators/named-filter inlining, the sort cascade, offset pagination,
+create/update/delete/restore/`tx`/single-level `^`, soft-delete, `@scope` injection, raw SQL,
+idempotency — and the three *specified, normal-workday* gaps the 2026-07-07 audit found (below) are all
+closed: nested/relation projection, keyset pagination, and update/delete declared-shape re-select. A
+complete, functional BSL now covers ordinary GET/PUT end-to-end. The gaps, for the record:
   - **L1. ✅ done (D55 to-one + D57 to-many). Nested / relation projection in shapes.** To-**one**
     sub-objects (D55): `field { … }` over a Forward (or unique one-to-one Inverse) relation nests the
     target's columns end-to-end — SQL prefixes them under a `field.<col>` alias (reusing the reach-rename
@@ -134,12 +134,20 @@ audit found where source parses + type-checks but codegen/runtime emit nothing o
     validated, `cursor.rs`), and strips the hidden columns. Client/OpenAPI carry `cursor`/`offset` inputs.
     A non-offset `page` always gets the `id` tiebreaker (deterministic even with no `order`). Proven live
     against SQLite (paging full→full→short, tampered cursor → 400). Unblocks A4's live pagination coverage.
-  - **L3. 🔴 Update/delete declared-shape re-select.** D12's re-select fires only when a mutation
-    *creates* its return row; a pure `update`/`delete` returns `{id}`/`{}` instead of its declared shape
-    (`based-codegen mutations.rs:37`, `based-runtime run.rs:221-228`). Re-select keyed off the write
-    `where`. Small–medium.
+  - **L3. ✅ done (D58). Update/delete declared-shape re-select.** A mutation now reads its written
+    row back in its declared shape even when it only *updates / soft-deletes / restores* it, not just on
+    *create* (D12). The re-select is **where-keyed**: it reuses the surviving write's own `where` (+
+    scope; + the soft-delete live predicate for update/restore, dropped for a soft delete so the
+    tombstoned row still reads back), runs after the write inside the same tx (read-your-writes), and
+    reuses the read side's `project_return` so nested to-one (D55) / to-many (D57) shapes work in a
+    re-select. **Delete-shape resolution:** a **real DELETE** (plain-model `delete` / `hard delete`)
+    removes the row, so there's no surviving row — those emit no re-select and return `{}`. Verified live
+    against SQLite (an `update` returning the full `OrderCard { status, total, placed_by { name } }` with
+    the new value, one tx). Incidental fix: SQLite UPDATE `SET` now emits a bare column (SQLite rejects a
+    qualified `SET` column — was never live-tested before this update path existed).
 
-**Track A — real-DB proof (DoD #1; A4 subordinate to / gated on Track L).** *Mechanism: Docker (OrbStack).*
+**Track A — real-DB proof (DoD #1; A4 now UNBLOCKED — Track L, which it was gated on, is complete). NEXT
+on the critical path.** *Mechanism: Docker (OrbStack).*
   - A1. ✅ **done (D35).** Docker-backed ephemeral-MariaDB test harness (`tests/support/docker_mariadb.rs`,
     feature `docker-tests`, skips cleanly with no daemon).
   - A2. ✅ **done (D35).** MariaDB live suite — verbatim codegen-lowered SQL through `serve::dispatch`
@@ -150,7 +158,8 @@ audit found where source parses + type-checks but codegen/runtime emit nothing o
     pool-exhaustion → 503 under load; verified against the live servers, not just designed. Also the
     remaining DoD-#1 coverage (pagination + soft-delete/restore) under the live suites.
 
-**Track B — example projects (DoD #2, follows A per DB; presupposes the Track L features it exercises). 🔴 OPEN.**
+**Track B — example projects (DoD #2, follows A per DB; the Track L features it exercises are now all
+built — no longer blocked on the language). 🔴 OPEN.**
   - B1. Scaffold `examples/` (standalone crates, non-workspace).
   - B2. One worked project per DB (SQLite first — its driver's already live — then MariaDB, then
     Postgres) consuming the generated client against the runtime; each builds + runs an end-to-end
@@ -275,10 +284,10 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | based-sema | ✅ stable | resolution + checks + lints + `CheckedSchema` IR. Detailed behaviour in the next section. |
 | based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
-| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
+| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
-| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select (D12); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
+| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4); container image (Track D1); durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
 

@@ -26,15 +26,24 @@
 //!   get distinct id binds (`:id_<step>`), and a `^.field` back-reference reads the
 //!   immediately preceding create — `^.id` binds that create's generated id.
 //!
-//! ## Returning the declared shape (D12)
-//! A mutation that **creates** its return row also carries a re-select: a trailing
-//! `SELECT <return shape> FROM <return model> WHERE id = :result_id [AND <live> AND
-//! <scope>]` that reads the created row back in its declared shape (`ret_select`),
-//! reusing the read side's `project_return` so the projection can't drift from a `get`
-//! (principle 4). The runtime binds `:result_id` to that create's engine id and runs the
-//! re-select inside the write transaction. A pure update/delete has no engine-generated
-//! id to key on, so it emits no re-select and the response falls back to `{ id }`/`{}`
-//! (its re-select would key off the write `where` — deferred, PLAN M6 write).
+//! ## Returning the declared shape (D12 create-keyed, D58 where-keyed)
+//! Every mutation reads its written row back in its declared shape via a trailing
+//! re-select (`ret_select`), reusing the read side's `project_return` so the projection
+//! can't drift from a `get` (principle 4). The re-select is keyed one of two ways:
+//! - **Create-keyed (D12).** A mutation that *creates* its return row keys on the engine
+//!   id: `SELECT <shape> FROM <model> WHERE id = :result_id [AND <live> AND <scope>]`.
+//!   The runtime binds `:result_id` to that create's generated id.
+//! - **Where-keyed (D58).** A mutation whose return row *survives* an `update` / soft
+//!   `delete` / `restore` keys on that write's own `where`: `SELECT <shape> FROM <model>
+//!   WHERE <write-where> [AND <live>] AND <scope>`. The runtime reuses the write's already
+//!   bound params/`$ctx` — no `:result_id`. The re-select runs *after* the write (inside
+//!   the same tx), so it reads the post-write values (read-your-writes). The soft-delete
+//!   live predicate rides along for update/restore (the row is live) but is dropped for a
+//!   soft delete (the row is now tombstoned — we still read it back).
+//!
+//! A **real DELETE** (a plain-model `delete` or `hard delete`) removes the row: there is
+//! no surviving row to re-select, so it emits none and the response falls back to `{}`.
+//! Both key forms run the re-select inside the write transaction.
 //!
 //! ## Dialects
 //! A relation-reaching WHERE lowers to the dialect's multi-table form: MySQL/MariaDB's
@@ -62,14 +71,13 @@ use crate::Dialect;
 pub struct LoweredMutation {
     pub name: String,
     pub stmts: Vec<LoweredWrite>,
-    /// The declared-shape re-select (D12): a `SELECT <return shape> FROM <return model>
-    /// WHERE id = :result_id [AND <live> AND <scope>]` that reads back the row the
-    /// mutation created, so the write response matches the client's decoded output type
-    /// (the same projection a `get` of that shape emits, principle 4). `Some` only when
-    /// the mutation *creates* its return row (its engine-generated `id` binds
-    /// `:result_id` at runtime); a pure update/delete has no such id, so it stays `None`
-    /// and the response falls back to `{ id }` / `{}` (PLAN M6 write — that case's
-    /// re-select would key off the write `where`, deferred).
+    /// The declared-shape re-select: a `SELECT <return shape> FROM <return model> WHERE
+    /// <key> [AND <live>] AND <scope>` that reads back the mutation's written row, so the
+    /// write response matches the client's decoded output type (the same projection a `get`
+    /// of that shape emits, principle 4). `<key>` is either `id = :result_id` for a create
+    /// (D12) or the write's own `where` for a surviving update / soft delete / restore
+    /// (D58). `None` only when the row does not survive the write — a real DELETE
+    /// (plain-model `delete` / `hard delete`) — where the response falls back to `{}`.
     pub ret_select: Option<String>,
 }
 
@@ -115,7 +123,7 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
             out.push_str(&w.sql);
         }
         if let Some(rs) = &lm.ret_select {
-            out.push_str("-- return: re-select the created row's declared shape (D12)\n");
+            out.push_str("-- return: re-select the written row's declared shape (D12/D58)\n");
             out.push_str(rs);
         }
     }
@@ -161,21 +169,29 @@ fn lower_mutation<'a>(
             schema, decls, stmt, "id", None, unscoped, inject, dialect, &mut stmts,
         );
     }
-    // Re-select the declared shape (D12) only when the mutation *creates* its return
-    // row — i.e. some write generates the engine `id` that binds `:result_id` at
-    // runtime. This mirrors `plan_mutation`'s `result_id` rule exactly, so codegen and
-    // the runtime agree on which mutations carry a re-select.
+    // Re-select the declared shape whenever the written row survives the mutation. Two
+    // key forms (kept identical to the runtime's `plan_mutation`, so codegen and runtime
+    // agree on which mutations carry a re-select):
+    //   - create-keyed (D12): a write generates the engine `id` of the return model — key
+    //     on `:result_id`;
+    //   - where-keyed (D58): an `update` / soft `delete` / `restore` on the return model —
+    //     key on that write's own `where`.
+    // A real DELETE removes the row (no surviving row) → no re-select → `{}` at runtime.
     let ret_select = schema
         .mutations
         .iter()
         .find(|rm| rm.name == m.name.node)
-        .filter(|rm| {
-            stmts
+        .and_then(|rm| {
+            let creates_ret = stmts
                 .iter()
-                .any(|w| w.gen_id.is_some() && w.model == rm.ret_model)
-        })
-        .map(|rm| {
-            lower_ret_select(
+                .any(|w| w.gen_id.is_some() && w.model == rm.ret_model);
+            let key = if creates_ret {
+                RetKey::CreatedId
+            } else {
+                let (pred, live) = surviving_ret_write(&m.body, &rm.ret_model, schema)?;
+                RetKey::Where { pred, live }
+            };
+            Some(lower_ret_select(
                 schema,
                 decls,
                 &rm.ret_model,
@@ -183,7 +199,8 @@ fn lower_mutation<'a>(
                 unscoped,
                 inject,
                 dialect,
-            )
+                key,
+            ))
         });
     LoweredMutation {
         name: m.name.node.clone(),
@@ -192,12 +209,25 @@ fn lower_mutation<'a>(
     }
 }
 
-/// Build the declared-shape re-select for a mutation's created row (D12): the same
-/// projection a `get` of that shape emits (`project_return`, reused from the read side
-/// so the two can't drift, principle 4), keyed on the created row's `id` — bound to
-/// `:result_id` by the runtime. The soft-delete live predicate and `@scope` ride the
-/// read path exactly as a `get` would, so a create that lands out of scope reads back
-/// as absent, consistent with every other read.
+/// How a declared-shape re-select keys the row it reads back.
+enum RetKey<'a> {
+    /// D12: the mutation *created* the row — key on its engine id (`WHERE id = :result_id`,
+    /// bound by the runtime). The row is live.
+    CreatedId,
+    /// D58: the mutation *updated / soft-deleted / restored* the row — key on that write's
+    /// own `where` predicate (its params/`$ctx` are already bound). `live` selects whether
+    /// the soft-delete live predicate rides along: true for update/restore (the row is
+    /// live), false for a soft delete (the row is now tombstoned but must still read back).
+    Where { pred: &'a Predicate, live: bool },
+}
+
+/// Build the declared-shape re-select for a mutation's written row: the same projection a
+/// `get` of that shape emits (`project_return`, reused from the read side so the two can't
+/// drift, principle 4), keyed per `key` (D12 created-id or D58 write-`where`). The
+/// soft-delete live predicate (when the row is live) and `@scope` ride the read path
+/// exactly as a `get` would, so a row that lands / lives out of scope reads back as
+/// absent, consistent with every other read.
+#[allow(clippy::too_many_arguments)]
 fn lower_ret_select(
     schema: &CheckedSchema,
     decls: &[Decl],
@@ -206,6 +236,7 @@ fn lower_ret_select(
     unscoped: bool,
     inject: &[ScopeInject],
     dialect: Dialect,
+    key: RetKey,
 ) -> String {
     let model = schema
         .model(ret_model)
@@ -214,11 +245,20 @@ fn lower_ret_select(
         .with_scope_inject(!unscoped)
         .with_scope_terms(inject);
 
-    // Projection first (it seeds joins for reached columns), then scope (may seed more).
+    // Projection first (it seeds joins for reached columns), then the row key + guards
+    // (which may seed more joins — a relation-reaching write `where`).
     let projection = project_return(&mut sel, decls, ret_shape, ret_model, model);
-    let mut wheres = vec![format!("{} = :result_id", sel.qcol(&sel.root_alias, "id"))];
-    if let Some(sd) = &model.soft_delete {
-        wheres.push(soft_pred(dialect, &sel.root_alias, model, sd));
+    let (mut wheres, live) = match key {
+        RetKey::CreatedId => (
+            vec![format!("{} = :result_id", sel.qcol(&sel.root_alias, "id"))],
+            true,
+        ),
+        RetKey::Where { pred, live } => (vec![sel.predicate(pred, model)], live),
+    };
+    if live {
+        if let Some(sd) = &model.soft_delete {
+            wheres.push(soft_pred(dialect, &sel.root_alias, model, sd));
+        }
     }
     if let Some(scope) = sel.scope_where(&sel.root_alias, model) {
         wheres.push(scope);
@@ -229,6 +269,53 @@ fn lower_ret_select(
     push_where(&mut sql, &wheres);
     sql.push_str(";\n");
     sql
+}
+
+/// The write whose surviving row a where-keyed re-select (D58) reads back: the first
+/// `update` / soft `delete` / `restore` on the return model, with its `where` predicate
+/// and whether the row is *live* afterwards (so the re-select injects the soft-delete live
+/// predicate). A plain-model / `hard delete` removes the row (no surviving row to read),
+/// and a `create` is the D12 create-keyed path — both yield `None` here.
+fn surviving_ret_write<'a>(
+    body: &'a [WriteStmt],
+    ret_model: &str,
+    schema: &CheckedSchema,
+) -> Option<(&'a Predicate, bool)> {
+    for w in flat_writes(body) {
+        match w {
+            WriteStmt::Update { model, where_, .. } if model.node == ret_model => {
+                return Some((where_, true)); // the updated row stays live
+            }
+            WriteStmt::Restore { model, where_ } if model.node == ret_model => {
+                return Some((where_, true)); // the row is live again after a restore
+            }
+            // A soft `delete` tombstones (the row survives — read it back *without* the
+            // live predicate); a plain-model `delete` really removes it (skip — no row).
+            WriteStmt::Delete { model, where_ }
+                if model.node == ret_model
+                    && schema
+                        .model(&model.node)
+                        .is_some_and(|m| m.soft_delete.is_some()) =>
+            {
+                return Some((where_, false));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The mutation's writes with any `tx` block flattened inline (execution order), so the
+/// re-select search sees the same statement sequence the author wrote.
+fn flat_writes(body: &[WriteStmt]) -> Vec<&WriteStmt> {
+    let mut out = Vec::new();
+    for w in body {
+        match w {
+            WriteStmt::Tx(inner) => out.extend(inner.iter()),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`
@@ -547,13 +634,15 @@ fn lower_restore(
 // ---------- statement assembly ---------------------------------------------
 
 /// The `SET` clause left-hand side for a column. MySQL/MariaDB accept (and this code
-/// emits) a table-qualified `` `t`.`col` `` even in a multi-table UPDATE; **Postgres
-/// forbids the target alias in `SET`** — the SET column must be bare (`col = …`), the
-/// alias belonging only to the `FROM`/`WHERE`. So this qualifies on MySQL/SQLite and
-/// stays bare on Postgres.
+/// emits) a table-qualified `` `t`.`col` ``, which a multi-table UPDATE's `SET` may need to
+/// disambiguate the target. **Postgres forbids the target alias in `SET`**, and **SQLite
+/// rejects a qualified column in an UPDATE `SET`** (it has no inline-join UPDATE, so the
+/// target is always unambiguous) — both take the bare column (`col = …`), the alias
+/// belonging only to the `FROM`/`WHERE`. So this qualifies on MySQL/MariaDB and stays bare
+/// on Postgres + SQLite.
 fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
     match sel.dialect {
-        Dialect::Postgres => sel.dialect.quote(col),
+        Dialect::Postgres | Dialect::Sqlite => sel.dialect.quote(col),
         _ => sel.qcol(&sel.root_alias, col),
     }
 }

@@ -141,11 +141,12 @@ pub struct MutationPlan {
     /// the row the write response identifies. `None` when the mutation creates no such
     /// row (a pure update/delete, or a create whose `id` the caller set).
     pub result_id: Option<String>,
-    /// The declared-shape re-select (D12): reads the created row back in the mutation's
-    /// return shape (`:result_id` bound to [`result_id`](Self::result_id)) so the write
-    /// response matches the client's decoded output type. `Some` exactly when
-    /// `result_id` is — a mutation that creates its return row. `None` otherwise, and
-    /// the response falls back to `{ id }` / `{}`.
+    /// The declared-shape re-select: reads the written row back in the mutation's return
+    /// shape so the write response matches the client's decoded output type. Keyed either
+    /// on the created row's id (D12, `:result_id` = [`result_id`](Self::result_id)) or on
+    /// an update/soft-delete/restore's own `where` (D58, its params already bound). `None`
+    /// only when the row does not survive the write (a real DELETE), where the response
+    /// falls back to `{}`.
     pub ret_select: Option<Stmt>,
 }
 
@@ -295,15 +296,20 @@ pub fn plan_mutation(
         .map(|w| env.bind(&w.sql))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // 4. The declared-shape re-select (D12), when the mutation creates its return row:
-    //    bind `:result_id` to that create's engine id (already in `result_id`). Codegen
-    //    emits the re-select under the same rule, so both are `Some` together.
-    let ret_select = match (&low.ret_select, &result_id) {
-        (Some(sql), Some(id)) => {
-            env.insert("result_id".to_string(), SqlValue::Text(id.clone()));
+    // 4. The declared-shape re-select: bind it whenever codegen emitted one (codegen and
+    //    this planner apply the same survives-the-write rule, so they agree). A create-keyed
+    //    re-select (D12) needs `:result_id` = this create's engine id; a where-keyed one
+    //    (D58, update/soft-delete/restore) reuses the write's own params/`$ctx`, already in
+    //    `env`. Seeding `:result_id` only when a create produced one is harmless for the
+    //    where-keyed form — `to_positional` binds only the placeholders each statement carries.
+    let ret_select = match &low.ret_select {
+        Some(sql) => {
+            if let Some(id) = &result_id {
+                env.insert("result_id".to_string(), SqlValue::Text(id.clone()));
+            }
             Some(env.bind(sql)?)
         }
-        _ => None,
+        None => None,
     };
 
     Ok(MutationPlan {

@@ -283,7 +283,7 @@ fn create_returning_mutation_reselects_the_declared_shape() {
         "#);
     // After the INSERT the created row is read back in its declared shape (D12).
     assert!(
-        out.contains("-- return: re-select the created row's declared shape (D12)"),
+        out.contains("-- return: re-select the written row's declared shape (D12/D58)"),
         "\n{out}"
     );
     // Projects the shape exactly as a `get` would: local `total` + the relation reach
@@ -300,7 +300,7 @@ fn create_returning_mutation_reselects_the_declared_shape() {
 }
 
 #[test]
-fn update_only_mutation_emits_no_reselect() {
+fn update_mutation_reselects_by_the_write_where() {
     let out = gen(r#"
         @updated(updated_at)
         Order { updated_at: timestamp, status: text }
@@ -309,13 +309,57 @@ fn update_only_mutation_emits_no_reselect() {
           update Order where (id = $id) { status = $status };
         }
         "#);
-    // A pure update creates no return row, so there is no engine `id` to key a
-    // re-select on — the response falls back to `{ id }`/`{}` at runtime (D12).
+    // An update's row survives, so the declared shape is re-selected keyed off the write's
+    // own `where` (D58) — no engine `id`, so no `:result_id`.
+    assert!(out.contains("-- return:"), "\n{out}");
     assert!(
         !out.contains(":result_id"),
-        "update-only mutation must not re-select:\n{out}"
+        "where-keyed re-select must not use :result_id:\n{out}"
     );
-    assert!(!out.contains("-- return:"), "\n{out}");
+    assert!(out.contains("`order`.`status` AS `status`"), "\n{out}");
+    // keyed on the update's own predicate (`id = :id`), reusing its bound param.
+    assert!(out.contains("WHERE `order`.`id` = :id;"), "\n{out}");
+}
+
+#[test]
+fn soft_delete_mutation_reselects_without_the_live_predicate() {
+    // A soft `delete` tombstones the row (it survives); the declared shape is re-selected
+    // keyed off the write `where`, but *without* the live predicate — so the just-tombstoned
+    // row is still read back (D58).
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        @updated(updated_at)
+        Order { deleted_at: timestamp?, updated_at: timestamp, status: text }
+        shape OrderCard from Order { status }
+        mutation remove(id: Id) -> OrderCard {
+          delete Order where (id = $id);
+        }
+        "#);
+    assert!(out.contains("-- return:"), "\n{out}");
+    // no live predicate on the re-select (the row is tombstoned now).
+    assert!(
+        out.contains(
+            "SELECT\n  `order`.`status` AS `status`\nFROM `order`\nWHERE `order`.`id` = :id;"
+        ),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn hard_delete_mutation_emits_no_reselect() {
+    // A real DELETE removes the row — no surviving row to read back, so no re-select
+    // (the response falls back to `{}` at runtime).
+    let out = gen(r#"
+        Tag { label: text }
+        shape TagCard from Tag { label }
+        mutation drop_tag(id: Id) -> TagCard {
+          delete Tag where (id = $id);
+        }
+        "#);
+    assert!(
+        !out.contains("-- return:"),
+        "a real delete must not re-select:\n{out}"
+    );
 }
 
 #[test]
@@ -503,9 +547,12 @@ fn pg_update_across_relation_uses_from_clause() {
         ),
         "\n{out}"
     );
+    // The UPDATE *statement* uses FROM, not an inline JOIN (the trailing D58 re-select is a
+    // plain SELECT and may carry a JOIN — scope the assertion to the update).
+    let update_stmt = &out[out.find("UPDATE").unwrap()..out.find("-- return:").unwrap()];
     assert!(
-        !out.contains("\nJOIN "),
-        "no inline join in a PG update:\n{out}"
+        !update_stmt.contains("\nJOIN "),
+        "no inline join in a PG update:\n{update_stmt}"
     );
 }
 

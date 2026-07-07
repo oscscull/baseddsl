@@ -165,7 +165,7 @@ const UPDATE_SCHEMA: &str = r#"
 "#;
 
 #[test]
-fn update_binds_arg_then_ctx_scope_and_returns_no_created_row() {
+fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
     let c = compile(UPDATE_SCHEMA);
     let mut ids = SeqIdGen::default();
     let r = Request::new(
@@ -187,8 +187,21 @@ fn update_binds_arg_then_ctx_scope_and_returns_no_created_row() {
             SqlValue::Text("org-7".into()),
         ]
     );
-    // no create -> the response identifies no row (re-select deferred).
+    // No create, so no engine id — but the updated row survives, so the declared shape is
+    // re-selected keyed off the write `where` (D58): `id = :id`, then the live + scope
+    // guards, all reusing the write's already-bound params.
     assert!(plan.result_id.is_none());
+    let rs = plan.ret_select.as_ref().expect("where-keyed re-select");
+    assert!(rs.sql.starts_with("SELECT"), "{}", rs.sql);
+    assert!(rs.sql.contains("FROM `order`"), "{}", rs.sql);
+    assert!(!rs.sql.contains(':'), "no named binds left: {}", rs.sql);
+    assert_eq!(
+        rs.params,
+        vec![
+            SqlValue::Text("ord-9".into()),
+            SqlValue::Text("org-7".into())
+        ]
+    );
 }
 
 #[test]
@@ -218,7 +231,9 @@ fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
         "#,
     );
     let mut ids = SeqIdGen::default();
-    let mut db = MockDb::default();
+    // The soft-deleted row survives (tombstoned), so after the write the engine re-selects
+    // it in its declared shape (D58) — the mock replies to that fetch with the shaped row.
+    let mut db = MockDb::new(vec![vec![row(json!({ "status": "cancelled" }))]]);
     let out = run_mutation(
         &c,
         &mut db,
@@ -228,13 +243,24 @@ fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
     )
     .unwrap();
 
-    // the executed statement is the tombstone UPDATE, not a DELETE.
+    // the executed write is the tombstone UPDATE, not a DELETE.
     let (sql, params) = &db.calls[0];
     assert!(sql.starts_with("UPDATE `order`"), "{sql}");
     assert!(!sql.contains("DELETE"), "must not be a real DELETE: {sql}");
     assert_eq!(params, &vec![SqlValue::Text("ord-1".into())]);
-    // nothing created -> empty write response.
-    assert_eq!(out, json!({}));
+    // then the where-keyed re-select reads the tombstoned row back in its declared shape,
+    // *without* the live predicate (it's tombstoned now), all under one transaction.
+    assert_eq!(db.tx, vec!["begin", "commit"]);
+    assert_eq!(db.calls.len(), 2);
+    let (sel_sql, sel_params) = &db.calls[1];
+    assert!(sel_sql.starts_with("SELECT"), "{sel_sql}");
+    assert!(
+        !sel_sql.contains("deleted_at"),
+        "soft-delete re-select must not filter on the tombstone: {sel_sql}"
+    );
+    assert_eq!(sel_params, &vec![SqlValue::Text("ord-1".into())]);
+    // the response is the deleted row's declared shape.
+    assert_eq!(out, json!({ "status": "cancelled" }));
 }
 
 #[test]
