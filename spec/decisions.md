@@ -37,7 +37,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
-  filter go-to-def), D53 (rename + prepareRename)
+  filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger)
 
@@ -1781,3 +1781,25 @@ prompting.
   org.bsl and the type ref in user.bsl; exactly the `Org`-spelled sites, none else); forward-edge
   rename over commerce leaves the `items` back-edge untouched; rejection of a non-identifier new name
   and of a cursor on a primitive keyword; prepareRename offers the declaration's identifier extent.
+
+## D54 — workspace symbols (⌘T) (`based-lsp`)
+Track C4 "workspace symbols", the project-wide counterpart to document symbols (D44). Where
+`documentSymbol` outlines one file, `workspaceSymbol` (⌘T) searches *every* declaration in the
+project by name, so an author jumps to any model/callable without knowing its file. Advertised
+`workspace_symbol_provider`.
+- **`Snapshot::workspace_symbols(query)`** walks the whole parsed decl set (not one `fid`) and emits a
+  flat `SymbolInformation` per named declaration: models (Struct) with their fields (Field, nested via
+  `container_name` = the model name), shapes (Interface), scopes (Namespace), queries (Function),
+  mutations (Method), filters (Function). Each carries its own file `Location` resolved from the name
+  span's `FileId` → `sources` → `Url`, so results span files. Kinds match the D44 document-symbol
+  mapping; scopes are additionally surfaced here (⌘T is the "find any named decl" entry point).
+- **Fuzzy filter.** `fuzzy_match(query, name)` is a case-insensitive ordered subsequence test (the ⌘T
+  convention: every query char appears in order, not necessarily contiguously); an empty query matches
+  all. Coarse server-side filter — the client re-ranks. `"oc"` matches `OrderCard`, `"co"` does not.
+- **Handler (`main.rs::symbol`).** Sweeps every open project's snapshot (⌘T is workspace-wide, not
+  one file). A file shared by nested manifests appears in more than one snapshot, so results are
+  deduped on `(uri, start line, start char)` — identical spans across snapshots collapse to one.
+- **Tests (`based-lsp`).** Over commerce: symbols span multiple files; `Order` → Struct with its
+  `status` field contained in `Order`; kind mapping for shape/query/mutation; the `"oc"` fuzzy query
+  narrows to a subset including `OrderCard` while a non-subsequence query drops it. Plus a unit test
+  pinning `fuzzy_match` as an ordered, case-insensitive subsequence with empty-matches-all.

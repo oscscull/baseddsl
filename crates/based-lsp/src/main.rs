@@ -172,6 +172,8 @@ impl LanguageServer for Backend {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // `⌘T` — project-wide symbol search across every open project.
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 // `.` opens field completion, `@` the decorator set (see
                 // `Snapshot::completions`); other contexts trigger on identifier chars.
                 completion_provider: Some(CompletionOptions {
@@ -369,6 +371,31 @@ impl LanguageServer for Backend {
         Ok(Some(DocumentSymbolResponse::Nested(
             snapshot.document_symbols(fid),
         )))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let st = self.state.lock().unwrap();
+        let query = &params.query;
+        // Sweep every open project. A file shared by nested manifests appears in more
+        // than one snapshot, so dedupe on the symbol's location (identical spans).
+        let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
+        let mut out: Vec<SymbolInformation> = Vec::new();
+        for snapshot in st.snapshots.values() {
+            for sym in snapshot.workspace_symbols(query) {
+                let key = (
+                    sym.location.uri.to_string(),
+                    sym.location.range.start.line,
+                    sym.location.range.start.character,
+                );
+                if seen.insert(key) {
+                    out.push(sym);
+                }
+            }
+        }
+        Ok(Some(out))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

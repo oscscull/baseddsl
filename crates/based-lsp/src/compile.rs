@@ -24,7 +24,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, InlayHint, InlayHintKind, InlayHintLabel,
-    InlayHintLabelPart, InlayHintTooltip, Location, Position, Range, SymbolKind, TextEdit, Url,
+    InlayHintLabelPart, InlayHintTooltip, Location, Position, Range, SymbolInformation, SymbolKind,
+    TextEdit, Url,
 };
 
 /// A compiled view of the project the server answers requests from.
@@ -594,6 +595,48 @@ impl Snapshot {
         out
     }
 
+    /// Workspace symbols (`workspace/symbol`, ⌘T): every named declaration across the
+    /// whole project — models (with their fields), shapes, scopes, queries, mutations,
+    /// filters — filtered by a case-insensitive fuzzy subsequence match on `query`
+    /// (empty query = everything). Unlike [`Snapshot::document_symbols`] this spans
+    /// every file in the snapshot; each symbol carries its own file `Location` so the
+    /// editor jumps straight to the declaration.
+    pub fn workspace_symbols(&self, query: &str) -> Vec<SymbolInformation> {
+        let mut out = Vec::new();
+        let mut push = |name: &Ident, kind: SymbolKind, container: Option<&str>| {
+            if !fuzzy_match(query, &name.node) {
+                return;
+            }
+            let fid = name.span.file.0 as usize;
+            let Some((path, _)) = self.sources.get(fid) else {
+                return;
+            };
+            let Ok(uri) = Url::from_file_path(path) else {
+                return;
+            };
+            let location = Location::new(uri, span_range(name.span, &self.lines[fid]));
+            out.push(sym_info(&name.node, kind, location, container));
+        };
+        for d in &self.decls {
+            match d {
+                Decl::Model(m) => {
+                    push(&m.name, SymbolKind::STRUCT, None);
+                    for mem in &m.members {
+                        if let Member::Field(f) = mem {
+                            push(&f.name, SymbolKind::FIELD, Some(&m.name.node));
+                        }
+                    }
+                }
+                Decl::Shape(s) => push(&s.name, SymbolKind::INTERFACE, None),
+                Decl::Scope(s) => push(&s.name, SymbolKind::NAMESPACE, None),
+                Decl::Query(q) => push(&q.name, SymbolKind::FUNCTION, None),
+                Decl::Mutation(m) => push(&m.name, SymbolKind::METHOD, None),
+                Decl::Filter(f) => push(&f.name, SymbolKind::FUNCTION, None),
+            }
+        }
+        out
+    }
+
     /// Context-aware completions at `(fid, offset)`. The buffer under an edit is
     /// often unparseable, so instead of parsing the half-typed text we read the
     /// source *prefix* before the cursor and classify by its trigger character (the
@@ -866,6 +909,38 @@ fn symbol(
         selection_range: span_range(name.span, idx),
         children,
     }
+}
+
+/// One `workspace/symbol` result: a flat, file-located symbol (no nesting — that is
+/// what `container_name` is for).
+#[allow(deprecated)] // `deprecated` is a required struct field, set to None.
+fn sym_info(
+    name: &str,
+    kind: SymbolKind,
+    location: Location,
+    container: Option<&str>,
+) -> SymbolInformation {
+    SymbolInformation {
+        name: name.to_owned(),
+        kind,
+        tags: None,
+        deprecated: None,
+        location,
+        container_name: container.map(str::to_owned),
+    }
+}
+
+/// Case-insensitive fuzzy subsequence match, the ⌘T convention: every char of
+/// `query` must appear in `name` in order (not necessarily contiguously). An empty
+/// query matches everything. The client re-ranks; this is the coarse server filter.
+fn fuzzy_match(query: &str, name: &str) -> bool {
+    let mut chars = name.chars().flat_map(char::to_lowercase);
+    for q in query.chars().flat_map(char::to_lowercase) {
+        if !chars.any(|c| c == q) {
+            return false;
+        }
+    }
+    true
 }
 
 /// A source `Span`'s byte range as an LSP `Range` via the owning file's index.
@@ -1461,6 +1536,7 @@ impl LineIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -2038,6 +2114,70 @@ mod tests {
         assert_eq!(m.kind, SymbolKind::METHOD);
         // Symbols are file-scoped: no cross-file leakage into the query file.
         assert!(qsyms.iter().all(|s| s.name != "Order"));
+    }
+
+    /// Workspace symbols span every file in the project (unlike document symbols),
+    /// map each declaration kind, nest fields under their model via `container_name`,
+    /// and filter by a fuzzy subsequence query. Asserted over the commerce schema.
+    #[test]
+    fn workspace_symbols_span_project_and_filter() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // Empty query = everything. Symbols come from many files, each carrying its
+        // own file `Location` (workspace-wide, not one file).
+        let all = snap.workspace_symbols("");
+        let files: HashSet<_> = all.iter().map(|s| s.location.uri.to_string()).collect();
+        assert!(files.len() > 1, "symbols should span multiple files");
+
+        // The `Order` model (Struct) and its `status` field (Field, contained in Order).
+        let order = all
+            .iter()
+            .find(|s| s.name == "Order")
+            .expect("Order symbol");
+        assert_eq!(order.kind, SymbolKind::STRUCT);
+        let status = all
+            .iter()
+            .find(|s| s.name == "status" && s.container_name.as_deref() == Some("Order"))
+            .expect("Order.status field");
+        assert_eq!(status.kind, SymbolKind::FIELD);
+
+        // Kind mapping across decl kinds: shape → Interface, query → Function,
+        // mutation → Method.
+        assert_eq!(
+            all.iter().find(|s| s.name == "OrderCard").unwrap().kind,
+            SymbolKind::INTERFACE
+        );
+        assert_eq!(
+            all.iter().find(|s| s.name == "place_order").unwrap().kind,
+            SymbolKind::METHOD
+        );
+        assert_eq!(
+            all.iter().find(|s| s.name == "my_org_orders").unwrap().kind,
+            SymbolKind::FUNCTION
+        );
+
+        // Fuzzy subsequence filter, case-insensitive: "oc" matches OrderCard (O..C),
+        // and the query narrows the set. A non-subsequence query drops it.
+        let oc = snap.workspace_symbols("oc");
+        assert!(oc.iter().any(|s| s.name == "OrderCard"));
+        assert!(oc.len() < all.len());
+        assert!(snap
+            .workspace_symbols("zzq")
+            .iter()
+            .all(|s| s.name != "OrderCard"));
+    }
+
+    /// `fuzzy_match` is an ordered, case-insensitive subsequence test; empty matches all.
+    #[test]
+    fn fuzzy_match_is_ordered_subsequence() {
+        assert!(fuzzy_match("", "anything"));
+        assert!(fuzzy_match("oc", "OrderCard"));
+        assert!(fuzzy_match("order", "Order"));
+        assert!(fuzzy_match("PO", "place_order"));
+        assert!(!fuzzy_match("co", "OrderCard")); // out of order
+        assert!(!fuzzy_match("xyz", "Order"));
     }
 
     /// Completion is context-aware off the source prefix: model names in a type

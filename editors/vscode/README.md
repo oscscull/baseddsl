@@ -86,6 +86,9 @@ code --install-extension based-vscode-0.1.0.vsix
   pairs through it) is *not* renamed, unlike the find-references listing.
 - **Document symbols** — the outline / breadcrumbs (⇧⌘O): models (fields nested),
   shapes, queries, mutations, filters.
+- **Workspace symbols** — jump to any named declaration by name across the whole
+  project (⌘T): models and their fields, shapes, scopes, queries, mutations, filters,
+  fuzzy-filtered by the typed query.
 - **Completion** — model names in a type annotation (after `:`) or return type
   (after `->`), a base model's fields after a resolvable `.`, decorators after `@`,
   and the keyword vocabulary otherwise.
@@ -105,7 +108,7 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 | Document symbols (`documentSymbol`) | **have** | outline / breadcrumbs (D44) |
 | Syntax highlighting (TextMate) | **have** | models vs. builtins; type-name coloring (D43) |
 | Completion (`completion`) | **have** | model names in type position, fields after a resolvable `.`, keyword/decorator set (D45) |
-| Workspace symbols (`workspaceSymbol`) | **missing** | jump to any model/callable by name across the project |
+| Workspace symbols (`workspaceSymbol`) | **have** | ⌘T — every named decl (models + fields, shapes, scopes, queries, mutations, filters) across the whole project, fuzzy-filtered (D54) |
 | Rename (`rename`) + prepare (`prepareRename`) | **have** | rewrites every occurrence spelling the old name across files (reuses the D52 `references_at` index); leaves the differently-named inverse back-edge untouched (D53) |
 | Folding ranges (`foldingRange`) | **missing** | block folding — cheap, expected |
 | Selection ranges (`selectionRange`) | **missing** | expand/shrink selection — cheap, expected |
