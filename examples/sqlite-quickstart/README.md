@@ -4,6 +4,20 @@ The thing to copy to start: a `.bsl` schema consumed through the **generated typ
 client** running over the in-process **`Engine`** against a live **SQLite** database — no
 socket, no server, no infra.
 
+## Prerequisites
+
+The steps below shell out to the `based` CLI, so install it onto your `PATH` once, from
+the repo root:
+
+```sh
+cargo install --path crates/based-cli
+```
+
+Then run the rest from this directory (`examples/sqlite-quickstart`).
+
+> Editing the engine crates? Re-run that install to pick up your changes, or invoke
+> `cargo run -p based-cli --` from the repo root to build from source on every call.
+
 ## Run it
 
 ```sh

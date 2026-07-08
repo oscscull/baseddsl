@@ -4,6 +4,20 @@ The thing to copy to start on **Postgres**: the *same* `.bsl` schema + end-to-en
 as [`sqlite-quickstart`](../sqlite-quickstart), consumed through the **generated typed
 client** over the in-process **`Engine`** — pointed at a real Postgres server.
 
+## Prerequisites
+
+The steps below shell out to the `based` CLI, so install it onto your `PATH` once, from
+the repo root:
+
+```sh
+cargo install --path crates/based-cli
+```
+
+Then run the rest from this directory (`examples/postgres-quickstart`).
+
+> Editing the engine crates? Re-run that install to pick up your changes, or invoke
+> `cargo run -p based-cli --` from the repo root to build from source on every call.
+
 ## Run it
 
 ```sh
