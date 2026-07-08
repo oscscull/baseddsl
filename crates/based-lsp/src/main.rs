@@ -174,6 +174,9 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // `⌘T` — project-wide symbol search across every open project.
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Fold declaration bodies; expand/shrink selection through the AST.
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 // `.` opens field completion, `@` the decorator set (see
                 // `Snapshot::completions`); other contexts trigger on identifier chars.
                 completion_provider: Some(CompletionOptions {
@@ -396,6 +399,54 @@ impl LanguageServer for Backend {
             }
         }
         Ok(Some(out))
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let st = self.state.lock().unwrap();
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        Ok(Some(snapshot.folding_ranges(fid)))
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let st = self.state.lock().unwrap();
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        let idx = &snapshot.lines[fid];
+        // One range per requested position, same order (LSP: result[i] covers
+        // positions[i]). A position on nothing foldable falls back to a bare cursor
+        // range so the array stays aligned.
+        let ranges = params
+            .positions
+            .iter()
+            .map(|pos| {
+                let offset = idx.offset(*pos) as u32;
+                snapshot
+                    .selection_range(fid, offset)
+                    .unwrap_or(SelectionRange {
+                        range: Range::new(*pos, *pos),
+                        parent: None,
+                    })
+            })
+            .collect();
+        Ok(Some(ranges))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

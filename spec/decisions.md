@@ -55,7 +55,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
   filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T), D67 (offline
-  migration-drift diagnostic W0108 + spent-`@was` W0107)
+  migration-drift diagnostic W0108 + spent-`@was` W0107), D68 (folding + selection ranges — Track
+  C4 feature-parity complete)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger), D67 (`@was` renames + offline drift diagnostic
   + `raw(dialect)` up step — Track E5, DoD #5 fully met)
@@ -2387,3 +2388,41 @@ reported that migration `partial`. MariaDB: the same `@was` cycle (twice, on val
 `ALTER TABLE `product` RENAME COLUMN …` and the row survived. Gate: `cargo test --workspace --all-features`
 + `fmt --check` + `clippy --all-features` clean; new sema cases (E0190/E0191 ± clean), codegen diff/render
 unit tests (rename one-step, spent-inert, snap round-trip, raw per-dialect), and LSP drift/spent tests.
+
+## D68 — Folding + selection ranges (Track C4 feature-parity complete)
+The two remaining C4 gaps in the LSP capability audit — `textDocument/foldingRange` and
+`textDocument/selectionRange`. Both advertised at `initialize` (`folding_range_provider` /
+`selection_range_provider` = `Simple(true)`) and served from the parsed decl spans already in the
+snapshot (`based-lsp::compile`), same routing (nearest-manifest snapshot) as the other position
+requests. The extension is a thin client — `vscode-languageclient` negotiates a newly advertised
+capability automatically, so no `editors/vscode` source change was needed (the TS still compiles).
+
+- **Folding** (`Snapshot::folding_ranges`): one `Region` fold per top-level declaration whose body
+  spans more than one line — model / shape / scope / query / mutation / filter. The range runs from
+  the body's opening `{` (found within the decl's own span, so the `Name {` header stays visible when
+  collapsed) to the span's closing byte; a brace-less multi-line decl folds from its first line. No
+  file-wide brace scan or re-parse — extents come off the `decl_span` the parser already stamped.
+- **Selection ranges** (`Snapshot::selection_range`): the expand/shrink-selection hierarchy at a
+  position, built by collecting every AST span covering the offset (a model field's `name` → `ty` →
+  whole-field, its enclosing declaration) plus the identifier token under the cursor and the whole
+  file, then keeping a strictly-nesting chain (sorted by width, each level contained in its parent)
+  linked innermost-out. The handler returns one `SelectionRange` per requested position (LSP requires
+  index alignment); a position on nothing resolvable falls back to a bare cursor range.
+- **Shared token scan:** the identifier-extent walk `prepareRename` used is factored into
+  `word_extent`, reused as the selection-range token level (one ASCII-safe byte scan, not duplicated).
+- **Code actions — declined (out of scope), documented.** The audit flagged `codeAction` (e.g. `W0103`
+  → add `@index`) as "borderline, only if cheap." It isn't: `W0103` is anchored on the *query*'s clause
+  span, often in a different file than the model that needs the index, and the diagnostic carries no
+  target-model span or column tuple — a correct quick-fix would need new plumbing threading the target
+  model + suggested columns from the lint through the diagnostic into the LSP. Not cheap; left as a
+  documented gap (README row stays "out of scope"), to revisit when a `based fmt` / edit-producing
+  surface exists.
+- **Static editing config verified:** `editors/vscode/language-configuration.json` already covers
+  bracket matching, auto-closing + surrounding pairs (`{}`/`[]`/`()`/`""`/` `` `), and `#` line-comment
+  toggling — no change needed.
+
+**Track C4 (VS Code / LSP feature-parity) is complete**, so DoD #3's "feature-parity fill-in" closes and
+every DoD item is met. Gate: `cargo test --workspace --all-features` + `fmt --check` +
+`clippy --workspace --all-features` clean; `cargo build -p based-lsp` + `npm run compile` clean; two new
+LSP unit tests over the commerce fixture (folding: model/shape fold, single-line scope doesn't; selection:
+`total` token → field → `Order` model → file, strictly nesting).

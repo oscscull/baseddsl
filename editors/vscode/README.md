@@ -92,6 +92,10 @@ code --install-extension based-vscode-0.1.0.vsix
 - **Completion** — model names in a type annotation (after `:`) or return type
   (after `->`), a base model's fields after a resolvable `.`, decorators after `@`,
   and the keyword vocabulary otherwise.
+- **Folding** — each multi-line declaration body (model, shape, scope, query,
+  mutation, filter) collapses from its `{` header line to its closing brace.
+- **Selection ranges** — expand/shrink selection walks the AST outward: the
+  identifier token → its field declaration → the enclosing declaration → the file.
 
 ## LSP capability audit (Track C4)
 
@@ -110,9 +114,9 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 | Completion (`completion`) | **have** | model names in type position, fields after a resolvable `.`, keyword/decorator set (D45) |
 | Workspace symbols (`workspaceSymbol`) | **have** | ⌘T — every named decl (models + fields, shapes, scopes, queries, mutations, filters) across the whole project, fuzzy-filtered (D54) |
 | Rename (`rename`) + prepare (`prepareRename`) | **have** | rewrites every occurrence spelling the old name across files (reuses the D52 `references_at` index); leaves the differently-named inverse back-edge untouched (D53) |
-| Folding ranges (`foldingRange`) | **missing** | block folding — cheap, expected |
-| Selection ranges (`selectionRange`) | **missing** | expand/shrink selection — cheap, expected |
-| Code actions (`codeAction`) | **missing** | lint quick-fixes (e.g. `W0103` → add `@index`) — borderline, include only if cheap |
+| Folding ranges (`foldingRange`) | **have** | fold each multi-line declaration body — model/shape/scope/query/mutation/filter — from its `{` header to the close, off the parsed decl spans (D68) |
+| Selection ranges (`selectionRange`) | **have** | expand/shrink selection through the AST: token → field → enclosing declaration → file (D68) |
+| Code actions (`codeAction`) | **out of scope** | lint quick-fixes: `W0103` anchors on the query (often a different file than the model needing the `@index`) and carries no target-model span, so a correct fix needs new lint→diagnostic plumbing — not cheap; revisit with `based fmt` (D68) |
 | Semantic tokens (`semanticTokens`) | **N/A** | coloring is done via TextMate; a semantic-token re-do is out of scope |
 | Formatting (`formatting`) | **deferred** | no `based fmt` exists yet — out of scope for C4 |
 | Signature help (`signatureHelp`) | **deferred** | exotic for a declarative DSL — out of scope for C4 |

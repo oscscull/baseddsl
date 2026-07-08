@@ -61,9 +61,12 @@ config, `/healthz` HEALTHCHECK, graceful drain), built + verified serving live `
 smoke-booted in CI via `make ci-image`. **Track E — migrations — is now COMPLETE (E5/D67):** `@was`
 data-preserving renames (snapshot-authoritative, per-dialect `ALTER … RENAME`), the offline
 schema-vs-migrations drift diagnostic (LSP `W0108` + `based migrate verify`), and the `raw(dialect)` up
-step, all proven live — so **DoD #5 is fully met** and **every DoD item is now met**. The only remaining
-open work is the **VS Code extension feature-parity fill-in (C4)** — folding + selection ranges — which
-shares no files with the rest. Batch-by-batch history is in `PLAN-archive.md`.
+step, all proven live — so **DoD #5 is fully met** and **every DoD item is now met**. The **VS Code / LSP
+feature-parity fill-in (C4) is now complete (D68):** folding + selection ranges land, code actions are
+declined as out-of-scope (documented), `language-configuration.json` is verified — so DoD #3's
+feature-parity fill-in closes. **All feature work is now done; the roadmap has no open feature items** —
+only the cross-cutting source-hygiene pass (F1) and deferred nice-to-haves remain. Batch-by-batch history
+is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -88,7 +91,7 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    `postgres:16` via Docker; the Postgres slice surfaced + fixed a real binary-format result-decode bug).
 3. **A functional, installable VS Code extension.** Packaged (`.vsix`), registers `.bsl`, launches
    `based-lsp`, surfaces diagnostics + inlay hints + hover + go-to-def + symbols + completion.
-   **✅ Installable (D36); feature-parity fill-in in progress (Track C4).**
+   **✅ Met (D36 installable; Track C4 feature-parity complete, D68).**
 4. **Deployable + kept-proven.** A container image / Dockerfile for `based serve`, and CI running the
    real-DB suites + example builds + extension build so none of it rots. **✅ Met (D64 + D66):** the
    `based serve` container image (`docker/Dockerfile`, dialect-aware serve, env-configured, `/healthz`
@@ -219,17 +222,17 @@ First **live Postgres `migrate apply`** landed here (worked unchanged). User flo
     `.vsix` packages.
   - C3. ✅ **done (D40).** Per-file manifest resolution — each open file resolves to its nearest
     `based.toml`, one snapshot per project, so embedded schemas resolve cross-file (no spurious E0110).
-  - **C4. 🔴 OPEN (parallel-eligible; no longer the top priority — that is Track L1). Feature-parity
-    audit + fill-in** (baseline editor features a `.bsl` author expects). *Framing (user, 2026-07-06):
-    the LSP exists to power the editor tooling, not the reverse.*
-    The audit checklist lives in `editors/vscode/README.md` ("LSP capability audit"). Done so far:
-    document symbols (D44), completion (D45), go-to-def (D43), find-references (D52), rename +
-    prepareRename (D53), workspace symbols `⌘T` (D54). **Remaining:** folding ranges, selection ranges;
-    code actions wiring lints to quick-fixes only if cheap. Also verify `language-configuration.json`
-    covers bracket/auto-close/comment (`#`) — likely partial. Explicitly out of scope: formatting, signature help, call hierarchy, semantic-tokens re-do,
-    debugging. **Acceptance:** each agreed gap implemented, capability-advertised, unit-tested against
-    the commerce fixture, binary rebuilt. The **`based fmt` formatter** + `format-document` LSP
-    directive are queued behind C4.
+  - **C4. ✅ done (D68). Feature-parity audit + fill-in** (baseline editor features a `.bsl` author
+    expects). *Framing (user, 2026-07-06): the LSP exists to power the editor tooling, not the reverse.*
+    The audit checklist lives in `editors/vscode/README.md` ("LSP capability audit"). Delivered: document
+    symbols (D44), completion (D45), go-to-def (D43), find-references (D52), rename + prepareRename (D53),
+    workspace symbols `⌘T` (D54), and the D68 fill-in — **folding ranges + selection ranges** (off the
+    parsed decl spans; capability-advertised, unit-tested over the commerce fixture, binary rebuilt).
+    `language-configuration.json` verified (bracket/auto-close/`#`-comment — already complete). **Code
+    actions declined:** `W0103` anchors on the query, not the model needing the `@index`, and carries no
+    target span — a correct quick-fix needs new lint→diagnostic plumbing, not cheap (documented). Was
+    out of scope: formatting, signature help, call hierarchy, semantic-tokens re-do, debugging. The
+    **`based fmt` formatter** + `format-document` LSP directive are queued next.
   - **C4a. ✅ done (D51) (user-raised 2026-07-07). Navigation + hover depth.** Three editor
     refinements the author noticed on the commerce `Order` model:
     - **Inverse inlay hint.** Was `inverse <- OrderItem via order` (wordy; `OrderItem[]` already on
@@ -332,7 +335,7 @@ path — worked when it won't preempt A/B/D/E).**
       ──codegen::openapi────▶ OpenAPI 3.1 doc → polyglot clients (D24 ✅)
       ──codegen::migrate────▶ schema.snap + up.mig + per-dialect migration SQL (E2/E3 ✅ D39/D41)
       ──facts───────────────▶ engine-derived facts    (M5 ✅)
-                              └─ based-lsp ──▶ editor inlay hints + hover + diagnostics + go-to-def + find-refs + rename + symbols + completion
+                              └─ based-lsp ──▶ editor inlay hints + hover + diagnostics + go-to-def + find-refs + rename + symbols + completion + folding + selection ranges
       ──runtime::plan/run───▶ bound positional statement + shaped JSON  (M6 read+write ✅)
       ──runtime::serve──────▶ WireResponse (dispatch core; PlanError→4xx, DbError→503)  (M6 ✅)
       ──runtime::http───────▶ `based serve`: tiny_http listener over dispatch  (M6 ✅ D21)
@@ -361,7 +364,7 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
 | based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57) with an **opt-in in-process embedded bridge** (`ClientOptions::embedded` / `client_with` → emits `client::embedded(&engine)` over `based_runtime::Engine`, so an embedder writes zero `Transport` plumbing; referenced by path, no based-runtime dep; D62); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50) + `@was` snapshot-authoritative renames (`Snapshot.renames` persisted → `rename table`/`rename column` steps → per-dialect `ALTER … RENAME`), the `raw(dialect)` escape step (`parse_raw_steps`), and the offline `drift` helper (D67). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
-| based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54); offline migration-drift diagnostic `W0108` + spent-`@was` `W0107` (diffs the latest `schema.snap` against the schema, no DB, D67). Remaining C4: folding, selection ranges. |
+| based-lsp | ✅ works (C4 complete) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54); offline migration-drift diagnostic `W0108` + spent-`@was` `W0107` (diffs the latest `schema.snap` against the schema, no DB, D67); folding ranges (per multi-line decl body) + selection ranges (token→field→decl→file), both off the parsed decl spans (D68). |
 | based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). Live-DB hardening (D65): per-dialect statement timeouts + bounded checkout wait on `PoolConfig`, drivers classify deadlock/serialization codes into `DbErrorKind::Deadlock` (mutation path retries the tx a bounded 5× with backoff) and pool saturation into `DbErrorKind::PoolExhausted` (fast 503), proven live on MariaDB/Postgres. `migrate` = live apply + ledger (D42). `based serve` is dialect-aware — the CLI branches on the manifest dialect to build the MariaDB/Postgres/SQLite backend (D66). Packaged as a container image (`docker/Dockerfile`, D66). *Open:* durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
