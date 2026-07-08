@@ -37,7 +37,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   phantom `Id<entity::M>` newtypes, transparent wire, `from_raw` escape, no blanket `From<String>`),
   D71 (production-grade errors: structured `ClientError` + `std::error::Error`/`Display` on runtime errors)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
-  `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire)
+  `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
+  D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
+  failure 1; reuses D71's typed errors as the cause instead of re-stringifying; `anyhow` dropped)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
@@ -2540,3 +2542,51 @@ serve,value}` (traits + `code()` accessors + single-source wire mapping), the ve
 `based-runtime/tests/embed.rs`, and all three regenerated `examples/*/src/client.rs`. Gate: `cargo test
 --workspace --all-features` + `fmt --check` + `clippy` all clean; all three quickstarts ran **green live**
 via `cargo run` (SQLite bundled; MariaDB `mariadb:11.4` + Postgres `postgres:16` over Docker).
+
+## D72 — Production-grade CLI error handling (structured `CliError` + exit-code convention)
+
+**Context (H7 deferred sub-item (i), continuing D71).** D71 fixed the errors a *library user* meets
+(the generated client + the runtime types it surfaces). The **CLI** is the other place a user meets
+errors directly, and it was not production-grade: `main` returned `anyhow::Result<()>`, so every failure
+printed anyhow's `Error: …` blob and exited `1` — a bad manifest, a missing database url, and an
+unreachable database were indistinguishable by exit code. Structured runtime errors were re-flattened to
+strings (`.map_err(|e| anyhow::anyhow!("{e}"))` on `MigrateError`, `.map_err(|e| anyhow::anyhow!("{}",
+e.message))` reaching into `DbError`), throwing away their `Display` + `code()`. The rustc-style
+parse/sema diagnostic rendering (`render.rs`), on the other hand, was already good.
+
+**Decision.** Give the CLI one structured top-level error and a real exit-code convention; drop `anyhow`.
+
+- **`CliError` (new `based-cli/src/error.rs`).** A struct carrying a clean, actionable `message`, an exit
+  `Kind` (`Usage` vs `Failure`), an optional boxed `source` (`dyn Error + Send + Sync`), and a
+  `summary_only` flag. Implements the reporting itself: `report(&self) -> ExitCode` prints a `based: <msg>`
+  line plus the `source()` chain (`  caused by: …` per level), then returns the code. Constructors:
+  `usage`/`failure` (no cause), `io`/`io_at` (fs failures naming the path), `db` (carries a `DbError`),
+  `migrate` (carries a `MigrateError`), `caused_by` (any `Error`), and `summary` (detail already on
+  stderr — print the one line only).
+- **Exit codes.** `Usage` → **2** (matching clap's own arg-parse exit, so a config/usage mistake is one
+  class end to end), `Failure` → **1** (an operational failure the run hit), success → 0. Classified per
+  site: no database url / unknown-migration / sqlite-multi-url / a schema that didn't check → `Usage`;
+  io / database-unreachable / migration-apply / serve-bind → `Failure`. A `MigrateError::Destructive`
+  (needs `--allow-destructive`) is reclassified `Usage` — it's the caller's to fix.
+- **Reuse, don't re-stringify (principle 4).** DB and migration failures keep their typed error as the
+  `source`, so D71's `MigrateError`/`DbError` `Display` (and `DbError::code()`) read through the chain
+  verbatim instead of being flattened into a bare string at the call site.
+- **Diagnostics unchanged.** The parse/sema path still renders rustc-style via `render.rs`; those sites
+  return a `summary_only` `CliError`, so the user sees the framed diagnostics followed by one terse
+  `check failed: N error(s) …` summary (exit 2), never a second anyhow blob on top.
+
+Userland messages carry no jargon / decision-refs. Before → after, a couple of paths: a missing database
+url was `Error: no database url: …` (exit 1) → `based: no database url: … set BASED_DATABASE_URL /
+DATABASE_URL` (exit **2**); an unreachable database was an `Error:` blob (exit 1) → `based: connecting to
+postgres://user@host/db` + `  caused by: <driver message>` (exit 1, url password-redacted).
+
+`anyhow` is dropped from `based-cli`'s dependencies. Touched `based-cli/src/{main.rs,error.rs}` +
+`Cargo.toml`. Gate: `cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace
+--all-features` all clean; error paths exercised manually (bad manifest, missing file, no db url,
+unreachable Postgres, no-migrations render, unwritable output) confirming message + exit code; the SQLite
+quickstart still runs green (`based migrate apply` → `cargo run`, exit 0).
+
+**Remaining deferred H7 sub-items:** (ii) HTTP listener edge errors sharing the code registry;
+(iii) `based migrate apply` already surfaces the structured `MigrateError` (this slice stopped
+re-flattening it) — a dedicated CLI-side type beyond that is unneeded; (iv) example `main.rs` as a
+`?`-based error-handling reference matching on `ClientError::kind()`/`code()`.

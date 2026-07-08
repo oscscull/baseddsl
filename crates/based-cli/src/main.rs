@@ -5,15 +5,17 @@
 //! `based gen client`: a typed Rust client module. `based gen openapi`: an OpenAPI 3.1
 //! spec over the same wire (polyglot clients via `openapi-generator`, D23).
 
+mod error;
 mod render;
 
-use anyhow::{bail, Context};
 use based_ast::{Decl, FileId};
 use based_codegen::{client::ClientTarget, Dialect};
 use based_manifest::Project;
 use based_sema::CheckedSchema;
 use clap::{Parser, Subcommand};
+use error::{io_at, CliError};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(name = "based", version, about = "based DSL compiler")]
@@ -185,8 +187,16 @@ enum GenTarget {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+fn main() -> ExitCode {
+    // clap prints its own usage error + exits 2 before we get here; our commands return a
+    // structured error so `main` can pick a clean message + exit class (2 usage, 1 failure).
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => e.report(),
+    }
+}
+
+fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Check { root } => cmd_check(&root),
         Command::Gen { target } => match target {
@@ -227,7 +237,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn cmd_check(root: &Path) -> anyhow::Result<()> {
+fn cmd_check(root: &Path) -> Result<(), CliError> {
     let (_project, schema, _decls, _sources, warnings) = load_checked(root)?;
     let n = schema.models.len();
     if warnings > 0 {
@@ -238,7 +248,7 @@ fn cmd_check(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
     // Schema DDL first, then the parameterized query templates (M3 read side).
@@ -259,7 +269,7 @@ fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     }
     match out {
         Some(path) => {
-            std::fs::write(path, &sql).with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(path, &sql).map_err(|e| io_at("writing", path, e))?;
             eprintln!("wrote {} ({} models)", path.display(), schema.models.len());
         }
         None => print!("{sql}"),
@@ -267,7 +277,7 @@ fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> anyhow::Result<()> {
+fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> Result<(), CliError> {
     use based_codegen::client::ClientOptions;
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let target = ClientTarget::parse(&project.manifest.client);
@@ -275,7 +285,7 @@ fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> anyhow::Re
     let code = based_codegen::client::client_with(&schema, &decls, target, opts);
     match out {
         Some(path) => {
-            std::fs::write(path, &code).with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(path, &code).map_err(|e| io_at("writing", path, e))?;
             let n = schema.queries.len() + schema.mutations.len();
             eprintln!("wrote {} ({n} callable(s))", path.display());
         }
@@ -284,12 +294,12 @@ fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> anyhow::Re
     Ok(())
 }
 
-fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
     let (_project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let doc = based_codegen::openapi::openapi(&schema, &decls);
     match out {
         Some(path) => {
-            std::fs::write(path, &doc).with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(path, &doc).map_err(|e| io_at("writing", path, e))?;
             let n = schema.queries.len() + schema.mutations.len();
             eprintln!("wrote {} ({n} operation(s))", path.display());
         }
@@ -302,7 +312,7 @@ fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
 /// snapshot and, if there are changes, write the next `migrations/NNNN_slug/{up.mig,
 /// schema.snap}` (E2). Offline + deterministic: the baseline is a stored snapshot, never
 /// a database. No changes ⇒ writes nothing and says so (a clean exit).
-fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> anyhow::Result<()> {
+fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     use based_codegen::migrate;
 
     let (_project, schema, _decls, _sources, _warnings) = load_checked(root)?;
@@ -313,10 +323,10 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> anyhow::Result<()> {
     let prev = match existing.last() {
         Some((_, dir)) => {
             let snap_path = dir.join("schema.snap");
-            let text = std::fs::read_to_string(&snap_path)
-                .with_context(|| format!("reading {}", snap_path.display()))?;
+            let text =
+                std::fs::read_to_string(&snap_path).map_err(|e| io_at("reading", &snap_path, e))?;
             migrate::Snapshot::parse(&text)
-                .with_context(|| format!("parsing {}", snap_path.display()))?
+                .map_err(|e| CliError::failure(format!("parsing {}: {e}", snap_path.display())))?
         }
         None => migrate::Snapshot::default(),
     };
@@ -332,12 +342,14 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> anyhow::Result<()> {
     let slug = migration_slug(name, next);
     let dir_name = format!("{next:04}_{slug}");
     let dir = migrations_dir.join(&dir_name);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| io_at("creating", &dir, e))?;
 
     let up = migrate::render_up(&steps);
     let snap = migrate::snapshot(&schema);
-    std::fs::write(dir.join("up.mig"), &up)?;
-    std::fs::write(dir.join("schema.snap"), &snap)?;
+    let up_path = dir.join("up.mig");
+    let snap_path = dir.join("schema.snap");
+    std::fs::write(&up_path, &up).map_err(|e| io_at("writing", &up_path, e))?;
+    std::fs::write(&snap_path, &snap).map_err(|e| io_at("writing", &snap_path, e))?;
 
     let destructive = steps.iter().filter(|s| s.destructive()).count();
     println!(
@@ -362,18 +374,12 @@ fn cmd_migrate_render(
     root: &Path,
     number: Option<u32>,
     dialect: Option<&str>,
-) -> anyhow::Result<()> {
+) -> Result<(), CliError> {
     use based_codegen::migrate;
 
     // Only the manifest dialect is needed — render reads stored artifacts, not the schema,
     // so it does not run the full front end (it works even against an in-progress schema).
-    let project = match based_manifest::discover(root) {
-        Ok(p) => p,
-        Err(diags) => {
-            render::render(&diags, &[]);
-            bail!("could not load project at {}", root.display());
-        }
-    };
+    let project = discover_project(root)?;
     let dialect = match dialect {
         Some(d) => Dialect::parse(d),
         None => Dialect::parse(&project.manifest.dialect),
@@ -382,22 +388,25 @@ fn cmd_migrate_render(
     let migrations_dir = root.join("migrations");
     let existing = existing_migrations(&migrations_dir)?;
     if existing.is_empty() {
-        bail!("no migrations found under {}", migrations_dir.display());
+        return Err(CliError::usage(format!(
+            "no migrations under {} — run `based migrate gen` first",
+            migrations_dir.display()
+        )));
     }
     if let Some(n) = number {
         if !existing.iter().any(|(m, _)| *m == n) {
-            bail!(
+            return Err(CliError::usage(format!(
                 "migration {n:04} not found under {}",
                 migrations_dir.display()
-            );
+            )));
         }
     }
 
-    let read_snap = |dir: &Path| -> anyhow::Result<migrate::Snapshot> {
+    let read_snap = |dir: &Path| -> Result<migrate::Snapshot, CliError> {
         let path = dir.join("schema.snap");
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        migrate::Snapshot::parse(&text).with_context(|| format!("parsing {}", path.display()))
+        let text = std::fs::read_to_string(&path).map_err(|e| io_at("reading", &path, e))?;
+        migrate::Snapshot::parse(&text)
+            .map_err(|e| CliError::failure(format!("parsing {}: {e}", path.display())))
     };
 
     for (idx, (n, dir)) in existing.iter().enumerate() {
@@ -438,14 +447,15 @@ fn cmd_migrate_apply(
     allow_destructive: bool,
     to: Option<u32>,
     down: bool,
-) -> anyhow::Result<()> {
+) -> Result<(), CliError> {
     use based_runtime::migrate;
 
     // Only the manifest dialect is needed to render each step to executable SQL; apply reads
     // stored artifacts, not the schema, so it works even against an in-progress `.bsl`.
     let project = discover_project(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
-    let migrations = migrate::load_migrations(root, dialect).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let migrations = migrate::load_migrations(root, dialect)
+        .map_err(|e| CliError::migrate("loading migrations", e))?;
     if migrations.is_empty() {
         println!(
             "no migrations under {}/migrations — run `based migrate gen` first",
@@ -468,7 +478,7 @@ fn cmd_migrate_apply(
     for url in &urls {
         let mut db = connect(dialect, url)?;
         let report = migrate::apply(&mut *db, dialect, &migrations, &opts)
-            .map_err(|e| anyhow::anyhow!("applying to {}: {e}", redact(url)))?;
+            .map_err(|e| CliError::migrate(format!("applying migrations to {}", redact(url)), e))?;
         report_apply(&report, &redact(url));
     }
     Ok(())
@@ -476,19 +486,21 @@ fn cmd_migrate_apply(
 
 /// `based migrate status`: read the ledger and show applied vs. pending migrations, flagging
 /// any hash mismatch (an edited applied migration) or an applied row missing from disk (E4).
-fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> anyhow::Result<()> {
+fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<(), CliError> {
     use based_runtime::migrate::{self, MigrationState};
 
     let project = discover_project(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
-    let migrations = migrate::load_migrations(root, dialect).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let migrations = migrate::load_migrations(root, dialect)
+        .map_err(|e| CliError::migrate("loading migrations", e))?;
 
     // Status is about applied-vs-pending, so it needs the ledger (first shard suffices).
     let urls = shard_urls(database_url)?;
     let mut db = connect(dialect, &urls[0])?;
-    migrate::ensure_ledger(&mut *db, dialect).map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    let ledger =
-        migrate::applied(&mut *db, dialect).map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    migrate::ensure_ledger(&mut *db, dialect)
+        .map_err(|e| CliError::db("reading the migration ledger", e))?;
+    let ledger = migrate::applied(&mut *db, dialect)
+        .map_err(|e| CliError::db("reading the migration ledger", e))?;
 
     let states = migrate::status(&migrations, &ledger);
     let (mut applied, mut pending, mut mismatched) = (0, 0, 0);
@@ -518,7 +530,10 @@ fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> anyhow::Result<
     }
     println!("{applied} applied, {pending} pending, {mismatched} problem(s)");
     if mismatched > 0 {
-        bail!("migration ledger has {mismatched} problem(s)");
+        return Err(CliError::summary(
+            false,
+            format!("migration ledger has {mismatched} problem(s) (see above)"),
+        ));
     }
     Ok(())
 }
@@ -526,7 +541,7 @@ fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> anyhow::Result<
 /// `based migrate verify`: the offline CI gate. Confirms each `up.mig` still matches the steps
 /// its `schema.snap` chain implies (no hand-edit drift) and the latest snapshot matches the
 /// current `.bsl` (no uncaptured schema changes). Never touches a database (E4).
-fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
+fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
     use based_codegen::migrate;
 
     let (_project, schema, _decls, _sources, _warnings) = load_checked(root)?;
@@ -541,8 +556,9 @@ fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
             eprintln!("  {name}: number out of sequence (expected {:04})", idx + 1);
             problems += 1;
         }
-        let snap_text = std::fs::read_to_string(dir.join("schema.snap"))
-            .with_context(|| format!("reading {}/schema.snap", name))?;
+        let snap_path = dir.join("schema.snap");
+        let snap_text =
+            std::fs::read_to_string(&snap_path).map_err(|e| io_at("reading", &snap_path, e))?;
         let snap = match migrate::Snapshot::parse(&snap_text) {
             Ok(s) => s,
             Err(e) => {
@@ -557,8 +573,9 @@ fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
         // migration reported `partial` (not offline-verifiable — migrations.md).
         let steps = migrate::diff_snapshots(&prev, &snap);
         let expected = migrate::render_up(&steps);
-        let stored = std::fs::read_to_string(dir.join("up.mig"))
-            .with_context(|| format!("reading {}/up.mig", name))?;
+        let up_path = dir.join("up.mig");
+        let stored =
+            std::fs::read_to_string(&up_path).map_err(|e| io_at("reading", &up_path, e))?;
         let partial = migrate::has_raw_step(&stored);
         let structural = if partial {
             migrate::strip_raw_steps(&stored)
@@ -589,10 +606,13 @@ fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
     }
 
     if problems > 0 {
-        bail!(
-            "verify failed: {problems} problem(s) across {} migration(s)",
-            existing.len()
-        );
+        return Err(CliError::summary(
+            false,
+            format!(
+                "verify failed: {problems} problem(s) across {} migration(s) (see above)",
+                existing.len()
+            ),
+        ));
     }
     println!("ok: {} migration(s) verified", existing.len());
     Ok(())
@@ -602,7 +622,7 @@ fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
 /// comma-separated `BASED_DATABASE_URL`, else the ubiquitous single `DATABASE_URL` (the
 /// convention the quickstarts + most hosting platforms use). Errors when none is set (a
 /// live database is required to apply/status/serve).
-fn shard_urls(database_url: Vec<String>) -> anyhow::Result<Vec<String>> {
+fn shard_urls(database_url: Vec<String>) -> Result<Vec<String>, CliError> {
     let urls: Vec<String> = if !database_url.is_empty() {
         database_url
     } else {
@@ -613,7 +633,9 @@ fn shard_urls(database_url: Vec<String>) -> anyhow::Result<Vec<String>> {
             .unwrap_or_default()
     };
     if urls.is_empty() {
-        bail!("no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL / DATABASE_URL");
+        return Err(CliError::usage(
+            "no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL / DATABASE_URL",
+        ));
     }
     Ok(urls)
 }
@@ -622,26 +644,28 @@ fn shard_urls(database_url: Vec<String>) -> anyhow::Result<Vec<String>> {
 /// stack `based serve` uses (MariaDB/Postgres via a single-shard router; SQLite over a file).
 /// The returned connection keeps its pool/connection alive on its own, so the local backend
 /// dropping at return is fine.
-fn connect(dialect: Dialect, url: &str) -> anyhow::Result<Box<dyn based_runtime::Db>> {
+fn connect(dialect: Dialect, url: &str) -> Result<Box<dyn based_runtime::Db>, CliError> {
     use based_runtime::driver::{PoolConfig, ShardRouter};
     use based_runtime::run::Backend;
 
+    let connecting = || format!("connecting to {}", redact(url));
     let db: Box<dyn based_runtime::Db> = match dialect {
         Dialect::MariaDb => {
             let router = ShardRouter::single(url, PoolConfig::default())
-                .map_err(|e| anyhow::anyhow!("connecting to {}: {}", redact(url), e.message))?;
-            Backend::checkout(&router, "").map_err(|e| anyhow::anyhow!("{}", e.message))?
+                .map_err(|e| CliError::db(connecting(), e))?;
+            Backend::checkout(&router, "").map_err(|e| CliError::db(connecting(), e))?
         }
         Dialect::Postgres => {
             let router = based_runtime::PgRouter::single(url, PoolConfig::default())
-                .map_err(|e| anyhow::anyhow!("connecting to {}: {}", redact(url), e.message))?;
-            Backend::checkout(&router, "").map_err(|e| anyhow::anyhow!("{}", e.message))?
+                .map_err(|e| CliError::db(connecting(), e))?;
+            Backend::checkout(&router, "").map_err(|e| CliError::db(connecting(), e))?
         }
         // A SQLite `url` is a filesystem path (or `:memory:`, useless for a persisted apply).
         Dialect::Sqlite => {
             let backend = based_runtime::SqliteBackend::open(url)
-                .map_err(|e| anyhow::anyhow!("opening {url}: {}", e.message))?;
-            Backend::checkout(&backend, "").map_err(|e| anyhow::anyhow!("{}", e.message))?
+                .map_err(|e| CliError::db(format!("opening {url}"), e))?;
+            Backend::checkout(&backend, "")
+                .map_err(|e| CliError::db(format!("opening {url}"), e))?
         }
     };
     Ok(db)
@@ -649,12 +673,15 @@ fn connect(dialect: Dialect, url: &str) -> anyhow::Result<Box<dyn based_runtime:
 
 /// Discover the project (manifest + files) without running the full front end — apply/status
 /// only need the manifest dialect, and must work against an in-progress schema.
-fn discover_project(root: &Path) -> anyhow::Result<Project> {
+fn discover_project(root: &Path) -> Result<Project, CliError> {
     match based_manifest::discover(root) {
         Ok(p) => Ok(p),
         Err(diags) => {
             render::render(&diags, &[]);
-            bail!("could not load project at {}", root.display());
+            Err(CliError::summary(
+                true,
+                format!("could not load project at {} (see above)", root.display()),
+            ))
         }
     }
 }
@@ -694,14 +721,18 @@ fn redact(url: &str) -> String {
 /// Existing `migrations/NNNN_slug/` directories, sorted by their `NNNN` number. A
 /// non-conforming entry (no `NNNN_` prefix) is ignored — only zero-padded sequential
 /// dirs order the ledger (migrations.md).
-fn existing_migrations(dir: &Path) -> anyhow::Result<Vec<(u32, PathBuf)>> {
+fn existing_migrations(dir: &Path) -> Result<Vec<(u32, PathBuf)>, CliError> {
     let mut out = Vec::new();
     if !dir.exists() {
         return Ok(out);
     }
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+    for entry in std::fs::read_dir(dir).map_err(|e| io_at("reading", dir, e))? {
+        let entry = entry.map_err(|e| io_at("reading", dir, e))?;
+        if !entry
+            .file_type()
+            .map_err(|e| io_at("reading", dir, e))?
+            .is_dir()
+        {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -738,22 +769,15 @@ type Loaded = (
 
 /// Shared front end: discover -> parse -> sema. Renders every diagnostic and bails
 /// on any error (a clean schema is a precondition for codegen).
-fn load_checked(root: &Path) -> anyhow::Result<Loaded> {
+fn load_checked(root: &Path) -> Result<Loaded, CliError> {
     // 1. Discover the closed set of `.bsl` files under the manifest root.
-    let project = match based_manifest::discover(root) {
-        Ok(p) => p,
-        Err(diags) => {
-            render::render(&diags, &[]);
-            bail!("could not load project at {}", root.display());
-        }
-    };
+    let project = discover_project(root)?;
 
     // 2. Read + parse each file. Sources are kept for diagnostic rendering; their
     //    index is the `FileId` the parser stamps onto spans.
     let mut sources: Vec<(PathBuf, String)> = Vec::with_capacity(project.files.len());
     for f in &project.files {
-        let src = std::fs::read_to_string(&f.path)
-            .with_context(|| format!("reading {}", f.path.display()))?;
+        let src = std::fs::read_to_string(&f.path).map_err(|e| io_at("reading", &f.path, e))?;
         sources.push((f.path.clone(), src));
     }
 
@@ -782,14 +806,18 @@ fn load_checked(root: &Path) -> anyhow::Result<Loaded> {
 
     let n = sources.len();
     if errors > 0 {
-        bail!("check failed: {errors} error(s), {warnings} warning(s) across {n} file(s)");
+        // The diagnostics are already framed rustc-style on stderr; this is the summary.
+        return Err(CliError::summary(
+            true,
+            format!("check failed: {errors} error(s), {warnings} warning(s) across {n} file(s)"),
+        ));
     }
     Ok((project, schema, all_decls, sources, warnings))
 }
 
 /// `based facts`: surface the engine-derived facts (principle 8) — the inferred
 /// inverse pairings and join-key indexes an editor would show as hints.
-fn cmd_facts(root: &Path, json: bool) -> anyhow::Result<()> {
+fn cmd_facts(root: &Path, json: bool) -> Result<(), CliError> {
     let (_project, schema, decls, sources, _warnings) = load_checked(root)?;
     let facts = based_facts::facts(&schema, &decls);
     if json {
@@ -814,7 +842,7 @@ fn cmd_serve(
     workers: Option<usize>,
     pool_min: usize,
     pool_max: usize,
-) -> anyhow::Result<()> {
+) -> Result<(), CliError> {
     use based_runtime::driver::{PoolConfig, ShardRouter};
     use based_runtime::http::{ServeConfig, TrustedHeaderContext};
     use based_runtime::Compiled;
@@ -856,23 +884,23 @@ fn cmd_serve(
     match dialect {
         Dialect::MariaDb => {
             let router = ShardRouter::new(&urls, pool)
-                .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
+                .map_err(|e| CliError::db("connecting to database", e))?;
             run_listener(compiled, router, ctx, config)
         }
         Dialect::Postgres => {
             let router = based_runtime::PgRouter::new(&urls, pool)
-                .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
+                .map_err(|e| CliError::db("connecting to database", e))?;
             run_listener(compiled, router, ctx, config)
         }
         Dialect::Sqlite => {
             if urls.len() > 1 {
-                bail!(
+                return Err(CliError::usage(format!(
                     "sqlite serves a single database file, got {} urls",
                     urls.len()
-                );
+                )));
             }
             let backend = based_runtime::SqliteBackend::open(&urls[0])
-                .map_err(|e| anyhow::anyhow!("opening {}: {}", urls[0], e.message))?;
+                .map_err(|e| CliError::db(format!("opening {}", urls[0]), e))?;
             run_listener(compiled, backend, ctx, config)
         }
     }
@@ -889,7 +917,7 @@ fn run_listener(
     backend: impl based_runtime::run::Backend + 'static,
     ctx: based_runtime::http::TrustedHeaderContext,
     config: based_runtime::http::ServeConfig,
-) -> anyhow::Result<()> {
+) -> Result<(), CliError> {
     based_runtime::http::serve_with_handle(compiled, backend, ctx, config, |handle| {
         if let Err(e) = ctrlc::set_handler(move || {
             eprintln!("based serve: shutdown signal received, draining…");
@@ -900,7 +928,7 @@ fn run_listener(
             eprintln!("based serve: could not install shutdown handler: {e}");
         }
     })
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    .map_err(|e| CliError::caused_by("serve failed", e))
 }
 
 fn count(diags: &[based_diagnostics::Diagnostic], errors: &mut usize, warnings: &mut usize) {

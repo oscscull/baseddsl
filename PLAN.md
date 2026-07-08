@@ -357,13 +357,17 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   constructors; the embedded bridge preserves the server's status+code+message. `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with a single-source `code()` that `serve` consumes (maps only
   status); `DbError::code()` distinguishes `deadlock`/`pool_exhausted`. Regenerated all three
-  `examples/*/src/client.rs`; ran green live on all three dialects. **Deferred H7 sub-items:** (i)
-  **CLI error ergonomics** — replace `anyhow`-blob CLI diagnostics with typed, coded errors + clean
-  `Display` (migrate/gen/serve/check); (ii) **HTTP listener edge errors** — the `http` edge's own
-  pre-dispatch failures (bad body, bad `$ctx` header) are coherent but could share the code registry;
-  (iii) **migration errors** (`based migrate apply`) — surface a structured error type, not strings;
-  (iv) **example `main.rs` as an error-handling reference** — convert the scenario to a `?`-based
-  `Result` flow that demonstrates matching on `ClientError::kind()`/`code()`.
+  `examples/*/src/client.rs`; ran green live on all three dialects. **✅ CLI slice done (D72):**
+  `based-cli` gained a structured `CliError` (`Display` + `source()` chaining + a `usage`/`failure`
+  exit-code convention — 2 for a config/usage mistake matching clap, 1 for an operational failure) that
+  reuses D71's typed `MigrateError`/`DbError` as the cause instead of re-flattening them to strings;
+  `anyhow` dropped from the crate; the rustc-style parse/sema diagnostic rendering is untouched (those
+  paths return a summary-only error). **Remaining deferred H7 sub-items:** (ii) **HTTP listener edge
+  errors** — the `http` edge's own pre-dispatch failures (bad body, bad `$ctx` header) are coherent but
+  could share the code registry; (iv) **example `main.rs` as an error-handling reference** — convert the
+  scenario to a `?`-based `Result` flow that demonstrates matching on `ClientError::kind()`/`code()`.
+  (Sub-item (iii), a structured migration error type, is subsumed — `based migrate apply` now surfaces
+  the typed `MigrateError` through the `CliError` chain, no longer re-stringified.)
 - **H2. `based fmt` formatter + `format-document` LSP directive.** The canonical `.bsl` formatter; the
   editor's `format-document` handler delegates to it. Queued off C4/D68 (§Track C notes) — the one
   baseline editor feature deliberately left out of the C4 parity fill-in. Standalone user-visible value.
@@ -439,7 +443,7 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). `$ctx` is inferred in sema, not declared here (D4). |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
 | based-sema | ✅ stable | resolution + checks + lints + `CheckedSchema` IR (incl. `@was` rename directive on `RModel`/`RMember` + `E0190`/`E0191`, D67). Detailed behaviour in the next section. |
-| based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
+| based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. Structured top-level `CliError` (`Display` + `source()` chaining; exit 2 usage/config, exit 1 operational failure) reusing the runtime's typed `MigrateError`/`DbError` as the cause; rustc-style parse/sema diagnostics via `render.rs` (D72). |
 | based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57; **per-entity phantom-typed ids** `Id<entity::M>` — transparent wire, `from_raw` escape, no blanket `From<String>`, D70; a structurally-sound **`ClientError`** — a `kind`(Transport/Decode/Api{status,code})-carrying `std::error::Error` with `Display`+`source()` (Arc-backed, stays `Clone`) + `code()`/`status()`/`message()` accessors, the embedded bridge preserving the wire status+code+message, D71) with an **opt-in in-process embedded bridge** (`ClientOptions::embedded` / `client_with` → emits `client::embedded(&engine)` over `based_runtime::Engine`, so an embedder writes zero `Transport` plumbing; referenced by path, no based-runtime dep; D62); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50) + `@was` snapshot-authoritative renames (`Snapshot.renames` persisted → `rename table`/`rename column` steps → per-dialect `ALTER … RENAME`), the `raw(dialect)` escape step (`parse_raw_steps`), and the offline `drift` helper (D67). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 complete) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54); offline migration-drift diagnostic `W0108` + spent-`@was` `W0107` (diffs the latest `schema.snap` against the schema, no DB, D67); folding ranges (per multi-line decl body) + selection ranges (token→field→decl→file), both off the parsed decl spans (D68). |
