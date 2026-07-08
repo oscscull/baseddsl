@@ -326,6 +326,66 @@ path — worked when it won't preempt A/B/D/E).**
     architecture docs (their deferred items already sit in the Deferred list). Comment-only; gate green
     (`test --workspace --all-features` + `fmt --check` + `clippy`). The standing rule is in Conventions.
 
+## Post-completion backlog (surfaced after the DoD was met)
+
+The DoD is fully met; these are items raised *after* completion — the standing **polish / UX /
+bugfinding** track. They are not deferred-and-forgotten (§Deferred) — they carry real standalone value
+a user would notice, but sit outside the acceptance criteria the project was built to. Worked when
+picked up, hardest-value-first within the section. H2–H4 are editor/LSP work (the extension is
+feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
+
+- **H1. Typed ids in the generated client (user-raised 2026-07-08).** Codegen lowers every id/relation
+  param to a bare `pub type Uuid = String` alias (`based-codegen::client`), so the schema's type
+  information is discarded at the Rust boundary: `place_order(buyer: Id)` — where `buyer` references
+  `User` — emits `buyer: String`, identical to `org`, `id`, and every `create` result's `.id`. Every
+  id-transposition (an `Org` id, an `Order` id, or a literal string as `buyer`) type-checks and fails
+  only at runtime (FK violation / empty result). This undercuts the DB-first-typed-access thesis at the
+  one place a human/LLM writes a call by hand (`examples/*/src/main.rs`). **Design (settled in
+  discussion):** emit per-entity phantom-typed newtypes — `Id<User>`, `Id<Org>` (a single
+  undifferentiated `Id` still lets org/user ids swap) — with `#[serde(transparent)]` so the wire is
+  unchanged (no custom serde); provide `From` only along safe edges (a `create_*` result already *is*
+  the typed id, so create→use chains need no conversion); do **not** blanket-`From<String>` (reopens
+  the hole) — raw construction is an explicit, greppable `Id::from_raw(s)`, mirroring how `unscoped(...)`
+  makes the unsafe escape visible. The compiler already resolves `buyer`→`User` in sema, so this is
+  "stop discarding what the front end knows," not new analysis. Per-target idiom needed (Rust newtype,
+  TS branded type, Go named type) → real but bounded codegen cost. Spec: needs a `calling.md` note + a
+  D# once designed. Touches `based-codegen::client` + `openapi` + all three `examples/*/src/main.rs`.
+- **H2. `based fmt` formatter + `format-document` LSP directive.** The canonical `.bsl` formatter; the
+  editor's `format-document` handler delegates to it. Queued off C4/D68 (§Track C notes) — the one
+  baseline editor feature deliberately left out of the C4 parity fill-in. Standalone user-visible value.
+- **H3. Comprehensive rename symbol (user-raised 2026-07-08).** Rename works (D53) but partially. Today
+  `references_at`/`rename_edits` (`based-lsp/src/compile.rs`) cover model/shape type refs,
+  `@scope`/`scoped` refs, filter calls, field-path segments, and explicit inverse pairings (back-edge
+  listed by find-refs, not rewritten). **Gaps to audit + close:** (a) **param rename** — a callable's
+  `buyer: Id` decl ↔ its `$buyer` uses in the body; (b) **scope-column / `$ctx`-field rename**
+  (`scope Tenant (org: …)` ↔ `$ctx.org`); (c) **callable (query/mutation) name rename**; (d) highest
+  value — **`@was`-aware physical rename**: renaming a field/model that maps to a live DB column should
+  offer to insert `@was("old")` so the generated migration *preserves data* (rename) instead of
+  drop+add — ties rename to Track E. Confirm rename spans the whole workspace, not just the cursor's
+  project. Touches `based-lsp` (reference index) + parser modifier position for `@was` insertion.
+- **H4. Editor-surface conciseness (user-raised 2026-07-08).** Hover/inlay text *tutorializes* instead
+  of naming things. `based-facts::scope_detail` teaches usage ("Every read and write … is confined … a
+  callable opts in with `scoped` or out with `unscoped`") and `ctx_fact.detail` explains the client
+  wire contract — both are spec material, not hover material. The `requires [org: -> Org]` **inlay**
+  duplicates the ctx hover; if the hover carries the full contract, the inlay is redundant noise.
+  **Rule:** editor gravy states *what a symbol is* when it isn't obvious, never *how to use the system*.
+  Trim scope/ctx hovers to a one-line identity + the concrete filter/bag; drop or minimize the ctx
+  inlay. Touches `based-facts::{scope_detail,ctx_fact}` + LSP inlay wiring; update the facts tests that
+  assert the old strings.
+- **H5. Doc + comment critical-eye pass, project-wide (user-raised 2026-07-08).** Two rules, enforced
+  everywhere a user reads: (a) **no `D#`/decision-refs in any userland surface** — editor hover/inlay
+  strings, CLI output, `examples/**` (comments + READMEs), `docker/README.md`, generated-code headers.
+  A user must never parse `D50`. The D50 scrub covered *facts editor strings*; this widens it to every
+  user-facing surface and re-verifies. (b) **comments say what + why-if-needed, never how; no design
+  rationale inline** — rationale lives in spec/decisions/PLAN; the only inline exception is a genuinely
+  blocking TODO, which also gets a PLAN line. F1/D69 swept `crates/**` for WIP narration; this is the
+  follow-on for *wordiness + rationale-in-comments + userland `D#`*, and explicitly includes
+  `examples/**` and the `spec/examples` comments a user meets first. Reinforces the Conventions rule.
+- **H6. Adversarial correctness sweep (user-raised 2026-07-08).** A standing bugfinding pass over the
+  built surface — codegen SQL edge cases, runtime binding/nesting, scope/soft-delete predicate
+  composition — driven against a live DB, not just unit tests. Scope each sweep to one subsystem; file
+  what it finds as its own item. Open-ended by nature; run when the higher-value H-items are quiet.
+
 ## Pipeline (data flow)
 
 ```
