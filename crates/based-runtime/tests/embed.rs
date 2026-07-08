@@ -114,10 +114,60 @@ mod client {
         pub cursor: Option<String>,
     }
 
-    /// An error from a client call (transport failure or decode failure). The concrete
-    /// `Transport` decides how to populate it.
+    /// What went wrong in a client call.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ClientErrorKind {
+        Transport,
+        Decode,
+        Api { status: u16, code: String },
+    }
+
+    /// An error from a client call: transport failure, decode failure, or a structured
+    /// server error. Mirrors `based gen client` output (verified by the regen gate).
     #[derive(Debug, Clone)]
-    pub struct ClientError(pub String);
+    pub struct ClientError {
+        kind: ClientErrorKind,
+        message: String,
+        source: Option<std::sync::Arc<dyn std::error::Error + Send + Sync + 'static>>,
+    }
+
+    impl ClientError {
+        pub fn decode(err: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>) -> Self {
+            let err = err.into();
+            ClientError {
+                kind: ClientErrorKind::Decode,
+                message: err.to_string(),
+                source: Some(err.into()),
+            }
+        }
+        pub fn api(status: u16, code: impl Into<String>, message: impl Into<String>) -> Self {
+            ClientError {
+                kind: ClientErrorKind::Api {
+                    status,
+                    code: code.into(),
+                },
+                message: message.into(),
+                source: None,
+            }
+        }
+        pub fn code(&self) -> &str {
+            match &self.kind {
+                ClientErrorKind::Transport => "transport",
+                ClientErrorKind::Decode => "decode",
+                ClientErrorKind::Api { code, .. } => code,
+            }
+        }
+        pub fn message(&self) -> &str {
+            &self.message
+        }
+    }
+
+    impl std::fmt::Display for ClientError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.message)
+        }
+    }
+    impl std::error::Error for ClientError {}
 
     /// Post a typed input to a route, carry the typed request context (`$ctx`, D4/D5 —
     /// sent out of band, never a body field, auth.md/D7), and decode the typed output.
@@ -236,7 +286,7 @@ mod client {
             C: Serialize,
             O: serde::de::DeserializeOwned,
         {
-            let args = serde_json::to_value(input).map_err(|e| ClientError(e.to_string()))?;
+            let args = serde_json::to_value(input).map_err(ClientError::decode)?;
             // `&()` → JSON `null`; the engine treats a non-object context as empty.
             let ctx = serde_json::to_value(ctx)
                 .map(|v| {
@@ -246,15 +296,16 @@ mod client {
                         serde_json::json!({})
                     }
                 })
-                .map_err(|e| ClientError(e.to_string()))?;
+                .map_err(ClientError::decode)?;
             let resp = self.engine.call(route, args, ctx);
             if resp.status == 200 {
-                serde_json::from_value(resp.body).map_err(|e| ClientError(e.to_string()))
+                serde_json::from_value(resp.body).map_err(ClientError::decode)
             } else {
-                let msg = resp.body["error"]["message"]
+                let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+                let message = resp.body["error"]["message"]
                     .as_str()
                     .unwrap_or("call failed");
-                Err(ClientError(msg.to_string()))
+                Err(ClientError::api(resp.status, code, message))
             }
         }
     }

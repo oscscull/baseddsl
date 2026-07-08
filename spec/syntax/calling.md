@@ -48,3 +48,11 @@ let out = api.place_order(input, ctx)?;   // typed, in-process, no socket
 It is opt-in: the wire client leaves it off (a pure-wire consumer need not depend on based-runtime), an embedding build turns it on. based-codegen gains no based-runtime dep — the reference is by path in the emitted text, resolved by the consuming crate.
 
 The generated module carries no inner `#![allow(dead_code)]` (an inner attribute breaks `include!`); include it under an outer `#[allow(dead_code)] mod client { … }`.
+
+## Errors
+Every client method returns `Result<Output, ClientError>`. `ClientError` is a real `std::error::Error` (so it chains with `?` and its cause is reachable via `source()`) with a `Display` and three accessors a caller can branch on without matching message text:
+- `kind()` → `ClientErrorKind`: `Transport` (the round-trip never completed), `Decode` (a value would not (de)serialize), or `Api { status, code }` (the server ran the call and returned a structured error).
+- `code()` → a stable machine string: the server's `error.code` for an api failure (e.g. `bad_arg`, `missing_ctx`, `database_error`), else `"transport"` / `"decode"`.
+- `status()` → the HTTP status of an api failure (`None` for transport/decode).
+
+The wire error envelope is `{ error: { code, message } }`; the embedded bridge and any HTTP transport rebuild a `ClientError` from it, preserving the server's status + stable code + message rather than flattening to an opaque string. The codes are those the runtime emits — `PlanError::code()` (boundary: `unknown_query`, `missing_arg`, `bad_arg`, `missing_ctx`, `bad_ctx`, `bad_cursor`, `internal`) and `DbError::code()` (operational: `database_error`, `deadlock`, `pool_exhausted`) — a single source of truth shared by the wire and any in-process consumer.

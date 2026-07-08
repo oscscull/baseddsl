@@ -79,7 +79,24 @@ impl DbError {
     pub fn is_deadlock(&self) -> bool {
         self.kind == DbErrorKind::Deadlock
     }
+
+    /// A stable machine-readable code for the operational class of this failure.
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            DbErrorKind::Other => "database_error",
+            DbErrorKind::Deadlock => "deadlock",
+            DbErrorKind::PoolExhausted => "pool_exhausted",
+        }
+    }
 }
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DbError {}
 
 /// Why running a request failed: a boundary [`PlanError`] (bad/missing input, unknown
 /// callable — the caller can fix it), a [`DbError`] (the database failed — an
@@ -110,6 +127,49 @@ impl From<PlanError> for RunError {
 impl From<DbError> for RunError {
     fn from(e: DbError) -> RunError {
         RunError::Db(e)
+    }
+}
+
+impl RunError {
+    /// A stable machine-readable code for the failure — the boundary/operational class a
+    /// consumer branches on. Delegates to the inner [`PlanError::code`]/[`DbError::code`]
+    /// where the failure carries its own; the idempotency variants own theirs.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RunError::Plan(e) => e.code(),
+            RunError::Db(e) => e.code(),
+            RunError::Conflict(_) => "idempotency_conflict",
+            RunError::KeyReuse(_) => "idempotency_key_reuse",
+        }
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::Plan(e) => write!(f, "{e}"),
+            RunError::Db(e) => write!(f, "{e}"),
+            RunError::Conflict(key) => {
+                write!(
+                    f,
+                    "a request with idempotency key `{key}` is already in progress"
+                )
+            }
+            RunError::KeyReuse(key) => write!(
+                f,
+                "idempotency key `{key}` was already used for a different request"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RunError::Plan(e) => Some(e),
+            RunError::Db(e) => Some(e),
+            RunError::Conflict(_) | RunError::KeyReuse(_) => None,
+        }
     }
 }
 

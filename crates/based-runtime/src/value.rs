@@ -52,6 +52,18 @@ impl Family {
             | Primitive::Id => Family::Text,
         }
     }
+
+    /// A human name for the family, for a boundary error message.
+    pub fn label(self) -> &'static str {
+        match self {
+            Family::Int => "int",
+            Family::Float => "float",
+            Family::Bool => "bool",
+            Family::Text => "text",
+            Family::Json => "json",
+            Family::Any => "value",
+        }
+    }
 }
 
 /// Why a value did not fit its expected family — carried up into a `PlanError`.

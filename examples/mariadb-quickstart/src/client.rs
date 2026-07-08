@@ -99,10 +99,117 @@ pub struct Page<T> {
     pub cursor: Option<String>,
 }
 
-/// An error from a client call (transport failure or decode failure). The concrete
-/// `Transport` decides how to populate it.
+/// What went wrong in a client call — lets a caller branch on the class of failure
+/// without matching on the message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientErrorKind {
+    /// The request never completed a round-trip — a socket/connection/engine failure.
+    /// Retryable in the same way the underlying transport is.
+    Transport,
+    /// The round-trip completed but a value could not be (de)serialized into its typed
+    /// input or output. A bug in the caller's types or the payload, not a server error.
+    Decode,
+    /// The server ran the call and returned a structured error (its HTTP `status` and a
+    /// stable machine `code`, e.g. `bad_arg`, `missing_ctx`, `database_error`).
+    Api { status: u16, code: String },
+}
+
+/// An error from a client call: a transport failure, a (de)serialization failure, or a
+/// structured error the server returned. Carries a stable machine [`code`](ClientError::code)
+/// and a clear human message; a server error also carries its HTTP [`status`](ClientError::status).
+/// Implements `std::error::Error`, so it chains with `?` and its underlying cause is reachable
+/// via `source()`.
 #[derive(Debug, Clone)]
-pub struct ClientError(pub String);
+pub struct ClientError {
+    kind: ClientErrorKind,
+    message: String,
+    // Kept behind an `Arc` so `ClientError` stays `Clone` while still handing back a live
+    // `&dyn Error` from `source()`.
+    source: Option<std::sync::Arc<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+impl ClientError {
+    /// A transport failure (the round-trip never completed), wrapping its cause.
+    pub fn transport(err: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>) -> Self {
+        let err = err.into();
+        ClientError {
+            kind: ClientErrorKind::Transport,
+            message: err.to_string(),
+            source: Some(err.into()),
+        }
+    }
+
+    /// A (de)serialization failure decoding an input or the reply, wrapping its cause.
+    pub fn decode(err: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>) -> Self {
+        let err = err.into();
+        ClientError {
+            kind: ClientErrorKind::Decode,
+            message: err.to_string(),
+            source: Some(err.into()),
+        }
+    }
+
+    /// A structured error the server returned: its HTTP `status`, stable machine `code`, and
+    /// human `message` (the `{ error: { code, message } }` envelope).
+    pub fn api(status: u16, code: impl Into<String>, message: impl Into<String>) -> Self {
+        ClientError {
+            kind: ClientErrorKind::Api {
+                status,
+                code: code.into(),
+            },
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// The failure class (transport / decode / server-side api).
+    pub fn kind(&self) -> &ClientErrorKind {
+        &self.kind
+    }
+
+    /// The human-readable message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// A stable machine-readable code: the server's `error.code` for an api failure, else
+    /// `"transport"` / `"decode"`. Safe to branch on.
+    pub fn code(&self) -> &str {
+        match &self.kind {
+            ClientErrorKind::Transport => "transport",
+            ClientErrorKind::Decode => "decode",
+            ClientErrorKind::Api { code, .. } => code,
+        }
+    }
+
+    /// The HTTP status of a server-side (api) failure; `None` for a transport/decode failure.
+    pub fn status(&self) -> Option<u16> {
+        match &self.kind {
+            ClientErrorKind::Api { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            ClientErrorKind::Transport => write!(f, "transport error: {}", self.message),
+            ClientErrorKind::Decode => write!(f, "decode error: {}", self.message),
+            ClientErrorKind::Api { status, code } => {
+                write!(f, "server error {status} [{code}]: {}", self.message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|e| &**e as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Post a typed input to a route, carry the typed request context (`$ctx`, D4/D5 —
 /// sent out of band, never a body field, auth.md/D7), and decode the typed output.
@@ -293,17 +400,19 @@ impl Transport for Embedded<'_> {
         C: Serialize,
         O: serde::de::DeserializeOwned,
     {
-        let args = serde_json::to_value(input).map_err(|e| ClientError(e.to_string()))?;
+        let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
-            .map_err(|e| ClientError(e.to_string()))?;
+            .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx);
         if resp.status == 200 {
-            serde_json::from_value(resp.body).map_err(|e| ClientError(e.to_string()))
+            serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
-            let msg = resp.body["error"]["message"].as_str().unwrap_or("call failed");
-            Err(ClientError(msg.to_string()))
+            // Preserve the server's structured error: its status + stable code + message.
+            let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            Err(ClientError::api(resp.status, code, message))
         }
     }
 }

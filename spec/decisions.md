@@ -34,7 +34,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client), D62
   (emitted in-process embedded bridge `client::embedded(&engine)`, opt-in via `ClientOptions`; inner
   `#![allow]` wart fixed), D63 (`based gen client --embedded` CLI flag), D70 (typed ids: per-entity
-  phantom `Id<entity::M>` newtypes, transparent wire, `from_raw` escape, no blanket `From<String>`)
+  phantom `Id<entity::M>` newtypes, transparent wire, `from_raw` escape, no blanket `From<String>`),
+  D71 (production-grade errors: structured `ClientError` + `std::error::Error`/`Display` on runtime errors)
+- **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
+  `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
@@ -2489,3 +2492,51 @@ test), the regenerated verbatim client in `based-runtime/tests/embed.rs` (its te
 (regenerated client; helper signatures take typed ids, no `.to_string()`). Gate: `cargo test --workspace
 --all-features` + `fmt --check` + `clippy` all clean; all three quickstarts ran green live via `cargo run`
 (SQLite bundled; Postgres `postgres:16` + MariaDB `mariadb:11.4` over Docker).
+
+## D71 — Production-grade errors on the user-facing path (client `ClientError` + runtime errors)
+
+**Context (H7, user-raised).** Audit of the error surface a *library user* meets found the user-facing
+error type was not production-grade. The generated client's `ClientError` was `pub struct ClientError(pub
+String)` — an opaque string, no `Display`, no `std::error::Error`, no `source()`, no machine code or HTTP
+status, and the embedded bridge *threw away* the wire envelope's `code` + `status`, flattening every server
+error to a message string a caller could only string-match. The runtime errors it surfaces (`PlanError`,
+`DbError`, `RunError`) were `Debug`-only: no `Display`, no `Error`, no `?`-chaining, and the stable wire
+codes lived only as string literals inside `serve::plan_error_response` (drift risk, principle 4).
+
+**Decision.** Make the whole user-facing error path structurally sound and ergonomic.
+
+- **Generated client `ClientError` is a real error.** Now a struct carrying a `ClientErrorKind`
+  (`Transport` / `Decode` / `Api { status, code }`), a human `message`, and an optional `source`
+  (an `Arc<dyn Error + Send + Sync>` so the type stays `Clone` while `source()` hands back a live
+  `&dyn Error`). It implements `Display` (kind-prefixed clear message) and `std::error::Error` (chains
+  with `?`). Accessors let a caller branch without matching message text: `kind()`, `message()`,
+  `code()` (the server's `error.code` for an api failure, else `"transport"`/`"decode"`), `status()`.
+  Constructors `transport(e)` / `decode(e)` / `api(status, code, message)` for any transport (the
+  embedded bridge and a hand-written HTTP transport alike). The embedded bridge rebuilds the api error
+  from the `{ error: { code, message } }` envelope, **preserving status + code + message** instead of
+  dropping them.
+- **Runtime errors implement `Error` + `Display` with a stable `code()`.** `PlanError`, `DbError`, and
+  `RunError` now implement `std::fmt::Display` and `std::error::Error` (`RunError::source()` chains to
+  the inner `PlanError`/`DbError`). `PlanError::code()` / `DbError::code()` / `RunError::code()` are the
+  **single source of truth** for the machine codes; `serve::dispatch` consumes `e.code()` + `e.to_string()`
+  and maps only the HTTP *status* (the wire concern), so the codes can no longer drift from a duplicated
+  literal. `DbError::code()` distinguishes `deadlock` / `pool_exhausted` from a generic `database_error`
+  (all still `503`) — more precise than the previous always-`database_error`. `Family::label()` centralizes
+  the family name used in a boundary message.
+- **Messages are userland.** Clear, actionable, no jargon, no decision-refs. `$ctx.<field>` (real DSL
+  syntax) replaces the previous `${ctx}.<field>` in boundary messages.
+
+**Wire contract:** unchanged shape (`{ error: { code, message } }`, statuses); OpenAPI describes the
+envelope generically (no code enum), so it needed no change. The added `deadlock`/`pool_exhausted` codes
+are strictly more informative on the existing `503`.
+
+**Deferred (recorded as H7 sub-items in PLAN).** CLI `anyhow`-blob errors (`based migrate`/`gen`/`serve`
+diagnostics), the HTTP listener edge's own error bodies beyond dispatch, and converting the example
+`main.rs` scenario to a `?`-based `Result` flow (it already benefits from the richer `Debug`/`Display`
+through `.expect`).
+
+Touched `based-codegen::client` (the `ClientError` type + embedded bridge), `based-runtime::{plan,run,
+serve,value}` (traits + `code()` accessors + single-source wire mapping), the verbatim client copy in
+`based-runtime/tests/embed.rs`, and all three regenerated `examples/*/src/client.rs`. Gate: `cargo test
+--workspace --all-features` + `fmt --check` + `clippy` all clean; all three quickstarts ran **green live**
+via `cargo run` (SQLite bundled; MariaDB `mariadb:11.4` + Postgres `postgres:16` over Docker).

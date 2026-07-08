@@ -181,6 +181,61 @@ pub enum PlanError {
     BadCursor(String),
 }
 
+impl PlanError {
+    /// The stable, machine-readable code for this failure — the single source of truth for
+    /// the wire `error.code` (`serve`) and any library consumer that branches on the class
+    /// of failure rather than the message text. Stable across releases.
+    pub fn code(&self) -> &'static str {
+        use PlanError::*;
+        match self {
+            UnknownQuery(_) => "unknown_query",
+            UnknownMutation(_) => "unknown_mutation",
+            MissingArg(_) => "missing_arg",
+            BadArg { .. } => "bad_arg",
+            MissingCtx(_) => "missing_ctx",
+            BadCtx { .. } => "bad_ctx",
+            UnboundPlaceholder(_) => "internal",
+            BadCursor(_) => "bad_cursor",
+        }
+    }
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use PlanError::*;
+        match self {
+            UnknownQuery(n) => write!(f, "no query `{n}`"),
+            UnknownMutation(n) => write!(f, "no mutation `{n}`"),
+            MissingArg(n) => write!(f, "missing argument `{n}`"),
+            BadArg {
+                name,
+                expected,
+                got,
+            } => write!(
+                f,
+                "argument `{name}`: expected {}, got {got}",
+                expected.label()
+            ),
+            MissingCtx(field) => write!(f, "missing request context `$ctx.{field}`"),
+            BadCtx {
+                field,
+                expected,
+                got,
+            } => write!(
+                f,
+                "context `$ctx.{field}`: expected {}, got {got}",
+                expected.label()
+            ),
+            UnboundPlaceholder(n) => {
+                write!(f, "unbound placeholder `:{n}` (codegen/planner mismatch)")
+            }
+            BadCursor(msg) => write!(f, "invalid cursor: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
+
 /// Plan a query request against a compiled project.
 pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanError> {
     let low = compiled

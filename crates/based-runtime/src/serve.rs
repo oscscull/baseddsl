@@ -24,7 +24,6 @@ use crate::idempotency::IdempotencyStore;
 use crate::load::Compiled;
 use crate::plan::PlanError;
 use crate::run::{run_mutation, run_query, Db, RunError};
-use crate::value::Family;
 use crate::Request;
 
 /// An HTTP response the listener writes back: a status code and a JSON body.
@@ -96,7 +95,7 @@ pub fn dispatch(
         // exhausted). The SQL is machine-generated from a checked schema, so this is
         // overwhelmingly operational, not a query bug → a retryable 503 (the client /
         // LB can retry, another shard's traffic is unaffected).
-        Err(RunError::Db(e)) => WireResponse::error(503, "database_error", e.message),
+        Err(RunError::Db(e)) => WireResponse::error(503, e.code(), e.message),
         // A concurrent mutation retry with the same idempotency key is still in flight
         // (D25). Rejecting rather than running a second write is what makes the key safe;
         // 409 is retryable once the first attempt settles.
@@ -170,63 +169,17 @@ fn parse_route(path: &str) -> Option<(Kind, &str)> {
     }
 }
 
-/// Map a boundary failure to an HTTP status + error envelope. Unknown callable → 404;
-/// a bad/missing arg or `$ctx` → 400 (the caller can fix it); an unbound placeholder
+/// Map a boundary failure to an HTTP status + error envelope. The stable machine `code`
+/// and the human `message` come from the [`PlanError`] itself (its `code()`/`Display`, one
+/// source of truth); this maps only the *status* — the wire concern: unknown callable →
+/// 404; a bad/missing arg or `$ctx` → 400 (the caller can fix it); an unbound placeholder
 /// is an internal invariant break (codegen/planner disagreement) → 500.
 fn plan_error_response(e: PlanError) -> WireResponse {
     use PlanError::*;
-    match e {
-        UnknownQuery(n) => WireResponse::error(404, "unknown_query", format!("no query `{n}`")),
-        UnknownMutation(n) => {
-            WireResponse::error(404, "unknown_mutation", format!("no mutation `{n}`"))
-        }
-        MissingArg(n) => WireResponse::error(400, "missing_arg", format!("missing argument `{n}`")),
-        BadArg {
-            name,
-            expected,
-            got,
-        } => WireResponse::error(
-            400,
-            "bad_arg",
-            format!(
-                "argument `{name}`: expected {}, got {got}",
-                family(expected)
-            ),
-        ),
-        MissingCtx(f) => WireResponse::error(
-            400,
-            "missing_ctx",
-            format!("missing request context `${{ctx}}.{f}`"),
-        ),
-        BadCtx {
-            field,
-            expected,
-            got,
-        } => WireResponse::error(
-            400,
-            "bad_ctx",
-            format!(
-                "context `${{ctx}}.{field}`: expected {}, got {got}",
-                family(expected)
-            ),
-        ),
-        UnboundPlaceholder(n) => WireResponse::error(
-            500,
-            "internal",
-            format!("unbound placeholder `:{n}` (codegen/planner mismatch)"),
-        ),
-        BadCursor(msg) => WireResponse::error(400, "bad_cursor", format!("invalid cursor: {msg}")),
-    }
-}
-
-/// A human name for an expected family, for the boundary error message.
-fn family(f: Family) -> &'static str {
-    match f {
-        Family::Int => "int",
-        Family::Float => "float",
-        Family::Bool => "bool",
-        Family::Text => "text",
-        Family::Json => "json",
-        Family::Any => "value",
-    }
+    let status = match &e {
+        UnknownQuery(_) | UnknownMutation(_) => 404,
+        MissingArg(_) | BadArg { .. } | MissingCtx(_) | BadCtx { .. } | BadCursor(_) => 400,
+        UnboundPlaceholder(_) => 500,
+    };
+    WireResponse::error(status, e.code(), e.to_string())
 }
