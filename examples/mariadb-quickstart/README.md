@@ -84,10 +84,10 @@ let api = client::embedded(&engine);   // typed, in-process, no socket, no bridg
 
 - **Schema setup is `based migrate apply`** (E4), not a raw-DDL string — `main.rs` never
   issues DDL.
-- **`src/client.rs`** is the verbatim `based gen client` output; `--embedded` (D62) also
+- **`src/client.rs`** is the verbatim `based gen client` output; `--embedded` also
   emits the in-process bridge, so `client::embedded(&engine)` is the whole of the wiring.
 - **`$ctx`** (org, user) is a typed method argument the *app* supplies from its auth layer,
-  never the caller (auth.md/D7).
+  never the caller (auth.md).
 
 > Standalone crate, **outside** the cargo workspace (the root `Cargo.toml` `exclude`s
 > `examples/`). It depends on the in-repo engine crates by path, so it always tracks the

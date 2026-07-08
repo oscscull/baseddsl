@@ -56,7 +56,7 @@ fn main() {
         UuidGen,
     );
 
-    // `client::embedded(&engine)` (D62) is the entire bridge — a typed, in-process client
+    // `client::embedded(&engine)` is the entire bridge — a typed, in-process client
     // with no socket and no hand-written `Transport` impl.
     let api = client::embedded(&engine);
 
@@ -94,7 +94,7 @@ fn main() {
         .id;
 
     // `$ctx` is the per-request context the *app* derives from its auth layer, never the
-    // caller (auth.md/D7). Here every call acts as the org `acme`.
+    // caller (auth.md). Here every call acts as the org `acme`.
     let acme_ctx = || client::PlaceOrderCtx { org: acme.clone() };
 
     // --- 1. create → read the write back in its declared shape (read-your-writes) ---
@@ -175,7 +175,7 @@ fn main() {
 
     // --- 5. soft-delete + restore round-trip ---
     // `delete` on a @soft_delete model tombstones the row and reads it back in its
-    // declared shape (D58) — the row still projects even though it is now soft-deleted.
+    // declared shape — the row still projects even though it is now soft-deleted.
     let cancelled = api
         .cancel_order(
             client::CancelOrderInput {

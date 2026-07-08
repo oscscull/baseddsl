@@ -12,7 +12,7 @@
 //!      → soft-delete/restore) and exit 0 only if every step passes.
 //!
 //! There is **no raw SQL here** and **no hand-written transport bridge**: setup is
-//! `based migrate apply`, and `client::embedded(&engine)` (D62) is the whole of the wiring.
+//! `based migrate apply`, and `client::embedded(&engine)` is the whole of the wiring.
 
 use based_runtime::{Compiled, Engine, SeqIdGen, SqliteDb};
 use rusqlite::Connection;
@@ -46,7 +46,7 @@ fn main() {
     let conn = Connection::open(&db_path).expect("open sqlite database");
     let engine = Engine::new(compiled, SqliteDb::new(conn), SeqIdGen::default());
 
-    // `client::embedded(&engine)` (D62) is the entire bridge — a typed, in-process client
+    // `client::embedded(&engine)` is the entire bridge — a typed, in-process client
     // with no socket and no hand-written `Transport` impl.
     let api = client::embedded(&engine);
 
@@ -84,7 +84,7 @@ fn main() {
         .id;
 
     // `$ctx` is the per-request context the *app* derives from its auth layer, never the
-    // caller (auth.md/D7). Here every call acts as the org `acme`.
+    // caller (auth.md). Here every call acts as the org `acme`.
     let acme_ctx = || client::PlaceOrderCtx { org: acme.clone() };
 
     // --- 1. create → read the write back in its declared shape (read-your-writes) ---
@@ -165,7 +165,7 @@ fn main() {
 
     // --- 5. soft-delete + restore round-trip ---
     // `delete` on a @soft_delete model tombstones the row and reads it back in its
-    // declared shape (D58) — the row still projects even though it is now soft-deleted.
+    // declared shape — the row still projects even though it is now soft-deleted.
     let cancelled = api
         .cancel_order(
             client::CancelOrderInput {

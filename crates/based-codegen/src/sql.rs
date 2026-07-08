@@ -6,7 +6,7 @@
 //! them opt-in, so the FK *column* exists but no `FOREIGN KEY` clause references it.
 //!
 //! Besides declared structure, each table carries the sema-inferred baseline
-//! indexes (indexing.md, D15): join-key indexes for inverse edges the access
+//! indexes (indexing.md): join-key indexes for inverse edges the access
 //! layer traverses, named `inf_…` so engine-owned keys are distinguishable from
 //! declared `idx_…` ones. On a `@soft_delete` model the soft-delete column is
 //! prepended (predicate-leading — MariaDB has no partial indexes). Filter-path
@@ -17,11 +17,11 @@
 //! |-------------|----------------|-----------|---------------|------|
 //! | `text`      | `VARCHAR(255)` | `TEXT`    | `TEXT`        | MariaDB bounds it so it is index/unique-able; SQLite/Postgres have no length cap |
 //! | `int`       | `BIGINT`       | `INTEGER` | `BIGINT`      | avoids silent overflow on money/counts (SQLite `INTEGER` is 64-bit) |
-//! | `bool`      | `BOOLEAN`      | `INTEGER` | `BOOLEAN`     | SQLite has no bool type — stored as `0`/`1` (matches the runtime `SqliteDb` mapping, D27) |
+//! | `bool`      | `BOOLEAN`      | `INTEGER` | `BOOLEAN`     | SQLite has no bool type — stored as `0`/`1` (matches the runtime `SqliteDb` mapping) |
 //! | `timestamp` | `DATETIME`     | `TEXT`    | `TIMESTAMPTZ` | MariaDB dodges `TIMESTAMP`'s implicit ON UPDATE + 2038; Postgres has a real tz-aware type |
 //! | `date`      | `DATE`         | `TEXT`    | `DATE`        | |
 //! | `json`      | `JSON`         | `TEXT`    | `JSONB`       | Postgres `JSONB` is the indexable/`@>`-queryable form (matches the DML `has` -> `@>`) |
-//! | `uuid`/`Id` | `UUID`         | `TEXT`    | `UUID`        | native on MariaDB + Postgres (D1); app-generated, no default. SQLite has no UUID type |
+//! | `uuid`/`Id` | `UUID`         | `TEXT`    | `UUID`        | native on MariaDB + Postgres; app-generated, no default. SQLite has no UUID type |
 //!
 //! A to-many scalar (`text[]`) has no columnar form; it maps to the dialect's JSON
 //! type (a JSON array) — `JSON` on MariaDB, `TEXT` on SQLite, `JSONB` on Postgres.
@@ -85,7 +85,7 @@ fn index_specs(model: &RModel) -> Vec<IndexSpec> {
         });
     }
 
-    // Inferred baseline indexes (indexing.md, D15): join keys of traversed inverse
+    // Inferred baseline indexes (indexing.md): join keys of traversed inverse
     // edges, deduped by sema against declared structure. Neither MariaDB nor SQLite
     // has partial indexes, so "predicate-leading" means the soft-delete column is
     // physically prepended — the engine filters it on every generated query.
@@ -143,7 +143,7 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
         }
     }
 
-    // Primary key — always `id` (D2). It is the first member `skeleton` inserts.
+    // Primary key — always `id`. It is the first member `skeleton` inserts.
     lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
 
     // Column-level `(unique)` constraints, in member order. All dialects accept the
@@ -294,8 +294,8 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static 
             }
         }
         // SQLite has a tiny type set (its dynamic typing means these are affinities,
-        // not constraints). The mapping mirrors the runtime `SqliteDb` value mapping
-        // (D27): bool ⇒ integer 0/1, json/uuid/timestamp/date ⇒ text.
+        // not constraints). The mapping mirrors the runtime `SqliteDb` value mapping:
+        // bool ⇒ integer 0/1, json/uuid/timestamp/date ⇒ text.
         Dialect::Sqlite => {
             if many {
                 return "TEXT";
@@ -329,7 +329,7 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static 
 }
 
 /// The SQL type of a relation's FK column — the target model's primary-key type.
-/// Defaults to the dialect's id type (from the implicit `id`, D1) when the target or
+/// Defaults to the dialect's id type (from the implicit `id`) when the target or
 /// its key is missing, which sema would already have flagged.
 fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> &'static str {
     match schema
@@ -344,7 +344,7 @@ fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> &'static s
 
 /// Render a `(default …)` value as a SQL literal / expression, per dialect. Only the
 /// bool literal differs: MariaDB has `TRUE`/`FALSE` keywords; SQLite stores bools as
-/// integers (D27), so a bool default renders `1`/`0`.
+/// integers, so a bool default renders `1`/`0`.
 fn render_default(dv: &DefaultVal, dialect: Dialect) -> String {
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => format!("'{}'", s.replace('\'', "''")),

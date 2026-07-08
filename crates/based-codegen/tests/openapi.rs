@@ -127,7 +127,7 @@ fn paginated_query_response_is_page_envelope() {
         }
         "#);
     let sch = ok_schema(&doc, "/q/active");
-    // The pagination envelope: rows + an opaque cursor, never a bare array.
+    // The pagination envelope: rows + an opaque cursor.
     assert_eq!(sch["type"], "object");
     assert_eq!(sch["properties"]["rows"]["type"], "array");
     assert_eq!(

@@ -157,7 +157,7 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
 /// ledger's tamper guard (migrations.md). Canonicalization drops comment (`#…`) and blank
 /// lines and trims each remaining line, so a cosmetic whitespace/comment edit doesn't trip
 /// the guard but any change to a step does. FNV-1a-64 (the same family the runtime uses for
-/// request fingerprints, D31), rendered as 16 lowercase hex digits — collision resistance
+/// request fingerprints), rendered as 16 lowercase hex digits — collision resistance
 /// is not security-critical here (it guards against an accidental post-apply edit, not an
 /// adversary), so a fast non-cryptographic hash is the right tool.
 pub fn content_hash(up_text: &str) -> String {
@@ -180,14 +180,14 @@ pub fn content_hash(up_text: &str) -> String {
 }
 
 /// The statement(s) for a full `CREATE TABLE` from a neutral snapshot table. Mirrors
-/// `sql::create_table`: the implicit `id` PK (D2) is re-synthesized (it is elided from the
+/// `sql::create_table`: the implicit `id` PK is re-synthesized (it is elided from the
 /// snapshot) unless the model declared its own; `(unique)` columns become `CONSTRAINT …
 /// UNIQUE`; indexes are inline `KEY`/`UNIQUE KEY` on MariaDB (one statement) and trailing
 /// standalone `CREATE INDEX` statements elsewhere.
 fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    // Implicit `id` primary key (D2): synthesized as the default uuid when the snapshot
+    // Implicit `id` primary key: synthesized as the default uuid when the snapshot
     // elided it; a declared non-default `id` rides in the column list instead.
     if t.column("id").is_none() {
         lines.push(format!(

@@ -1,10 +1,9 @@
 //! Client codegen (M4): a `CheckedSchema` -> a typed client module (`based gen
-//! client`). Rust is the first (and, per the manifest default, only) target.
+//! client`). Rust is the only target.
 //!
 //! ## The closed RPC surface (calling.md)
-//! Clients call the pre-defined query/mutation signatures only — they never write or
-//! send the DSL, and the wire carries *arguments*, not queries. So each signature
-//! generates exactly three things:
+//! Clients call the pre-defined query/mutation signatures only; the wire carries
+//! *arguments*, not queries. Each signature generates three things:
 //!   1. a typed **input** struct (fields from the signature params),
 //!   2. a typed **output** type (from `-> Output`: a shape struct, a bare-model
 //!      struct, or the pagination envelope `Page<T>`),
@@ -13,42 +12,36 @@
 //!
 //! ## What we emit vs. what the runtime owns
 //! Transport is abstract: the generated `Client<T>` is generic over a `Transport`
-//! trait (post JSON to a route, decode JSON back). The actual HTTP/driver lives in
-//! the runtime crate (not started), so codegen emits the *typed surface* — input
-//! types, output types, routes, and method bodies that delegate to `Transport` —
-//! without inventing an HTTP stack. This keeps the generated code honest.
+//! trait (post JSON to a route, decode JSON back). The concrete HTTP/driver lives in
+//! the runtime crate, so codegen emits only the *typed surface* — input types, output
+//! types, routes, and method bodies that delegate to `Transport`.
 //!
-//! ## Type mapping (mirrors the DDL side, D10)
-//! Primitives map through readable aliases so the generated structs read
-//! semantically: `Uuid`/`Timestamp`/`Date` alias `String`, `Json` aliases
-//! `serde_json::Value`. An **entity id** — a model's own `id`, a relation param/FK, or a
-//! `$ctx` relation — is a phantom-typed `Id<entity::M>` newtype (`#[serde(transparent)]`,
-//! so the wire is an unchanged string): distinct per entity, so a `User` id can't be
-//! passed where an `Org` id is wanted, and a raw string only becomes one through the
-//! explicit `Id::from_raw`. `optional` -> `Option<T>`, a to-many scalar -> `Vec<T>`.
+//! ## Type mapping (mirrors the DDL side)
+//! Primitives map through readable aliases: `Uuid`/`Timestamp`/`Date` alias `String`,
+//! `Json` aliases `serde_json::Value`. An **entity id** — a model's own `id`, a relation
+//! param/FK, or a `$ctx` relation — is a phantom-typed `Id<entity::M>` newtype
+//! (`#[serde(transparent)]`, so the wire is an unchanged string): distinct per entity, so
+//! a `User` id can't be passed where an `Org` id is wanted, and a raw string becomes one
+//! only through the explicit `Id::from_raw`. `optional` -> `Option<T>`, a to-many scalar
+//! -> `Vec<T>`.
 //!
-//! ## Per-callable `$ctx` (D4/D5, D30)
-//! `$ctx` is per-request and inferred, not a global type: each callable requires
-//! exactly the `$ctx.<field>`s it (plus its `@scope`/filters) reads, each typed by
-//! inference. The client mirrors that — a callable with context requirements gets a
-//! typed `<Name>Ctx` struct (one field per requirement) that the method takes
-//! alongside its input, and the `Transport` carries it as request context (never a
-//! body field, auth.md/D7). A callable needing *no* context takes `ctx: ()`, so the
-//! common public case stays clean. This makes the client honest about the context
-//! contract instead of smuggling `$ctx` on the side.
+//! ## Per-callable `$ctx`
+//! `$ctx` is per-request and inferred: each callable requires exactly the `$ctx.<field>`s
+//! it (plus its `@scope`/filters) reads, each typed by inference. A callable with context
+//! requirements gets a typed `<Name>Ctx` struct (one field per requirement) that the
+//! method takes alongside its input, and the `Transport` carries it as request context
+//! (never a body field, auth.md). A callable needing *no* context takes `ctx: ()`.
 //!
-//! ## The embedded bridge (opt-in, D62)
+//! ## The embedded bridge (opt-in)
 //! The abstract `Transport` is defined *in this generated module*, so the orphan rule
-//! forbids a library-side `impl Transport for Engine` in based-runtime — every embedder
-//! would otherwise hand-copy the same ~20-line bridge. So when [`ClientOptions::embedded`]
-//! is set, the module *also* emits that bridge over `based_runtime::Engine`: an `Embedded`
-//! transport plus a `embedded(&engine)` constructor, giving an in-process consumer a
-//! working `Client` with one call and **zero** bridge code (`let api = client::embedded(&engine)`).
-//! It is opt-in because a pure-wire/HTTP client need not depend on based-runtime, so the
-//! `based_runtime::Engine` reference must not be forced on it; the CLI wire path leaves it
-//! off, an embedding build (the quickstarts, `tests/embed.rs`) turns it on. based-codegen
-//! itself gains no based-runtime dep — the reference is by path in the emitted *text*, and
-//! the consuming crate is what depends on based-runtime.
+//! forbids a library-side `impl Transport for Engine` in based-runtime. When
+//! [`ClientOptions::embedded`] is set, the module *also* emits that bridge over
+//! `based_runtime::Engine`: an `Embedded` transport plus an `embedded(&engine)`
+//! constructor, giving an in-process consumer a working `Client` with zero bridge code.
+//! Opt-in so a pure-wire/HTTP client need not depend on based-runtime; the CLI wire path
+//! leaves it off, an embedding build (the quickstarts, `tests/embed.rs`) turns it on.
+//! based-codegen itself gains no based-runtime dep — the reference is by path in the
+//! emitted *text*, and the consuming crate is what depends on based-runtime.
 //!
 //! ## Deferred (documented, not silently wrong)
 //! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct; a to-**many**
@@ -84,9 +77,8 @@ impl ClientTarget {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClientOptions {
     /// Also emit the in-process **embedded bridge** — an `Embedded` `Transport` over
-    /// `based_runtime::Engine` plus an `embedded(&engine)` constructor (D62). Off by
-    /// default: a pure-wire/HTTP client need not depend on based-runtime, so the
-    /// `based_runtime::Engine` reference must not be forced on it. An embedding consumer
+    /// `based_runtime::Engine` plus an `embedded(&engine)` constructor. Off by default so
+    /// a pure-wire/HTTP client need not depend on based-runtime. An embedding consumer
     /// (the quickstarts, `tests/embed.rs`) turns it on to get a working `Client` with no
     /// hand-written bridge.
     pub embedded: bool,
@@ -128,7 +120,7 @@ struct Callable<'a> {
     output: String,
     /// the output *struct* to emit (name + fields), deduped across callables.
     out_struct: OutStruct,
-    /// the `$ctx.<field>`s this callable requires (D4/D5), inferred per callable.
+    /// the `$ctx.<field>`s this callable requires, inferred per callable.
     /// Empty for a public callable (no context); non-empty callables get a typed
     /// `<Name>Ctx` struct the method takes and the `Transport` carries.
     ctx_requires: &'a [CtxReq],
@@ -197,8 +189,8 @@ mod rust {
             out.push('\n');
             let fields = input_fields(schema, c);
             out.push_str(&render_struct(&input_name(c.name), &fields));
-            // A callable that reads `$ctx.<field>`s (D4/D5) gets a typed context
-            // struct the method takes; a public callable (no requirements) takes `()`.
+            // A callable that reads `$ctx.<field>`s gets a typed context struct the
+            // method takes; a public callable (no requirements) takes `()`.
             if !c.ctx_requires.is_empty() {
                 out.push_str(&render_struct(
                     &ctx_name(c.name),
@@ -221,8 +213,8 @@ mod rust {
         }
         out.push_str("}\n");
 
-        // Opt-in in-process bridge over `based_runtime::Engine` (D62): a working client
-        // with no hand-written `Transport` impl. Gated so the wire client stays free of a
+        // Opt-in in-process bridge over `based_runtime::Engine`: a working client with no
+        // hand-written `Transport` impl. Gated so the wire client stays free of a
         // based-runtime dependency.
         if opts.embedded {
             out.push_str(EMBEDDED);
@@ -781,7 +773,7 @@ mod rust {
     }
 
     /// A param/field base type: a primitive by its alias, a model reference as the
-    /// `Uuid` FK the wire carries (D1).
+    /// `Uuid` FK the wire carries.
     fn base_type(b: &BaseType) -> &'static str {
         match b {
             BaseType::Primitive(p) => primitive(*p),
@@ -828,7 +820,7 @@ mod rust {
     }
 
     /// The context fields for a callable: one per required `$ctx.<field>`, typed by
-    /// the inference (a relation requirement carries the model's key `Uuid`, D1).
+    /// the inference (a relation requirement carries the model's key `Uuid`).
     fn ctx_fields(reqs: &[CtxReq]) -> Vec<(String, String)> {
         reqs.iter()
             .map(|r| (r.field.clone(), ctx_field_type(&r.ty)))
@@ -1145,10 +1137,10 @@ impl std::error::Error for ClientError {
     }
 }
 
-/// Post a typed input to a route, carry the typed request context (`$ctx`, D4/D5 —
-/// sent out of band, never a body field, auth.md/D7), and decode the typed output.
-/// A callable with no `$ctx` requirements passes `ctx: &()`. Implemented by the
-/// runtime's HTTP client; codegen only depends on this shape.
+/// Post a typed input to a route, carry the typed request context (`$ctx` — sent out
+/// of band, never a body field, auth.md), and decode the typed output. A callable with
+/// no `$ctx` requirements passes `ctx: &()`. Implemented by the runtime's HTTP client;
+/// codegen only depends on this shape.
 pub trait Transport {
     fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
@@ -1163,14 +1155,14 @@ pub struct Client<T> {
 }
 "#;
 
-    /// The opt-in in-process bridge (D62), appended when [`ClientOptions::embedded`] is
-    /// set. It references `based_runtime::Engine` *by path* — the consuming crate depends
-    /// on based-runtime (based-codegen itself does not; that would be circular). This
-    /// is the bridge an embedder would otherwise hand-copy: serialize the typed input
-    /// and `$ctx` to JSON (a non-object ctx → `{}`), call `engine.call`, decode a `200`
-    /// body into `O`, map a non-`200` to a `ClientError` from `error.message`.
+    /// The opt-in in-process bridge, appended when [`ClientOptions::embedded`] is set. It
+    /// references `based_runtime::Engine` *by path* — the consuming crate depends on
+    /// based-runtime (based-codegen itself does not; that would be circular). This is the
+    /// bridge an embedder would otherwise hand-copy: serialize the typed input and `$ctx`
+    /// to JSON (a non-object ctx → `{}`), call `engine.call`, decode a `200` body into
+    /// `O`, map a non-`200` to a `ClientError` from `error.message`.
     const EMBEDDED: &str = r#"
-// ---------- embedded bridge (based_runtime::Engine, D62) ----------
+// ---------- embedded bridge (based_runtime::Engine) ----------
 
 /// A `Transport` backed by an in-process `based_runtime::Engine` — every callable runs
 /// through the engine's dispatch core with no socket. Build one with [`embedded`].
@@ -1203,7 +1195,7 @@ impl Transport for Embedded<'_> {
 }
 
 /// A ready-to-use client over an in-process `based_runtime::Engine` — no bridge to write.
-/// `$ctx` is a typed per-call argument (auth.md/D7 still holds: the app sets it, not the
+/// `$ctx` is a typed per-call argument (auth.md still holds: the app sets it, not the
 /// caller); a public callable passes `()`, which maps to an empty context bag.
 pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
     Client {

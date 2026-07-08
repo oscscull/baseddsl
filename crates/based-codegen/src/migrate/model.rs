@@ -74,9 +74,9 @@ pub struct TableSnap {
     pub name: String,
     /// `@soft_delete` column + its neutral mode (`timestamp`/`bool`), if any.
     pub soft_delete: Option<(String, String)>,
-    /// `@created` engine-managed column (set on insert, D2), if any.
+    /// `@created` engine-managed column (set on insert), if any.
     pub created: Option<String>,
-    /// `@updated` engine-managed column (set on insert + every update, D2), if any.
+    /// `@updated` engine-managed column (set on insert + every update), if any.
     pub updated: Option<String>,
     /// The model's `@scope` alternatives, each a set of scope names (auth.md DNF). One
     /// entry per `@scope` decorator — `@scope A, B` is one alternative `["A", "B"]`, two
@@ -110,7 +110,7 @@ pub struct IndexSnap {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
-    /// An engine-inferred join-key baseline index (D15) vs. a declared `@index`.
+    /// An engine-inferred join-key baseline index vs. a declared `@index`.
     pub inferred: bool,
 }
 
@@ -154,7 +154,7 @@ impl TableSnap {
     }
 }
 
-/// Is this column the universally-implicit default `id` (D2)? Such a column is elided
+/// Is this column the universally-implicit default `id`? Such a column is elided
 /// from the snapshot's column list and carried as an invariant; a model that declares a
 /// non-default `id` (a different type, nullable, or unique) records it explicitly.
 fn is_default_id(c: &ColumnSnap) -> bool {
@@ -186,7 +186,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
                 fk_col,
                 ..
             } => columns.push(ColumnSnap {
-                // A relation is its FK column (D3): its physical type is the target's
+                // A relation is its FK column: its physical type is the target's
                 // key type (default uuid), and it carries the related model so a
                 // retyped/dropped relation reads as an add/drop/alter of `<field>_id`.
                 name: fk_col.clone(),
@@ -285,10 +285,10 @@ fn canonical_scope_alts(alts: &[Vec<String>]) -> Vec<Vec<String>> {
     out
 }
 
-/// Declared `@index`es + the inferred join-key baseline (D15), each resolved to
+/// Declared `@index`es + the inferred join-key baseline, each resolved to
 /// physical columns and its stable `idx_`/`uq_`/`inf_` name. Mirrors `sql::ddl`'s
 /// naming so the snapshot's index identity matches the generated DDL exactly — the
-/// soft-delete column is prepended to an inferred index (predicate-leading, D15).
+/// soft-delete column is prepended to an inferred index (predicate-leading).
 fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
     let mut out = Vec::new();
     for idx in &model.indexes {
@@ -358,7 +358,7 @@ pub(crate) fn index_name(prefix: &str, table: &str, columns: &[String]) -> Strin
     name
 }
 
-/// Neutral type family for a primitive (`Id` folds to `uuid`, D1). A to-many scalar
+/// Neutral type family for a primitive (`Id` folds to `uuid`). A to-many scalar
 /// gets a `[]` suffix — it has no columnar form and rides as a JSON array in DDL, but
 /// the snapshot records the neutral intent so a change to it still diffs.
 fn neutral_type(ty: Primitive, many: bool) -> String {

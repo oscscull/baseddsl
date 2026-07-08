@@ -6,7 +6,7 @@
 //! ([`client`]): `CheckedSchema` -> a Rust client module (M4). The **OpenAPI** spec
 //! ([`openapi`]): `CheckedSchema` -> one OpenAPI document over the same wire, so
 //! `openapi-generator` yields clients in any language (polyglot via one emitter, not
-//! N — D23). The **migration** engine ([`migrate`]): `CheckedSchema` -> a canonical
+//! N). The **migration** engine ([`migrate`]): `CheckedSchema` -> a canonical
 //! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list (E2). Each
 //! is a module reading the same resolved IR.
 //!
@@ -19,20 +19,20 @@ pub mod migrate;
 pub mod openapi;
 pub mod sql;
 
-/// The SQL compile target (manifest `dialect`). MariaDB is the default (D5).
+/// The SQL compile target (manifest `dialect`). MariaDB is the default.
 ///
 /// - `MariaDb` — the original target. MySQL maps here too (a MariaDB fork; the
 ///   emitted SQL — backtick idents, `DATETIME`, `MEMBER OF`, positional `?` — is
 ///   MySQL-8-compatible).
-/// - `Sqlite` (D27/D28) — the infra-free backend + its DDL. Backtick idents, `IS
-///   NULL`, `= TRUE`, positional `?` all run on SQLite too, so only DDL branches.
-/// - `Postgres` (D29) — the standards-track target. It diverges the most: identifiers
-///   are double-quoted (`"order"`), placeholders are `$1, $2, …` (not `?` — the one
-///   coupling D21 flagged, fixed in the runtime scanner), JSON containment is `@>`
-///   (not MySQL's `MEMBER OF`), and the multi-table UPDATE/DELETE forms use
-///   `FROM`/`USING` rather than MySQL's `JOIN` clause. Its `Db`/`Backend` driver is
-///   deferred to the live-DB slice (needs a real server to be meaningful, like
-///   MariaDb's — see D29); this variant is the *codegen* + scanner half.
+/// - `Sqlite` — the infra-free backend + its DDL. Backtick idents, `IS NULL`, `= TRUE`,
+///   positional `?` all run on SQLite too, so only DDL branches.
+/// - `Postgres` — the standards-track target. It diverges the most: identifiers are
+///   double-quoted (`"order"`), placeholders are `$1, $2, …` (not `?` — the one such
+///   coupling, fixed in the runtime scanner), JSON containment is `@>` (not MySQL's
+///   `MEMBER OF`), and the multi-table UPDATE/DELETE forms use `FROM`/`USING` rather
+///   than MySQL's `JOIN` clause. Its `Db`/`Backend` driver is deferred to the live-DB
+///   slice (needs a real server to be meaningful, like MariaDb's); this variant is the
+///   *codegen* + scanner half.
 ///
 /// Two things branch on the dialect: identifier quoting + a handful of operator/type
 /// spellings ([`Dialect::quote`], [`Dialect::bool_lit`], …) used by the DML/mutation
@@ -87,7 +87,7 @@ impl Dialect {
     }
 
     /// The boolean literal spelling. MariaDB/Postgres have the `TRUE`/`FALSE`
-    /// keywords; SQLite stores bools as integers (D27), so it is `1`/`0`.
+    /// keywords; SQLite stores bools as integers, so it is `1`/`0`.
     pub fn bool_lit(self, b: bool) -> &'static str {
         match self {
             Dialect::MariaDb | Dialect::Postgres => {

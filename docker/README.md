@@ -2,7 +2,7 @@
 
 The image compiles the `based` binary and runs `based serve` — the HTTP listener over the
 dispatch core, with `/healthz` (liveness) + `/readyz` (readiness) probes and graceful drain
-on `SIGTERM` (D26). It serves whichever dialect the project's `based.toml` targets
+on `SIGTERM`. It serves whichever dialect the project's `based.toml` targets
 (MariaDB, Postgres, or SQLite).
 
 The image carries **no schema** — you supply your project (`based.toml` + `**/*.bsl`
@@ -27,7 +27,7 @@ the binary + entrypoint (~120 MB). Runs as an unprivileged user.
 | `BASED_LISTEN` | bind address, read natively by `based serve`. Default `0.0.0.0:8080`. |
 | `BASED_MIGRATE_ON_START` | `1` runs `based migrate apply` before serving. Off by default — leave unset if you apply migrations out of band. |
 
-`$ctx` (auth/scope) is **server-supplied, never the request body** (D7): front the
+`$ctx` (auth/scope) is **server-supplied, never the request body**: front the
 container with an auth proxy that sets `X-Based-Context` (a JSON object) after
 authenticating the caller. See `spec/syntax/auth.md`.
 

@@ -74,7 +74,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   rebuild: `based migrate apply` setup + checked-in `src/client.rs`/`migrations/` + `client::embedded`
   + `.env`/dotenvy + client-`create` seeding; no build.rs, no raw SQL; `based gen client --embedded` flag)
 - **Source hygiene / conventions** — D69 (Track F1 comment-hygiene sweep: source reads as finished, no
-  build-time/WIP narration, TODOs live in the roadmap `.md`s — the standing Conventions rule enforced)
+  build-time/WIP narration, TODOs live in the roadmap `.md`s — the standing Conventions rule enforced),
+  D74 (H4/H5 hygiene: positive framing over define-by-negation; `based-codegen` D#-refs + overlong
+  comments cleaned; userland surfaces D#-free)
 
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
@@ -2624,3 +2626,39 @@ Touched `based-codegen::client` (the `Cursor` type + `Page<T>` field + keyset in
 handoff). Gate: `cargo test --workspace --all-features` + `fmt --check` + `clippy` all clean; all three
 quickstarts ran **green live** exercising pagination via `cargo run` (SQLite bundled; MariaDB
 `mariadb:11.4` + Postgres `postgres:16` over Docker).
+
+## D74 — Editor/comment hygiene: positive framing, `based-codegen` D#-refs, overlong comments (H4/H5)
+
+**Context (three user-raised corrections, one principle: state what a thing *is*, concisely).**
+
+1. **Positive framing over define-by-negation.** A `Page` hover / doc-string read "…rows + an opaque
+   cursor, **never a bare array**." Defining a thing by what it *isn't* reads as bizarre. Rule: *say what
+   a thing is, never what it isn't.* Rewrote the pagination surface to state only the envelope's contents
+   (rows + an opaque cursor; next page = the same call carrying the cursor) in `calling.md`, the emitted
+   `Page<T>` doc-comment (already positive in `based-codegen::client`), `openapi::page_schema`, and the
+   `openapi`/`client` tests. Swept the source + userland surface for the same define-by-negation pattern
+   (`never a bare …`, `not a bare …`, `not just a …` *used to define*) and rewrote those. **Genuine
+   behavioral guarantees are kept** (`never a panic`, `never a hang`, `never a real DELETE`, `never a
+   partial write`, `$ctx never a body field`) — a warning about behavior is not a define-by-negation.
+
+2. **No `D#` decision-refs in `based-codegen` or any userland surface.** The standing rule allows `D#`
+   in internal `///` doc comments, **but** (a) the user explicitly flagged `based-codegen`'s comments, so
+   *all* `D#` refs were stripped from `crates/based-codegen/src/**` (108 sites across `lib.rs`,
+   `client.rs`, `openapi.rs`, `sql.rs`, `sql/{dml,mutations}.rs`, `migrate*`), and (b) userland surfaces
+   must never show a `D#`: cleaned the emitted SQL re-select comment (`sql/mutations.rs` + its test), two
+   OpenAPI `description` strings, the `--embedded`/`openapi` clap `--help` doc-comments (`based-cli`),
+   an `E0181` sema **diagnostic message** (`based-sema`), the three example `main.rs`/`README.md`,
+   `docker/{Dockerfile,healthcheck.sh,README.md}`, and the regenerated `examples/*/src/client.rs`.
+   Internal `///` doc-comment `D#` refs in the other crates (`based-sema`/`runtime`/`ast`/`parser`/…)
+   stay — the durable rule permits them and they aid the reviewer; they are not a userland surface.
+
+3. **Overlong `based-codegen` comments.** Compressed the long module `//!` headers and block comments to
+   terse what + why (dropped design-rationale essays, step-by-step how, and WIP/history narration),
+   keeping the load-bearing what. E.g. `openapi.rs`'s "why one contract not N emitters" section and
+   `sql/mutations.rs`'s create-keyed/where-keyed re-select block were roughly halved without losing the
+   what.
+
+Comments/strings only — no logic changed. Gate: `cargo test --workspace --all-features` + `fmt --check`
++ `clippy` all clean; `grep` finds no `D#` in `based-codegen/src` or any userland surface; the SQLite
+quickstart ran **green** (`based migrate apply` → `cargo run`, exit 0) and the MariaDB/Postgres example
+clients compile (their regenerated `client.rs` diffs are comment-only).

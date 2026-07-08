@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Container image for `based serve` (DoD #4 / Track D1). Multi-stage: a Rust builder
+# Container image for `based serve`. Multi-stage: a Rust builder
 # compiles the release `based` binary; a slim runtime carries just the binary + its
 # entrypoint. The served project (based.toml + **/*.bsl [+ migrations/]) is mounted at
 # /app, and everything else is env-configured — see docker/README.md for the run recipe.
@@ -48,7 +48,7 @@ WORKDIR /app
 VOLUME ["/app"]
 EXPOSE 8080
 
-# Liveness (D26) via docker-healthcheck.sh (probes /healthz on BASED_LISTEN's port). The
+# Liveness via docker-healthcheck.sh (probes /healthz on BASED_LISTEN's port). The
 # probe lives in a script so the port derivation runs in the shell at container runtime,
 # not Docker's build-time parser.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \

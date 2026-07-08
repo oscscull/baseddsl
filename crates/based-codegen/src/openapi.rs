@@ -1,14 +1,11 @@
 //! OpenAPI codegen (`based gen openapi`): a `CheckedSchema` -> a single OpenAPI 3.1
 //! document describing the JSON/HTTP wire `serve::dispatch` already serves.
 //!
-//! ## Why an OpenAPI spec, not N per-language emitters (D23)
-//! The container door exists to serve non-Rust callers, so the schema must yield
-//! clients in many languages. The move is *not* to hand-write a TypeScript emitter,
-//! then a Python one, then Go — it is **one** machine-readable contract that
-//! `openapi-generator` (or similar) turns into a typed client in any language. So
-//! polyglot is one emitter, not N. The **Rust** client stays hand-emitted ([`client`],
-//! D22) because it is the in-process `Transport` path (tighter than a generated HTTP
-//! stub); everything else falls out of this spec.
+//! ## Why an OpenAPI spec, not N per-language emitters
+//! One machine-readable contract that `openapi-generator` (or similar) turns into a typed
+//! client in any language — polyglot is one emitter, not N. The **Rust** client stays
+//! hand-emitted ([`client`]) because it is the in-process `Transport` path (tighter than a
+//! generated HTTP stub); everything else falls out of this spec.
 //!
 //! [`client`]: crate::client
 //!
@@ -23,14 +20,14 @@
 //! - **Responses**: `200` with the response schema (the return wrapper — a bare `T`,
 //!   an array, or the `Page<T>` / `{ id }` envelope) and the shared error responses
 //!   (`{ "error": { code, message } }`, the envelope `serve::dispatch` returns).
-//! - **`$ctx` is not a body param.** It rides the `X-Based-Context` header (D21,
-//!   auth.md/D7), so the spec models it as a header parameter referencing a shared
-//!   component, never a request-body field.
+//! - **`$ctx` is not a body param.** It rides the `X-Based-Context` header (auth.md),
+//!   so the spec models it as a header parameter referencing a shared component, never
+//!   a request-body field.
 //!
-//! ## Type mapping (reuses D10/D13, re-projected to JSON Schema)
+//! ## Type mapping (re-projected to JSON Schema)
 //! `text`/`uuid`/`timestamp`/`date` -> `string` (`uuid`/`date-time`/`date` formats
 //! where they carry one), `int` -> `integer`, `bool` -> `boolean`, `json` -> an open
-//! object, a relation FK -> a `uuid` string (the wire carries the id, D1). `optional`
+//! object, a relation FK -> a `uuid` string (the wire carries the id). `optional`
 //! -> the property is not `required`; a to-many scalar -> an `array`.
 //!
 //! ## Deferred (documented, not silently wrong — same gaps as the client)
@@ -39,7 +36,7 @@
 //!   schema — both matching the client + SQL sides.
 //! - A `sql`…`` shape field has no statically known type -> the open-object `Json`.
 //! - A **pure** update/delete mutation still responds `{ id }` (its declared-shape
-//!   re-select is deferred, D12), so its `200` schema is the `MutationResult` `{ id }`
+//!   re-select is deferred), so its `200` schema is the `MutationResult` `{ id }`
 //!   object, not the declared shape. A create-returning mutation advertises the shape.
 
 use based_ast::*;
@@ -144,7 +141,7 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
         },
         "paths": Value::Object(paths),
         "components": {
-            // `$ctx` rides a header, not the body (D21/D7): model it as a reusable
+            // `$ctx` rides a header, not the body (auth.md): model it as a reusable
             // header parameter every operation references.
             "parameters": { "BasedContext": context_header_param() },
             "schemas": Value::Object(schemas),
@@ -179,15 +176,15 @@ fn path_item(schema: &CheckedSchema, c: &Callable) -> Value {
                 "404": error_response("No such query/mutation."),
                 "503": error_response("Retryable database error."),
             },
-            // The `$ctx` fields this callable requires (D4/D5) surfaced as a vendor
-            // extension — descriptive, not enforced by the wire (auth.md/D7).
+            // The `$ctx` fields this callable requires surfaced as a vendor
+            // extension — descriptive, not enforced by the wire (auth.md).
             "x-ctx-requires": Value::Array(ctx.clone()),
         }
     })
 }
 
-/// The deduped `$ctx.<field>` requirements as `{ field, type }` objects (D4/D5). A
-/// relation-typed field carries the model's key (D1), rendered `-> Model`.
+/// The deduped `$ctx.<field>` requirements as `{ field, type }` objects. A
+/// relation-typed field carries the model's key, rendered `-> Model`.
 fn callable_ctx(schema: &CheckedSchema, c: &Callable) -> Vec<Value> {
     use based_sema::CtxField;
     // The requirement bag lives on the resolved callable (RQuery/RMutation), keyed by
@@ -264,7 +261,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                         .and_then(|s| schema.model(&s.from))
                 });
                 // A mutation only advertises its declared shape when it re-selects one
-                // (a create-returning mutation, D12); a pure update/delete responds
+                // (a create-returning mutation); a pure update/delete responds
                 // `{ id }`, so it emits no object schema and points at `MutationResult`.
                 let has_reselect = rm.ret_shape.is_some() || schema.model(&m.ret.ty.node).is_some();
                 let os = out_schema(schema, decls, &m.ret, root, !has_reselect);
@@ -301,7 +298,7 @@ fn query_response(rq: &RQuery, os: &OutSchema) -> Value {
     }
 }
 
-/// A mutation's `200` schema: the declared shape (create-returning, D12), an array if
+/// A mutation's `200` schema: the declared shape (create-returning), an array if
 /// `-> T[]`, or the `{ id }` `MutationResult` fallback (pure update/delete).
 fn mutation_response(m: &Mutation, os: &OutSchema) -> Value {
     let item = if os.is_result_fallback {
@@ -316,9 +313,8 @@ fn mutation_response(m: &Mutation, os: &OutSchema) -> Value {
     }
 }
 
-/// The `Page<T>` envelope schema (calling.md): rows + an opaque cursor, never a bare
-/// array. Inlined per response so the item type is concrete (no `Page<T>` generic in
-/// JSON Schema).
+/// The `Page<T>` envelope schema (calling.md): rows + an opaque cursor. Inlined per
+/// response so the item type is concrete (no `Page<T>` generic in JSON Schema).
 fn page_schema(item: &Value) -> Value {
     json!({
         "type": "object",
@@ -537,7 +533,7 @@ fn page_input(q: &Query) -> PageInput {
 }
 
 /// A param's JSON-Schema type. Explicit annotation wins (a model type -> a `uuid`
-/// string, the FK the wire carries, D1); otherwise infer from the bound/same-named
+/// string, the FK the wire carries); otherwise infer from the bound/same-named
 /// column. To-many -> an array.
 fn param_schema(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> Value {
     match &p.ty {
@@ -611,7 +607,7 @@ fn wrap(base: Value, many: bool) -> Value {
     }
 }
 
-/// A primitive's JSON Schema (mirrors the DDL/client mapping, D10/D13). `uuid`/date/
+/// A primitive's JSON Schema (mirrors the DDL/client mapping). `uuid`/date/
 /// timestamp carry the standard OpenAPI `format` so a generator can pick a rich type.
 fn primitive_schema(p: Primitive) -> Value {
     match p {
@@ -626,7 +622,7 @@ fn primitive_schema(p: Primitive) -> Value {
 }
 
 /// A param/field base schema: a primitive, or a model reference as the `uuid` FK the
-/// wire carries (D1).
+/// wire carries.
 fn base_schema(b: &BaseType) -> Value {
     match b {
         BaseType::Primitive(p) => primitive_schema(*p),
@@ -634,7 +630,7 @@ fn base_schema(b: &BaseType) -> Value {
     }
 }
 
-/// The `uuid`-string schema (a relation/id FK on the wire, D1).
+/// The `uuid`-string schema (a relation/id FK on the wire).
 fn uuid_schema() -> Value {
     json!({ "type": "string", "format": "uuid" })
 }
@@ -701,26 +697,26 @@ fn error_schema() -> Value {
 }
 
 /// The `{ id }` schema a pure update/delete mutation responds with (its declared-shape
-/// re-select is deferred, D12).
+/// re-select is deferred).
 fn mutation_result_schema() -> Value {
     json!({
         "type": "object",
         "required": ["id"],
         "properties": { "id": uuid_schema() },
         "description": "A write with no declared-shape re-select responds with the id \
-                        of the affected row (D12)."
+                        of the affected row."
     })
 }
 
 /// The reusable `$ctx` header parameter: a JSON object an upstream auth proxy sets
-/// (`X-Based-Context`, D21/D7). Never a request-body field.
+/// (`X-Based-Context`). Never a request-body field.
 fn context_header_param() -> Value {
     json!({
         "name": "X-Based-Context",
         "in": "header",
         "required": false,
         "description": "Pre-authenticated request context (`$ctx`) as a JSON object, \
-                        set by an upstream auth proxy (auth.md, D7). Carries the \
+                        set by an upstream auth proxy (auth.md). Carries the \
                         `$ctx.<field>` values a callable requires (see `x-ctx-requires`).",
         "schema": { "type": "string" }
     })

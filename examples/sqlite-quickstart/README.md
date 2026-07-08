@@ -73,7 +73,7 @@ based gen client -o src/client.rs --embedded   # src/client.rs (the typed client
 
 - **`migrations/`** — schema setup is `based migrate apply`, the real convention (E4), not
   a raw-DDL string in the program. `main.rs` never issues DDL.
-- **`src/client.rs`** — the verbatim `based gen client` output. `--embedded` (D62) also
+- **`src/client.rs`** — the verbatim `based gen client` output. `--embedded` also
   emits the in-process bridge, so the whole of the wiring is one line:
 
   ```rust
@@ -82,7 +82,7 @@ based gen client -o src/client.rs --embedded   # src/client.rs (the typed client
   ```
 
 - **`$ctx`** (the request context — org, user) is a typed method argument the *app*
-  supplies from its auth layer, never the caller (auth.md/D7).
+  supplies from its auth layer, never the caller (auth.md).
 
 ## This is the SQLite slice
 

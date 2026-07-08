@@ -15,8 +15,8 @@ GraphQL's field-picking is moot (shape + filter fixed server-side) -> RPC-style 
 3. Input validation — typed params validated at the boundary before SQL; defaults applied.
 
 ## Typed ids
-An id is never a bare string on the typed surface. Every id the client touches — a
-model's own `id`, a relation param/FK, or a `$ctx` relation — is a per-entity phantom
+On the typed surface, every id the client touches — a model's own `id`, a relation
+param/FK, or a `$ctx` relation — is a per-entity phantom
 newtype `Id<E>` (Rust: `Id<entity::User>`, `Id<entity::Org>`; a branded/named type in
 other targets). Distinct entities are distinct types, so an `Org` id can never be passed
 where a `User` id is wanted — the transposition that a shared string type type-checks and
@@ -33,9 +33,9 @@ hole; turning a raw string into a typed id is an explicit, greppable `Id::from_r
 (mirroring how `unscoped(...)` makes the unsafe escape visible, principle 1/6).
 
 ## Pagination envelope
-A query with `page (N)` returns `{ rows, cursor }`, never a bare array (cursor must come back). Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).
+A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque cursor for the next page. Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).
 
-The cursor is a typed `Cursor` on the client surface, not a bare string — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
+The cursor is a typed `Cursor` on the client surface — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
 
 ## Transport + the embedded bridge (D62)
 The generated `Client<T>` is generic over a `Transport` trait the module *defines itself* (post typed input + typed `$ctx` to a route, decode the reply). A wire/HTTP transport is the caller's; the module carries no HTTP stack.

@@ -168,7 +168,7 @@ enum GenTarget {
         /// Write to this file instead of stdout.
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Also emit the in-process **embedded bridge** (D62): an `Embedded` `Transport`
+        /// Also emit the in-process **embedded bridge**: an `Embedded` `Transport`
         /// over `based_runtime::Engine` plus `client::embedded(&engine)`, so an embedding
         /// build gets a working client with no hand-written bridge. The consuming crate
         /// must depend on based-runtime; a pure-wire client leaves this off.
@@ -176,7 +176,7 @@ enum GenTarget {
         embedded: bool,
     },
     /// Emit an OpenAPI 3.1 spec for the wire — feed it to `openapi-generator` for a
-    /// client in any language (polyglot via one contract, not N emitters; D23).
+    /// client in any language (polyglot via one contract, not N emitters).
     Openapi {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]

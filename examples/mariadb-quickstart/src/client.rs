@@ -247,10 +247,10 @@ impl std::error::Error for ClientError {
     }
 }
 
-/// Post a typed input to a route, carry the typed request context (`$ctx`, D4/D5 —
-/// sent out of band, never a body field, auth.md/D7), and decode the typed output.
-/// A callable with no `$ctx` requirements passes `ctx: &()`. Implemented by the
-/// runtime's HTTP client; codegen only depends on this shape.
+/// Post a typed input to a route, carry the typed request context (`$ctx` — sent out
+/// of band, never a body field, auth.md), and decode the typed output. A callable with
+/// no `$ctx` requirements passes `ctx: &()`. Implemented by the runtime's HTTP client;
+/// codegen only depends on this shape.
 pub trait Transport {
     fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
@@ -421,7 +421,7 @@ impl<T: Transport> Client<T> {
     }
 }
 
-// ---------- embedded bridge (based_runtime::Engine, D62) ----------
+// ---------- embedded bridge (based_runtime::Engine) ----------
 
 /// A `Transport` backed by an in-process `based_runtime::Engine` — every callable runs
 /// through the engine's dispatch core with no socket. Build one with [`embedded`].
@@ -454,7 +454,7 @@ impl Transport for Embedded<'_> {
 }
 
 /// A ready-to-use client over an in-process `based_runtime::Engine` — no bridge to write.
-/// `$ctx` is a typed per-call argument (auth.md/D7 still holds: the app sets it, not the
+/// `$ctx` is a typed per-call argument (auth.md still holds: the app sets it, not the
 /// caller); a public callable passes `()`, which maps to an empty context bag.
 pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
     Client {

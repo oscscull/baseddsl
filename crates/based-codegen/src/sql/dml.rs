@@ -21,7 +21,7 @@
 //! - WHERE from the query filter (bare-param same-name equality, per-param
 //!   bindings, or an explicit `where`), then the injected soft-delete + scope.
 //!   A named-filter call in `where` is inlined: its body is substituted with the
-//!   call args and lowered against the call-site model (the codegen twin of sema D14).
+//!   call args and lowered against the call-site model (the codegen twin of the sema check).
 //! - ORDER from the sort cascade (query `order` > model `@sort`); keyset queries
 //!   get the unique `id` tiebreaker appended, shown not written (pagination.md).
 //! - LIMIT / OFFSET from `page (...)`; `with count` emits a second COUNT(*). A keyset
@@ -31,7 +31,7 @@
 //! ## Parameter placeholders
 //! Signature inputs render as `:name` named placeholders (`$ctx.org` -> `:ctx_org`).
 //! The runtime binds them to the driver's positional form (`?` on MySQL/MariaDB/SQLite,
-//! `$n` on Postgres — D29). Named placeholders keep the emitted SQL legible — readable
+//! `$n` on Postgres). Named placeholders keep the emitted SQL legible — readable
 //! over terse (CLAUDE.md).
 //!
 //! ## Dialects
@@ -188,8 +188,8 @@ fn lower_query(
     dialect: Dialect,
 ) -> LoweredQuery {
     let root = schema.model(&rq.target).expect("target resolved by sema");
-    // `unscoped` (D32) opts the whole query out of scope handling — the joined
-    // tables' `@scope` (D34) as well as the root's, kept in one decision (P4).
+    // `unscoped` opts the whole query out of scope handling — the joined
+    // tables' `@scope` as well as the root's, kept in one decision (P4).
     let mut sel = Select::new(schema, decls, root, dialect)
         .with_scope_inject(q.unscoped.is_none())
         .with_scope_terms(&rq.scope_inject);
@@ -204,8 +204,8 @@ fn lower_query(
         wheres.push(soft_pred(dialect, &sel.root_alias, root, sd));
     }
     // `@scope` rides into every query on the model (auth.md) unless the query opts out
-    // with `unscoped(...)` (D32). The injected predicate is the *chosen alternative*
-    // (D47) — the axes this query named — resolved by sema per callable.
+    // with `unscoped(...)`. The injected predicate is the *chosen alternative* — the
+    // axes this query named — resolved by sema per callable.
     if let Some(scope) = sel.scope_where(&sel.root_alias, root) {
         wheres.push(scope);
     }
@@ -320,7 +320,7 @@ fn keyset_predicate(keys: &[OrderKey]) -> String {
 // ---------- projection -----------------------------------------------------
 
 /// Build the indented SELECT-list text for a query. Delegates to [`project_return`],
-/// the shape-projection core the write side reuses for its post-write re-select (D12).
+/// the shape-projection core the write side reuses for its post-write re-select.
 fn build_projection<'a>(
     sel: &mut Select<'a>,
     decls: &'a [Decl],
@@ -332,8 +332,8 @@ fn build_projection<'a>(
 
 /// Build the indented SELECT-list text from a return type. Uses the named return shape
 /// when present, else projects every stored column of a bare-model return. Shared by
-/// the read side (queries) and the write side (`mutations`'s declared-shape re-select,
-/// D12), so a mutation returns the *same* projection a `get` of that shape would.
+/// the read side (queries) and the write side (`mutations`'s declared-shape re-select),
+/// so a mutation returns the *same* projection a `get` of that shape would.
 pub(crate) fn project_return<'a>(
     sel: &mut Select<'a>,
     decls: &'a [Decl],
@@ -586,7 +586,7 @@ pub(crate) struct Select<'a> {
     /// path-prefix key (e.g. "placed_by", "address.city") -> join alias.
     seen: HashMap<String, String>,
     /// Named filters by name, so a `FilterCall` (or a bare atom naming a filter) can
-    /// inline its body against the call-site model — the codegen mirror of sema D14.
+    /// inline its body against the call-site model — the codegen mirror of the sema check.
     filters: HashMap<&'a str, &'a NamedFilter>,
     /// Filters currently mid-expansion; guards a self-referential filter from looping
     /// (sema permits recursion, so we must terminate on our own, like sema does).
@@ -594,15 +594,15 @@ pub(crate) struct Select<'a> {
     /// The immediately preceding `create` in an enclosing `tx`, so a `^.field`
     /// back-reference can bind to it (mutations.md). `None` outside a `tx`.
     back: Option<BackCtx<'a>>,
-    /// Whether to inject a *joined* scoped model's `@scope` into its join `ON`
-    /// (D34). True by default; set false for an `unscoped` callable (D32), which
-    /// opts out of *all* scope handling — the joined tables included, not just the
-    /// root. The root/write-target `@scope` is injected by the caller (`lower_query`
-    /// / `lower_write`), which already honours `unscoped`; this flag governs only the
+    /// Whether to inject a *joined* scoped model's `@scope` into its join `ON`.
+    /// True by default; set false for an `unscoped` callable, which opts out of
+    /// *all* scope handling — the joined tables included, not just the root. The
+    /// root/write-target `@scope` is injected by the caller (`lower_query` /
+    /// `lower_write`), which already honours `unscoped`; this flag governs only the
     /// join-`ON` injection the resolver performs as it materializes each join.
     inject_scope: bool,
-    /// The per-touched-model scope the *current callable* injects (auth.md / D47),
-    /// from `RQuery`/`RMutation.scope_inject`. Keyed by model name; each entry is the
+    /// The per-touched-model scope the *current callable* injects (auth.md), from
+    /// `RQuery`/`RMutation.scope_inject`. Keyed by model name; each entry is the
     /// chosen alternative's `(column, ctx_field)` terms. The root `WHERE`, the joined
     /// `ON`, and the create auto-set all read the terms for their model from here, so a
     /// callable naming one alternative injects a different predicate than one naming
@@ -671,15 +671,15 @@ impl<'a> Select<'a> {
         self
     }
 
-    /// Set whether a joined scoped model's `@scope` rides into its join `ON` (D34).
-    /// An `unscoped` callable (D32) passes `false` to drop scope from the joined
-    /// tables too — the same opt-out the root/write-target scope already honours.
+    /// Set whether a joined scoped model's `@scope` rides into its join `ON`.
+    /// An `unscoped` callable passes `false` to drop scope from the joined tables
+    /// too — the same opt-out the root/write-target scope already honours.
     pub(crate) fn with_scope_inject(mut self, inject: bool) -> Self {
         self.inject_scope = inject;
         self
     }
 
-    /// Attach the current callable's per-model chosen scope injection (D47), from
+    /// Attach the current callable's per-model chosen scope injection, from
     /// `RQuery`/`RMutation.scope_inject`. Every scope predicate this `Select` emits —
     /// root `WHERE`, joined `ON`, create auto-set — reads its terms from here.
     pub(crate) fn with_scope_terms(mut self, inject: &'a [ScopeInject]) -> Self {
@@ -688,7 +688,7 @@ impl<'a> Select<'a> {
     }
 
     /// The scope `(column, ctx_field)` terms the current callable injects for `model`
-    /// (the alternative it chose, D47), or `&[]` when the callable confines this model
+    /// (the alternative it chose), or `&[]` when the callable confines this model
     /// by no scope (unscoped, or the model isn't touched).
     pub(crate) fn scope_terms_for(&self, model: &str) -> &[(String, String)] {
         self.scope_inject
@@ -704,7 +704,7 @@ impl<'a> Select<'a> {
     /// (unscoped callable, or a model carrying none of the named axes). The bind name
     /// `:ctx_<field>` is the *same* one every scope site uses, so the runtime binds it
     /// once from the request `$ctx` (P4). For a single-alternative model this is the
-    /// model's whole scope — byte-identical to iteration 1 (D48).
+    /// model's whole scope.
     pub(crate) fn scope_where(&self, alias: &str, model: &RModel) -> Option<String> {
         let terms: Vec<String> = self
             .scope_terms_for(&model.name)
@@ -719,9 +719,9 @@ impl<'a> Select<'a> {
         (!terms.is_empty()).then(|| terms.join(" AND "))
     }
 
-    /// The joined-`ON` scope injection (D34): the callable's chosen `@scope` for the
-    /// joined `model`, or `None` when scope injection is off (`unscoped` callable) —
-    /// the join-`ON` twin of the root `scope_where`.
+    /// The joined-`ON` scope injection: the callable's chosen `@scope` for the joined
+    /// `model`, or `None` when scope injection is off (`unscoped` callable) — the
+    /// join-`ON` twin of the root `scope_where`.
     fn scope_join_pred(&self, alias: &str, model: &RModel) -> Option<String> {
         if !self.inject_scope {
             return None;
@@ -803,7 +803,7 @@ impl<'a> Select<'a> {
     /// `s<n>_<table>` root alias (distinct from `outer_alias`, so a self-referential edge
     /// works), the element body is projected as a per-dialect JSON object, and the
     /// subquery correlates the child's back FK to `outer_alias.id`, applying the child's
-    /// soft-delete tombstone + `@scope` exactly as a join would (D34).
+    /// soft-delete tombstone + `@scope` exactly as a join would.
     fn json_array_subquery(
         &mut self,
         body: &[ShapeField],
@@ -988,7 +988,7 @@ impl<'a> Select<'a> {
                 soft_pred(self.dialect, &alias, tmodel, sd)
             ));
         }
-        // A joined *scoped* model rides its `@scope` into the `ON` too (D34) — the
+        // A joined *scoped* model rides its `@scope` into the `ON` too — the
         // exact parallel of the soft-delete injection above, so a query reaching
         // another tenant's row through a relation can't read across the scope
         // boundary. A LEFT JOIN stays a left join (the predicate is in `ON`, not
@@ -1031,7 +1031,7 @@ impl<'a> Select<'a> {
                 soft_pred(self.dialect, &alias, tmodel, sd)
             ));
         }
-        // Joined-model `@scope` rides the `ON` too (D34), same as the forward join.
+        // Joined-model `@scope` rides the `ON` too, same as the forward join.
         if let Some(scope) = self.scope_join_pred(&alias, tmodel) {
             on.push_str(&format!(" AND {scope}"));
         }
@@ -1106,7 +1106,7 @@ impl<'a> Select<'a> {
                 )
             }
             // Inline the filter's body, substituting args for its params, resolved
-            // against the call-site model (sema D14 guarantees the body resolves).
+            // against the call-site model (sema guarantees the body resolves).
             Predicate::FilterCall { name, args } => match self.filters.get(name.node.as_str()) {
                 Some(f) => self.filter_call(f, args, model),
                 None => format!("TRUE /* filter {} unresolved */", name.node),

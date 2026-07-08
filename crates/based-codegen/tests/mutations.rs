@@ -283,7 +283,7 @@ fn create_returning_mutation_reselects_the_declared_shape() {
         "#);
     // After the INSERT the created row is read back in its declared shape (D12).
     assert!(
-        out.contains("-- return: re-select the written row's declared shape (D12/D58)"),
+        out.contains("-- return: re-select the written row's declared shape"),
         "\n{out}"
     );
     // Projects the shape exactly as a `get` would: local `total` + the relation reach

@@ -397,7 +397,10 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   **Rule:** editor gravy states *what a symbol is* when it isn't obvious, never *how to use the system*.
   Trim scope/ctx hovers to a one-line identity + the concrete filter/bag; drop or minimize the ctx
   inlay. Touches `based-facts::{scope_detail,ctx_fact}` + LSP inlay wiring; update the facts tests that
-  assert the old strings.
+  assert the old strings. **Partial (D74):** the *positive-framing* half is done — the `Page` hover /
+  doc-string "…rows + an opaque cursor, **never a bare array**" is now stated positively, and the same
+  define-by-negation pattern was swept from source + userland (genuine behavioral guarantees kept).
+  **Still open:** trimming the scope/ctx *tutorializing* hovers + dropping the redundant ctx inlay.
 - **H5. Doc + comment critical-eye pass, project-wide (user-raised 2026-07-08).** Two rules, enforced
   everywhere a user reads: (a) **no `D#`/decision-refs in any userland surface** — editor hover/inlay
   strings, CLI output, `examples/**` (comments + READMEs), `docker/README.md`, generated-code headers.
@@ -407,6 +410,14 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   blocking TODO, which also gets a PLAN line. F1/D69 swept `crates/**` for WIP narration; this is the
   follow-on for *wordiness + rationale-in-comments + userland `D#`*, and explicitly includes
   `examples/**` and the `spec/examples` comments a user meets first. Reinforces the Conventions rule.
+  **Substantially advanced (D74):** every userland surface is now `D#`-free — the emitted SQL re-select
+  comment, two OpenAPI `description` strings, the `--embedded`/`openapi` `--help` doc-comments, an
+  `E0181` sema **diagnostic message**, the three example `main.rs`/`README.md`, `docker/*`, and the
+  regenerated `examples/*/src/client.rs`; and `crates/based-codegen/src/**` is fully `D#`-free with its
+  overlong module/block comments compressed to what+why (the user flagged that crate by name). **Left
+  standing on purpose:** internal `///` doc-comment `D#` refs in the *other* crates (`based-sema`/
+  `runtime`/`ast`/`parser`/…) — the standing rule permits `D#` in internal doc comments (they aid the
+  reviewer, are not a userland surface). A project-wide *wordiness* pass beyond `based-codegen` remains.
 - **H6. Adversarial correctness sweep (user-raised 2026-07-08).** A standing bugfinding pass over the
   built surface — codegen SQL edge cases, runtime binding/nesting, scope/soft-delete predicate
   composition — driven against a live DB, not just unit tests. Scope each sweep to one subsystem; file

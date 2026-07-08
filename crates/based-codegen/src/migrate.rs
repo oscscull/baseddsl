@@ -40,8 +40,8 @@
 //! scope emits no DDL, so this is header/decl metadata that round-trips for the drift check.
 //! Every table opens with a `table` line and closes at the next `table`/EOF; its
 //! `column`/`index` lines are indented two spaces. The `id` column is elided when it
-//! is the default (`uuid`, not-null, not-unique) — a universally implicit invariant
-//! (D2); a model that declares a non-default `id` records it explicitly.
+//! is the default (`uuid`, not-null, not-unique) — a universally implicit invariant;
+//! a model that declares a non-default `id` records it explicitly.
 
 mod diff;
 mod model;

@@ -585,7 +585,7 @@ fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, si
                 code::SCOPE_ASSIGN,
                 a.col.span,
                 format!(
-                    "`{}` is `@scope`-managed on `create`; the engine sets it from `$ctx` (D32)",
+                    "`{}` is `@scope`-managed on `create`; the engine sets it from `$ctx`",
                     a.col.node
                 ),
                 "a scoped create can't target another scope — drop the assign, or mark the mutation `unscoped(\"…\")`",
