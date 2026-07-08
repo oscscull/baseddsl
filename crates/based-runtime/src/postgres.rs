@@ -1,9 +1,9 @@
 //! The concrete Postgres driver + shard router (feature `postgres`, A3/D38).
 //!
 //! This is the Postgres twin of the MariaDB driver ([`crate::driver`]): the production
-//! [`Db`]/[`Backend`] that runs the *verbatim* Postgres-lowered SQL (D29) against a real
+//! [`Db`]/[`Backend`] that runs the *verbatim* Postgres-lowered SQL  against a real
 //! server. Postgres codegen (`ddl`/`dml`/`mutations`) and the dialect-aware `:name`→`$n`
-//! scanner are already done (D29); this is the runtime that executes what they emit. Two
+//! scanner are already done ; this is the runtime that executes what they emit. Two
 //! layers, exactly mirroring the MariaDB structure:
 //!
 //! - [`PostgresDb`] — a [`Db`] over one pooled connection. It runs the whole request on
@@ -44,7 +44,7 @@ use crate::value::SqlValue;
 
 /// Postgres deadlock (`40P01`, `deadlock_detected`) and serialization failure (`40001`): the
 /// server rolled the transaction back for a concurrency conflict, so the mutation path may
-/// retry it (D65). A `statement_timeout` cancel (`57014`) is *not* retried — re-running would
+/// retry it . A `statement_timeout` cancel (`57014`) is *not* retried — re-running would
 /// just time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
 fn map_pg_err(e: postgres::Error) -> DbError {
     let kind = match e.code() {
@@ -154,7 +154,7 @@ impl ToSql for PgValue {
 
 /// A returned column value → JSON (the shape the wire response is built from), read by the
 /// column's Postgres type. Numbers map to JSON numbers; every string-family type
-/// (text/uuid/timestamptz/date/jsonb) rides back as a JSON string (D1). A genuinely
+/// (text/uuid/timestamptz/date/jsonb) rides back as a JSON string . A genuinely
 /// unknown/binary type falls back to lowercase hex (never a panic), matching the
 /// MariaDB/SQLite drivers' `from_*`.
 ///
@@ -456,7 +456,7 @@ impl PgRouter {
     /// Check out a connection to a specific physical shard. `r2d2` waits at most the pool's
     /// configured `connection_timeout` (from [`PoolConfig::checkout_timeout`]) for a free
     /// connection, then errors — a saturated pool becomes a fast, retryable pool-exhausted
-    /// `503` (D65), never a hung worker.
+    /// `503` , never a hung worker.
     pub fn checkout_shard(&self, shard: ShardId) -> Result<PostgresDb, DbError> {
         let pool = self
             .shards
@@ -500,7 +500,7 @@ impl Backend for PgRouter {
 
 /// Build one shard's bounded connection pool from a `postgres://…` URL. The pool's
 /// `connection_timeout` is the checkout wait (pool-exhaustion → fast `503`, D65), and the
-/// server-side `statement_timeout` (D65) is set as a startup option so every statement on a
+/// server-side `statement_timeout`  is set as a startup option so every statement on a
 /// pooled connection is capped — a runaway query is cancelled (`57014`) rather than hanging.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<PgPool, DbError> {
     let mut config = url

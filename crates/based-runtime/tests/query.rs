@@ -31,7 +31,7 @@ fn compile(src: &str) -> Compiled {
 }
 
 /// Same, but for the Postgres target — the emitted SQL is double-quoted and the runtime
-/// binds ordinal `$n` placeholders (D29). Used to prove the dialect threads end-to-end.
+/// binds ordinal `$n` placeholders . Used to prove the dialect threads end-to-end.
 fn compile_pg(src: &str) -> Compiled {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
@@ -95,7 +95,7 @@ fn get_binds_param_positionally() {
 #[test]
 fn postgres_binds_ordinal_dollar_placeholders() {
     // A Postgres `Compiled` lowers double-quoted SQL and the runtime scanner rewrites
-    // `:name` -> `$n` in bind order (D29). This one query has a param *and* a `$ctx`
+    // `:name` -> `$n` in bind order . This one query has a param *and* a `$ctx`
     // field, so both ordinals must appear in the right order.
     let c = compile_pg(SCHEMA);
     let req = Request::new("orders_in_org", json!({ "org": "org-1" }), json!({}));

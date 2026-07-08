@@ -30,14 +30,13 @@
 //! object, a relation FK -> a `uuid` string (the wire carries the id). `optional`
 //! -> the property is not `required`; a to-many scalar -> an `array`.
 //!
-//! ## Deferred (documented, not silently wrong — same gaps as the client)
+//! ## Shape projection
 //! - A to-**one** nested sub-object (`buyer { … }`) is emitted as an inline nested
 //!   object schema; a to-**many** nest (`items { … }`) as an `array` of that object
 //!   schema — both matching the client + SQL sides.
 //! - A `sql`…`` shape field has no statically known type -> the open-object `Json`.
-//! - A **pure** update/delete mutation still responds `{ id }` (its declared-shape
-//!   re-select is deferred), so its `200` schema is the `MutationResult` `{ id }`
-//!   object, not the declared shape. A create-returning mutation advertises the shape.
+//! - A mutation with a declared return shape advertises it; one with no declared shape
+//!   (e.g. a bare-`{ id }` write) responds with the shared `MutationResult` `{ id }`.
 
 use based_ast::*;
 use based_sema::{CheckedSchema, MemberKind, RModel, RMutation, RQuery};
@@ -373,7 +372,8 @@ fn out_schema(
 /// Project a shape body into `(field, schema, required)` triples. A `sql`…`` field
 /// maps to the open-object `Json`; a to-**one** nest (`buyer { … }`) becomes an inline
 /// nested object schema (recursively projected), required unless the relation is
-/// optional. A to-**many** nest is skipped (deferred, like the client + SQL sides).
+/// optional. A to-**many** nest (`items { … }`) becomes an `array` of that object
+/// schema (always present — an empty array when there are no children).
 fn shape_fields(
     schema: &CheckedSchema,
     body: &[ShapeField],
@@ -696,8 +696,7 @@ fn error_schema() -> Value {
     })
 }
 
-/// The `{ id }` schema a pure update/delete mutation responds with (its declared-shape
-/// re-select is deferred).
+/// The `{ id }` schema a mutation with no declared return shape responds with.
 fn mutation_result_schema() -> Value {
     json!({
         "type": "object",

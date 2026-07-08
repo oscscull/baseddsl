@@ -7,7 +7,7 @@
 //!
 //! Binding uses the fact that codegen's placeholder *names* are unambiguous given
 //! the schema: a declared param renders `:<param>`, a context field `:ctx_<field>`
-//! (D11), offset pagination `:offset`. So the runtime assembles one value
+//! , offset pagination `:offset`. So the runtime assembles one value
 //! environment from the validated inputs and lets [`crate::scan::to_positional`]
 //! pull from it in SQL order.
 
@@ -25,7 +25,7 @@ pub struct Request {
     pub callable: String,
     pub args: serde_json::Map<String, serde_json::Value>,
     pub ctx: serde_json::Map<String, serde_json::Value>,
-    /// An optional idempotency key for a **mutation retry** (D25): the caller attaches a
+    /// An optional idempotency key for a **mutation retry** : the caller attaches a
     /// stable key so the engine runs the write body at most once per key. Request
     /// metadata, supplied out of band (the `Idempotency-Key` header), never the JSON body
     /// — the same trusted-edge discipline as `$ctx` (auth.md/D7), and never a schema
@@ -50,7 +50,7 @@ impl Request {
         }
     }
 
-    /// Attach a mutation idempotency key (D25). A blank/whitespace-only key is treated as
+    /// Attach a mutation idempotency key . A blank/whitespace-only key is treated as
     /// absent (a header set to `""` is not a real key), so an empty header never claims a
     /// store slot.
     pub fn with_idempotency_key(mut self, key: Option<String>) -> Self {
@@ -59,7 +59,7 @@ impl Request {
     }
 
     /// A stable hash of this request's **payload** — its args and `$ctx` — for the
-    /// idempotency store (D25). A genuine retry of the same request produces the same
+    /// idempotency store . A genuine retry of the same request produces the same
     /// fingerprint (so the stored response replays); a caller who reuses one key for a
     /// *different* request produces a different one, which the store rejects rather than
     /// silently answering with the first request's result.
@@ -73,8 +73,8 @@ impl Request {
     pub fn fingerprint(&self) -> crate::idempotency::Fingerprint {
         // FNV-1a over the canonical JSON of (args, ctx). A field-count prefix separates the
         // two maps so that moving a field from args to ctx changes the hash (no ambiguous
-        // concatenation). FNV is stable across releases (unlike `DefaultHasher`), which the
-        // durable multi-instance store (deferred, D25) will rely on.
+        // concatenation). FNV is stable across releases (unlike `DefaultHasher`), which a
+        // durable multi-instance store relies on .
         let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis.
         for part in [&self.args, &self.ctx] {
             let s = serde_json::Value::Object(part.clone()).to_string();
@@ -143,8 +143,8 @@ pub struct MutationPlan {
     pub result_id: Option<String>,
     /// The declared-shape re-select: reads the written row back in the mutation's return
     /// shape so the write response matches the client's decoded output type. Keyed either
-    /// on the created row's id (D12, `:result_id` = [`result_id`](Self::result_id)) or on
-    /// an update/soft-delete/restore's own `where` (D58, its params already bound). `None`
+    /// on the created row's id (`:result_id` = [`result_id`](Self::result_id)) or on
+    /// an update/soft-delete/restore's own `where` (its params already bound). `None`
     /// only when the row does not survive the write (a real DELETE), where the response
     /// falls back to `{}`.
     pub ret_select: Option<Stmt>,
@@ -331,7 +331,7 @@ pub fn plan_mutation(
         env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
     }
 
-    // 2. Generate the engine `id` for each create (D1). Record the id of the first
+    // 2. Generate the engine `id` for each create . Record the id of the first
     //    create matching the return model — the row the response identifies.
     let mut result_id = None;
     for w in &low.stmts {
@@ -353,8 +353,8 @@ pub fn plan_mutation(
 
     // 4. The declared-shape re-select: bind it whenever codegen emitted one (codegen and
     //    this planner apply the same survives-the-write rule, so they agree). A create-keyed
-    //    re-select (D12) needs `:result_id` = this create's engine id; a where-keyed one
-    //    (D58, update/soft-delete/restore) reuses the write's own params/`$ctx`, already in
+    //    re-select  needs `:result_id` = this create's engine id; a where-keyed one
+    //    (update/soft-delete/restore) reuses the write's own params/`$ctx`, already in
     //    `env`. Seeding `:result_id` only when a create produced one is harmless for the
     //    where-keyed form — `to_positional` binds only the placeholders each statement carries.
     let ret_select = match &low.ret_select {
@@ -435,7 +435,7 @@ fn param_family(p: &Param) -> (Family, bool) {
         Some(t) => {
             let family = match &t.base {
                 BaseType::Primitive(prim) => Family::of(*prim),
-                // A relation param carries the target's key (D1): a uuid string.
+                // A relation param carries the target's key : a uuid string.
                 BaseType::Model(_) => Family::Text,
             };
             (family, t.optional || p.default.is_some())
@@ -450,7 +450,7 @@ fn param_family(p: &Param) -> (Family, bool) {
 fn bind_ctx(c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
     let family = match &c.ty {
         CtxField::Scalar(prim) => Family::of(*prim),
-        // A relation-typed context field carries the model's key (D1).
+        // A relation-typed context field carries the model's key .
         CtxField::Relation(_) => Family::Text,
     };
     match req.ctx.get(&c.field) {

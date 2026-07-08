@@ -43,7 +43,7 @@
 //! based-codegen itself gains no based-runtime dep — the reference is by path in the
 //! emitted *text*, and the consuming crate is what depends on based-runtime.
 //!
-//! ## Deferred (documented, not silently wrong)
+//! ## Shape projection
 //! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct; a to-**many**
 //!   nest (`items { … }`) emits a nested struct wrapped in `Vec<…>`, both matching the
 //!   read side (the runtime decodes the SQL JSON array into it).
@@ -477,7 +477,8 @@ mod rust {
     /// auxiliary structs for its to-one nested sub-objects. A `sql`…`` field maps to
     /// `Json`; a to-one nest (`buyer { … }`) becomes a nested struct named
     /// `<Parent><Field>` and the field takes that type (`Option<…>` when the relation
-    /// is optional). A to-many nest is skipped (deferred, like the SQL side).
+    /// is optional). A to-many nest (`items { … }`) becomes a nested struct wrapped in
+    /// `Vec<…>`.
     fn build_struct(
         schema: &CheckedSchema,
         name: String,

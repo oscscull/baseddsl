@@ -97,14 +97,14 @@ pub fn dispatch(
         // LB can retry, another shard's traffic is unaffected).
         Err(RunError::Db(e)) => WireResponse::error(503, e.code(), e.message),
         // A concurrent mutation retry with the same idempotency key is still in flight
-        // (D25). Rejecting rather than running a second write is what makes the key safe;
+        // . Rejecting rather than running a second write is what makes the key safe;
         // 409 is retryable once the first attempt settles.
         Err(RunError::Conflict(key)) => WireResponse::error(
             409,
             "idempotency_conflict",
             format!("a request with idempotency key `{key}` is already in progress"),
         ),
-        // The idempotency key was reused for a *different* request (D25). Not retryable —
+        // The idempotency key was reused for a *different* request . Not retryable —
         // replaying the first request's response would be wrong; the client must use a fresh
         // key. 422 (well-formed request, but its key/payload pairing is unprocessable).
         Err(RunError::KeyReuse(key)) => WireResponse::error(
@@ -148,7 +148,7 @@ enum Kind {
 
 /// The routable target of a path: `(is_mutation, name)`, or `None` when unroutable.
 /// Exposed so the listener edge can resolve a request's callable — to look up its
-/// shard key (D33) — *before* it borrows a connection, using the same route grammar
+/// shard key  — *before* it borrows a connection, using the same route grammar
 /// `dispatch` enforces (one source of truth for what `/q|m/<name>` means).
 pub fn route_target(path: &str) -> Option<(bool, &str)> {
     parse_route(path).map(|(kind, name)| (matches!(kind, Kind::Mutation), name))

@@ -1,4 +1,4 @@
-# CI (D64) — a THIN example wrapper. The substance lives in the portable `make` targets
+# CI — a THIN example wrapper. The substance lives in the portable `make` targets
 # (see Makefile); this file only provisions infra (DB service containers, a Node toolchain)
 # and calls those targets. Anyone on GitLab/Buildkite/a laptop runs the same `make` targets;
 # this is the demonstration, not the pipeline logic. Keep it thin — no bespoke marketplace
@@ -21,7 +21,7 @@ jobs:
           components: rustfmt, clippy
       - run: make ci-workspace
 
-  # Build + package the VS Code extension so it never rots (DoD #4, extension half).
+  # Build + package the VS Code extension so it never rots.
   extension:
     runs-on: ubuntu-latest
     steps:
@@ -31,8 +31,7 @@ jobs:
           node-version: 20
       - run: make ci-extension
 
-  # Build the `based serve` container image + smoke-boot it against bundled SQLite (DoD #4,
-  # deploy half). Docker is preinstalled on ubuntu-latest; no DB service needed.
+  # Build the `based serve` container image + smoke-boot it against bundled SQLite. Docker is preinstalled on ubuntu-latest; no DB service needed.
   image:
     runs-on: ubuntu-latest
     steps:

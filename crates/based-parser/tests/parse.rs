@@ -183,7 +183,7 @@ fn query_tiers_and_bindings() {
 
 #[test]
 fn unscoped_clause_on_query_and_mutation() {
-    // The `unscoped("reason")` opt-out (D32) parses after the return type on a query,
+    // The `unscoped("reason")` opt-out  parses after the return type on a query,
     // after any `guard` on a mutation. The reason string is mandatory.
     let sf = parse_ok(
         r#"

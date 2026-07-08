@@ -1,8 +1,8 @@
 //! based-sema — semantic analysis over the closed declaration set.
 //!
 //! Builds one resolved schema from many parsed files, then checks it:
-//!   * name + casing resolution (D7): `Order` <-> model `Order`, paths, inverses
-//!   * implicit `id` column (D2); engine-managed timestamp roles
+//!   * name + casing resolution : `Order` <-> model `Order`, paths, inverses
+//!   * implicit `id` column ; engine-managed timestamp roles
 //!   * type checking: fields, shape paths, predicate operands, param bindings
 //!   * the four query inferences (queries.md): verb, param type, filter, target
 //!   * lints: nondeterministic sort, raw soft-delete gaps, get-not-keyed
@@ -68,7 +68,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     }
     let mut shape_from: HashMap<String, String> = HashMap::new();
     for s in &shapes {
-        // `full` is a per-model convention (D9), so duplicate `full` is allowed.
+        // `full` is a per-model convention , so duplicate `full` is allowed.
         if s.name.node != "full" && shape_from.contains_key(&s.name.node) {
             sink.error(
                 code::DUP_SHAPE,
@@ -80,7 +80,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         }
     }
     // Shape bodies keyed by name, so `$ctx` collection can walk a return shape's
-    // relation reaches to find joined scoped models (D34). Last write wins on a
+    // relation reaches to find joined scoped models . Last write wins on a
     // duplicate name (already reported above); the collector only reads it.
     let mut shape_bodies: HashMap<String, &[based_ast::ShapeField]> = HashMap::new();
     for s in &shapes {
@@ -174,7 +174,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         m.inferred_indexes = inf;
     }
 
-    // 7. `$ctx` coherence (D4/D5): each callable's inferred context requirement is
+    // 7. `$ctx` coherence : each callable's inferred context requirement is
     // its own, but a field name must mean one type everywhere the caller's shared
     // context bag is read — closed world makes that a fact, not a guess.
     ctx::check_coherence(&rqueries, &rmutations, &mut sink);

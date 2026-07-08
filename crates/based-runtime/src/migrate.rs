@@ -256,7 +256,7 @@ fn read_file(path: &Path) -> Result<String, MigrateError> {
 }
 
 /// Split a raw SQL script into individual statements on `;`, dropping `--`/`#` comment lines
-/// and blank fragments. A `down.mig` is hand-written raw SQL (D42), terminated by `;`.
+/// and blank fragments. A `down.mig` is hand-written raw SQL , terminated by `;`.
 fn split_sql(script: &str) -> Vec<String> {
     script
         .split(';')
@@ -333,7 +333,7 @@ fn str_field(r: &Row, key: &str) -> String {
 
 fn placeholder(dialect: Dialect, n: usize) -> String {
     match dialect {
-        // Postgres binds `$1, $2, …`; MariaDB/SQLite bind `?` (D21/D29).
+        // Postgres binds `$1, $2, …`; MariaDB/SQLite bind `?` .
         Dialect::Postgres => format!("${n}"),
         Dialect::MariaDb | Dialect::Sqlite => "?".to_string(),
     }

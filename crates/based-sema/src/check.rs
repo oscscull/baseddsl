@@ -181,8 +181,8 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
 
     let ctx_requires = crate::ctx::collect_query(q, ti, cx);
 
-    // The shard key is the target model's `@scope` owner field (D33) — the field the
-    // request routes on — but a `unscoped` query (D32) deliberately reads across scopes,
+    // The shard key is the target model's `@scope` owner field  — the field the
+    // request routes on — but a `unscoped` query  deliberately reads across scopes,
     // so it has no single owning shard and must route by an explicit key instead.
     let shard_key = if q.unscoped.is_some() {
         None
@@ -190,7 +190,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         cx.model(ti).shard_key_ctx_field()
     };
 
-    // The alternative this query injects per touched scoped model (D47) — threaded to
+    // The alternative this query injects per touched scoped model  — threaded to
     // codegen so a callable naming one `@scope` alternative filters differently from one
     // naming another. Single-alternative models resolve to the same terms as before.
     let scope_inject =
@@ -268,7 +268,7 @@ fn resolve_return(
 fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
     let m = cx.model(ti);
     // The column/edge this param maps onto — its type is what an explicit
-    // annotation must agree with (D1). `None` when the mapping is unresolved
+    // annotation must agree with . `None` when the mapping is unresolved
     // (error already reported) or the param isn't column-mapped.
     let mapped: Option<resolve::Mapped> = match &p.binding {
         Some(ParamBinding::Edge(edge)) => match m.member(&edge.node).map(|mm| &mm.kind) {
@@ -420,7 +420,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     }
     let ret = resolve_return(&m.ret, None, cx, sink)?;
     // At the top level there is no enclosing `tx`, so no back-reference is in scope.
-    // A mutation may opt out of `@scope` on its write models (D32) — that both drops
+    // A mutation may opt out of `@scope` on its write models  — that both drops
     // the injected guard and lets a `create` assign the (otherwise engine-managed)
     // scope column, so the flag rides into every write check.
     let unscoped = m.unscoped.is_some();
@@ -449,9 +449,9 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
             );
         }
     }
-    // Shard key (D33): the return model's `@scope` owner field — a `tx` is a single-shard
-    // unit (D20), so the whole mutation routes on the primary written model's owner. An
-    // `unscoped` mutation (D32) disables scope and so has no owning shard.
+    // Shard key : the return model's `@scope` owner field — a `tx` is a single-shard
+    // unit , so the whole mutation routes on the primary written model's owner. An
+    // `unscoped` mutation  disables scope and so has no owning shard.
     let shard_key = if unscoped {
         None
     } else {
@@ -567,11 +567,11 @@ fn check_assign(
     resolve::check_assign_type(&member.kind, &a.col, &a.value, mi, back, cx, sink);
 }
 
-/// On a scoped model (D32) the `@scope` column is engine-managed on `create`: it is
+/// On a scoped model  the `@scope` column is engine-managed on `create`: it is
 /// auto-set from `$ctx.<field>` so a caller cannot plant a row outside their own scope
 /// (cross-scope create is inexpressible). Assigning it is therefore an `E0181`, exactly
 /// as assigning `id`/`@created` would be redundant/wrong — *unless* the mutation is
-/// `unscoped` (D32), in which case scope isn't injected at all and the caller owns the
+/// `unscoped` , in which case scope isn't injected at all and the caller owns the
 /// column. Reports every offending assign.
 fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, sink: &mut Sink) {
     if unscoped {

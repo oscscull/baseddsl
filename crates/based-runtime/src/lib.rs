@@ -29,7 +29,7 @@
 //! writes can never drift from the emitted SQL either.
 //!
 //! A mutation may carry an **idempotency key** ([`idempotency`], D25): app-side id-gen
-//! (D1) means a naive client retry after a `503`/timeout would double-insert, so a keyed
+//!  means a naive client retry after a `503`/timeout would double-insert, so a keyed
 //! mutation runs its write body **at most once** per key — a retry replays the first
 //! attempt's stored response via the [`idempotency::IdempotencyStore`] seam. The key is
 //! out-of-band request metadata (the `Idempotency-Key` header), never the body or a
@@ -68,8 +68,8 @@
 //! tiny `impl Transport` in the embedding crate — one binary, no sidecar. See `embed` for the
 //! bridge and `tests/embed.rs` for a worked end-to-end example over [`run::MockDb`].
 //!
-//! The write response is the created row's engine `id` today — the declared-shape
-//! re-select (RETURNING) is deferred (D12).
+//! A write reads its written row back in its declared shape under the same tx
+//! (declared-shape re-select, D12/D58).
 
 pub mod cursor;
 pub mod embed;

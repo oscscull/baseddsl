@@ -2,7 +2,7 @@
 //! schema snippet, emit the spec, and assert on the resulting JSON tree (parsed, so
 //! the assertions are structural, not text-position dependent). The headline
 //! assertions are the per-callable path + operation, the input/response schema
-//! mapping, and the shared error/`$ctx`-header surface (D23).
+//! mapping, and the shared error/`$ctx`-header surface .
 
 use based_ast::FileId;
 use based_codegen::openapi::openapi;
@@ -262,7 +262,7 @@ fn ctx_requirements_surface_as_vendor_extension() {
           list Order where (org = $ctx.org);
         }
         "#);
-    // The `$ctx.org` the query silently requires (D4/D5), typed by inference, surfaces
+    // The `$ctx.org` the query silently requires , typed by inference, surfaces
     // on the operation as an `x-ctx-requires` listing (descriptive, not a body param).
     let ctx = &doc["paths"]["/q/my_org_orders"]["post"]["x-ctx-requires"];
     assert_eq!(ctx[0]["field"], "org");

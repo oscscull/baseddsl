@@ -230,7 +230,7 @@ fn keyword_field_is_raw_escaped() {
 
 #[test]
 fn ctx_transport_carries_typed_context() {
-    // The abstract transport threads a typed context alongside the input (D30).
+    // The abstract transport threads a typed context alongside the input .
     let out = gen(r#"
         @soft_delete(deleted_at)
         Order { deleted_at: timestamp?, status: text }
@@ -247,7 +247,7 @@ fn ctx_transport_carries_typed_context() {
 
 #[test]
 fn callable_reading_ctx_gets_typed_ctx_struct() {
-    // A `$ctx.<field>` requirement (D4/D5) surfaces as a per-callable `<Name>Ctx`
+    // A `$ctx.<field>` requirement  surfaces as a per-callable `<Name>Ctx`
     // struct the method takes; a relation field carries the model's typed id.
     let out = gen(r#"
         @soft_delete(deleted_at)

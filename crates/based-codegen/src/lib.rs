@@ -30,9 +30,8 @@ pub mod sql;
 ///   double-quoted (`"order"`), placeholders are `$1, $2, …` (not `?` — the one such
 ///   coupling, fixed in the runtime scanner), JSON containment is `@>` (not MySQL's
 ///   `MEMBER OF`), and the multi-table UPDATE/DELETE forms use `FROM`/`USING` rather
-///   than MySQL's `JOIN` clause. Its `Db`/`Backend` driver is deferred to the live-DB
-///   slice (needs a real server to be meaningful, like MariaDb's); this variant is the
-///   *codegen* + scanner half.
+///   than MySQL's `JOIN` clause. Its `Db`/`Backend` driver lives in `based-runtime`
+///   (`postgres`); this variant is the *codegen* + scanner half.
 ///
 /// Two things branch on the dialect: identifier quoting + a handful of operator/type
 /// spellings ([`Dialect::quote`], [`Dialect::bool_lit`], …) used by the DML/mutation

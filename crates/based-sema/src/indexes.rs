@@ -294,7 +294,7 @@ impl Pattern {
 
     /// Walk a predicate's conjunctive spine collecting eq/range fields; relation
     /// reaches become join demand + remote usage. Named filters expand against
-    /// the call-site model (D14), guarded against self-reference.
+    /// the call-site model , guarded against self-reference.
     fn walk(
         &mut self,
         pred: &Predicate,

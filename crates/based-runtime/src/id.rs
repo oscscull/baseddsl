@@ -1,4 +1,4 @@
-//! Engine id generation (D1: the app generates a model's `id`, no SQL default).
+//! Engine id generation .
 //!
 //! A `create` binds its `id` to an engine-generated value (`:id` / `:id_<step>`);
 //! the runtime fills it from an [`IdGen`]. The trait is the seam: production uses the
@@ -47,7 +47,7 @@ impl IdGen for SeqIdGen {
 }
 
 /// The production generator: a fresh random v4 uuid per `create`. Unpredictable and
-/// globally unique (D1) — no coordination with the database, so a `create`'s id is
+/// globally unique  — no coordination with the database, so a `create`'s id is
 /// known *before* the INSERT, which is what lets a `^.id` back-reference bind the same
 /// value the INSERT used. One is built per request in `based serve` (id state is
 /// per-request, never shared across threads).

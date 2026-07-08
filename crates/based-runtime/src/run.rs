@@ -1,12 +1,12 @@
 //! Executing a planned query and shaping the rows into the response envelope.
 //!
-//! The concrete MariaDB driver is the next slice; execution goes through the
-//! abstract [`Db`] trait — the runtime's twin of the generated client's abstract
-//! `Transport`. A [`MockDb`] returns canned rows so the whole request → JSON path
-//! is testable with no database. Row shaping is where the envelope becomes real:
-//! `get` → a JSON object or `null`, `list` → an array, a paginated `list` → the
-//! `{ rows, cursor }` page envelope (cursor encoding is a driver concern, deferred —
-//! it rides as `null` here).
+//! Execution goes through the abstract [`Db`] trait — the runtime's twin of the
+//! generated client's abstract `Transport`; concrete drivers (`sqlite`, `driver`,
+//! `postgres`) implement it, and a [`MockDb`] returns canned rows so the whole
+//! request → JSON path is testable with no database. Row shaping is where the
+//! envelope becomes real: `get` → a JSON object or `null`, `list` → an array, a
+//! paginated `list` → the `{ rows, cursor }` page envelope (the keyset cursor is
+//! minted here from the last row's hidden sort-key columns).
 
 use crate::id::IdGen;
 use crate::idempotency::{IdempotencyStore, KeyState};
@@ -28,7 +28,7 @@ pub type Row = serde_json::Map<String, serde_json::Value>;
 /// retryable `503`. The message is human-facing; the driver fills it from its error.
 ///
 /// The [`kind`](DbError::kind) is the driver's classification of *how to handle* the
-/// failure (D65): every `DbError` is still a `503`, but a [`Deadlock`](DbErrorKind::Deadlock)
+/// failure : every `DbError` is still a `503`, but a [`Deadlock`](DbErrorKind::Deadlock)
 /// additionally tells the mutation path the transaction is safe to auto-retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbError {
@@ -37,7 +37,7 @@ pub struct DbError {
 }
 
 /// The operational class of a [`DbError`], set by the driver from the server's error code
-/// (D65). Only [`Deadlock`](DbErrorKind::Deadlock) changes engine behaviour (bounded
+/// . Only [`Deadlock`](DbErrorKind::Deadlock) changes engine behaviour (bounded
 /// transaction retry); the rest are informational — every kind is still a wire `503`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DbErrorKind {
@@ -49,7 +49,7 @@ pub enum DbErrorKind {
     /// A deadlock or serialization failure: the server *already rolled the transaction
     /// back*, and re-running it usually succeeds (the contending transaction has moved
     /// on). The mutation path retries the whole transaction a bounded number of times
-    /// (D65). MariaDB 1213/1205, Postgres 40P01/40001, SQLite `SQLITE_BUSY`/`SQLITE_LOCKED`.
+    /// . MariaDB 1213/1205, Postgres 40P01/40001, SQLite `SQLITE_BUSY`/`SQLITE_LOCKED`.
     Deadlock,
     /// No connection became free within the pool's checkout timeout — the pool is
     /// saturated. Fails fast as a `503` (the client/LB backs off), never a hang and never
@@ -108,12 +108,12 @@ pub enum RunError {
     Plan(PlanError),
     Db(DbError),
     /// A mutation retry arrived while a prior attempt with the same idempotency key is
-    /// still running (D25). Running a second write would risk the double-insert the key
+    /// still running . Running a second write would risk the double-insert the key
     /// exists to prevent, so the retry is rejected as a retryable conflict (`409`): the
     /// client retries once the first attempt settles.
     Conflict(String),
     /// The idempotency key was reused for a **different** request — same key, different
-    /// args/`$ctx` (D25). Replaying the first attempt's response would answer the wrong
+    /// args/`$ctx` . Replaying the first attempt's response would answer the wrong
     /// request, so the reuse is rejected loudly (a non-retryable `422`) rather than run or
     /// replayed. The client must use a fresh key for a genuinely different request.
     KeyReuse(String),
@@ -242,7 +242,7 @@ pub fn run_query(
 /// Plan and run a mutation request: id-gen + bind, then execute every write under one
 /// engine-owned transaction, returning the write response.
 ///
-/// When the request carries an idempotency key (D25) the write body runs **at most once**
+/// When the request carries an idempotency key  the write body runs **at most once**
 /// per `(callable, key)`: a first attempt claims the key, runs, and records its response;
 /// a retry replays that recorded response with no writes (exactly-once), and a concurrent
 /// retry while the first is still in flight is a [`RunError::Conflict`]. Planning (arg /
@@ -267,7 +267,7 @@ pub fn run_mutation(
     };
 
     // Fingerprint the request payload (args + `$ctx`) so the store can tell a genuine
-    // retry (same payload) from one key reused for a different request (D25).
+    // retry (same payload) from one key reused for a different request .
     match store.begin(&req.callable, key, req.fingerprint()) {
         // A prior attempt with the same payload already committed: replay it, run no writes.
         KeyState::Done(response) => Ok(response),
@@ -291,7 +291,7 @@ pub fn run_mutation(
 }
 
 /// How many times the mutation path re-runs a transaction the server aborted for a
-/// deadlock / serialization conflict before giving up (D65). Bounded so a pathological
+/// deadlock / serialization conflict before giving up . Bounded so a pathological
 /// hot row fails fast as a `503` rather than retrying forever; a handful of attempts
 /// clears an ordinary two-transaction deadlock (the loser re-runs after the winner
 /// commits). Total attempts = 1 + this.
@@ -309,7 +309,7 @@ fn deadlock_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(step_ms + jitter)
 }
 
-/// Execute a mutation's transaction, retrying the whole thing on a deadlock (D65). A
+/// Execute a mutation's transaction, retrying the whole thing on a deadlock . A
 /// deadlock/serialization abort ([`DbErrorKind::Deadlock`]) rolled the transaction back
 /// server-side, so re-running it from the top on the same connection usually succeeds once
 /// the contending transaction commits; a bounded [`TX_RETRY_LIMIT`] then a `503` prevents a

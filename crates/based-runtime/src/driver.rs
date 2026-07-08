@@ -33,7 +33,7 @@ use crate::value::SqlValue;
 
 /// MariaDB deadlock (1213, `ER_LOCK_DEADLOCK`) and lock-wait timeout (1205,
 /// `ER_LOCK_WAIT_TIMEOUT`): the server rolled the transaction back for lock contention, so
-/// the mutation path may retry it (D65). Everything else is an opaque operational `503`.
+/// the mutation path may retry it . Everything else is an opaque operational `503`.
 fn map_mysql_err(e: mysql::Error) -> DbError {
     let kind = match &e {
         mysql::Error::MySqlError(se) if se.code == 1213 || se.code == 1205 => DbErrorKind::Deadlock,
@@ -50,7 +50,7 @@ pub use crate::shard::{PoolConfig, ShardId};
 // ---------- value conversion (pure, unit-tested) ---------------------------
 
 /// A bound [`SqlValue`] → the driver's parameter value. The families line up with
-/// `SqlValue`'s (D1): a `bool` binds as MySQL's tinyint `0/1`; `json` is sent as its
+/// `SqlValue`'s : a `bool` binds as MySQL's tinyint `0/1`; `json` is sent as its
 /// serialized text (MySQL parses it into the `JSON` column).
 pub(crate) fn to_mysql(v: &SqlValue) -> Value {
     match v {
@@ -69,9 +69,9 @@ pub(crate) fn to_mysql(v: &SqlValue) -> Value {
 /// columns (e.g. a `BINARY(16)` uuid where native `UUID` is unavailable). Date/Time
 /// render as their canonical SQL string.
 ///
-/// *Deferred* (matches the shape limits already noted in codegen): a `JSON` column
-/// comes back as a JSON-encoded *string*, not a reconstructed object — the runtime
-/// does not carry per-column types into row shaping this slice.
+/// A `JSON` column comes back as a JSON-encoded *string*, not a reconstructed object:
+/// the runtime does not carry per-column types into row shaping (matching the shape
+/// limits noted in codegen).
 pub(crate) fn from_mysql(v: Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {
@@ -185,7 +185,7 @@ pub struct ShardRouter {
     shards: Vec<Pool>,
     /// `logical shard → physical shard index`; length is always [`LOGICAL_SHARDS`].
     assign: Vec<ShardId>,
-    /// Max wait for a free connection before a checkout fails fast as pool-exhausted (D65).
+    /// Max wait for a free connection before a checkout fails fast as pool-exhausted .
     checkout_timeout: Duration,
 }
 
@@ -231,7 +231,7 @@ impl ShardRouter {
     }
 
     /// Check out a connection to a specific physical shard. Waits at most the configured
-    /// `checkout_timeout` for a free connection, then fails fast as pool-exhausted (D65) —
+    /// `checkout_timeout` for a free connection, then fails fast as pool-exhausted  —
     /// a saturated pool becomes a retryable `503`, never a hung worker.
     pub fn checkout_shard(&self, shard: ShardId) -> Result<MariaDb, DbError> {
         let pool = self
@@ -281,7 +281,7 @@ impl Backend for ShardRouter {
 }
 
 /// Build one shard's bounded connection pool from a `mysql://…` URL. Each new connection
-/// runs an `init` that sets the session `max_statement_time` (D65) — MariaDB's per-query
+/// runs an `init` that sets the session `max_statement_time`  — MariaDB's per-query
 /// server-side timeout (seconds; unlike MySQL's SELECT-only `max_execution_time`, it caps
 /// *every* statement), so a runaway query is aborted rather than hanging the connection.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<Pool, DbError> {

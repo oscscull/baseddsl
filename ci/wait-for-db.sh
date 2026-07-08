@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Portable DB readiness-wait (D64). Blocks until a TCP connection to the host:port in a
+# Portable DB readiness-wait. Blocks until a TCP connection to the host:port in a
 # database URL succeeds, or a timeout elapses. Dependency-free: uses bash's built-in
 # /dev/tcp, so it runs anywhere bash does (CI runner, laptop) with no psql/mysql client.
 #

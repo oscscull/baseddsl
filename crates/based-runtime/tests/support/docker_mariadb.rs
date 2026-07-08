@@ -1,4 +1,4 @@
-//! Docker-backed ephemeral MariaDB harness for real-DB integration tests (D35).
+//! Docker-backed ephemeral MariaDB harness for real-DB integration tests .
 //!
 //! This brings up a throwaway MariaDB server in a container, waits for it to accept
 //! connections, and tears it down when the test ends — so a live integration suite can run
@@ -14,7 +14,7 @@
 //! real-DB proof runs *when infra is present* and is simply absent otherwise (it never
 //! turns a missing daemon into a red build).
 //!
-//! **CI-provided server ⇒ use it, don't spin one (D64).** When `TEST_MARIADB_URL` is set,
+//! **CI-provided server ⇒ use it, don't spin one .** When `TEST_MARIADB_URL` is set,
 //! [`MariaDbContainer::start`] connects to *that* server (a CI service container, a shared
 //! dev DB, …) instead of launching its own container — after the same readiness-wait, so the
 //! suite never races a still-booting server. `Drop` then leaves the external server alone.

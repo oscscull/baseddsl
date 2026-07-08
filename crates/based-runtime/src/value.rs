@@ -4,7 +4,7 @@
 //! neutral middle — one variant per storable family. Coercion is *family-aware*:
 //! the signature says a param is an `int`, so a JSON string is rejected at the
 //! boundary before any SQL runs (calling.md #3). Families are coarse on purpose,
-//! matching sema's `=`-operand families (D1): `uuid`/`timestamp`/`date`/`Id` all
+//! matching sema's `=`-operand families : `uuid`/`timestamp`/`date`/`Id` all
 //! ride as text, since on the wire they are strings.
 
 use based_ast::Primitive;

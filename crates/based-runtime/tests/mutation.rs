@@ -97,7 +97,7 @@ fn run_create_reselects_the_declared_shape_inside_the_tx() {
     let c = compile(CREATE_SCHEMA);
     let mut ids = SeqIdGen::default();
     // The mutation returns `OrderCard { total }`, so after the INSERT the engine
-    // re-selects the created row in that shape (D12). The mock replies to that fetch
+    // re-selects the created row in that shape . The mock replies to that fetch
     // with the shaped row — which becomes the response, not a bare `{ id }`.
     let mut db = MockDb::new(vec![vec![row(json!({ "total": 42 }))]]);
     let out = run_mutation(
@@ -188,7 +188,7 @@ fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
         ]
     );
     // No create, so no engine id — but the updated row survives, so the declared shape is
-    // re-selected keyed off the write `where` (D58): `id = :id`, then the live + scope
+    // re-selected keyed off the write `where` : `id = :id`, then the live + scope
     // guards, all reusing the write's already-bound params.
     assert!(plan.result_id.is_none());
     let rs = plan.ret_select.as_ref().expect("where-keyed re-select");
@@ -232,7 +232,7 @@ fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
     );
     let mut ids = SeqIdGen::default();
     // The soft-deleted row survives (tombstoned), so after the write the engine re-selects
-    // it in its declared shape (D58) — the mock replies to that fetch with the shaped row.
+    // it in its declared shape  — the mock replies to that fetch with the shaped row.
     let mut db = MockDb::new(vec![vec![row(json!({ "status": "cancelled" }))]]);
     let out = run_mutation(
         &c,
@@ -336,13 +336,13 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     assert!(db.calls[2].0.starts_with("SELECT"), "{}", db.calls[2].0);
 }
 
-// ---------- deadlock-retry (D65) -------------------------------------------
+// ---------- deadlock-retry  -------------------------------------------
 
 use based_runtime::{DbError, DbErrorKind, Row, RunError};
 
 /// A `Db` that fails its first `deadlocks` transaction attempts with a deadlock-class
 /// error, then succeeds — modelling a real server aborting the losing side of a lock
-/// conflict (D65). Each attempt is one `begin → execute → fetch(re-select) → commit`
+/// conflict . Each attempt is one `begin → execute → fetch(re-select) → commit`
 /// cycle; the deadlock fires on the first `execute` (as a real server would, mid-write),
 /// so the engine rolls back and re-runs the whole transaction.
 struct DeadlockThenOk {

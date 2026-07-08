@@ -243,7 +243,7 @@ fn scope_detail(schema: &CheckedSchema, scope: &RScope) -> String {
 
 /// The `$ctx` bag a callable requires, as one aggregate fact anchored at its
 /// declaration — `None` when it needs no context. The bag is inference-derived
-/// (D4/D5): each field's type comes from the column its use compares against, and
+/// : each field's type comes from the column its use compares against, and
 /// the generated client sends exactly this set.
 fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
     if reqs.is_empty() {

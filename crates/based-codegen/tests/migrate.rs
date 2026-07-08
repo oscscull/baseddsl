@@ -174,7 +174,7 @@ fn init_render_produces_one_create_table_per_model_per_dialect() {
             schema.models.len(),
             "one CREATE TABLE per model ({dialect:?})\n{sql}"
         );
-        // Every model's table appears, and an `id` PK is (re)synthesized for each (D2).
+        // Every model's table appears, and an `id` PK is (re)synthesized for each .
         assert_eq!(
             sql.matches("PRIMARY KEY (").count(),
             schema.models.len(),

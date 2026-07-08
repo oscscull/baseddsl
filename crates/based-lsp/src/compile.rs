@@ -7,7 +7,7 @@
 //! is the index into `sources`, exactly as the CLI builds it.
 //!
 //! A workspace holds *many* projects: `.bsl` rides along inside a host repo, so the
-//! opened folder is rarely the schema's `based.toml` dir (D5/D9). Each open file is
+//! opened folder is rarely the schema's `based.toml` dir . Each open file is
 //! resolved to its owning project by walking up to the nearest `based.toml`
 //! ([`find_manifest_root`]) and one snapshot is compiled per project — so cross-file
 //! references inside a manifest resolve, and multiple embedded schemas in one

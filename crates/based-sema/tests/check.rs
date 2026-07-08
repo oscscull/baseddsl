@@ -79,13 +79,13 @@ fn resolved_schema_shape() {
     );
 
     let order = schema.model("Order").expect("Order resolved");
-    assert_eq!(order.table, "order"); // snake_case, no pluralization (D3)
+    assert_eq!(order.table, "order"); // snake_case, no pluralization
     assert_eq!(order.created.as_deref(), Some("created_at"));
     assert!(matches!(
         order.soft_delete.as_ref().unwrap().mode,
         SoftMode::Timestamp
     ));
-    // implicit `id` is prepended (D2)
+    // implicit `id` is prepended
     assert!(matches!(
         order.member("id").unwrap().kind,
         MemberKind::Scalar { .. }
@@ -425,7 +425,7 @@ fn mutation_update_wrong_column_type_rejected() {
 
 #[test]
 fn mutation_assign_relation_key_is_clean() {
-    // A forward FK accepts its key as a uuid string or an int (D1); a param or a
+    // A forward FK accepts its key as a uuid string or an int ; a param or a
     // matching literal is fine. Correct scalar types pass too.
     assert_clean(
         r#"
@@ -994,7 +994,7 @@ fn scope_filter_counts_toward_pattern() {
     );
 }
 
-// ---------- named scope: decl / @scope / scoped (D46/D47) ------------------
+// ---------- named scope: decl / @scope / scoped  ------------------
 
 #[test]
 fn scope_term_must_bind_ctx_field() {
@@ -1235,7 +1235,7 @@ fn unscoped_on_a_model_without_scope_is_stale_w0106() {
     assert_eq!(codes(&d), vec!["W0106"]);
 }
 
-// ---------- $ctx inference + coherence (D4/D5) -----------------------------
+// ---------- $ctx inference + coherence  -----------------------------
 
 #[test]
 fn ctx_inferred_from_use_is_clean() {
@@ -1346,7 +1346,7 @@ fn ctx_joined_scope_is_required_via_where_reach() {
 
 #[test]
 fn ctx_unscoped_query_drops_joined_scope_requirement() {
-    // `unscoped` (D32) drops all scope handling, joins included, so the joined
+    // `unscoped`  drops all scope handling, joins included, so the joined
     // scoped model contributes no `$ctx` requirement (mirrors codegen D34).
     let (schema, d) = analyze(
         r#"
@@ -1460,7 +1460,7 @@ fn ctx_from_create_assign_is_recorded() {
 
 #[test]
 fn ctx_mutation_reselect_joined_scope_is_required() {
-    // D34: a mutation's declared-shape re-select (D12) projects the return shape, so a
+    // D34: a mutation's declared-shape re-select  projects the return shape, so a
     // relation reach in that shape joins a scoped model and injects its `@scope` — the
     // mutation must require the joined model's `$ctx.org` too. Here `Ticket` is
     // unscoped but its re-select reaches the org-scoped `Contact`.
@@ -1663,7 +1663,7 @@ fn custom_join_param_rejected() {
     assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
 }
 
-// ---------- multi-scope DNF: alternatives, E0185, E0186 (D47) --------------
+// ---------- multi-scope DNF: alternatives, E0185, E0186  --------------
 
 #[test]
 fn or_model_query_injects_only_its_named_alternative() {

@@ -10,7 +10,7 @@
 //! Wire form: `<checksum-hex>.<payload-hex>`, where the payload is the JSON array of
 //! sort-key values and the checksum is an FNV-1a hash of it. The checksum catches
 //! corruption/truncation and cheap tampering; it is **not** a cryptographic signature
-//! (that needs a server secret — deferred). The real safety property — no predicate
+//! (that needs a server secret). The real safety property — no predicate
 //! injection — holds regardless: cursor values only ever fill bound parameters, never
 //! concatenate into SQL, so even a forged cursor can shift *which* rows are returned
 //! (values the caller could read off the results anyway) but never inject SQL.

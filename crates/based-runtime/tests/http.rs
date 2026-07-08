@@ -233,7 +233,7 @@ fn missing_required_ctx_is_400() {
 
 #[test]
 fn mutation_over_the_socket_returns_the_declared_shape() {
-    // The backend answers the post-write re-select with the shaped row (D12).
+    // The backend answers the post-write re-select with the shaped row .
     let backend = MockBackend::new(vec![vec![row(json!({ "status": "open", "total": 5 }))]]);
     let addr = start(backend);
     let resp = post(
@@ -250,7 +250,7 @@ fn mutation_over_the_socket_returns_the_declared_shape() {
 #[test]
 fn idempotency_key_header_dedupes_a_write_over_the_socket() {
     // A retry with the same `Idempotency-Key` header replays the first attempt's stored
-    // response instead of writing again (D25). The store is shared across the worker pool,
+    // response instead of writing again . The store is shared across the worker pool,
     // so a retry that lands on any worker dedupes. Here both mocks would return the same
     // shaped row, so the replay is proven rigorously by the pure `serve.rs` test
     // (`db.calls.is_empty()` on the retry); over the socket we assert the header is honored

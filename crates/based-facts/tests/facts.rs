@@ -146,7 +146,7 @@ fn get_query_resolves_to_singular() {
 #[test]
 fn ctx_requirement_is_shown_typed() {
     // `$ctx.org` compares against a `-> Org` relation column, so the request-context
-    // field is inferred as a relation (D4/D5) — nothing in source declares it.
+    // field is inferred as a relation  — nothing in source declares it.
     let fs = facts_of(
         r#"
         Org { name: text }

@@ -34,7 +34,7 @@ fn loads_and_lowers_commerce() {
 #[test]
 fn plans_a_commerce_ctx_query() {
     let c = commerce();
-    // `my_org_orders` is a plain `list Order`, but Order is `@scope`d (D32) so the org
+    // `my_org_orders` is a plain `list Order`, but Order is `@scope`d  so the org
     // filter is injected from `$ctx` — it still binds from context, positionally.
     let r = Request::new("my_org_orders", json!({}), json!({ "org": "org-42" }));
     let plan = plan_query(&c, &r).unwrap();

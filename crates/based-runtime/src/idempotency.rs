@@ -1,6 +1,6 @@
-//! Write-retry idempotency (D25) — dedupe a retried `create`/mutation.
+//! Write-retry idempotency  — dedupe a retried `create`/mutation.
 //!
-//! App-side id-gen (D1) means the engine mints a *fresh* `id` for every `create`, so a
+//! App-side id-gen  means the engine mints a *fresh* `id` for every `create`, so a
 //! client that retries a mutation after a `503`/timeout — not knowing whether the first
 //! attempt committed — would **double-insert** (D20 flagged this as the gap to close
 //! before write retries are safe at scale). An *idempotency key* closes it: the caller
@@ -43,8 +43,8 @@
 //! single instance, and the whole request→response path is testable against it with no
 //! infra). A production, multi-instance deployment backs the store with a shared store
 //! (the database itself, or a cache) so a retry that lands on a *different* app instance
-//! still dedupes — that durable backing is deferred (it needs live infra), but the seam
-//! and the exactly-once logic land now.
+//! still dedupes. [`MemStore`] is the single-instance implementation of the seam; a
+//! shared/durable store (the database or a cache) implements the same trait.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -54,7 +54,7 @@ use std::sync::Mutex;
 /// Two attempts that are genuine retries of the *same* request produce the same
 /// fingerprint; a caller that accidentally reuses one key for two *different* requests
 /// produces different ones, which the store rejects rather than silently replaying the
-/// first (D25). Built by [`Request::fingerprint`](crate::Request::fingerprint); opaque and
+/// first . Built by [`Request::fingerprint`](crate::Request::fingerprint); opaque and
 /// compared only for equality (the exact hash is never surfaced).
 pub type Fingerprint = u64;
 
@@ -121,11 +121,10 @@ enum Entry {
 /// An in-process [`IdempotencyStore`]: a `Mutex`-guarded map keyed by `(callable, key)`.
 ///
 /// Correct for a **single** app instance (one process dedupes its own retries). It is
-/// `Send + Sync`, so the shared HTTP worker pool (D20) uses one behind an `Arc`. A
+/// `Send + Sync`, so the shared HTTP worker pool  uses one behind an `Arc`. A
 /// multi-instance deployment wants a *shared* store (so a retry on another instance also
-/// dedupes) — deferred to the driver/live-DB slice; the seam is identical. There is no
-/// eviction yet (keys accumulate); a production store adds a TTL. For local/embedded use
-/// and tests this is complete.
+/// dedupes) behind the same trait; the seam is identical. Keys accumulate (no eviction);
+/// a production store adds a TTL. For local/embedded use and tests this is complete.
 #[derive(Default)]
 pub struct MemStore {
     entries: Mutex<HashMap<(String, String), Entry>>,

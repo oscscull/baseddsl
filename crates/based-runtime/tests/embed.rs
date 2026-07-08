@@ -453,7 +453,7 @@ fn typed_list_round_trips_in_process() {
     assert_eq!(rows[1].status, "open");
 }
 
-/// `$ctx` is a **typed** argument on the generated method (D30): `my_org_orders` takes a
+/// `$ctx` is a **typed** argument on the generated method : `my_org_orders` takes a
 /// `MyOrgOrdersCtx { org }`, supplied straight in — no header dance (auth.md/D7) and no
 /// untyped side-channel bag. With the required context the `$ctx`-scoped query runs; an
 /// empty context (the embedded bridge maps `&()` → `{}`) makes the engine's boundary `400`
@@ -488,7 +488,7 @@ fn ctx_supplied_in_process_and_required() {
 }
 
 /// The write path runs in-process and returns the created row in its **declared shape**
-/// (D12): after the INSERT the engine re-selects the created `Order` as an `OrderCard`,
+/// : after the INSERT the engine re-selects the created `Order` as an `OrderCard`,
 /// still inside the transaction, and *that* is the `200` body — so the typed
 /// `place_order` method decodes clean into an `OrderCard`, exactly like a `get`. This
 /// closes the gap the earlier `{ id }` response left.
@@ -526,7 +526,7 @@ fn mutation_response_is_the_created_rows_declared_shape() {
             },
             (),
         )
-        .expect("write response decodes into the declared OrderCard (D12)");
+        .expect("write response decodes into the declared OrderCard ");
     assert_eq!(card.status, "open");
     assert_eq!(card.total, 7);
 }

@@ -1,4 +1,4 @@
-//! End-to-end integration against a **real** engine (SQLite), no mock (D27).
+//! End-to-end integration against a **real** engine (SQLite), no mock .
 //!
 //! Every other runtime test drives the plan → run → shape path against a `MockDb` that
 //! returns canned rows — so it proves the *binding* is right but never that the emitted
@@ -100,7 +100,7 @@ fn get_query_runs_against_real_sqlite() {
         "POST",
         "/q/order_by_id",
         json!({ "id": "order-1" }),
-        // Order is `@scope`d (D32): even a keyed `get` is org-scoped, so `$ctx.org` is
+        // Order is `@scope`d : even a keyed `get` is org-scoped, so `$ctx.org` is
         // required. order-1 belongs to org-1, so it's visible to this caller.
         json!({ "org": "org-1" }),
     );
@@ -164,7 +164,7 @@ fn ctx_scoped_list_query_binds_context() {
 #[test]
 fn mutation_writes_then_reselects_declared_shape() {
     // `place_order` creates an Order (engine-generated id) and reads it back in its
-    // declared OrderCard shape (D12), all under one transaction — the full write path
+    // declared OrderCard shape , all under one transaction — the full write path
     // against a real engine: INSERT executes, the re-select joins and projects.
     let c = commerce();
     let backend = seeded_backend(&c);
@@ -173,7 +173,7 @@ fn mutation_writes_then_reselects_declared_shape() {
         &backend,
         "POST",
         "/m/place_order",
-        // `org` is `@scope`-managed on create (D32): supplied via `$ctx`, auto-set on the
+        // `org` is `@scope`-managed on create : supplied via `$ctx`, auto-set on the
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
         json!({ "buyer": "user-1", "total": 99 }),
         json!({ "org": "org-1" }),
@@ -222,12 +222,12 @@ fn bad_arg_is_a_400_before_sql() {
 
 #[test]
 fn backend_ping_succeeds_on_a_live_db() {
-    // The readiness seam (D26) works against a real engine: `SELECT 1` round-trips.
+    // The readiness seam  works against a real engine: `SELECT 1` round-trips.
     let c = commerce();
     assert!(seeded_backend(&c).ping().is_ok());
 }
 
-/// An `update` mutation reads its row back in the **full declared shape** (D58), not a bare
+/// An `update` mutation reads its row back in the **full declared shape** , not a bare
 /// `{ id }`, keyed off the write's own `where` and run inside the same transaction
 /// (read-your-writes) — proven against a real engine. The shape includes a nested to-one
 /// sub-object (`placed_by { name }`, D55), so the re-select exercises a relation join too.

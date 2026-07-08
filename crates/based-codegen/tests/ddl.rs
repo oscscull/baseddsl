@@ -186,7 +186,7 @@ fn inferred_join_key_deduped_when_declared() {
 }
 
 // ---------------------------------------------------------------------------
-// SQLite dialect (D28). Same resolved schema, SQLite-shaped physical output:
+// SQLite dialect . Same resolved schema, SQLite-shaped physical output:
 // a small type set, no inline index clauses (indexes trail as `CREATE INDEX`),
 // bool defaults as `0`/`1`. The DML/mutation SQL is unchanged (dialect-portable).
 // ---------------------------------------------------------------------------
@@ -235,7 +235,7 @@ fn sqlite_id_is_text_primary_key() {
     let ddl = gen_sqlite("Org { name: text }");
     assert!(ddl.contains("`id` TEXT NOT NULL"), "\n{ddl}");
     assert!(ddl.contains("PRIMARY KEY (`id`)"), "\n{ddl}");
-    // app-generated id carries no SQL default (D1)
+    // app-generated id carries no SQL default
     assert!(!ddl.contains("`id` TEXT NOT NULL DEFAULT"), "\n{ddl}");
 }
 
@@ -332,7 +332,7 @@ fn sqlite_indexes_are_separate_create_index_statements() {
 
 #[test]
 fn sqlite_inferred_join_key_is_a_create_index() {
-    // The inferred join-key baseline (D15) becomes a trailing CREATE INDEX on SQLite,
+    // The inferred join-key baseline  becomes a trailing CREATE INDEX on SQLite,
     // still predicate-leading (soft-delete column first).
     let ddl = gen_sqlite(
         r#"
@@ -352,7 +352,7 @@ fn sqlite_inferred_join_key_is_a_create_index() {
     );
 }
 
-// ---------- Postgres (D29) -------------------------------------------------
+// ---------- Postgres  -------------------------------------------------
 
 #[test]
 fn pg_uses_double_quoted_identifiers_and_native_types() {

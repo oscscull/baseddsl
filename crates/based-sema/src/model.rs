@@ -1,7 +1,7 @@
 //! Model resolution: AST `Model` -> `RModel`.
 //!
 //! Two phases, because a relation's target and an inverse's forward edge may be
-//! declared in any file (D6): [`skeleton`] records every model's fields without
+//! declared in any file : [`skeleton`] records every model's fields without
 //! cross-checking, then [`validate`] resolves relation targets, inverses,
 //! decorators, indexes, and sorts once all skeletons exist.
 
@@ -45,7 +45,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
         });
     }
 
-    // Implicit `id: Id` unless the model declares its own key (D1/D2).
+    // Implicit `id: Id` unless the model declares its own key .
     if !seen.contains_key("id") {
         members.insert(
             0,
@@ -58,7 +58,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
                     many: false,
                     column: "id".to_string(),
                     unique: false, // PK, expressed as PRIMARY KEY not a UNIQUE constraint
-                    default: None, // engine-generated on insert (D1), no SQL default
+                    default: None, // engine-generated on insert , no SQL default
                 },
                 was: None,
             },
@@ -503,7 +503,7 @@ pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
         }
     }
     // Custom `on:` joins span two tables (this model + the relation target), so
-    // resolve them here in the read pass where other models are reachable (D17).
+    // resolve them here in the read pass where other models are reachable .
     for mem in &ast.members {
         let Member::Field(f) = mem else { continue };
         let Some(pred) = &f.relation_on else { continue };

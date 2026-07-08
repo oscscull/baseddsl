@@ -1,9 +1,9 @@
 //! Named → positional placeholder translation.
 //!
-//! Codegen emits legible `:name` placeholders (D11); the driver binds positional
+//! Codegen emits legible `:name` placeholders ; the driver binds positional
 //! placeholders. The runtime is the layer that translates — a driver concern, kept
 //! here so the generated SQL stays readable. The **positional spelling is
-//! dialect-specific** (D21's one flagged coupling): MySQL/MariaDB and SQLite bind an
+//! dialect-specific** : MySQL/MariaDB and SQLite bind an
 //! anonymous `?`, Postgres binds ordinal `$1, $2, …`. So the scan takes the
 //! [`Dialect`] and emits the right form — the rest of the rewrite is identical.
 //!
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn postgres_binds_ordinal_dollar_n() {
-        // Postgres uses `$1, $2, …` in bind order — the one dialect coupling (D21).
+        // Postgres uses `$1, $2, …` in bind order — the one dialect coupling .
         let (sql, ps) = go_pg("WHERE a = :org AND b > :since AND c = :org");
         assert_eq!(sql, "WHERE a = $1 AND b > $2 AND c = $3");
         assert_eq!(ps, vec!["org", "since", "org"]);

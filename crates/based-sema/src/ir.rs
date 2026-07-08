@@ -51,10 +51,10 @@ pub mod code {
     // operand typing (PLAN.md sema #1)
     pub const OP_TYPE: &str = "E0150"; // operator not applicable to the operand type
     pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison
-    pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column (D1)
+    pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column
     pub const ASSIGN_TYPE: &str = "E0153"; // create/update assigns a value of the wrong type to a column
 
-    // $ctx typing (D4/D5): the caller-supplied request context. Its type is not
+    // $ctx typing : the caller-supplied request context. Its type is not
     // declared — it is inferred per callable from use and checked for coherence.
     pub const CTX_BAD_PATH: &str = "E0160"; // $ctx used without exactly one field segment
     pub const CTX_CONFLICT: &str = "E0161"; // $ctx.<field> used at incompatible types across uses
@@ -71,7 +71,7 @@ pub mod code {
     pub const SCOPE_UNKNOWN: &str = "E0183"; // `@scope Name` / `scoped Name` names no `scope` decl
     pub const SCOPE_MODEL_COLUMN: &str = "E0184"; // `@scope` model lacks the scope's column / wrong type
     pub const SCOPE_ACK_MISMATCH: &str = "E0185"; // `scoped …` set ⊉ any alternative of a touched scoped model
-    pub const SCOPE_CREATE_UNSAT: &str = "E0186"; // a `create` can satisfy no alternative (D47 — deferred)
+    pub const SCOPE_CREATE_UNSAT: &str = "E0186"; // a `create` can satisfy no alternative
 
     // `@was("old")` rename directive (migrations.md / E5): declares a field's/model's
     // previous physical name so the diff emits a clean rename instead of drop+add.
@@ -102,7 +102,7 @@ pub const KNOWN_DECORATORS: &[&str] = &[
     "was",
 ];
 
-/// The closed set of value-position functions (grammar defers the set to sema).
+/// The closed set of value-position functions (the grammar leaves the set to sema).
 pub const KNOWN_FUNCS: &[&str] = &["now"];
 
 // ---------- resolved schema -----------------------------------------------
@@ -152,14 +152,14 @@ pub struct RScopeTerm {
     pub ty: CtxField,
 }
 
-/// The scope injection a single callable chose for one touched scoped model (D47).
+/// The scope injection a single callable chose for one touched scoped model .
 /// A model may declare several `@scope` alternatives (DNF); the callable's `scoped …`
 /// clause selects which axes confine *this* callable. `terms` is the flattened
 /// `(column_field, ctx_field)` set of the chosen axes — exactly the equalities codegen
 /// ANDs into the root `WHERE`, the joined `ON`, and the create auto-set for `model`.
 /// Two callables naming different alternatives of the same model therefore inject
 /// different predicates. For a single-alternative model this is that model's whole
-/// scope, so the emitted SQL is unchanged from iteration 1 (D48).
+/// scope, so the emitted SQL is unchanged from iteration 1 .
 #[derive(Debug, Clone)]
 pub struct ScopeInject {
     /// The touched scoped model this injection confines (by name).
@@ -182,15 +182,15 @@ pub struct RModel {
     /// (auth.md Handle 2). Synthesized from the model's `@scope Name` reference(s) —
     /// the conjunction of the referenced `scope` decls' `col = $ctx.field` terms
     /// (the single alternative, iteration 1). `None` when the model is not scoped.
-    /// Codegen lowers it exactly like any `where` (D32/D34), so scope injection is
+    /// Codegen lowers it exactly like any `where` , so scope injection is
     /// unchanged in effect from the old inline `@scope(pred)`.
     pub scope: Option<Predicate>,
     /// The model's `@scope` alternatives as scope-name sets (auth.md / D47 DNF): each
     /// `@scope Name[, Name]*` decorator is one alternative (an AND of names). Empty
     /// when the model is not scoped. Iteration 1 resolves exactly one alternative but
-    /// stores a list so multi-scope (D47) adds DNF without reshaping this.
+    /// stores a list so multi-scope  adds DNF without reshaping this.
     pub scope_alts: Vec<Vec<String>>,
-    /// `@created` / `@updated` engine-managed timestamp fields (D2).
+    /// `@created` / `@updated` engine-managed timestamp fields .
     pub created: Option<String>,
     pub updated: Option<String>,
     pub indexes: Vec<RIndex>,
@@ -226,7 +226,7 @@ impl RModel {
     pub fn is_unique(&self, field: &str) -> bool {
         self.unique_cols.iter().any(|c| c == field)
     }
-    /// The `@scope` equality terms as `(lhs_field, ctx_field)` pairs (D32): for
+    /// The `@scope` equality terms as `(lhs_field, ctx_field)` pairs : for
     /// `@scope(org = $ctx.org)`, `[("org", "org")]`. Sema restricts `@scope` to a
     /// conjunction of `col = $ctx.field` (`E0180`), so this is exactly the set of
     /// columns the engine injects into every read/write and **auto-sets on create**
@@ -240,9 +240,9 @@ impl RModel {
         out
     }
 
-    /// The single `$ctx` field a request on this model **shards** on (D33), or `None`
+    /// The single `$ctx` field a request on this model **shards** on , or `None`
     /// when the model has no `@scope`. A scope is a conjunction of `col = $ctx.field`
-    /// (D32); the shard key is the *owner* the scope filters by, i.e. the `$ctx` field
+    /// ; the shard key is the *owner* the scope filters by, i.e. the `$ctx` field
     /// of the **first** scope term (`@scope(org = $ctx.org)` → `Some("org")`). This is
     /// the one field the router hashes to pick a physical shard (D20's single-shard-
     /// per-request), read from the same `@scope` that filters rows — one source of
@@ -378,10 +378,10 @@ pub struct RQuery {
     pub ret_shape: Option<String>,
     pub paginated: bool,
     /// The `$ctx.<field>` this query requires (its own `where` + the target model's
-    /// `@scope` + expanded filters), each typed by inference (D4/D5). Deduped per
+    /// `@scope` + expanded filters), each typed by inference . Deduped per
     /// callable; the client sends exactly these as request context.
     pub ctx_requires: Vec<CtxReq>,
-    /// The `$ctx` field this query **shards** on (D33): the target model's `@scope`
+    /// The `$ctx` field this query **shards** on : the target model's `@scope`
     /// owner field ([`RModel::shard_key_ctx_field`]), or `None` when the model has no
     /// `@scope` *or* the query is `unscoped` (D32 — a cross-scope read has no single
     /// owning shard, so it must route explicitly, never by a scope it disabled). The
@@ -402,15 +402,15 @@ pub struct RMutation {
     pub ret_model: String,
     /// The return shape, or `None` when the return type is a bare model — the twin of
     /// [`RQuery::ret_shape`]. Codegen projects it when re-selecting the written row's
-    /// declared shape after the write (D12).
+    /// declared shape after the write .
     pub ret_shape: Option<String>,
     /// The `$ctx.<field>` this mutation requires (its write `where`s + the write
     /// models' `@scope` + `create`/`update` assigns), each typed by inference
-    /// (D4/D5). Deduped per callable.
+    /// Deduped per callable.
     pub ctx_requires: Vec<CtxReq>,
-    /// The `$ctx` field this mutation **shards** on (D33): the return model's `@scope`
+    /// The `$ctx` field this mutation **shards** on : the return model's `@scope`
     /// owner field ([`RModel::shard_key_ctx_field`]), or `None` when it has no `@scope`
-    /// *or* the mutation is `unscoped` (D32). D20 makes a `tx` a single-shard unit, so
+    /// *or* the mutation is `unscoped` . D20 makes a `tx` a single-shard unit, so
     /// the whole mutation routes on this one field (the return model is the primary
     /// written model). The runtime pulls it out of the request `$ctx` to pick a shard.
     pub shard_key: Option<String>,
@@ -466,7 +466,7 @@ impl Sink {
     }
 }
 
-/// One `$ctx.<field>` requirement of a single callable (D4/D5): the field name and
+/// One `$ctx.<field>` requirement of a single callable : the field name and
 /// the type it was used at, inferred from the column the use compared against.
 /// `$ctx` is per-request; there is no global context type — each query/mutation
 /// requires exactly the fields *it* (plus its `@scope`/filters) reads. Cross-
@@ -487,7 +487,7 @@ pub enum CtxField {
     Relation(String),
 }
 
-/// Table name for a model (D3): `snake_case(Name)`, no pluralization.
+/// Table name for a model : `snake_case(Name)`, no pluralization.
 pub fn snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (i, c) in name.char_indices() {

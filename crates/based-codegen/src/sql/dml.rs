@@ -740,8 +740,8 @@ impl<'a> Select<'a> {
     /// Materialize the JOIN for a to-**one** relation member `field` on `model` (rooted
     /// at `alias`/`prefix`), returning `(joined_alias, joined_prefix, target_model)` for
     /// projecting the nested sub-object's columns. `None` for a scalar (not a relation)
-    /// or a to-**many** inverse edge — the array case is deferred (L1), so a nest over it
-    /// is dropped, not mis-lowered. A Forward relation is always to-one; an Inverse is
+    /// or a to-**many** inverse edge (handled by the to-many subquery path, not here).
+    /// A Forward relation is always to-one; an Inverse is
     /// to-one only when its paired forward FK (`via`) is unique on the target (a genuine
     /// one-to-one back edge), else it is a collection.
     pub(crate) fn enter_to_one(
@@ -767,7 +767,7 @@ impl<'a> Select<'a> {
             MemberKind::Inverse { target, via } => {
                 let tmodel = self.schema.model(target)?;
                 if !tmodel.is_unique(via) {
-                    return None; // to-many collection — deferred (L1 array follow-up).
+                    return None; // to-many collection — handled by the to-many subquery path.
                 }
                 let (a, m) = self.join_inverse(alias, &mut prefix, field, target, via);
                 Some((a, prefix, m))

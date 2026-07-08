@@ -22,7 +22,7 @@ pub struct Cx<'a> {
     pub filters: &'a HashMap<String, &'a NamedFilter>,
     /// shape name -> the model it projects (`from`). Used to resolve return types.
     pub shapes: &'a HashMap<String, String>,
-    /// shape name -> its projection body. Lets `$ctx` collection (D34) walk a return
+    /// shape name -> its projection body. Lets `$ctx` collection  walk a return
     /// shape's relation reaches to find joined *scoped* models, whose `@scope` codegen
     /// injects into the join `ON` — so the callable must require their `$ctx` fields.
     pub shape_bodies: &'a HashMap<String, &'a [ShapeField]>,
@@ -119,7 +119,7 @@ fn lit_family(l: &Literal) -> Option<Family> {
 
 /// Are two operand families comparable with `=`/`!=` (and, for orderable ones, the
 /// relational operators)? Json matches anything; a relation key accepts either a
-/// uuid string or an integer key (D1).
+/// uuid string or an integer key.
 fn compatible(a: Family, b: Family) -> bool {
     use Family::*;
     if a == Json || b == Json {
@@ -288,7 +288,7 @@ pub fn check_assign_type(
     }
 }
 
-/// The column a param maps onto, for annotation agreement (D1).
+/// The column a param maps onto, for annotation agreement .
 pub enum Mapped<'a> {
     Scalar(Primitive),
     Relation(&'a str),
@@ -560,7 +560,7 @@ pub fn check_value(
 }
 
 pub fn check_param_ref(pr: &ParamRef, params: &[String], sink: &mut Sink) {
-    // `$ctx` is the caller-supplied request context (D4/D5). It must be referenced
+    // `$ctx` is the caller-supplied request context . It must be referenced
     // as exactly `$ctx.<field>` (one segment — the fields are flat). Its *type* is
     // not declared: it is inferred per callable from the column each use compares
     // against, and checked for cross-callable coherence (see `ctx.rs`).

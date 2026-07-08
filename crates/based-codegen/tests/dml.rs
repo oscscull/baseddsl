@@ -124,8 +124,8 @@ fn where_reach_into_scoped_model_injects_scope_in_join_on() {
 
 #[test]
 fn unscoped_query_drops_joined_scope_too() {
-    // `unscoped` (D32) opts out of *all* scope handling — the joined table's `@scope`
-    // (D34) included, not just the root's. The join `ON` carries no scope predicate.
+    // `unscoped`  opts out of *all* scope handling — the joined table's `@scope`
+    //  included, not just the root's. The join `ON` carries no scope predicate.
     let ddl = gen(r#"
         Org { name: text }
         scope Tenant (org: Org = $ctx.org)
@@ -252,7 +252,7 @@ fn scope_predicate_is_injected() {
 
 #[test]
 fn unscoped_query_omits_the_scope_predicate() {
-    // `unscoped(...)` (D32) is the cross-scope escape hatch: no `@scope` injection for
+    // `unscoped(...)`  is the cross-scope escape hatch: no `@scope` injection for
     // this query. Soft-delete still rides — it's a separate guarantee.
     let ddl = gen(r#"
         scope Tenant (org: Org = $ctx.org)
@@ -541,7 +541,7 @@ fn pg_nested_to_one_double_quotes_prefixed_alias() {
     );
 }
 
-// ---------- Postgres (D29) -------------------------------------------------
+// ---------- Postgres  -------------------------------------------------
 
 #[test]
 fn pg_select_double_quotes_identifiers_and_keeps_named_placeholders() {
@@ -618,7 +618,7 @@ fn pg_join_double_quotes_alias_and_on() {
     );
 }
 
-// ---------- multi-scope DNF: per-callable alternative injection (D47) -------
+// ---------- multi-scope DNF: per-callable alternative injection  -------
 
 /// Extract one query's SELECT text from the `based gen sql` output (between its
 /// `-- query <name>` header and the next header or EOF).

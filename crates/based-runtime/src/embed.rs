@@ -31,7 +31,7 @@
 //!
 //! The emitted bridge serializes the typed input *and* the typed `$ctx` to JSON, calls
 //! [`Engine::call`], then decodes the `200` body into the output type (a non-`200` becomes
-//! the client's `ClientError`). `$ctx` is a typed method argument (D30) supplied straight in
+//! the client's `ClientError`). `$ctx` is a typed method argument  supplied straight in
 //! — no header dance (auth.md/D7 still holds: the *app*, not the caller, sets it); a public
 //! callable passes `()`, which the bridge maps to an empty context bag. `tests/embed.rs`
 //! consumes the emitted `embedded(&engine)` end-to-end over [`crate::run::MockDb`].
@@ -63,7 +63,7 @@ pub struct Engine {
     // connection ⇒ one thread at a time — a pooled embed uses `Backend` instead.
     db: RefCell<Box<dyn Db>>,
     id_gen: RefCell<Box<dyn IdGen>>,
-    // An in-process idempotency store (D25) for keyed mutation retries via
+    // An in-process idempotency store  for keyed mutation retries via
     // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
     // `Engine::call` (no key) never consults it.
     store: MemStore,
@@ -73,7 +73,7 @@ impl Engine {
     /// Build an engine over a compiled schema, a database connection, and an id
     /// generator. For a `MockDb`-backed test pass [`crate::id::SeqIdGen`]; a real embed
     /// passes its own [`Db`] (e.g. the caller's existing pool checkout) and a uuid
-    /// generator (D1).
+    /// generator .
     pub fn new(compiled: Compiled, db: impl Db + 'static, id_gen: impl IdGen + 'static) -> Engine {
         Engine {
             compiled,
@@ -98,7 +98,7 @@ impl Engine {
         self.call_with_key(route, args, ctx, None)
     }
 
-    /// Like [`Engine::call`], with a mutation idempotency key (D25). A retry of a
+    /// Like [`Engine::call`], with a mutation idempotency key . A retry of a
     /// `/m/<name>` mutation with the same non-empty `idem_key` replays the first
     /// attempt's response instead of writing again (queries ignore the key). This is the
     /// in-process twin of the HTTP edge's `Idempotency-Key` header — supplied straight in,
@@ -176,7 +176,7 @@ mod tests {
     }
 
     /// A write call runs the transaction and returns the created row in its declared
-    /// shape (D12), read back inside the tx — no socket.
+    /// shape , read back inside the tx — no socket.
     #[test]
     fn engine_runs_a_mutation() {
         let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);

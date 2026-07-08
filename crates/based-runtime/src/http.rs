@@ -15,7 +15,7 @@
 //! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`] — **never the
 //!    body** (auth.md, D7: a client cannot inject scope; request context is
 //!    server-supplied out of band by the auth edge). The shard key is then derived from
-//!    the callable's resolved `@scope` owner field pulled out of `$ctx` (D33) — the same
+//!    the callable's resolved `@scope` owner field pulled out of `$ctx`  — the same
 //!    `@scope` that filters the row, so routing and row-visibility share one source of
 //!    truth (an explicit `X-Based-Shard-Key` header can override it).
 //! 3. Check a connection out of the [`Backend`] for that shard key (single-shard
@@ -86,7 +86,7 @@ pub trait ContextSource: Send + Sync {
 /// What a [`ContextSource`] produces: the request `$ctx` (passed to `dispatch` as the
 /// out-of-band context) and an **optional explicit** shard-key override.
 ///
-/// The shard key is *normally* derived from the schema (D33): the callable's target
+/// The shard key is *normally* derived from the schema : the callable's target
 /// model's resolved `@scope` owner field, pulled out of `$ctx` by the listener — so the
 /// shard a row lives in and the shard its owner's requests route to share one source of
 /// truth (the `@scope`, D32), never a hand-set config. `shard_key_override` is the escape
@@ -96,7 +96,7 @@ pub trait ContextSource: Send + Sync {
 pub struct Context {
     pub ctx: serde_json::Value,
     /// An explicit shard key from `X-Based-Shard-Key`, or `None` to let the listener
-    /// derive it from the callable's `@scope` field (D33).
+    /// derive it from the callable's `@scope` field .
     pub shard_key_override: Option<String>,
 }
 
@@ -121,7 +121,7 @@ impl HeaderView<'_> {
 ///   non-object → `400` (a misconfigured edge, surfaced loudly rather than silently
 ///   dropped).
 /// - The shard key is normally *not* read here — the listener derives it from the
-///   callable's `@scope` field (D33). This source only surfaces the `X-Based-Shard-Key`
+///   callable's `@scope` field . This source only surfaces the `X-Based-Shard-Key`
 ///   header as an explicit override (usually absent), which the listener honours over the
 ///   schema-derived field.
 ///
@@ -146,7 +146,7 @@ impl ContextSource for TrustedHeaderContext {
                 }
             },
         };
-        // The shard key is schema-derived (D33) unless a deployment forces it with an
+        // The shard key is schema-derived  unless a deployment forces it with an
         // explicit header. Only that override is read here; the derivation needs the
         // route, which the listener knows.
         let shard_key_override = headers.get("X-Based-Shard-Key").map(str::to_string);
@@ -157,7 +157,7 @@ impl ContextSource for TrustedHeaderContext {
     }
 }
 
-/// Resolve the shard key for a routable request (D33): the explicit `X-Based-Shard-Key`
+/// Resolve the shard key for a routable request : the explicit `X-Based-Shard-Key`
 /// override wins; else the callable's `@scope` owner field pulled out of `$ctx`; else the
 /// empty string (an unscoped callable, or a single-shard deployment — both route to shard
 /// 0). Pure, so the derivation is unit-testable without a socket. `$ctx.<field>` is read
@@ -182,10 +182,10 @@ struct Shared {
     compiled: Compiled,
     backend: Box<dyn Backend>,
     ctx_source: Box<dyn ContextSource>,
-    /// The mutation idempotency store (D25), shared across all workers so a retry that
+    /// The mutation idempotency store , shared across all workers so a retry that
     /// lands on any worker dedupes. `MemStore` dedupes within this one process; a
-    /// multi-instance deployment wants a shared/durable store behind the same seam
-    /// (deferred to the live-DB slice — the `IdempotencyStore` trait is identical).
+    /// multi-instance deployment wants a shared/durable store behind the same
+    /// `IdempotencyStore` trait.
     idempotency: MemStore,
     /// Set once when a graceful shutdown is requested (SIGTERM/SIGINT). `/readyz` reads
     /// it to fail readiness first (drain), and the worker loop reads it to stop.
@@ -358,7 +358,7 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
         return resp;
     }
     // Preflight guaranteed a routable path, so this is the callable to run — needed now
-    // to derive the shard key from its `@scope` field (D33), before checkout.
+    // to derive the shard key from its `@scope` field , before checkout.
     let (is_mutation, name) = route_target(&path).expect("preflight guaranteed a routable path");
 
     // Derive $ctx (never the body) + the explicit shard-key override, from the headers.
@@ -378,12 +378,12 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
         Err(resp) => return resp,
     };
 
-    // The shard key: the callable's `@scope` owner field pulled out of `$ctx` (D33), or
+    // The shard key: the callable's `@scope` owner field pulled out of `$ctx` , or
     // an explicit header override, or "" (unscoped / single-shard → shard 0). Derived from
     // the same `@scope` that filters the row, so routing and row-visibility can't drift.
     let shard_key = resolve_shard_key(&shared.compiled, is_mutation, name, &context);
 
-    // The mutation idempotency key (D25) rides the standard `Idempotency-Key` header —
+    // The mutation idempotency key  rides the standard `Idempotency-Key` header —
     // out of band, never the body. Absent/blank → no dedupe; queries ignore it.
     let idem_key = header_view.get("Idempotency-Key").map(str::to_string);
 
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(err.status, 400);
     }
 
-    // ---- shard-key derivation from `@scope` (D33) ----------------------------
+    // ---- shard-key derivation from `@scope`  ----------------------------
 
     /// A tiny scoped schema: `Order @scope Tenant`, one scoped query, one scoped
     /// mutation, one `unscoped` cross-org query, and one unscoped-model query.

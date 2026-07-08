@@ -57,7 +57,7 @@ fn resolve_term(
     model_index: &HashMap<String, usize>,
     sink: &mut Sink,
 ) -> RScopeTerm {
-    // The type declared here (`col: Type`) is the scope field's type (D46).
+    // The type declared here (`col: Type`) is the scope field's type .
     let ty = match &t.ty.base {
         BaseType::Primitive(p) => CtxField::Scalar(*p),
         BaseType::Model(m) => {
@@ -144,7 +144,7 @@ pub fn attach_models(
 /// A governed model must carry the scope's column at a conforming type (`E0184`):
 /// a relation-typed term needs a forward relation to the same model; a scalar term
 /// needs a scalar of the same family. The field name must equal the scope column
-/// name (a per-model override is reserved/deferred, D46).
+/// name.
 fn check_column(model: &RModel, scope: &RScope, term: &RScopeTerm, at: Span, sink: &mut Sink) {
     let Some(member) = model.member(&term.column) else {
         sink.error(
@@ -178,7 +178,7 @@ fn check_column(model: &RModel, scope: &RScope, term: &RScopeTerm, at: Span, sin
 /// Synthesize the injected `Predicate` from the alternative's terms — the AND of
 /// each `col = $ctx.field`. Codegen lowers this exactly as the old inline `@scope`
 /// predicate, so scope injection (root `WHERE`, joined `ON`, create auto-set, shard
-/// key) is unchanged in effect (D32/D34). `None` when the alternative is empty.
+/// key) is unchanged in effect . `None` when the alternative is empty.
 fn synthesize_pred(terms: &[&RScopeTerm], span: Span) -> Option<Predicate> {
     let mut acc: Option<Predicate> = None;
     for t in terms {
@@ -298,7 +298,7 @@ pub fn check_ack(
     }
 }
 
-// ---------- per-callable chosen-alternative injection (D47) ----------------
+// ---------- per-callable chosen-alternative injection  ----------------
 
 /// Resolve the scope a callable injects **per touched scoped model** (auth.md / D47):
 /// the alternative its `scoped …` clause satisfied, expanded to that alternative's
@@ -408,7 +408,7 @@ fn check_create_sat_stmt(stmt: &WriteStmt, named: &[&str], cx: &Cx, sink: &mut S
 }
 
 /// Scoped model indices a query touches: the root (if scoped) plus every scoped model
-/// reached through a relation (D34 joined `ON`). Mirrors codegen's join sources — the
+/// reached through a relation . Mirrors codegen's join sources — the
 /// same reaches `ctx::collect_joined_scope` walks (a `Nest` sub-object produces no join).
 pub fn touched_query(q: &Query, ti: usize, cx: &Cx) -> Vec<usize> {
     let mut out = Vec::new();
@@ -441,7 +441,7 @@ pub fn touched_query(q: &Query, ti: usize, cx: &Cx) -> Vec<usize> {
 }
 
 /// Scoped model indices a mutation touches: each written model (if scoped) plus the
-/// scoped models its write `where`s and its declared-shape re-select join (D34).
+/// scoped models its write `where`s and its declared-shape re-select join .
 pub fn touched_mutation(
     m: &Mutation,
     ret_shape: Option<&str>,
@@ -510,8 +510,8 @@ fn walk_pred_join(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<usize>)
             }
         }
         Predicate::Bare(path) => walk_path_join(path, model, cx, out),
-        // Filter bodies join at the call site too, but scope-through-filter is deferred
-        // in codegen (D34), so we mirror codegen and don't walk them here.
+        // Filter bodies join at the call site too, but codegen does not walk them for
+        // scope , so we mirror codegen and don't walk them here.
         Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
     }
 }

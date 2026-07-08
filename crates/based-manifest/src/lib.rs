@@ -45,7 +45,7 @@ pub struct Project {
 pub const MANIFEST_NAME: &str = "based.toml";
 
 /// Load the manifest at `root/based.toml` and glob `**/*.bsl` under the schema
-/// root into the closed file set. Directory layout is not constrained (D9); files
+/// root into the closed file set. Directory layout is not constrained ; files
 /// are returned in a stable, path-sorted order so diagnostics are deterministic.
 pub fn discover(root: &Path) -> Result<Project, Vec<Diagnostic>> {
     let manifest_path = root.join(MANIFEST_NAME);

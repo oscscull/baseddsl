@@ -440,7 +440,7 @@ fn cmd_migrate_render(
 
 /// `based migrate apply`: apply pending migrations (or roll back) against a live database,
 /// reconciling the `_based_migrations` ledger (E4). Runs against every `--database-url` in
-/// turn — a sharded fleet migrates each shard (D20) with the same migration set.
+/// turn — a sharded fleet migrates each shard with the same migration set.
 fn cmd_migrate_apply(
     root: &Path,
     database_url: Vec<String>,
@@ -864,7 +864,7 @@ fn cmd_serve(
         ..PoolConfig::default()
     };
     // Default workers to the pool ceiling so a worker never blocks waiting for a free
-    // connection on a single shard (D20: bounded worker pool over the bounded conn pool).
+    // connection on a single shard.
     let config = ServeConfig {
         listen: listen.to_string(),
         workers: workers.unwrap_or(pool_max),
@@ -877,7 +877,7 @@ fn cmd_serve(
     eprintln!("liveness: GET /healthz  readiness: GET /readyz");
 
     // Build the backend for the manifest dialect and stand the listener up. The `@scope`
-    // owner field routes to a shard schema-side (D33), so no shard key is hand-set here —
+    // owner field routes to a shard schema-side, so no shard key is hand-set here —
     // the driver reads it off the compiled schema. SQLite is a single local file (one url,
     // one shared connection), so it neither shards nor pools.
     let ctx = TrustedHeaderContext;

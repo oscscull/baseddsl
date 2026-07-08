@@ -1,5 +1,4 @@
-# Portable CI targets (D64) — the substance of "keep-proven" (DoD #4).
-#
+# Portable CI targets.
 # Every target here is a plain `cargo`/`based`/`npm` invocation runnable ANYWHERE: a laptop,
 # GitLab, Buildkite, or the GitHub Actions example in .github/workflows/ci.yml (a thin wrapper
 # that provisions service containers and calls these). The DB-backed targets read their server
@@ -48,7 +47,7 @@ ci-workspace:
 ci-extension:
 	cd editors/vscode && $(NPM) ci && $(NPM) run compile && $(NPM) run package
 
-## Build the `based serve` container image (DoD #4, deploy half), then smoke-boot it against
+## Build the `based serve` container image, then smoke-boot it against
 ## bundled SQLite (no external DB) to prove the packaged image actually serves — the deploy
 ## artifact never rots. Needs Docker; the smoke script curls /healthz + /readyz.
 ci-image:

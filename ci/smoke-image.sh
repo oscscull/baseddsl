@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-boot the `based serve` image (DoD #4 keep-proven): run the container against the
+# Smoke-boot the `based serve` image: run the container against the
 # bundled-SQLite quickstart — no external DB service — apply its migrations on start, and
 # assert /healthz + /readyz both answer 200. Proves the packaged image actually boots and
 # serves, self-contained enough to run on any CI runner or a laptop.

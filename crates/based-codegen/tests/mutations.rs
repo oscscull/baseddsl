@@ -45,8 +45,8 @@ fn create_binds_id_relation_fk_and_engine_timestamps() {
           create User { org = $org, email = $email };
         }
         "#);
-    // app-generated `id` (D1) leads; relation param maps to its FK; created/updated
-    // are engine-set on insert (D2). Column and value lists line up positionally.
+    // app-generated `id`  leads; relation param maps to its FK; created/updated
+    // are engine-set on insert . Column and value lists line up positionally.
     assert!(
         out.contains(
             "INSERT INTO `user` (`id`, `org_id`, `email`, `created_at`, `updated_at`)\nVALUES (:id, :org, :email, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
@@ -281,7 +281,7 @@ fn create_returning_mutation_reselects_the_declared_shape() {
           create Order { org = $org, placed_by = $buyer, total = $total };
         }
         "#);
-    // After the INSERT the created row is read back in its declared shape (D12).
+    // After the INSERT the created row is read back in its declared shape .
     assert!(
         out.contains("-- return: re-select the written row's declared shape"),
         "\n{out}"
@@ -310,7 +310,7 @@ fn update_mutation_reselects_by_the_write_where() {
         }
         "#);
     // An update's row survives, so the declared shape is re-selected keyed off the write's
-    // own `where` (D58) — no engine `id`, so no `:result_id`.
+    // own `where`  — no engine `id`, so no `:result_id`.
     assert!(out.contains("-- return:"), "\n{out}");
     assert!(
         !out.contains(":result_id"),
@@ -325,7 +325,7 @@ fn update_mutation_reselects_by_the_write_where() {
 fn soft_delete_mutation_reselects_without_the_live_predicate() {
     // A soft `delete` tombstones the row (it survives); the declared shape is re-selected
     // keyed off the write `where`, but *without* the live predicate — so the just-tombstoned
-    // row is still read back (D58).
+    // row is still read back .
     let out = gen(r#"
         @soft_delete(deleted_at)
         @updated(updated_at)
@@ -383,7 +383,7 @@ fn update_where_across_relation_uses_multi_table_form() {
 
 #[test]
 fn create_auto_sets_the_scope_column_from_ctx() {
-    // On a scoped model the scope column is engine-managed on create (D32): auto-set
+    // On a scoped model the scope column is engine-managed on create : auto-set
     // from `:ctx_<field>`, never a caller param. Cross-scope create is inexpressible.
     let out = gen(r#"
         Org { name: text }
@@ -413,7 +413,7 @@ fn create_auto_sets_the_scope_column_from_ctx() {
 
 #[test]
 fn unscoped_mutation_omits_scope_injection_and_auto_set() {
-    // `unscoped(...)` (D32) drops the write guard *and* the create auto-set: the caller
+    // `unscoped(...)`  drops the write guard *and* the create auto-set: the caller
     // supplies the scope column and the write carries no injected scope predicate.
     let out = gen(r#"
         Org { name: text }
@@ -458,7 +458,7 @@ fn unscoped_update_omits_the_scope_guard() {
     assert!(out.contains("WHERE `order`.`id` = :id;"), "\n{out}");
 }
 
-// ---------- Postgres (D29) -------------------------------------------------
+// ---------- Postgres  -------------------------------------------------
 
 #[test]
 fn pg_create_double_quotes_and_keeps_named_placeholders() {
@@ -578,7 +578,7 @@ fn pg_hard_delete_across_relation_uses_using_clause() {
     );
 }
 
-// ---------- multi-scope DNF: create auto-set of the named alternative (D47) ---
+// ---------- multi-scope DNF: create auto-set of the named alternative  ---
 
 /// A `create` on an AND model (`@scope Page, Author`) auto-sets *both* scope columns
 /// from `$ctx` — every axis of the alternative the mutation's `scoped …` named — so a

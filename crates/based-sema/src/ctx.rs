@@ -1,4 +1,4 @@
-//! `$ctx` inference + coherence (D4/D5).
+//! `$ctx` inference + coherence .
 //!
 //! `$ctx` is the caller-supplied request context (auth.md). It is **per-request**,
 //! so there is no single global context type; each callable *requires* exactly the
@@ -8,7 +8,7 @@
 //! A field's type is never declared: it is inferred from the column each use is
 //! compared against (`org = $ctx.org` ⇒ `org` is the FK, so `$ctx.org` is that
 //! model's key). Uses with no column to infer from (a literal, a raw block, a
-//! guard arg — the latter two are the deferred "residue") contribute nothing.
+//! guard arg) contribute nothing.
 //!
 //! The one global fact is **coherence**: every callable reads from the same bag
 //! the caller builds per request, so a field *name* must mean one *type* across
@@ -25,7 +25,7 @@ pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
     let mut out = Vec::new();
     // `@scope` is injected into every query on the model (auth.md Handle 2), so a
     // scope that reads `$ctx` makes that field a requirement of every such query —
-    // unless the query is `unscoped` (D32), which drops the injection and the need.
+    // unless the query is `unscoped` , which drops the injection and the need.
     if q.unscoped.is_none() {
         if let Some(scope) = &cx.model(ti).scope {
             walk_pred(scope, ti, cx, &mut Vec::new(), &mut out);
@@ -36,7 +36,7 @@ pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
             walk_pred(p, ti, cx, &mut Vec::new(), &mut out);
         }
     }
-    // Joined *scoped* models (D34): codegen injects a joined model's `@scope` into
+    // Joined *scoped* models : codegen injects a joined model's `@scope` into
     // its join `ON`, so a query that reaches another scoped tenant through a relation
     // must *also* require that model's `$ctx` field (else the injected `:ctx_<field>`
     // bind is unbound at runtime). `unscoped` drops the whole scope machinery, joins
@@ -48,11 +48,11 @@ pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
 }
 
 /// Collect the `@scope` `$ctx` requirements of every scoped model a query *joins*
-/// (D34). The join sources are exactly codegen's: relation reaches in a `where` path,
+/// . The join sources are exactly codegen's: relation reaches in a `where` path,
 /// the sort path (query `order`, else the model `@sort`), and the return shape's
-/// `out = path` reaches. A `Nest { … }` shape sub-object produces no join today
-/// (codegen defers JSON aggregation), so it is deliberately not walked — sema and
-/// codegen stay aligned on exactly which joins exist.
+/// `out = path` reaches. A `Nest { … }` shape sub-object lowers to a correlated subquery
+/// carrying its own scoped `WHERE` , not an outer join, so it is deliberately not
+/// walked — sema and codegen stay aligned on exactly which joins exist.
 fn collect_joined_scope(q: &Query, ti: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
     // `where` paths.
     for clause in query_clauses(q) {
@@ -82,7 +82,7 @@ fn collect_joined_scope(q: &Query, ti: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
 }
 
 /// Walk every column path in a predicate, recording joined-model scope for each
-/// relation reach. Filter calls expand against the call site (D14), guarded against
+/// relation reach. Filter calls expand against the call site , guarded against
 /// self-reference. (`walk_pred` above collects *direct* `$ctx` uses; this collects
 /// the *joined-model* scope those same paths traverse — a separate concern.)
 fn walk_pred_paths(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
@@ -142,7 +142,7 @@ fn walk_filter_paths(
 }
 
 /// Walk a return shape body: an `out = path` reach may join, a `Bare` never does
-/// (single-segment), a `Nest` is deferred in codegen (no join → not walked, D34).
+/// (single-segment), a `Nest` lowers to a subquery in codegen (no outer join → not walked, D34).
 fn walk_shape_scope(body: &[ShapeField], model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
     for f in body {
         if let ShapeField::Rename {
@@ -172,7 +172,7 @@ fn walk_path_scope(path: &Path, start: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
         match &mem.kind {
             MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
                 let Some(mi) = cx.find(target) else { return };
-                // The join into `target` carries `target`'s `@scope` (D34).
+                // The join into `target` carries `target`'s `@scope` .
                 if let Some(scope) = &cx.model(mi).scope {
                     walk_pred(scope, mi, cx, &mut Vec::new(), out);
                 }
@@ -185,7 +185,7 @@ fn walk_path_scope(path: &Path, start: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
 
 /// The `$ctx` a mutation requires: each write statement's `where` + its model's
 /// `@scope` (update/delete/restore inject it, D12) + `create`/`update` assigns, plus
-/// (D34) any scoped model a write `where` or the create's declared-shape re-select
+///  any scoped model a write `where` or the create's declared-shape re-select
 /// *joins*. `ret_shape`/`ret_model` describe that re-select's projection.
 pub fn collect_mutation(
     m: &Mutation,
@@ -194,18 +194,18 @@ pub fn collect_mutation(
     cx: &Cx,
 ) -> Vec<CtxReq> {
     let mut out = Vec::new();
-    // `unscoped` (D32) drops both the injected write guard and the create-time auto-set,
+    // `unscoped`  drops both the injected write guard and the create-time auto-set,
     // so a scoped model contributes no `$ctx` requirement to an unscoped mutation.
     let unscoped = m.unscoped.is_some();
     for stmt in &m.body {
         walk_write(stmt, cx, unscoped, &mut out);
     }
-    // Joined-model scope (D34), unless `unscoped` (which drops all scope handling).
+    // Joined-model scope , unless `unscoped` (which drops all scope handling).
     if !unscoped {
         for stmt in &m.body {
             collect_write_joined_scope(stmt, cx, &mut out);
         }
-        // The declared-shape re-select (D12) projects `ret_shape` from `ret_model`,
+        // The declared-shape re-select  projects `ret_shape` from `ret_model`,
         // so its relation reaches join scoped models exactly like a query's shape.
         if let (Some(name), Some(mi)) = (ret_shape, cx.find(ret_model)) {
             if let Some(body) = cx.shape_bodies.get(name) {
@@ -217,7 +217,7 @@ pub fn collect_mutation(
 }
 
 /// A write's `where` paths reach through relations (update/delete/restore); each
-/// non-terminal hop into a scoped model is a scope-injected join (D34). A `create`
+/// non-terminal hop into a scoped model is a scope-injected join . A `create`
 /// has no `where`; a `tx` recurses.
 fn collect_write_joined_scope(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
     match stmt {
@@ -238,7 +238,7 @@ fn collect_write_joined_scope(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) 
     }
 }
 
-/// Closed-world coherence (D4/D5): a `$ctx.<field>` must carry the same type
+/// Closed-world coherence : a `$ctx.<field>` must carry the same type
 /// everywhere, since every callable reads the one context bag the caller builds.
 /// Reports `CTX_CONFLICT` at the first use whose type disagrees with an earlier one.
 pub fn check_coherence(queries: &[RQuery], mutations: &[RMutation], sink: &mut Sink) {
@@ -286,7 +286,7 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) 
         WriteStmt::Create { model, assigns } => {
             if let Some(mi) = cx.find(&model.node) {
                 // A create on a scoped model auto-sets the scope column from `$ctx`
-                // (D32), so it *requires* that field — the create-time twin of the
+                // , so it *requires* that field — the create-time twin of the
                 // read/write injection. An explicit assign may also set one from ctx.
                 scope_ctx(mi, cx, unscoped, out);
                 for a in assigns {
@@ -335,7 +335,7 @@ fn scope_ctx(mi: usize, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) {
 
 /// Walk a predicate against `model`, recording every `$ctx.<field>` compared to a
 /// resolvable column. Filter calls expand against the call-site model, guarded by
-/// `in_filters` so a self-referential filter terminates (D14).
+/// `in_filters` so a self-referential filter terminates .
 fn walk_pred(
     pred: &Predicate,
     model: usize,
@@ -372,7 +372,7 @@ fn walk_pred(
         }
         Predicate::FilterCall { name, .. } => {
             // The args (which may themselves be `$ctx`) bind to filter params whose
-            // column usage isn't tracked yet — arg/usage typing is deferred (D14).
+            // column usage is not tracked .
             // The body's *direct* `$ctx` uses are inferred against the call site.
             if let Some(def) = cx.filters.get(&name.node) {
                 expand_filter(def, model, cx, in_filters, out);
