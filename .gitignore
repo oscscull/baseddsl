@@ -1,4 +1,6 @@
 /target
+# Standalone example crates (outside the workspace) build into their own target dir.
+examples/*/target/
 **/*.rs.bk
 .DS_Store
 .claude/settings.local.json

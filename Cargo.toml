@@ -12,6 +12,11 @@ members = [
     "crates/based-lsp",
     "crates/based-cli",
 ]
+# `examples/**` are standalone crates a user copies to start (DoD #2, Track B). They
+# depend on the workspace crates *by path* but are deliberately kept out of the
+# workspace so `cargo test --workspace` never builds them (they carry their own deps,
+# e.g. bundled SQLite, and run as end-to-end smoke binaries, not unit tests).
+exclude = ["examples"]
 
 [workspace.package]
 version = "0.0.0"

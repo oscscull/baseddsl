@@ -1,0 +1,26 @@
+# A standalone example — deliberately OUTSIDE the workspace (see the root Cargo.toml
+# `exclude`). It depends on the in-repo engine crates *by path*, so it always tracks the
+# current engine, but `cargo test --workspace` never builds it.
+[package]
+name = "sqlite-quickstart"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The engine: in-process `Engine`, the `SqliteDb` driver, and the id generator. The
+# `sqlite` feature pulls in bundled SQLite (no system dependency, no live server).
+based-runtime = { path = "../../crates/based-runtime", features = ["sqlite"] }
+# Open the one SQLite connection the engine runs on (same version as the driver's, so
+# the `Connection` type unifies). `bundled` compiles SQLite from source.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# The generated client derives serde; the transport bridge serializes the typed input.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# `build.rs` runs the compiler front end over `schema/` and emits the typed client +
+# SQLite DDL into `OUT_DIR` at build time, so the generated code can never go stale
+# against the schema (no checked-in generated artifacts to forget to regenerate).
+[build-dependencies]
+based-runtime = { path = "../../crates/based-runtime" }
+based-codegen = { path = "../../crates/based-codegen" }

@@ -44,7 +44,7 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-**Where things stand (as of D59):** the architecture milestones (M2–M6) are done, all three target
+**Where things stand (as of D60):** the architecture milestones (M2–M6) are done, all three target
 dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — including symmetric live coverage of
 keyset/offset pagination + soft-delete/restore (D59) — and **Track L — the language — is now
 feature-complete.** The 2026-07-07 audit's three normal-workday gaps are all closed and proven live:
@@ -74,8 +74,9 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    deadlock-retry, pool-exhaustion — are a separate open track, not a DoD-#1 coverage gap.)
 2. **A real, copyable example project per target DB.** A standalone Rust project (in-repo, **outside**
    the workspace, under `examples/`) consuming the generated client + runtime against a live DB — the
-   thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **🔴 Not started
-   (Track B).**
+   thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **🟡 SQLite met
+   (D60)** — `examples/sqlite-quickstart` runs the full create→read-your-writes→list/scope→paginate→
+   soft-delete/restore scenario green via `cargo run`. *Remaining:* MariaDB + Postgres slices (Track B2).
 3. **A functional, installable VS Code extension.** Packaged (`.vsix`), registers `.bsl`, launches
    `based-lsp`, surfaces diagnostics + inlay hints + hover + go-to-def + symbols + completion.
    **✅ Installable (D36); feature-parity fill-in in progress (Track C4).**
@@ -165,11 +166,21 @@ on the critical path.** *Mechanism: Docker (OrbStack).*
     under load; verified against the live servers, not just designed.
 
 **Track B — example projects (DoD #2, follows A per DB; the Track L features it exercises are now all
-built — no longer blocked on the language). 🔴 OPEN.**
-  - B1. Scaffold `examples/` (standalone crates, non-workspace).
-  - B2. One worked project per DB (SQLite first — its driver's already live — then MariaDB, then
-    Postgres) consuming the generated client against the runtime; each builds + runs an end-to-end
-    scenario in CI.
+built — no longer blocked on the language). 🟡 SQLite done (D60), MariaDB + Postgres open.**
+  - B1. ✅ **done (D60).** Scaffolded `examples/` as standalone crates **outside** the workspace (root
+    `Cargo.toml` `exclude = ["examples"]`, so `cargo test --workspace` never builds them; each has its
+    own `target/`, gitignored).
+  - B2 (SQLite). ✅ **done (D60).** `examples/sqlite-quickstart` — a reduced-commerce `.bsl` schema
+    (`@scope Tenant`, nested to-one shape, keyset page, soft-delete) consumed through the **generated
+    typed client over the in-process `Engine`** against a live bundled-SQLite DB. `build.rs` regenerates
+    the client + DDL from the schema each build (no checked-in generated code); `cargo run` executes and
+    asserts the end-to-end scenario (create → read-your-writes in declared shape → get → list/scope →
+    keyset paginate → soft-delete/restore round-trip) and exits 0 only if it passes — a copyable
+    reference that doubles as a smoke test.
+  - B2 (MariaDB + Postgres). 🔴 **OPEN.** The same worked scenario against a live MariaDB / Postgres
+    server via Docker (mirroring the A2/A3 harness) — one example crate per dialect, each `cargo run`
+    green against its server. Reuse the sqlite-quickstart shape; swap `Compiled::load`'s dialect + the
+    `Db`/`Backend` (driver/`ShardRouter` vs `PgRouter`) and stand the server up (OrbStack).
 
 **Track C — VS Code extension (DoD #3, independent, may run in parallel).**
   - C1/C2. ✅ **done (D36).** Scaffolded `editors/vscode/` (TS + `vscode-languageclient`): `.bsl`

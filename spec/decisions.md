@@ -47,6 +47,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger)
+- **Example projects** — D60 (`examples/` outside the workspace; SQLite quickstart: build-time
+  codegen + in-process `Engine` + typed client, end-to-end scenario)
 
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
@@ -2026,3 +2028,41 @@ per-DB coverage is symmetric across all three dialects.
   --all-features`, `fmt --check`, `clippy` all clean. This closes A4's pagination + soft-delete/restore
   live coverage; A4's remaining hardening items (statement timeouts, deadlock-retry, pool-exhaustion →
   503 under load) stay open.
+
+## D60 — Example projects: `examples/` outside the workspace; the SQLite quickstart (Track B, DoD #2)
+The copyable example projects (DoD #2) live under **`examples/`** as **standalone crates deliberately
+excluded from the cargo workspace** (root `Cargo.toml` `exclude = ["examples"]`), so `cargo test
+--workspace` never builds them: they carry their own heavy deps (bundled SQLite) and run as end-to-end
+smoke *binaries*, not unit tests. Each depends on the in-repo engine crates **by path** (so it always
+tracks the current engine) and builds into its own gitignored `target/`.
+
+**`examples/sqlite-quickstart` (the SQLite slice).** The reference a user copies to start: a reduced
+commerce `.bsl` schema (`schema/`) consumed through the **generated typed client running over the
+in-process `Engine`** against a live bundled-SQLite database — no socket, no server, no infra.
+
+- **Consumption surface = typed client + `Engine`, not raw `dispatch`.** The generated `Client<T>` is
+  driven by a ~20-line `InProcess` `Transport` bridge (the whole of what an embedding app writes; the
+  `Transport` trait is defined *by* the generated client, so the orphan rule keeps the impl in the
+  consumer crate). This is the documented Tier-1 in-process door (`embed.rs`), now shown against a real
+  `SqliteDb` instead of a `MockDb`. The engine is built over one `rusqlite::Connection` (open → run the
+  generated DDL → `SqliteDb::new` → `Engine::new`); SQLite is embedded, so depending on `rusqlite`
+  directly to open the connection is honest, not a leak.
+- **No checked-in generated code — `build.rs` regenerates it.** The build step runs the compiler front
+  end as a library (`based_runtime::Compiled::load` — the same discover→parse→check `based check`/`based
+  serve` use) and emits the typed client (`based_codegen::client::client`) + SQLite DDL
+  (`based_codegen::sql::ddl`) into `OUT_DIR` on every build, so neither can drift from the schema; a
+  broken schema fails the build with diagnostics. `main.rs` `include!`s the client and `include_str!`s
+  the DDL. (The generated client's inner `#![allow(dead_code)]` is stripped in `build.rs` and re-added
+  as an outer attribute on `mod client`, because `include!` rejects inner attributes on a fragment.)
+  Chosen over checking in `based gen client` output (the `embed.rs` convention) because build-time
+  generation can never go stale and needs no `based` binary on `PATH` — cleaner for a copyable start.
+- **Scenario (runs + asserts on `cargo run`, exits 0 only if green).** create (`place_order`) →
+  read-your-writes in the declared `OrderCard` shape incl. a nested `placed_by { name, email }` to-one
+  sub-object → get (`order_by_id`) → list under `@scope Tenant` (`my_orders`; a different org sees none)
+  → keyset pagination (`recent_orders`, `page (2)`, cursor walk) → soft-delete + restore round-trip
+  (`cancel_order`/`restore_order`, the tombstone reads back in shape then vanishes from a live list).
+  `SeqIdGen` for deterministic demo ids (production uses `UuidGen` behind the `serve` feature).
+- **Gate.** The example builds + its scenario runs **green** via `cargo run`; the workspace stays green
+  with `examples/` excluded (`cargo test --workspace --all-features`, `fmt --check`, `clippy` all clean,
+  example crate included). **Open (B2):** the MariaDB + Postgres slices — the same scenario against those
+  servers via Docker.
