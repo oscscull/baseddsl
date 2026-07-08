@@ -65,6 +65,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   quickstart slices against live Docker servers; Track B / DoD #2 complete), D63 (quickstart DX
   rebuild: `based migrate apply` setup + checked-in `src/client.rs`/`migrations/` + `client::embedded`
   + `.env`/dotenvy + client-`create` seeding; no build.rs, no raw SQL; `based gen client --embedded` flag)
+- **Source hygiene / conventions** — D69 (Track F1 comment-hygiene sweep: source reads as finished, no
+  build-time/WIP narration, TODOs live in the roadmap `.md`s — the standing Conventions rule enforced)
 
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
@@ -2426,3 +2428,27 @@ every DoD item is met. Gate: `cargo test --workspace --all-features` + `fmt --ch
 `clippy --workspace --all-features` clean; `cargo build -p based-lsp` + `npm run compile` clean; two new
 LSP unit tests over the commerce fixture (folding: model/shape fold, single-line scope doesn't; selection:
 `total` token → field → `Order` model → file, strictly nesting).
+
+## D69 — Comment-hygiene sweep (Track F1, last roadmap item)
+The one-time cleanup the Conventions rule promised: sweep every `crates/**/*.rs` for build-time / WIP /
+narration comments and rewrite them into brief what+why matching surrounding density. **Standing rule
+enforced** (CLAUDE.md Conventions): source is *finished* source, not a scratch pad — no "here's what I'm
+building" / "now we…" running commentary, no historical "used to be X" storytelling; inline TODOs live in
+PLAN.md / the roadmap `.md`s, not source, unless genuinely blocking.
+
+- **Finding: the tree was already clean.** `sqlite.rs` (PLAN's flagged "known offender") read as finished
+  — D65's live-hardening rewrite had already given it clean what+why comments. No live `TODO`/`FIXME`/
+  `XXX`/`HACK` markers remained anywhere in source. Prior iterations' adherence to the Conventions rule
+  (and the `source-comment-style` memory) had kept narration out incrementally.
+- **Tightened (comment-only, zero logic change):** three residual bits — `based-codegen/src/migrate.rs`
+  `schema.snap` grammar header ("(finalizing migrations.md's TODO)" → dropped), `based-codegen/src/client.rs`
+  `ClientTarget` doc ("first and only for now" → "the only target") and the embedded-bridge doc ("the bridge
+  every embedder used to hand-copy" → "the bridge an embedder would otherwise hand-copy", present-tense).
+- **Left as-is (legitimate, not narration):** the `idempotency.rs`/`http.rs`/`lib.rs` "deferred to the
+  live-DB slice / multi-instance store" notes are deliberate scope documentation of a known limitation whose
+  deferred item is already tracked in PLAN's Deferred list — architecture docs, not a WIP TODO.
+
+**This is the last open roadmap item**, so with it done every roadmap track (features + hygiene) is complete
+and the project is fully done per the Definition of Done — only deferred nice-to-haves remain. Comment-only,
+so the gate is `cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace --all-features`,
+all clean.

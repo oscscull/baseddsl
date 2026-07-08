@@ -59,8 +59,8 @@
 use based_ast::*;
 use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel, RQuery};
 
-/// The client compile target (manifest `client`). Rust is first and only for now;
-/// the enum exists so the entry point can branch when a second target lands.
+/// The client compile target (manifest `client`). Rust is the only target; the
+/// enum exists so the entry point can branch when a second target lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientTarget {
     Rust,
@@ -761,7 +761,7 @@ pub struct Client<T> {
     /// The opt-in in-process bridge (D62), appended when [`ClientOptions::embedded`] is
     /// set. It references `based_runtime::Engine` *by path* — the consuming crate depends
     /// on based-runtime (based-codegen itself does not; that would be circular). This
-    /// reproduces the bridge every embedder used to hand-copy: serialize the typed input
+    /// is the bridge an embedder would otherwise hand-copy: serialize the typed input
     /// and `$ctx` to JSON (a non-object ctx → `{}`), call `engine.call`, decode a `200`
     /// body into `O`, map a non-`200` to a `ClientError` from `error.message`.
     const EMBEDDED: &str = r#"

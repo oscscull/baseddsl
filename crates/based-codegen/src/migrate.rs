@@ -24,7 +24,7 @@
 //! The snapshot text and step list stay decoupled from SQL: everything outside [`sql`]
 //! names no dialect.
 //!
-//! ## `schema.snap` grammar (finalizing migrations.md's TODO)
+//! ## `schema.snap` grammar
 //! ```text
 //! snapshot v1 dialect=neutral
 //! scope <Name> (<col>: <Type> = $ctx.<field>, …)

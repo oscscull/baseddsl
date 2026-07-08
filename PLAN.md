@@ -64,9 +64,11 @@ schema-vs-migrations drift diagnostic (LSP `W0108` + `based migrate verify`), an
 step, all proven live — so **DoD #5 is fully met** and **every DoD item is now met**. The **VS Code / LSP
 feature-parity fill-in (C4) is now complete (D68):** folding + selection ranges land, code actions are
 declined as out-of-scope (documented), `language-configuration.json` is verified — so DoD #3's
-feature-parity fill-in closes. **All feature work is now done; the roadmap has no open feature items** —
-only the cross-cutting source-hygiene pass (F1) and deferred nice-to-haves remain. Batch-by-batch history
-is in `PLAN-archive.md`.
+feature-parity fill-in closes. **Every roadmap item is now complete** — the last one, the cross-cutting
+source-hygiene pass (**F1/D69**), swept every `crates/**/*.rs` and confirmed the source reads as finished
+(only a few residual narration bits tightened; prior incremental hygiene had kept it clean). **The project
+is fully done per the Definition of Done** — every DoD item met, no open features, no open hygiene —
+only deferred nice-to-haves remain. Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -315,12 +317,14 @@ detail: `PLAN-archive.md`.
 
 **Track F — source hygiene pass (quality, cross-cutting; standalone value, off the DoD critical
 path — worked when it won't preempt A/B/D/E).**
-  - F1. **Finalize comments across all source.** Sweep every `crates/**/*.rs` and rewrite build-time /
-    WIP narration into clean, **brief** what+why comments matching surrounding density. `sqlite.rs` is
-    the known offender — do it first, then the rest. Source must read as finished source, not a scratch
-    pad (narration reads as unfinished and leads humans *and* agents off task). Move inline TODOs into
-    PLAN.md / the relevant roadmap `.md` unless genuinely must-do/blocking. Comment-only, so it gates on
-    `cargo fmt --check` + `cargo clippy`. The standing rule is in Conventions below.
+  - F1. ✅ **done (D69). Comment hygiene swept across all source.** Every `crates/**/*.rs` checked for
+    build-time / WIP narration (`sqlite.rs` first — it read clean, since D65 had already rewritten it
+    well); the source already reads as finished (the standing rule in Conventions had kept it clean
+    incrementally), so only three residual narration bits were tightened (`migrate.rs` `schema.snap`
+    grammar header, `client.rs` `ClientTarget` "for now" + embedded-bridge historical phrasing). No live
+    inline TODO/FIXME markers remained; the "deferred to the live-DB slice" scope notes are legitimate
+    architecture docs (their deferred items already sit in the Deferred list). Comment-only; gate green
+    (`test --workspace --all-features` + `fmt --check` + `clippy`). The standing rule is in Conventions.
 
 ## Pipeline (data flow)
 
@@ -455,7 +459,7 @@ codes) + `tests/conformance.rs` (a golden harness over `tests/conformance-sema/<
 - **Comments state what + why, briefly — never build-time narration.** Source is finished
   source, not a scratch pad: no "here's what I'm building" / WIP running commentary (it reads
   as unfinished and leads humans *and* agents off task). TODOs live in PLAN.md / roadmap `.md`,
-  not inline, unless genuinely must-do/blocking. (One-time cleanup of existing narration = Track F1.)
+  not inline, unless genuinely must-do/blocking. (The one-time cleanup of existing narration was Track F1, D69.)
 - **Keep this file lean.** PLAN.md is the resume read; shipped-work narration goes to
   `PLAN-archive.md`, per-decision detail to `spec/decisions.md`. Add a one-line status + D# here,
   not a paragraph.
