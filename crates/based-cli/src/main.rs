@@ -54,8 +54,9 @@ enum Command {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]
         root: PathBuf,
-        /// Address to bind the HTTP listener on.
-        #[arg(long, default_value = "127.0.0.1:8080")]
+        /// Address to bind the HTTP listener on. `BASED_LISTEN` overrides the default —
+        /// a container sets `0.0.0.0:8080` there so the port is reachable from outside.
+        #[arg(long, env = "BASED_LISTEN", default_value = "127.0.0.1:8080")]
         listen: String,
         /// A database URL per physical shard (repeat for a sharded fleet). Falls back
         /// to `BASED_DATABASE_URL` (comma-separated) when none is passed.
@@ -579,19 +580,22 @@ fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The shard database URLs: the repeated `--database-url` flag wins, else `BASED_DATABASE_URL`
-/// (comma-separated). Errors when none is set (apply/status need a live database).
+/// The shard database URLs: the repeated `--database-url` flag wins, else the
+/// comma-separated `BASED_DATABASE_URL`, else the ubiquitous single `DATABASE_URL` (the
+/// convention the quickstarts + most hosting platforms use). Errors when none is set (a
+/// live database is required to apply/status/serve).
 fn shard_urls(database_url: Vec<String>) -> anyhow::Result<Vec<String>> {
     let urls: Vec<String> = if !database_url.is_empty() {
         database_url
     } else {
         std::env::var("BASED_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
             .ok()
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default()
     };
     if urls.is_empty() {
-        bail!("no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL");
+        bail!("no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL / DATABASE_URL");
     }
     Ok(urls)
 }
@@ -794,21 +798,11 @@ fn cmd_serve(
     pool_max: usize,
 ) -> anyhow::Result<()> {
     use based_runtime::driver::{PoolConfig, ShardRouter};
-    use based_runtime::http::{serve_with_handle, ServeConfig, TrustedHeaderContext};
+    use based_runtime::http::{ServeConfig, TrustedHeaderContext};
     use based_runtime::Compiled;
 
-    // Shard URLs: the repeated flag wins; else BASED_DATABASE_URL (comma-separated).
-    let urls: Vec<String> = if !database_url.is_empty() {
-        database_url
-    } else {
-        std::env::var("BASED_DATABASE_URL")
-            .ok()
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default()
-    };
-    if urls.is_empty() {
-        bail!("no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL");
-    }
+    // Shard URLs: the repeated flag wins; else BASED_DATABASE_URL / DATABASE_URL.
+    let urls = shard_urls(database_url)?;
 
     // Reuse the shared front end so diagnostics render exactly as `based check` does,
     // then build the served artifact from the clean schema (no second parse/check).
@@ -823,11 +817,6 @@ fn cmd_serve(
         max: pool_max,
         ..PoolConfig::default()
     };
-    let router = ShardRouter::new(&urls, pool)
-        .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
-    // The shard key is schema-derived per callable (D33): the target model's `@scope`
-    // owner field. No hand-set field here — the router reads it off the compiled schema.
-    let ctx_source = TrustedHeaderContext;
     // Default workers to the pool ceiling so a worker never blocks waiting for a free
     // connection on a single shard (D20: bounded worker pool over the bounded conn pool).
     let config = ServeConfig {
@@ -836,17 +825,54 @@ fn cmd_serve(
     };
 
     eprintln!(
-        "based serve: {} shard(s), {} worker(s), listening on {listen}",
-        router.shard_count(),
+        "based serve: {dialect:?}, {} worker(s), listening on {listen}",
         config.workers,
     );
     eprintln!("liveness: GET /healthz  readiness: GET /readyz");
 
-    // Graceful shutdown: on SIGTERM/SIGINT begin draining (readiness fails first, so a
-    // load balancer pulls this instance out of rotation) and let in-flight requests
-    // finish, then `serve_with_handle` returns. The handle is captured once the listener
-    // is up (`on_start`), so the signal handler can only fire after we're serving.
-    serve_with_handle(compiled, router, ctx_source, config, |handle| {
+    // Build the backend for the manifest dialect and stand the listener up. The `@scope`
+    // owner field routes to a shard schema-side (D33), so no shard key is hand-set here —
+    // the driver reads it off the compiled schema. SQLite is a single local file (one url,
+    // one shared connection), so it neither shards nor pools.
+    let ctx = TrustedHeaderContext;
+    match dialect {
+        Dialect::MariaDb => {
+            let router = ShardRouter::new(&urls, pool)
+                .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
+            run_listener(compiled, router, ctx, config)
+        }
+        Dialect::Postgres => {
+            let router = based_runtime::PgRouter::new(&urls, pool)
+                .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;
+            run_listener(compiled, router, ctx, config)
+        }
+        Dialect::Sqlite => {
+            if urls.len() > 1 {
+                bail!(
+                    "sqlite serves a single database file, got {} urls",
+                    urls.len()
+                );
+            }
+            let backend = based_runtime::SqliteBackend::open(&urls[0])
+                .map_err(|e| anyhow::anyhow!("opening {}: {}", urls[0], e.message))?;
+            run_listener(compiled, backend, ctx, config)
+        }
+    }
+}
+
+/// Stand the listener up over a concrete backend and block until the process is signalled.
+/// Generic over the backend so each dialect's driver drops in without the listener naming
+/// it. Graceful shutdown: on SIGTERM/SIGINT begin draining (readiness fails first, so a
+/// load balancer pulls this instance out of rotation) and let in-flight requests finish,
+/// then the call returns. The handle is captured once the listener is up (`on_start`), so
+/// the signal handler can only fire after we're serving.
+fn run_listener(
+    compiled: based_runtime::Compiled,
+    backend: impl based_runtime::run::Backend + 'static,
+    ctx: based_runtime::http::TrustedHeaderContext,
+    config: based_runtime::http::ServeConfig,
+) -> anyhow::Result<()> {
+    based_runtime::http::serve_with_handle(compiled, backend, ctx, config, |handle| {
         if let Err(e) = ctrlc::set_handler(move || {
             eprintln!("based serve: shutdown signal received, draining…");
             handle.shutdown();

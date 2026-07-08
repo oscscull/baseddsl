@@ -44,7 +44,7 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-**Where things stand (as of D61):** the architecture milestones (M2–M6) are done, all three target
+**Where things stand (as of D66):** the architecture milestones (M2–M6) are done, all three target
 dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — including symmetric live coverage of
 keyset/offset pagination + soft-delete/restore (D59) — **Track L — the language — is feature-complete**
 (nested/relation projection D55/D57, keyset-cursor pagination D56, update/delete declared-shape re-select
@@ -55,12 +55,12 @@ usable BSL covers ordinary GET/PUT end-to-end (get/list, filters, sort cascade, 
 create/update/delete/restore/`tx`, soft-delete, `@scope`, raw SQL, idempotency, declared-shape read-back on
 every surviving write), and **DB-verification hardening is now done (A4/D65)**: statement timeouts,
 deadlock-retry, and pool-exhaustion→fast-503 are built into the drivers + `PoolConfig` and proven live
-against `mariadb:11.4`/`postgres:16`. **Remaining on the critical path: Deploy Track D1 (the `based serve`
-container image).**
-Track D2 — CI running the real-DB suites + example builds + extension + migration-apply — is **done (D64)**:
-portable `make` targets (env-URL override so the live suites hit a provided CI DB, readiness-wait, per-test
-reset) + a thin `.github/workflows/ci.yml`, proven green locally. The independent non-feature tracks — the
-extension (C4) and migrations (E5) — may still run in parallel (they share no files with the rest).
+against `mariadb:11.4`/`postgres:16`. **Track D — deploy — is now COMPLETE:** D2/D3 CI (D64) plus the
+`based serve` **container image (D1/D66)** — a multi-stage `docker/Dockerfile` (dialect-aware serve, env
+config, `/healthz` HEALTHCHECK, graceful drain), built + verified serving live `postgres:16` end-to-end,
+smoke-booted in CI via `make ci-image`. The only DoD item still open is E5 (migration `@was` renames +
+LSP drift diagnostic). The independent non-feature tracks — the extension (C4) and migrations (E5) — may
+still run in parallel (they share no files with the rest).
 Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
@@ -88,11 +88,12 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    `based-lsp`, surfaces diagnostics + inlay hints + hover + go-to-def + symbols + completion.
    **✅ Installable (D36); feature-parity fill-in in progress (Track C4).**
 4. **Deployable + kept-proven.** A container image / Dockerfile for `based serve`, and CI running the
-   real-DB suites + example builds + extension build so none of it rots. **🟡 CI half done (D2, D64):**
-   portable `make` targets (workspace, live MariaDB/Postgres, examples, extension) + a thin
+   real-DB suites + example builds + extension build so none of it rots. **✅ Met (D64 + D66):** the
+   `based serve` container image (`docker/Dockerfile`, dialect-aware serve, env-configured, `/healthz`
+   HEALTHCHECK, graceful drain) built + verified serving live `postgres:16` end-to-end (D66); portable
+   `make` targets (workspace, live MariaDB/Postgres, examples, extension, `ci-image`) + a thin
    `.github/workflows/ci.yml` example, all proven green locally against live `mariadb:11.4`/`postgres:16`;
-   the live suites honor an external `TEST_*_URL` (CI service container). **Remaining: D1** — the
-   `based serve` container image/Dockerfile (serve-side health/readiness/drain already done, D26).
+   the live suites honor an external `TEST_*_URL` (CI service container).
 5. **Schema evolution: migration generation.** A `.bsl` change produces a reviewable, editable
    migration you can safely apply to an existing DB — not just from-scratch DDL. **✅ Core met** —
    spec (E1), snapshot + diff (D39), per-dialect render (D41), apply + `_based_migrations` ledger +
@@ -273,9 +274,17 @@ a callable confines by a set ⊇ one alternative. Landed across three iterations
 rename is deferred to the C4 rename iteration** (needs the full reference-site index). Full iteration
 detail: `PLAN-archive.md`.
 
-**Track D — deploy + keep-proven (DoD #4, last). 🟡 CI half done (D2/D3 via D64); D1 open.**
-  - D1. 🔴 **OPEN.** Dockerfile / image for `based serve` (health/readiness + graceful drain already
-    done, D26 — this is packaging). Not started; separate iteration.
+**Track D — deploy + keep-proven (DoD #4, last). ✅ COMPLETE (D1 D66; D2/D3 D64).**
+  - D1. ✅ **done (D66).** `based serve` container image (`docker/Dockerfile` + `entrypoint.sh` +
+    `healthcheck.sh` + `docker/README.md`). Multi-stage (rust builder → `debian:bookworm-slim`, ~122 MB,
+    BuildKit cache mounts, unprivileged); carries no schema — the project mounts at `/app`, all else env
+    (`BASED_DATABASE_URL`/`DATABASE_URL`, `BASED_LISTEN`, `BASED_MIGRATE_ON_START` opt-in migrate-then-serve);
+    `HEALTHCHECK` probes `/healthz` (D26). Enabling seams: `based serve` is now **dialect-aware** (was
+    MariaDB-only — branches on the manifest dialect to build MariaDB/Postgres/SQLite backend), and `--listen`
+    reads `BASED_LISTEN` + the db-url resolver honors `DATABASE_URL`. CI: `make ci-image` builds + smoke-boots
+    it against bundled SQLite (`ci/smoke-image.sh` → `/healthz`+`/readyz` 200), thin `image:` job in `ci.yml`.
+    Verified live: image served `postgres:16` end-to-end (migrate-on-boot, scoped write/read, tenant
+    isolation, `HEALTHCHECK` healthy, SIGTERM drain).
   - D2. ✅ **done (D64).** CI running the real-DB suites (A) + example builds (B) + extension build (C) +
     migration apply (E4). Substance lives in portable `make` targets (`ci-workspace`, `ci-live-mariadb`,
     `ci-live-postgres`, `ci-examples`, `ci-extension`; `dev-db-up`/`dev-db-down` for local DBs) invoked
@@ -341,7 +350,7 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57) with an **opt-in in-process embedded bridge** (`ClientOptions::embedded` / `client_with` → emits `client::embedded(&engine)` over `based_runtime::Engine`, so an embedder writes zero `Transport` plumbing; referenced by path, no based-runtime dep; D62); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
-| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). Live-DB hardening (D65): per-dialect statement timeouts + bounded checkout wait on `PoolConfig`, drivers classify deadlock/serialization codes into `DbErrorKind::Deadlock` (mutation path retries the tx a bounded 5× with backoff) and pool saturation into `DbErrorKind::PoolExhausted` (fast 503), proven live on MariaDB/Postgres. `migrate` = live apply + ledger (D42). *Open:* container image (Track D1); durable multi-instance idempotency store. |
+| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). Live-DB hardening (D65): per-dialect statement timeouts + bounded checkout wait on `PoolConfig`, drivers classify deadlock/serialization codes into `DbErrorKind::Deadlock` (mutation path retries the tx a bounded 5× with backoff) and pool saturation into `DbErrorKind::PoolExhausted` (fast 503), proven live on MariaDB/Postgres. `migrate` = live apply + ledger (D42). `based serve` is dialect-aware — the CLI branches on the manifest dialect to build the MariaDB/Postgres/SQLite backend (D66). Packaged as a container image (`docker/Dockerfile`, D66). *Open:* durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
 

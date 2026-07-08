@@ -31,6 +31,14 @@ jobs:
           node-version: 20
       - run: make ci-extension
 
+  # Build the `based serve` container image + smoke-boot it against bundled SQLite (DoD #4,
+  # deploy half). Docker is preinstalled on ubuntu-latest; no DB service needed.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make ci-image
+
   # Live MariaDB: the integration suite + `based migrate apply` against a service container.
   # The suite honors TEST_MARIADB_URL (set by the make target from MARIADB_URL) and connects
   # to this service instead of spinning its own container.

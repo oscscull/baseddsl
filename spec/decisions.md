@@ -49,7 +49,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D64 (`TEST_*_URL` env override: live suites connect to a provided server instead of self-spinning),
   D65 (live hardening tests: statement-timeout abort, crossed-lock deadlock, fast pool-exhaustion)
 - **CI / deploy (keep-proven)** — D64 (Track D2 CI: portable `make` targets + `.github/workflows/ci.yml`
-  thin example wrapper; env-URL override, readiness-wait, migrate-apply/examples/extension in CI)
+  thin example wrapper; env-URL override, readiness-wait, migrate-apply/examples/extension in CI),
+  D66 (Track D1: `based serve` container image — dialect-aware serve + env config + `docker/` + `ci-image`)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
@@ -2296,3 +2297,39 @@ through one runtime seam and proven against live `mariadb:11.4` + `postgres:16` 
 - **Gate.** `cargo test --workspace --all-features` green *with Docker up* — the three MariaDB + three
   Postgres hardening tests booted real `mariadb:11.4`/`postgres:16` containers and passed (MariaDB
   suite 13, Postgres 14); `fmt --check` + `clippy --all-features` clean.
+
+## D66 — `based serve` container image (Track D1, DoD #4 deploy half)
+
+Packages `based serve` (the D21 listener with D26 health/readiness/drain) as a deployable image.
+The artifact and two enabling seams:
+
+- **`based serve` is now dialect-aware.** It previously hardcoded the MariaDB `ShardRouter`, so it
+  only ever served MySQL/MariaDB regardless of the manifest dialect (a footgun for a "deployable" —
+  a Postgres project would silently point a MySQL driver at Postgres). `cmd_serve` now branches on the
+  manifest `Dialect` and builds the matching backend — `ShardRouter` (MariaDB), `PgRouter` (Postgres),
+  or a single-file `SqliteBackend` — each handed to a small generic `run_listener` (the listener is
+  already `Backend`-generic, D21). One image serves whatever `based.toml` targets.
+- **Env config seams** (a container configures by env, not flags). `--listen` gains `env = "BASED_LISTEN"`
+  (flag > env > `127.0.0.1:8080` default; the image sets `0.0.0.0:8080` so the port is reachable), and
+  the db-url resolver additionally honors the ubiquitous `DATABASE_URL` after `BASED_DATABASE_URL` — the
+  convention the quickstarts + most hosts use. `cmd_serve` now shares the migrate path's `shard_urls`.
+- **The image** (`docker/Dockerfile`). Multi-stage: a `rust:1-bookworm` builder compiles the release
+  binary (BuildKit cache mounts keep an unchanged dep set from recompiling — the cache-friendly split
+  without a stub-crate dance), a `debian:bookworm-slim` runtime carries just the binary + entrypoint
+  (~122 MB, unprivileged user). Carries **no schema** — the project (`based.toml` + `**/*.bsl`
+  [+ `migrations/`]) mounts at `/app`; everything else is env. `entrypoint.sh` optionally runs
+  `based migrate apply` first (`BASED_MIGRATE_ON_START=1`, opt-in — safe by default) then `based serve`.
+  `HEALTHCHECK` runs `docker-healthcheck.sh` (a script, so the port is derived in the shell at runtime,
+  not Docker's build parser) probing `/healthz` — never touches the DB, so a DB blip drains via `/readyz`
+  instead of restarting the box.
+- **CI keep-proven** (matching D64's shape): a portable `make ci-image` builds the image then
+  `ci/smoke-image.sh` boots it against the bundled-SQLite quickstart (no external service) and asserts
+  `/healthz` + `/readyz` answer 200; a thin `image:` job in `ci.yml` calls it.
+
+**Verified live.** Built the image, ran it on a Docker network against an ephemeral `postgres:16`
+(`BASED_MIGRATE_ON_START=1` applied `0001_init` on boot, served the Postgres dialect): Docker
+`HEALTHCHECK` went `healthy`, `/healthz` + `/readyz` = 200, then the full scoped flow through the
+container — `create_org`/`create_user` (public) → `place_order` (scoped write, nested `placed_by` shape)
+→ `my_orders` (scoped read returns it) → a different tenant's `$ctx` sees `[]` (isolation). `SIGTERM`
+drained ("shutdown signal received, draining…") and exited 0. `make ci-image` also green (SQLite smoke).
+Gate: `fmt --check` + `clippy --all-features -D warnings` + `cargo test --workspace --all-features` clean.

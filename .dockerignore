@@ -1,0 +1,10 @@
+# Keep the build context small + the dependency cache clean. Everything the image needs
+# is source; build artifacts and editor deps only bloat the context and bust caches.
+.git
+target
+**/target
+examples/**/target
+editors/vscode/node_modules
+editors/vscode/out
+editors/vscode/*.vsix
+**/*.db

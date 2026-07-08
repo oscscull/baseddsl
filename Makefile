@@ -8,6 +8,7 @@
 #
 #   make ci-workspace      # fmt + clippy + test (no infra)
 #   make ci-extension      # build + package the VS Code extension (needs node/npm)
+#   make ci-image          # build the `based serve` image + smoke-boot it (needs docker)
 #   make dev-db-up         # throwaway mariadb:11.4 + postgres:16 for local runs
 #   make ci-live-mariadb   # migrate-apply + live MariaDB suite against $(MARIADB_URL)
 #   make ci-live-postgres  # live Postgres suite against $(POSTGRES_URL)
@@ -21,6 +22,7 @@ CARGO ?= cargo
 NPM   ?= npm
 ROOT  := $(dir $(realpath $(firstword $(MAKEFILE_LIST))))
 BASED := $(ROOT)target/debug/based
+IMAGE ?= based-serve:ci
 
 # Server URLs. Defaults match `make dev-db-up`'s throwaway containers; override to point a CI
 # service container (or any server) at these targets, e.g.
@@ -29,7 +31,7 @@ MARIADB_URL  ?= mysql://root:based_test_pw@127.0.0.1:13306/based_test
 POSTGRES_URL ?= postgres://postgres:based_test_pw@127.0.0.1:15432/based_test
 SQLITE_DB    ?= quickstart.db
 
-.PHONY: ci ci-workspace ci-extension ci-live ci-live-mariadb ci-live-postgres \
+.PHONY: ci ci-workspace ci-extension ci-image ci-live ci-live-mariadb ci-live-postgres \
         ci-examples ci-example-sqlite ci-example-mariadb ci-example-postgres \
         based-cli dev-db-up dev-db-down
 
@@ -45,6 +47,13 @@ ci-workspace:
 ## Build + package the VS Code extension (.vsix). `npm ci` is the reproducible install.
 ci-extension:
 	cd editors/vscode && $(NPM) ci && $(NPM) run compile && $(NPM) run package
+
+## Build the `based serve` container image (DoD #4, deploy half), then smoke-boot it against
+## bundled SQLite (no external DB) to prove the packaged image actually serves — the deploy
+## artifact never rots. Needs Docker; the smoke script curls /healthz + /readyz.
+ci-image:
+	docker build -f docker/Dockerfile -t $(IMAGE) .
+	$(ROOT)ci/smoke-image.sh $(IMAGE)
 
 ## Build the `based` CLI once; the example targets shell out to it.
 based-cli:
