@@ -1,108 +1,42 @@
 //! Postgres quickstart — the whole engine, in one process, against a live Postgres server.
 //!
-//! This is the thing to copy to start on Postgres: the *same* `.bsl` schema + scenario as
-//! `examples/sqlite-quickstart`, consumed through the **generated typed client** running
-//! over the in-process **`Engine`** — but pointed at a real **Postgres** server instead of
-//! bundled SQLite. `build.rs` regenerates the client + Postgres DDL from the schema on every
-//! build, so nothing here is stale. Point `DATABASE_URL` at a Postgres and run `cargo run`:
-//! it creates the tables, runs an end-to-end scenario (create → read-your-writes → list/
-//! filter → paginate → soft-delete/restore), and exits 0 only if every step passes.
+//! Copy this directory to start on Postgres. It is the *same* `.bsl` schema + scenario as
+//! `examples/sqlite-quickstart`, consumed through the **generated typed client**
+//! (`src/client.rs`) over the in-process **`Engine`** — but pointed at a real Postgres
+//! server. The steps a user runs (see README):
 //!
-//! The only things that differ from the SQLite slice are the *driver* (a pooled `PgRouter`/
-//! `PostgresDb` over a live URL, not an in-memory `SqliteDb`), the *id generator* (`UuidGen`
-//! — Postgres's native `uuid` id columns reject non-uuid ids), and the ids in the fixtures
-//! (real v4 UUIDs, for the same reason). The schema, the client, the `InProcess` bridge, and
-//! the scenario assertions are identical — that is the point of the reference.
+//!   1. set `DATABASE_URL` in `.env`
+//!   2. `based migrate apply` — create the tables from the checked-in `migrations/`
+//!   3. `based gen client -o src/client.rs --embedded` — the typed client (checked in)
+//!   4. `cargo run` — this program: seed via the client's own `create` calls, then run
+//!      the end-to-end scenario and exit 0 only if every step passes.
+//!
+//! There is **no raw SQL here** and **no hand-written transport bridge**. The only things
+//! that differ from the SQLite slice are the *driver* (a pooled `PgRouter`/`PostgresDb` over
+//! a live URL) and the *id generator* (`UuidGen` — Postgres's native `uuid` id columns reject
+//! non-uuid ids). The schema, the client, and the scenario are identical.
 
 use based_runtime::id::UuidGen;
 use based_runtime::shard::PoolConfig;
-use based_runtime::{pg_connect, Compiled, Engine, PgRouter};
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::json;
+use based_runtime::{Compiled, Engine, PgRouter};
 use std::path::PathBuf;
 
-/// The typed client, generated at build time from `schema/*.bsl` (see `build.rs`) — the
-/// verbatim output of `based gen client`. Regenerated on every build, never checked in.
+/// The typed client — the verbatim output of `based gen client -o src/client.rs --embedded`,
+/// checked in as a reviewable artifact. It defines the wire surface *and* an in-process
+/// `Embedded` transport over `Engine`, so `client::embedded(&engine)` is a ready client.
 #[allow(dead_code)]
-mod client {
-    include!(concat!(env!("OUT_DIR"), "/client.rs"));
-}
-
-/// The Postgres DDL, generated at build time (`based gen sql`). Creates every table.
-const SCHEMA_SQL: &str = include_str!(concat!(env!("OUT_DIR"), "/schema.sql"));
-
-/// The connection URL default: the throwaway server this example's README stands up. Override
-/// it with `DATABASE_URL` to point at your own Postgres.
-const DEFAULT_URL: &str = "postgres://postgres:based_test_pw@127.0.0.1:5433/based_test";
-
-// The org + user the scenario acts as. Postgres maps `Id` to a native `uuid` column, which
-// rejects a non-uuid string — so, unlike the SQLite slice's `org-acme`/`user-ada`, the seed
-// ids are real v4-shaped UUIDs (the trailing digits keep them readable across assertions).
-const ORG_ACME: &str = "00000000-0000-4000-8000-0000000000a1";
-const ORG_OTHER: &str = "00000000-0000-4000-8000-0000000000a2";
-const USER_ADA: &str = "00000000-0000-4000-8000-0000000000b1";
-
-/// Reset the three tables before recreating them, so the example is re-runnable against a
-/// persistent server (the generated DDL is a plain `CREATE TABLE`, no `IF NOT EXISTS`).
-const RESET_SQL: &str = r#"DROP TABLE IF EXISTS "order", "user", "org" CASCADE;"#;
-
-/// Seed the org + user the scenario references (real UUID ids, per the note above).
-const SEED_SQL: &str = "\
-    INSERT INTO \"org\"  (\"id\", \"name\", \"slug\")  VALUES ('00000000-0000-4000-8000-0000000000a1', 'Acme', 'acme'); \
-    INSERT INTO \"user\" (\"id\", \"email\", \"name\") VALUES ('00000000-0000-4000-8000-0000000000b1', 'ada@acme.test', 'Ada');";
-
-/// The bridge from the generated `Transport` to an in-process [`Engine`] — the whole of
-/// what an embedding app writes (the `Transport` trait is defined *by* the generated
-/// client, so the orphan rule keeps this impl here, next to the generated module). It
-/// serializes the typed input + `$ctx` to JSON, runs it through the engine, and decodes
-/// the `200` body into the output type (a non-`200` becomes a `ClientError`). Identical to
-/// the SQLite slice's bridge — the `Engine` is driver-agnostic.
-struct InProcess<'a> {
-    engine: &'a Engine,
-}
-
-impl client::Transport for InProcess<'_> {
-    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, client::ClientError>
-    where
-        I: Serialize,
-        C: Serialize,
-        O: DeserializeOwned,
-    {
-        let args = serde_json::to_value(input).map_err(|e| client::ClientError(e.to_string()))?;
-        // `&()` → JSON `null`; the engine treats a non-object context as empty.
-        let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { json!({}) })
-            .map_err(|e| client::ClientError(e.to_string()))?;
-        let resp = self.engine.call(route, args, ctx);
-        if resp.status == 200 {
-            serde_json::from_value(resp.body).map_err(|e| client::ClientError(e.to_string()))
-        } else {
-            let msg = resp.body["error"]["message"]
-                .as_str()
-                .unwrap_or("call failed");
-            Err(client::ClientError(msg.to_string()))
-        }
-    }
-}
+mod client;
 
 fn main() {
-    // --- Stand up an in-process engine over a live Postgres database ---
-    let schema_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema");
-    let compiled = Compiled::load(&schema_dir).expect("schema checks clean");
+    // `.env` supplies `DATABASE_URL` (dotenvy, the 12-factor convention) — no hard-coded URL.
+    dotenvy::dotenv().ok();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL (see .env)");
 
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-
-    // Create every table from the *generated* Postgres DDL and seed the fixtures through a
-    // one-shot client — `batch_execute` runs a whole multi-statement script (DDL + seed). A
-    // real deployment applies the DDL out of band (`based migrate apply`, `psql < schema.sql`);
-    // a self-contained smoke test does it inline.
-    let mut setup =
-        pg_connect(&url).unwrap_or_else(|e| panic!("connect to Postgres at {url}: {e:?}"));
-    setup.batch_execute(RESET_SQL).expect("reset tables");
-    setup
-        .batch_execute(SCHEMA_SQL)
-        .expect("create tables from generated DDL");
-    setup.batch_execute(SEED_SQL).expect("seed org + user");
+    // Load the schema into the engine — the same front end `based check`/`based serve` run.
+    // The tables already exist: `based migrate apply` created them (README step 2), so this
+    // program never issues DDL.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let compiled = Compiled::load(&manifest).expect("schema checks clean");
 
     // The `PgRouter` is the production `Backend` (a bounded pool per physical shard); a
     // single-server deploy is `single`. A checked-out connection is the engine's `Db`.
@@ -117,22 +51,56 @@ fn main() {
         router.checkout("").expect("checkout for engine"),
         UuidGen,
     );
-    let api = client::Client {
-        transport: InProcess { engine: &engine },
-    };
+
+    // `client::embedded(&engine)` (D62) is the entire bridge — a typed, in-process client
+    // with no socket and no hand-written `Transport` impl.
+    let api = client::embedded(&engine);
+
+    // --- 0. seed via the client's own `create` mutations (no raw INSERT) ---
+    // Two tenants + one user; the engine mints each uuid and hands it back.
+    let acme = api
+        .create_org(
+            client::CreateOrgInput {
+                name: "Acme".into(),
+                slug: "acme".into(),
+            },
+            (),
+        )
+        .expect("create_org")
+        .id;
+    let other = api
+        .create_org(
+            client::CreateOrgInput {
+                name: "Other".into(),
+                slug: "other".into(),
+            },
+            (),
+        )
+        .expect("create_org (other)")
+        .id;
+    let ada = api
+        .create_user(
+            client::CreateUserInput {
+                email: "ada@acme.test".into(),
+                name: "Ada".into(),
+            },
+            (),
+        )
+        .expect("create_user")
+        .id;
 
     // `$ctx` is the per-request context the *app* derives from its auth layer, never the
     // caller (auth.md/D7). Here every call acts as the org `acme`.
-    let acme = || client_org(ORG_ACME);
+    let acme_ctx = || client::PlaceOrderCtx { org: acme.clone() };
 
     // --- 1. create → read the write back in its declared shape (read-your-writes) ---
     let placed = api
         .place_order(
             client::PlaceOrderInput {
-                buyer: USER_ADA.into(),
+                buyer: ada.clone(),
                 total: 100,
             },
-            client::PlaceOrderCtx { org: acme() },
+            acme_ctx(),
         )
         .expect("place_order");
     assert_eq!(placed.status, "pending", "status defaults on create");
@@ -144,43 +112,36 @@ fn main() {
     println!("created order {} for {}", placed.id, placed.placed_by.name);
 
     // Two more, so there is a set to paginate.
-    let second = place(&api, 200);
-    let third = place(&api, 300);
+    let second = place(&api, &acme, &ada, 200);
+    let third = place(&api, &acme, &ada, 300);
 
     // --- 2. read one back by id ---
-    let got = api
-        .order_by_id(
-            client::OrderByIdInput {
-                id: placed.id.clone(),
-            },
-            client::OrderByIdCtx { org: acme() },
-        )
-        .expect("order_by_id")
-        .expect("the order exists");
+    let got = get(&api, &acme, &placed.id).expect("the order exists");
     assert_eq!(got.id, placed.id);
     assert_eq!(got.total, 100);
 
     // --- 3. list/filter: the Tenant scope makes a plain `list` "my org's orders" ---
     let mine = api
-        .my_orders(client::MyOrdersInput, client::MyOrdersCtx { org: acme() })
+        .my_orders(
+            client::MyOrdersInput,
+            client::MyOrdersCtx { org: acme.clone() },
+        )
         .expect("my_orders");
     assert_eq!(mine.len(), 3, "all three orders are visible to their org");
     // A different org sees none of them — the injected scope predicate is real.
-    let other = api
+    let others = api
         .my_orders(
             client::MyOrdersInput,
-            client::MyOrdersCtx {
-                org: client_org(ORG_OTHER),
-            },
+            client::MyOrdersCtx { org: other.clone() },
         )
         .expect("my_orders (other org)");
-    assert!(other.is_empty(), "cross-org rows are invisible");
+    assert!(others.is_empty(), "cross-org rows are invisible");
 
     // --- 4. keyset pagination: walk all three orders two at a time ---
     let p1 = api
         .recent_orders(
             client::RecentOrdersInput { cursor: None },
-            client::RecentOrdersCtx { org: acme() },
+            client::RecentOrdersCtx { org: acme.clone() },
         )
         .expect("recent_orders page 1");
     assert_eq!(p1.rows.len(), 2, "a full first page");
@@ -190,7 +151,7 @@ fn main() {
             client::RecentOrdersInput {
                 cursor: Some(cursor),
             },
-            client::RecentOrdersCtx { org: acme() },
+            client::RecentOrdersCtx { org: acme.clone() },
         )
         .expect("recent_orders page 2");
     assert_eq!(p2.rows.len(), 1, "a short final page");
@@ -216,19 +177,22 @@ fn main() {
             client::CancelOrderInput {
                 id: placed.id.clone(),
             },
-            client::CancelOrderCtx { org: acme() },
+            client::CancelOrderCtx { org: acme.clone() },
         )
         .expect("cancel_order");
     assert_eq!(cancelled.id, placed.id);
     // It is now hidden from ordinary reads (the soft-delete live predicate).
     assert!(
-        get(&api, &placed.id).is_none(),
+        get(&api, &acme, &placed.id).is_none(),
         "a cancelled order is hidden from a get"
     );
     assert_eq!(
-        api.my_orders(client::MyOrdersInput, client::MyOrdersCtx { org: acme() })
-            .expect("my_orders")
-            .len(),
+        api.my_orders(
+            client::MyOrdersInput,
+            client::MyOrdersCtx { org: acme.clone() }
+        )
+        .expect("my_orders")
+        .len(),
         2,
         "and from the list"
     );
@@ -239,18 +203,21 @@ fn main() {
             client::RestoreOrderInput {
                 id: placed.id.clone(),
             },
-            client::RestoreOrderCtx { org: acme() },
+            client::RestoreOrderCtx { org: acme.clone() },
         )
         .expect("restore_order");
     assert_eq!(restored.id, placed.id);
     assert!(
-        get(&api, &placed.id).is_some(),
+        get(&api, &acme, &placed.id).is_some(),
         "restored order is readable"
     );
     assert_eq!(
-        api.my_orders(client::MyOrdersInput, client::MyOrdersCtx { org: acme() })
-            .expect("my_orders")
-            .len(),
+        api.my_orders(
+            client::MyOrdersInput,
+            client::MyOrdersCtx { org: acme.clone() }
+        )
+        .expect("my_orders")
+        .len(),
         3,
         "back to all three"
     );
@@ -259,32 +226,27 @@ fn main() {
     println!("\nend-to-end scenario passed");
 }
 
-/// A `$ctx.org` value (the scope owner the app derives from auth, D33/D46).
-fn client_org(id: &str) -> client::Uuid {
-    id.to_string()
-}
-
-/// Place an order for the seeded buyer at `total`, acting as org `acme`; return its id.
-fn place(api: &client::Client<InProcess>, total: i64) -> String {
+/// Place an order for `buyer` at `total`, acting as `org`; return its id.
+fn place(api: &client::Client<client::Embedded>, org: &str, buyer: &str, total: i64) -> String {
     api.place_order(
         client::PlaceOrderInput {
-            buyer: USER_ADA.into(),
+            buyer: buyer.to_string(),
             total,
         },
         client::PlaceOrderCtx {
-            org: client_org(ORG_ACME),
+            org: org.to_string(),
         },
     )
     .expect("place_order")
     .id
 }
 
-/// Read an order back by id, acting as org `acme`.
-fn get(api: &client::Client<InProcess>, id: &str) -> Option<client::OrderCard> {
+/// Read an order back by id, acting as `org`.
+fn get(api: &client::Client<client::Embedded>, org: &str, id: &str) -> Option<client::OrderCard> {
     api.order_by_id(
         client::OrderByIdInput { id: id.to_string() },
         client::OrderByIdCtx {
-            org: client_org(ORG_ACME),
+            org: org.to_string(),
         },
     )
     .expect("order_by_id")

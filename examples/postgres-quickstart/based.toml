@@ -1,0 +1,6 @@
+# based project manifest (decisions.md D5). `root` points the schema glob at `schema/`,
+# so `migrations/` lives at the project root (sibling of the sources, migrations.md) and
+# `based <cmd>` can run from here with the default `.` root.
+dialect = "postgres"
+client  = "rust"
+root    = "schema"

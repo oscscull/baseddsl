@@ -1,0 +1,3 @@
+/target
+# The local SQLite database `based migrate apply` creates (a fresh DB per run).
+*.db

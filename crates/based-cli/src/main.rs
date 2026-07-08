@@ -165,6 +165,12 @@ enum GenTarget {
         /// Write to this file instead of stdout.
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Also emit the in-process **embedded bridge** (D62): an `Embedded` `Transport`
+        /// over `based_runtime::Engine` plus `client::embedded(&engine)`, so an embedding
+        /// build gets a working client with no hand-written bridge. The consuming crate
+        /// must depend on based-runtime; a pure-wire client leaves this off.
+        #[arg(long)]
+        embedded: bool,
     },
     /// Emit an OpenAPI 3.1 spec for the wire — feed it to `openapi-generator` for a
     /// client in any language (polyglot via one contract, not N emitters; D23).
@@ -184,7 +190,11 @@ fn main() -> anyhow::Result<()> {
         Command::Check { root } => cmd_check(&root),
         Command::Gen { target } => match target {
             GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
-            GenTarget::Client { root, out } => cmd_gen_client(&root, out.as_deref()),
+            GenTarget::Client {
+                root,
+                out,
+                embedded,
+            } => cmd_gen_client(&root, out.as_deref(), embedded),
             GenTarget::Openapi { root, out } => cmd_gen_openapi(&root, out.as_deref()),
         },
         Command::Migrate { action } => match action {
@@ -256,10 +266,12 @@ fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_gen_client(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> anyhow::Result<()> {
+    use based_codegen::client::ClientOptions;
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let target = ClientTarget::parse(&project.manifest.client);
-    let code = based_codegen::client::client(&schema, &decls, target);
+    let opts = ClientOptions { embedded };
+    let code = based_codegen::client::client_with(&schema, &decls, target, opts);
     match out {
         Some(path) => {
             std::fs::write(path, &code).with_context(|| format!("writing {}", path.display()))?;

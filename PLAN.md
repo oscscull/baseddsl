@@ -168,11 +168,15 @@ on the critical path.** *Mechanism: Docker (OrbStack).*
   - A4. 🔴 **OPEN. Live-DB hardening** — statement timeouts, deadlock-retry, pool-exhaustion → 503
     under load; verified against the live servers, not just designed.
 
-**Track B — example projects (DoD #2). ✅ COMPLETE (B1/B2 SQLite D60, B2 MariaDB + Postgres D61).** One
-worked, runnable project per target DB, all three green via `cargo run`. **Follow-up unblocked (D62):**
-`based gen client` now *emits* the in-process bridge (`client::embedded(&engine)`), so the three
-quickstarts can drop their hand-written `InProcess` `Transport` + the `.replace("#![allow(dead_code)]…")`
-surgery — a DX rebuild for the next iteration (the examples still build unchanged today).
+**Track B — example projects (DoD #2). ✅ COMPLETE (B1/B2 SQLite D60, B2 MariaDB + Postgres D61); DX
+rebuild D63.** One worked, runnable project per target DB, all three green via `cargo run`. **DX rebuild
+done (D63):** the three quickstarts are now genuinely copyable references, not integration tests —
+schema setup is `based migrate apply` (checked-in `migrations/`), the typed client is a checked-in
+`src/client.rs` from `based gen client -o src/client.rs --embedded` (new CLI flag) consumed via
+`client::embedded(&engine)` (zero bridge), seeding is the client's own `create_org`/`create_user`
+mutations (zero raw SQL), and `DATABASE_URL` comes from a committed `.env` (dotenvy). No `build.rs`.
+First **live Postgres `migrate apply`** landed here (worked unchanged). User flow: set `.env` →
+`based migrate apply` → `cargo run`.
   - B1. ✅ **done (D60).** Scaffolded `examples/` as standalone crates **outside** the workspace (root
     `Cargo.toml` `exclude = ["examples"]`, so `cargo test --workspace` never builds them; each has its
     own `target/`, gitignored).
@@ -259,6 +263,10 @@ detail: `PLAN-archive.md`.
     this is packaging).
   - D2. CI running the real-DB suites (A) + example builds (B) + extension build (C) + migration apply
     tests (E4) so the whole thing stays green.
+  - D3. **CI ergonomics for migrations** (queued, user-raised 2026-07-08). Make `based migrate apply`
+    run cleanly from GitHub Actions + in test runs — the quickstarts now depend on it for schema setup
+    (D63), so CI must stand up the DB, apply, and run each example non-interactively. Part of DoD #4 CI
+    (folds into D2). Not yet implemented.
 
 **Track F — source hygiene pass (quality, cross-cutting; standalone value, off the DoD critical
 path — worked when it won't preempt A/B/D/E).**

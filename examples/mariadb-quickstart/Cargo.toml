@@ -13,13 +13,8 @@ publish = false
 # `UuidGen` — MariaDB's native `UUID` id columns reject non-uuid ids, so a real embed uses
 # the same v4-uuid generator production does (never the deterministic `SeqIdGen`).
 based-runtime = { path = "../../crates/based-runtime", features = ["mariadb", "serve"] }
-# The generated client derives serde; the transport bridge serializes the typed input.
+# The generated client derives serde; the embedded bridge serializes the typed input.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# `build.rs` runs the compiler front end over `schema/` and emits the typed client +
-# MariaDB DDL into `OUT_DIR` at build time, so the generated code can never go stale
-# against the schema (no checked-in generated artifacts to forget to regenerate).
-[build-dependencies]
-based-runtime = { path = "../../crates/based-runtime" }
-based-codegen = { path = "../../crates/based-codegen" }
+# Load `DATABASE_URL` from `.env` (the conventional 12-factor crate) — no hard-coded URL.
+dotenvy = "0.15"
