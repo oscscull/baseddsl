@@ -134,9 +134,18 @@ impl ToSql for PgValue {
 
 /// A returned column value → JSON (the shape the wire response is built from), read by the
 /// column's Postgres type. Numbers map to JSON numbers; every string-family type
-/// (text/uuid/timestamptz/date/json) rides back as a JSON string (D1) via the column's text
-/// representation. A genuinely unknown/binary type falls back to lowercase hex (never a
-/// panic), matching the MariaDB/SQLite drivers' `from_*`.
+/// (text/uuid/timestamptz/date/jsonb) rides back as a JSON string (D1). A genuinely
+/// unknown/binary type falls back to lowercase hex (never a panic), matching the
+/// MariaDB/SQLite drivers' `from_*`.
+///
+/// **rust-postgres returns results in *binary* format** (format code 1 for every column),
+/// not text. For `text`/`varchar`/`json` the binary bytes *are* the UTF-8 text, so a raw
+/// read yields the right string; but `uuid` (16 raw bytes), `timestamptz`/`timestamp` (an
+/// i64 of microseconds since 2000-01-01), `date` (an i32 of days), and `jsonb` (a version
+/// byte + text) all carry a binary layout that is not their canonical string. Those get an
+/// explicit decoder here so they round-trip as the same string a text-format read (or a
+/// literal) would — the value re-binds correctly (e.g. a keyset cursor's timestamp/uuid
+/// basis compares equal on the next page). Decoders are pure + unit-tested below.
 pub(crate) fn from_pg(row: &PgRow, idx: usize) -> serde_json::Value {
     use serde_json::Value as J;
     let col = row.columns()[idx].type_();
@@ -155,10 +164,16 @@ pub(crate) fn from_pg(row: &PgRow, idx: usize) -> serde_json::Value {
         Type::FLOAT8 => opt(row.get::<_, Option<f64>>(idx), |f| {
             serde_json::Number::from_f64(f).map_or(J::Null, J::Number)
         }),
-        // Everything else — text/varchar, uuid, timestamptz/timestamp, date, json/jsonb — is
-        // read as its text representation (a `FromSql` that accepts any OID and hands back the
-        // raw column text), so it rides the wire as a JSON string. This mirrors the MariaDB
-        // driver, where uuid/timestamp/json all come back as strings.
+        // Binary layouts that are not their canonical string — decoded explicitly (see the
+        // doc-comment). Read the raw field bytes (`PgBytes` accepts any OID) and format them.
+        Type::UUID => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_uuid(&b.0)),
+        Type::TIMESTAMPTZ | Type::TIMESTAMP => {
+            opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_timestamp(&b.0))
+        }
+        Type::DATE => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_date(&b.0)),
+        Type::JSONB => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_jsonb(&b.0)),
+        // Everything else — text/varchar, `json`, etc. — has a binary form that *is* its
+        // UTF-8 text, so read it straight as a String (a `FromSql` accepting any OID).
         _ => match row.try_get::<_, Option<PgText>>(idx) {
             Ok(Some(PgText(s))) => J::String(s),
             Ok(None) => J::Null,
@@ -170,6 +185,99 @@ pub(crate) fn from_pg(row: &PgRow, idx: usize) -> serde_json::Value {
             },
         },
     }
+}
+
+/// Postgres's binary temporal epoch: 2000-01-01 is 10957 days after the Unix epoch, the
+/// offset that turns "days since 2000" into the days-since-1970 the civil conversion uses.
+const PG_EPOCH_DAYS_FROM_UNIX: i64 = 10957;
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// A binary `uuid` (16 raw bytes) → the canonical hyphenated `8-4-4-4-12` string. A hex fall
+/// back (via [`from_pg`]) would drop the hyphens — a technically-parseable but non-canonical
+/// form; this emits the real thing.
+fn pg_uuid(b: &[u8]) -> serde_json::Value {
+    if b.len() != 16 {
+        return serde_json::Value::String(hex(b));
+    }
+    let h = hex(b);
+    serde_json::Value::String(format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32],
+    ))
+}
+
+/// A binary `timestamptz`/`timestamp` (an i64 of microseconds since 2000-01-01 UTC) → an
+/// ISO string `YYYY-MM-DD HH:MM:SS[.ffffff]+00` Postgres parses back to the same instant
+/// (so a keyset cursor's timestamp basis compares exactly equal on the next page).
+fn pg_timestamp(b: &[u8]) -> serde_json::Value {
+    let Some(micros) = read_i64(b) else {
+        return serde_json::Value::String(hex(b));
+    };
+    let days = micros.div_euclid(MICROS_PER_DAY);
+    let tod = micros.rem_euclid(MICROS_PER_DAY); // microseconds into the day, always ≥ 0
+    let (y, m, d) = civil_from_days(days + PG_EPOCH_DAYS_FROM_UNIX);
+    let (secs, frac) = (tod / 1_000_000, tod % 1_000_000);
+    let (hh, mm, ss) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let mut s = format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}");
+    if frac != 0 {
+        s.push_str(&format!(".{frac:06}"));
+    }
+    s.push_str("+00");
+    serde_json::Value::String(s)
+}
+
+/// A binary `date` (an i32 of days since 2000-01-01) → an ISO `YYYY-MM-DD` string.
+fn pg_date(b: &[u8]) -> serde_json::Value {
+    let Some(days) = read_i32(b) else {
+        return serde_json::Value::String(hex(b));
+    };
+    let (y, m, d) = civil_from_days(days as i64 + PG_EPOCH_DAYS_FROM_UNIX);
+    serde_json::Value::String(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// A binary `jsonb` (a leading version byte — always `1` today — then the JSON text) → the
+/// JSON text (the wire carries JSON as a string, D1). Strips the version byte a raw read
+/// would otherwise prepend.
+fn pg_jsonb(b: &[u8]) -> serde_json::Value {
+    match b.split_first() {
+        Some((1, rest)) => match std::str::from_utf8(rest) {
+            Ok(s) => serde_json::Value::String(s.to_string()),
+            Err(_) => serde_json::Value::String(hex(b)),
+        },
+        _ => match std::str::from_utf8(b) {
+            Ok(s) => serde_json::Value::String(s.to_string()),
+            Err(_) => serde_json::Value::String(hex(b)),
+        },
+    }
+}
+
+fn read_i64(b: &[u8]) -> Option<i64> {
+    b.try_into().ok().map(i64::from_be_bytes)
+}
+
+fn read_i32(b: &[u8]) -> Option<i32> {
+    b.try_into().ok().map(i32::from_be_bytes)
+}
+
+/// Civil date (year, month, day) from a day count since the Unix epoch (1970-01-01) — Howard
+/// Hinnant's branchless `civil_from_days` algorithm, valid across the whole proleptic
+/// Gregorian range with no date library (principle: no heavyweight dep for a closed-form
+/// calculation). Month is `1..=12`, day `1..=31`.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // day of era, [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era, [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year (Mar-based), [0, 365]
+    let mp = (5 * doy + 2) / 153; // Mar-based month, [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // day, [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // Jan-based month, [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Apply `f` to a fetched `Option<T>`, mapping `None` (SQL NULL) to JSON null.
@@ -484,5 +592,59 @@ mod tests {
     #[test]
     fn hex_of_binary_bytes() {
         assert_eq!(hex(&[0xff, 0x01]), "ff01");
+    }
+
+    /// The binary decoders round-trip a Postgres binary field into its canonical string —
+    /// the fix for reading a `uuid`/`timestamptz`/`date`/`jsonb` result column (rust-postgres
+    /// returns results in *binary* format, so a raw text read mangles these). Proven live in
+    /// `tests/postgres_integration.rs`; here the pure byte→string mapping is unit-covered.
+    #[test]
+    fn binary_uuid_decodes_to_canonical_string() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0xa1,
+        ];
+        assert_eq!(
+            pg_uuid(&bytes),
+            json!("00000000-0000-4000-8000-0000000000a1")
+        );
+        // A wrong length never panics — it falls back to hex.
+        assert_eq!(pg_uuid(&[0x01, 0x02]), json!("0102"));
+    }
+
+    #[test]
+    fn binary_timestamp_decodes_to_iso() {
+        // The Postgres epoch itself (0 microseconds since 2000-01-01 00:00:00 UTC).
+        assert_eq!(
+            pg_timestamp(&0i64.to_be_bytes()),
+            json!("2000-01-01 00:00:00+00")
+        );
+        // One day + 1s500000µs past the epoch → 2000-01-02 00:00:01.500000+00.
+        let micros = MICROS_PER_DAY + 1_500_000;
+        assert_eq!(
+            pg_timestamp(&micros.to_be_bytes()),
+            json!("2000-01-02 00:00:01.500000+00")
+        );
+    }
+
+    #[test]
+    fn binary_date_decodes_to_iso() {
+        assert_eq!(pg_date(&0i32.to_be_bytes()), json!("2000-01-01"));
+        assert_eq!(pg_date(&31i32.to_be_bytes()), json!("2000-02-01"));
+    }
+
+    #[test]
+    fn binary_jsonb_strips_version_byte() {
+        let mut b = vec![1u8];
+        b.extend_from_slice(br#"{"a":1}"#);
+        assert_eq!(pg_jsonb(&b), json!(r#"{"a":1}"#));
+    }
+
+    /// A leap-year boundary the civil conversion must get right (2000 is a leap year).
+    #[test]
+    fn civil_from_days_handles_leap_year() {
+        // 2000-02-29 is day 59 since 2000-01-01.
+        let (y, m, d) = civil_from_days(59 + PG_EPOCH_DAYS_FROM_UNIX);
+        assert_eq!((y, m, d), (2000, 2, 29));
     }
 }

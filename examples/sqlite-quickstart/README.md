@@ -60,8 +60,11 @@ src/main.rs: Compiled::load(schema) ─▶ Engine over SqliteDb ─▶ Client<In
 ## This is the SQLite slice
 
 SQLite needs no live server (bundled, in-memory), so this example builds and runs
-anywhere. The MariaDB and Postgres slices — the same scenario against those servers via
-Docker — are the remaining Track-B sub-items (see the repo `PLAN.md`).
+anywhere. The **same scenario** against a live server lives in the sibling crates
+[`../mariadb-quickstart`](../mariadb-quickstart) and
+[`../postgres-quickstart`](../postgres-quickstart) — identical schema, client, bridge, and
+assertions; they differ only in the driver, the id generator, and the fixture ids (see their
+READMEs). One worked project per target DB.
 
 > Standalone crate, **outside** the cargo workspace (the root `Cargo.toml` `exclude`s
 > `examples/`). It depends on the in-repo engine crates by path, so it always tracks the

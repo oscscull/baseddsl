@@ -1,0 +1,3 @@
+# based project manifest (decisions.md D5). Globs **/*.bsl under this directory.
+dialect = "postgres"
+client  = "rust"

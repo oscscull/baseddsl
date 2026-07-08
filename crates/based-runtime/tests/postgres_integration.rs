@@ -471,6 +471,61 @@ fn offset_pagination_pages_the_set() {
     assert_eq!(p3.body["rows"], json!([{ "name": "e", "rank": 50 }]));
 }
 
+/// `uuid` + `timestamptz` result columns round-trip as canonical strings, and a keyset cursor
+/// whose sort basis is a `timestamptz` (not just an int) walks the set. This is the regression
+/// guard for the binary-format decode fix: rust-postgres returns results in *binary* format, so
+/// a `uuid` arrives as 16 raw bytes and a `timestamptz` as an i64 of microseconds — `from_pg`
+/// now decodes both to their canonical string rather than mangling them (a raw text read dropped
+/// the uuid hyphens and turned the timestamp into hex, which then failed to re-bind on page 2).
+#[test]
+fn uuid_and_timestamp_columns_round_trip_and_keyset() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @sort(id asc)
+        Event { id: text, at: timestamp, label: text }
+        shape EventCard from Event { id, at, label }
+        query events() -> EventCard[] { list Event order (at asc) page (2); }
+        "#,
+    ) else {
+        return;
+    };
+    // `id: text` maps to TEXT here (plain string ids); `at` is a real `timestamptz`. Distinct,
+    // ordered instants so the keyset basis is unambiguous.
+    seed(
+        &container,
+        "INSERT INTO \"event\" (\"id\", \"at\", \"label\") VALUES \
+            ('e1', '2024-01-01 00:00:00+00', 'a'), \
+            ('e2', '2024-01-02 12:30:45.500000+00', 'b'), \
+            ('e3', '2024-01-03 00:00:00+00', 'c');",
+    );
+
+    let page = |args: serde_json::Value| call(&c, &router, "POST", "/q/events", args, json!({}));
+
+    // Page 1: the two earliest events. The `timestamptz` comes back as a canonical ISO string
+    // (decoded from binary microseconds), not hex — proving the fix on the projected column.
+    let p1 = page(json!({}));
+    assert_eq!(p1.status, 200, "{:?}", p1.body);
+    assert_eq!(p1.body["rows"][0]["at"], json!("2024-01-01 00:00:00+00"));
+    assert_eq!(
+        p1.body["rows"][1]["at"],
+        json!("2024-01-02 12:30:45.500000+00")
+    );
+    let cursor = p1.body["cursor"]
+        .as_str()
+        .expect("page 1 cursor")
+        .to_string();
+
+    // Page 2: feeding the cursor back binds the previous row's `timestamptz` basis — which only
+    // works because the decoded string re-binds to the exact same instant (the bug's failure).
+    let p2 = page(json!({ "cursor": cursor }));
+    assert_eq!(p2.status, 200, "{:?}", p2.body);
+    assert_eq!(
+        p2.body["rows"],
+        json!([{ "id": "e3", "at": "2024-01-03 00:00:00+00", "label": "c" }])
+    );
+    assert_eq!(p2.body["cursor"], json!(null), "last page has no cursor");
+}
+
 /// Soft-delete + restore read-back (soft-delete.md / D58), proven live against Postgres. A soft
 /// `delete` rewrites to `deleted_at = now()` (never a real DELETE) and reads the tombstoned row
 /// back in its declared shape (D58 drops the live predicate for a soft delete); the row then

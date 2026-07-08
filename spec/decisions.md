@@ -38,7 +38,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency key fingerprint)
 - **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
 - **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
-  scanner), D38 (Postgres driver + live suite)
+  scanner), D38 (Postgres driver + live suite), D61 (Postgres binary-format result decode: uuid/
+  timestamptz/date/jsonb columns → canonical strings)
 - **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite), D59
   (live pagination + soft-delete/restore coverage on MariaDB/Postgres; Postgres numeric text-bind fix)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
@@ -48,7 +49,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger)
 - **Example projects** — D60 (`examples/` outside the workspace; SQLite quickstart: build-time
-  codegen + in-process `Engine` + typed client, end-to-end scenario)
+  codegen + in-process `Engine` + typed client, end-to-end scenario), D61 (MariaDB + Postgres
+  quickstart slices against live Docker servers; Track B / DoD #2 complete)
 
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
@@ -2066,3 +2068,42 @@ in-process `Engine`** against a live bundled-SQLite database — no socket, no s
   with `examples/` excluded (`cargo test --workspace --all-features`, `fmt --check`, `clippy` all clean,
   example crate included). **Open (B2):** the MariaDB + Postgres slices — the same scenario against those
   servers via Docker.
+
+## D61 — Example projects: the MariaDB + Postgres quickstart slices (Track B / DoD #2 complete)
+The MariaDB + Postgres slices of B2, mirroring the SQLite quickstart (D60) so **all three target
+dialects have a copyable, runnable reference** — one worked project per DB (DoD #2). `examples/mariadb-
+quickstart` and `examples/postgres-quickstart` are standalone crates, workspace-excluded like the SQLite
+one, each with its own gitignored `target/` + committed `Cargo.lock`.
+
+- **Deliberately near-identical to the SQLite slice.** Same `schema/` (`@scope Tenant`, nested to-one
+  `placed_by { name, email }` shape, keyset `page`, soft-delete), same `build.rs` codegen pattern
+  (front end as a library → typed client + DDL into `OUT_DIR`, no checked-in generated code — only the
+  DDL `Dialect` differs), same ~20-line `InProcess` `Transport` bridge, same scenario + assertions
+  (create → read-your-writes → get → list/scope → keyset paginate → soft-delete/restore). *The point of
+  the reference set:* the engine is driver-agnostic, so moving an app between dialects swaps only the
+  driver + manifest `dialect`, nothing else. Three things legitimately differ, all forced by the server:
+  the **driver** (a pooled `ShardRouter`/`MariaDb` resp. `PgRouter`/`PostgresDb` over a live
+  `DATABASE_URL`, checked out as the engine's `Db`, not an in-memory `SqliteDb`), the **id generator**
+  (`UuidGen`, the production one — MariaDB/Postgres native `uuid` id columns reject non-uuid ids, so
+  `SeqIdGen`'s `id-N` won't do), and the **fixture ids** (real v4 UUIDs). Each example resets its three
+  tables on startup (`DROP TABLE IF EXISTS` → generated DDL → seed) so it is re-runnable against a
+  persistent server; MariaDB runs the setup script statement-by-statement over the `Db` seam, Postgres
+  via a one-shot `pg_connect(...).batch_execute(...)`. `DATABASE_URL` env (documented default matching a
+  throwaway Docker server) supplies the connection.
+- **A real Postgres driver bug the example path surfaced + fixed (like D59).** rust-postgres returns
+  result columns in **binary** format (format code 1), but `from_pg` decoded every non-numeric column as
+  raw UTF-8 text. Coincidentally fine for `text`/`int` (which no prior live test exceeded), but a `uuid`
+  arrived as 16 raw bytes (hex-encoded to a *hyphen-less* string — accidentally re-parseable, so it hid)
+  and a `timestamptz` as an i64 of microseconds → hex garbage → `invalid input syntax for type timestamp
+  with time zone` when a keyset cursor fed that value back on page 2. Fixed in `postgres.rs`: `from_pg`
+  now decodes the binary layouts explicitly — `uuid` (16 bytes → canonical `8-4-4-4-12`), `timestamptz`/
+  `timestamp` (µs since 2000-01-01 → ISO `YYYY-MM-DD HH:MM:SS[.ffffff]+00`), `date` (days → `YYYY-MM-DD`,
+  via a dependency-free Hinnant `civil_from_days`), `jsonb` (strip the version byte) — so each round-trips
+  as the same string a text read/literal would and re-binds exactly (keyset equality holds). Pure
+  decoders unit-tested; a live regression test (`uuid_and_timestamp_columns_round_trip_and_keyset`)
+  projects a uuid + `timestamptz` and keyset-pages on the timestamp against a real Postgres.
+- **Gate.** Both examples **build and run green** (`cargo run`) against live `mariadb:11.4` + `postgres:16`
+  (Docker/OrbStack), twice each (proving the reset). `cargo test --workspace --all-features` green
+  (11/11 Postgres live tests incl. the new one), `fmt --check` + `clippy` clean across the workspace and
+  both new example crates, `examples/` still workspace-excluded. **Track B / DoD #2 complete** — a worked,
+  runnable project per target DB (SQLite D60, MariaDB + Postgres D61).

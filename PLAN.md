@@ -44,19 +44,20 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-**Where things stand (as of D60):** the architecture milestones (M2–M6) are done, all three target
+**Where things stand (as of D61):** the architecture milestones (M2–M6) are done, all three target
 dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — including symmetric live coverage of
-keyset/offset pagination + soft-delete/restore (D59) — and **Track L — the language — is now
-feature-complete.** The 2026-07-07 audit's three normal-workday gaps are all closed and proven live:
-nested/relation projection in shapes (to-one D55, to-many incl. self-ref D57), keyset-cursor pagination
-(D56), and update/delete declared-shape re-select (D58). A complete, functional, usable BSL now covers
-ordinary GET/PUT end-to-end (get/list, filters, sort cascade, offset + keyset pagination,
-create/update/delete/restore/`tx`, soft-delete, `@scope`, raw SQL, idempotency, declared-shape
-read-back on every surviving write). **With the language done, the priority shifts to the subordinate
-tracks it gated: DB-verification hardening (A4 — keyset + soft-delete/restore + richer-shape coverage
-under the live MariaDB/Postgres suites) and example projects (B), now unblocked.** The independent
-non-feature tracks — the extension (C4) and migrations (E5) — may still run in parallel (they share no
-files with the rest). Deploy (D) closes it all out. Batch-by-batch history is in `PLAN-archive.md`.
+keyset/offset pagination + soft-delete/restore (D59) — **Track L — the language — is feature-complete**
+(nested/relation projection D55/D57, keyset-cursor pagination D56, update/delete declared-shape re-select
+D58), and **Track B — example projects (DoD #2) — is now COMPLETE**: one copyable, runnable worked project
+per target DB, all three green via `cargo run` (SQLite D60; MariaDB + Postgres against live Docker servers
+D61, which also surfaced + fixed a real Postgres binary-format result-decode bug). A complete, functional,
+usable BSL covers ordinary GET/PUT end-to-end (get/list, filters, sort cascade, offset + keyset pagination,
+create/update/delete/restore/`tx`, soft-delete, `@scope`, raw SQL, idempotency, declared-shape read-back on
+every surviving write). **Remaining on the critical path: DB-verification hardening (A4 — timeouts,
+deadlock-retry, pool-exhaustion under load) and Deploy (D — Dockerfile + CI running the real-DB suites +
+example builds + extension + migration-apply).** The independent non-feature tracks — the extension (C4)
+and migrations (E5) — may still run in parallel (they share no files with the rest). Batch-by-batch history
+is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -74,9 +75,11 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    deadlock-retry, pool-exhaustion — are a separate open track, not a DoD-#1 coverage gap.)
 2. **A real, copyable example project per target DB.** A standalone Rust project (in-repo, **outside**
    the workspace, under `examples/`) consuming the generated client + runtime against a live DB — the
-   thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **🟡 SQLite met
-   (D60)** — `examples/sqlite-quickstart` runs the full create→read-your-writes→list/scope→paginate→
-   soft-delete/restore scenario green via `cargo run`. *Remaining:* MariaDB + Postgres slices (Track B2).
+   thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **✅ Met** — one
+   worked project per dialect, each running the full create→read-your-writes→list/scope→paginate→
+   soft-delete/restore scenario green via `cargo run`: `examples/sqlite-quickstart` (D60, bundled
+   SQLite), `examples/mariadb-quickstart` + `examples/postgres-quickstart` (D61, live `mariadb:11.4` /
+   `postgres:16` via Docker; the Postgres slice surfaced + fixed a real binary-format result-decode bug).
 3. **A functional, installable VS Code extension.** Packaged (`.vsix`), registers `.bsl`, launches
    `based-lsp`, surfaces diagnostics + inlay hints + hover + go-to-def + symbols + completion.
    **✅ Installable (D36); feature-parity fill-in in progress (Track C4).**
@@ -165,8 +168,8 @@ on the critical path.** *Mechanism: Docker (OrbStack).*
   - A4. 🔴 **OPEN. Live-DB hardening** — statement timeouts, deadlock-retry, pool-exhaustion → 503
     under load; verified against the live servers, not just designed.
 
-**Track B — example projects (DoD #2, follows A per DB; the Track L features it exercises are now all
-built — no longer blocked on the language). 🟡 SQLite done (D60), MariaDB + Postgres open.**
+**Track B — example projects (DoD #2). ✅ COMPLETE (B1/B2 SQLite D60, B2 MariaDB + Postgres D61).** One
+worked, runnable project per target DB, all three green via `cargo run`.
   - B1. ✅ **done (D60).** Scaffolded `examples/` as standalone crates **outside** the workspace (root
     `Cargo.toml` `exclude = ["examples"]`, so `cargo test --workspace` never builds them; each has its
     own `target/`, gitignored).
@@ -175,12 +178,14 @@ built — no longer blocked on the language). 🟡 SQLite done (D60), MariaDB + 
     typed client over the in-process `Engine`** against a live bundled-SQLite DB. `build.rs` regenerates
     the client + DDL from the schema each build (no checked-in generated code); `cargo run` executes and
     asserts the end-to-end scenario (create → read-your-writes in declared shape → get → list/scope →
-    keyset paginate → soft-delete/restore round-trip) and exits 0 only if it passes — a copyable
-    reference that doubles as a smoke test.
-  - B2 (MariaDB + Postgres). 🔴 **OPEN.** The same worked scenario against a live MariaDB / Postgres
-    server via Docker (mirroring the A2/A3 harness) — one example crate per dialect, each `cargo run`
-    green against its server. Reuse the sqlite-quickstart shape; swap `Compiled::load`'s dialect + the
-    `Db`/`Backend` (driver/`ShardRouter` vs `PgRouter`) and stand the server up (OrbStack).
+    keyset paginate → soft-delete/restore round-trip) and exits 0 only if it passes.
+  - B2 (MariaDB + Postgres). ✅ **done (D61).** `examples/mariadb-quickstart` + `examples/postgres-
+    quickstart` — the *same* schema/client/bridge/scenario/assertions as the SQLite slice, differing only
+    where the server forces it: the driver (`ShardRouter`/`MariaDb`, `PgRouter`/`PostgresDb` over a live
+    `DATABASE_URL`, checked out as the engine's `Db`), the id generator (`UuidGen` — native `uuid` id
+    columns reject non-uuid ids), and the fixture ids (real UUIDs). Each resets its tables on startup so
+    it is re-runnable; ran green against live `mariadb:11.4` + `postgres:16` (Docker). The Postgres slice
+    surfaced + fixed a real driver bug (binary-format result decode for uuid/timestamptz/date/jsonb, D61).
 
 **Track C — VS Code extension (DoD #3, independent, may run in parallel).**
   - C1/C2. ✅ **done (D36).** Scaffolded `editors/vscode/` (TS + `vscode-languageclient`): `.bsl`
@@ -304,7 +309,7 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
-| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4 — timeouts/deadlock-retry/pool-exhaustion); container image (Track D1); durable multi-instance idempotency store. |
+| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4 — timeouts/deadlock-retry/pool-exhaustion); container image (Track D1); durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
 
