@@ -6,6 +6,8 @@
 //! regardless of which database dialect serves it. So they live here, feature-free, rather
 //! than in a driver module gated behind one backend's crate.
 
+use std::time::Duration;
+
 /// A physical shard's identity: its index into a router's shard list.
 pub type ShardId = usize;
 
@@ -16,19 +18,36 @@ pub type ShardId = usize;
 /// to 4096 physical shards, and any split moves whole logical shards, never rehashes keys).
 pub const LOGICAL_SHARDS: usize = 4096;
 
-/// Bounded per-shard pool sizing. The `max` is the concurrency ceiling against one database
-/// box (protecting it under load); `min` keeps warm connections ready.
+/// Bounded per-shard pool sizing + the live-DB hardening timeouts (D65). The `max` is the
+/// concurrency ceiling against one database box (protecting it under load); `min` keeps warm
+/// connections ready. The two timeouts turn "wait forever" hangs into fast, retryable `503`s.
 #[derive(Debug, Clone, Copy)]
 pub struct PoolConfig {
     pub min: usize,
     pub max: usize,
+    /// Max time a checkout waits for a free connection before failing with a
+    /// [`DbErrorKind::PoolExhausted`](crate::run::DbErrorKind::PoolExhausted) `503` (D65).
+    /// Bounds pool saturation to a fast failure the client/LB retries, never an unbounded
+    /// hang that ties up a worker thread.
+    pub checkout_timeout: Duration,
+    /// Server-side per-statement timeout: a query/mutation running longer is aborted by the
+    /// server and surfaces as a `503` (D65) rather than hanging a connection (MariaDB
+    /// `max_statement_time`, Postgres `statement_timeout`). `ZERO` disables it.
+    pub statement_timeout: Duration,
 }
 
 impl Default for PoolConfig {
     /// A conservative default: a small warm floor, a bounded ceiling well under a database
-    /// box's connection limit (scale for load by adding shards + instances).
+    /// box's connection limit (scale for load by adding shards + instances), a few-second
+    /// checkout wait, and a generous per-statement ceiling (D65 — a hardening backstop for a
+    /// runaway query, not a tight SLA; a deployment tightens it).
     fn default() -> PoolConfig {
-        PoolConfig { min: 4, max: 32 }
+        PoolConfig {
+            min: 4,
+            max: 32,
+            checkout_timeout: Duration::from_secs(5),
+            statement_timeout: Duration::from_secs(30),
+        }
     }
 }
 

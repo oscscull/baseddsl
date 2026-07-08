@@ -22,12 +22,25 @@
 //! compile-verified here; the value conversions ([`to_mysql`]/[`from_mysql`]) are pure
 //! and unit-tested below.
 
+use std::time::Duration;
+
 use mysql::prelude::Queryable;
 use mysql::{Opts, OptsBuilder, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Value};
 
-use crate::run::{Backend, Db, DbError, Row};
+use crate::run::{Backend, Db, DbError, DbErrorKind, Row};
 use crate::shard::{fnv1a_64, LOGICAL_SHARDS};
 use crate::value::SqlValue;
+
+/// MariaDB deadlock (1213, `ER_LOCK_DEADLOCK`) and lock-wait timeout (1205,
+/// `ER_LOCK_WAIT_TIMEOUT`): the server rolled the transaction back for lock contention, so
+/// the mutation path may retry it (D65). Everything else is an opaque operational `503`.
+fn map_mysql_err(e: mysql::Error) -> DbError {
+    let kind = match &e {
+        mysql::Error::MySqlError(se) if se.code == 1213 || se.code == 1205 => DbErrorKind::Deadlock,
+        _ => DbErrorKind::Other,
+    };
+    DbError::of(kind, e.to_string())
+}
 
 // The shard-routing primitives now live in the backend-agnostic `crate::shard` module (a
 // key must route identically to MariaDB or Postgres). Re-exported here so the historical
@@ -126,12 +139,12 @@ impl Db for MariaDb {
         let result = self
             .conn
             .exec_iter(sql, Self::positional(params))
-            .map_err(|e| DbError::new(e.to_string()))?;
+            .map_err(map_mysql_err)?;
         let mut rows = Vec::new();
         // Build each row from its column names (the SELECT aliases each projection to
         // its output name, so a row is already the response object).
         for row in result {
-            let row = row.map_err(|e| DbError::new(e.to_string()))?;
+            let row = row.map_err(map_mysql_err)?;
             let cols = row.columns();
             let mut obj = serde_json::Map::with_capacity(cols.len());
             for (col, val) in cols.iter().zip(row.unwrap()) {
@@ -145,24 +158,20 @@ impl Db for MariaDb {
     fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
         self.conn
             .exec_drop(sql, Self::positional(params))
-            .map_err(|e| DbError::new(e.to_string()))?;
+            .map_err(map_mysql_err)?;
         Ok(self.conn.affected_rows())
     }
 
     fn begin(&mut self) -> Result<(), DbError> {
         self.conn
             .query_drop("START TRANSACTION")
-            .map_err(|e| DbError::new(e.to_string()))
+            .map_err(map_mysql_err)
     }
     fn commit(&mut self) -> Result<(), DbError> {
-        self.conn
-            .query_drop("COMMIT")
-            .map_err(|e| DbError::new(e.to_string()))
+        self.conn.query_drop("COMMIT").map_err(map_mysql_err)
     }
     fn rollback(&mut self) -> Result<(), DbError> {
-        self.conn
-            .query_drop("ROLLBACK")
-            .map_err(|e| DbError::new(e.to_string()))
+        self.conn.query_drop("ROLLBACK").map_err(map_mysql_err)
     }
 }
 
@@ -176,6 +185,8 @@ pub struct ShardRouter {
     shards: Vec<Pool>,
     /// `logical shard → physical shard index`; length is always [`LOGICAL_SHARDS`].
     assign: Vec<ShardId>,
+    /// Max wait for a free connection before a checkout fails fast as pool-exhausted (D65).
+    checkout_timeout: Duration,
 }
 
 impl ShardRouter {
@@ -195,7 +206,11 @@ impl ShardRouter {
         // the default balance; a deployment can later hand-assign to move hot shards.
         let n = shards.len();
         let assign = (0..LOGICAL_SHARDS).map(|i| i % n).collect();
-        Ok(ShardRouter { shards, assign })
+        Ok(ShardRouter {
+            shards,
+            assign,
+            checkout_timeout: pool.checkout_timeout,
+        })
     }
 
     /// The common case: one physical shard (all logical shards map to it). The router
@@ -215,13 +230,23 @@ impl ShardRouter {
         self.checkout_shard(self.shard_for(key))
     }
 
-    /// Check out a connection to a specific physical shard.
+    /// Check out a connection to a specific physical shard. Waits at most the configured
+    /// `checkout_timeout` for a free connection, then fails fast as pool-exhausted (D65) —
+    /// a saturated pool becomes a retryable `503`, never a hung worker.
     pub fn checkout_shard(&self, shard: ShardId) -> Result<MariaDb, DbError> {
         let pool = self
             .shards
             .get(shard)
             .ok_or_else(|| DbError::new(format!("no shard {shard}")))?;
-        let conn = pool.get_conn().map_err(|e| DbError::new(e.to_string()))?;
+        let conn = pool.try_get_conn(self.checkout_timeout).map_err(|e| {
+            DbError::of(
+                DbErrorKind::PoolExhausted,
+                format!(
+                    "connection pool exhausted (waited {:?}): {e}",
+                    self.checkout_timeout
+                ),
+            )
+        })?;
         Ok(MariaDb::new(conn))
     }
 
@@ -255,13 +280,21 @@ impl Backend for ShardRouter {
     }
 }
 
-/// Build one shard's bounded connection pool from a `mysql://…` URL.
+/// Build one shard's bounded connection pool from a `mysql://…` URL. Each new connection
+/// runs an `init` that sets the session `max_statement_time` (D65) — MariaDB's per-query
+/// server-side timeout (seconds; unlike MySQL's SELECT-only `max_execution_time`, it caps
+/// *every* statement), so a runaway query is aborted rather than hanging the connection.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<Pool, DbError> {
     let opts = Opts::from_url(url).map_err(|e| DbError::new(format!("bad database url: {e}")))?;
     let constraints = PoolConstraints::new(cfg.min, cfg.max)
         .ok_or_else(|| DbError::new("pool min must be <= max"))?;
-    let builder =
+    let mut builder =
         OptsBuilder::from_opts(opts).pool_opts(PoolOpts::new().with_constraints(constraints));
+    if cfg.statement_timeout > Duration::ZERO {
+        // `max_statement_time` is a float number of seconds; sub-second is honoured.
+        let secs = cfg.statement_timeout.as_secs_f64();
+        builder = builder.init(vec![format!("SET SESSION max_statement_time = {secs}")]);
+    }
     Pool::new(builder).map_err(|e| DbError::new(format!("connecting to shard: {e}")))
 }
 

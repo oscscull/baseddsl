@@ -108,7 +108,7 @@ pub use migrate::{
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };
-pub use run::{run_mutation, run_query, Backend, Db, DbError, MockDb, Row, RunError};
+pub use run::{run_mutation, run_query, Backend, Db, DbError, DbErrorKind, MockDb, Row, RunError};
 pub use serve::{dispatch, preflight, WireResponse};
 pub use value::SqlValue;
 

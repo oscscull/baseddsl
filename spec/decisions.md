@@ -37,14 +37,17 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
-  idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency key fingerprint)
+  idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency key fingerprint),
+  D65 (live-DB hardening: statement timeouts, bounded deadlock-retry, pool-exhaustion→fast-503)
 - **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
 - **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
   scanner), D38 (Postgres driver + live suite), D61 (Postgres binary-format result decode: uuid/
-  timestamptz/date/jsonb columns → canonical strings)
+  timestamptz/date/jsonb columns → canonical strings), D65 (per-dialect statement-timeout + deadlock/
+  pool-exhaustion classification via `DbErrorKind`)
 - **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite), D59
   (live pagination + soft-delete/restore coverage on MariaDB/Postgres; Postgres numeric text-bind fix),
-  D64 (`TEST_*_URL` env override: live suites connect to a provided server instead of self-spinning)
+  D64 (`TEST_*_URL` env override: live suites connect to a provided server instead of self-spinning),
+  D65 (live hardening tests: statement-timeout abort, crossed-lock deadlock, fast pool-exhaustion)
 - **CI / deploy (keep-proven)** — D64 (Track D2 CI: portable `make` targets + `.github/workflows/ci.yml`
   thin example wrapper; env-URL override, readiness-wait, migrate-apply/examples/extension in CI)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
@@ -2242,3 +2245,54 @@ Dockerfile/image) stays open — a separate iteration.
   path); `fmt --check` + `clippy -D warnings` clean; all portable targets ran green locally against
   live `mariadb:11.4` + `postgres:16` — both live suites + `migrate apply` against provided URLs,
   all three example scenarios, and the extension `.vsix` packaged.
+
+## D65 — Live-DB hardening: statement timeouts, deadlock-retry, pool-exhaustion→fast-503
+
+Track A4 (DoD #1 hardening). A dependable engine must not *hang* under adverse live conditions —
+a runaway query, a lock conflict, or a saturated pool. Three per-dialect mechanisms, all classified
+through one runtime seam and proven against live `mariadb:11.4` + `postgres:16` (not just designed).
+
+- **One classification seam: `DbError.kind: DbErrorKind`.** `DbError` grew a `kind`
+  (`Other` | `Deadlock` | `PoolExhausted`, `#[default] Other`). Every `DbError` is still the wire's
+  `503`; the kind only changes *engine* behaviour: `Deadlock` is retried, the rest fail through. Each
+  driver maps its own server error codes (the runtime stays dialect-neutral): MariaDB 1213/1205 →
+  `Deadlock`, Postgres `40P01`/`40001` → `Deadlock` (a `57014` statement-timeout cancel stays `Other`
+  — retrying would just time out again), SQLite `SQLITE_BUSY`/`SQLITE_LOCKED` → `Deadlock`; a checkout
+  wait that times out → `PoolExhausted`. `DbError::new` keeps the `Other` default so no call site broke.
+
+- **Statement timeouts (server-side, per-dialect).** A query/mutation past a ceiling is aborted *by
+  the server*, surfacing as a `503` rather than holding a connection. MariaDB sets session
+  `max_statement_time` (seconds; unlike MySQL's SELECT-only `max_execution_time` it caps *every*
+  statement) via the pool's per-connection `init`; Postgres sets `statement_timeout` (ms) as a startup
+  `options` param so it applies to every statement on a pooled connection; SQLite sets a bounded
+  `busy_timeout` on open (the realistic under-contention concern for a file DB). Configured on
+  `PoolConfig.statement_timeout` (`Duration::ZERO` disables); default 30s — a runaway-query backstop,
+  not a tight SLA a deployment tightens.
+
+- **Deadlock-retry (bounded, with backoff).** A deadlock/serialization abort rolled the transaction
+  back server-side, so re-running it usually succeeds once the winner commits. `run::apply` now wraps
+  the transaction (`apply_once`) in a loop: on a `Deadlock`-kind error it re-runs the *whole* tx up to
+  `TX_RETRY_LIMIT` (5) times with a short exponential+jittered backoff (≤100ms; jitter so two
+  deadlocked txns don't collide in lockstep), then surfaces the `503`. Bounded so a pathological hot
+  row fails fast, not forever. Retries only the write path (reads that fail are the client's to retry).
+
+- **Pool-exhaustion → fast 503, never a hang.** A saturated pool must fail fast so a worker thread is
+  never tied up unboundedly. `PoolConfig.checkout_timeout` (default 5s) bounds the wait: the MariaDB
+  router uses `try_get_conn(timeout)` (the `mysql` pool otherwise blocks indefinitely), the Postgres
+  router sets r2d2's `connection_timeout`; both map a checkout timeout to `PoolExhausted` → the HTTP
+  edge's existing checkout-failure→503 path (D21). `PoolConfig` gained the two `Duration` fields
+  (stays `Copy`); `based serve` fills pool sizing from its flags and keeps the timeout defaults.
+
+- **Verified live (the DoD bar).** New live tests in `tests/{mariadb,postgres}_integration.rs`
+  (feature `docker-tests`, against real containers): (1) `SELECT SLEEP(5)`/`pg_sleep(5)` under a 500ms
+  timeout returns an error in <3s, not after the full sleep; (2) two threads lock two rows in opposite
+  order behind a `Barrier` (deterministic crossed-lock) → exactly one side aborts with a `Deadlock`
+  kind, the other commits; (3) a pool of one with a held connection fails the next checkout fast as
+  `PoolExhausted`, not a hang. The retry *loop* (retries-then-commit + gives-up-after-bound) is
+  unit-proven with a fake `Db` in `tests/mutation.rs` (deterministic, no reliance on racing a server
+  to hit the exact retry path), and SQLite `SQLITE_BUSY`→`Deadlock` classification is unit-proven
+  against a real two-connection file DB in `sqlite.rs`.
+
+- **Gate.** `cargo test --workspace --all-features` green *with Docker up* — the three MariaDB + three
+  Postgres hardening tests booted real `mariadb:11.4`/`postgres:16` containers and passed (MariaDB
+  suite 13, Postgres 14); `fmt --check` + `clippy --all-features` clean.

@@ -816,9 +816,12 @@ fn cmd_serve(
     let dialect = Dialect::parse(&project.manifest.dialect);
     let compiled = Compiled::from_checked(schema, decls, dialect);
 
+    // Pool sizing from the flags; the hardening timeouts (checkout + statement, D65) keep
+    // their conservative defaults (a saturated pool → fast 503, a runaway query aborted).
     let pool = PoolConfig {
         min: pool_min,
         max: pool_max,
+        ..PoolConfig::default()
     };
     let router = ShardRouter::new(&urls, pool)
         .map_err(|e| anyhow::anyhow!("connecting to database: {}", e.message))?;

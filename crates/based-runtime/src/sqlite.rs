@@ -24,12 +24,19 @@
 //! MariaDB (D20's scale-out model), not many SQLite connections.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::types::{Value as SqlV, ValueRef};
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode};
 
-use crate::run::{Backend, Db, DbError, Row};
+use crate::run::{Backend, Db, DbError, DbErrorKind, Row};
 use crate::value::SqlValue;
+
+/// How long a locked SQLite database waits for the lock to clear before returning
+/// `SQLITE_BUSY` (D65). SQLite serializes writers, so under a concurrent writer (another
+/// process on a file DB) a checkout would otherwise fail instantly; the busy timeout lets it
+/// wait a bounded moment, and a genuine timeout then surfaces as a retryable deadlock.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One shared SQLite connection behind a `Mutex`. Cloning a [`SqliteDb`] (via the
 /// backend handing out clones) shares the same underlying connection, so an in-memory
@@ -39,8 +46,11 @@ pub struct SqliteDb {
 }
 
 impl SqliteDb {
-    /// Wrap an already-open connection as a shareable [`Db`].
+    /// Wrap an already-open connection as a shareable [`Db`]. Sets a bounded `busy_timeout`
+    /// (D65) so a momentarily-locked database waits rather than failing a writer instantly.
     pub fn new(conn: Connection) -> SqliteDb {
+        // Best effort: a driver that rejects the pragma still works, just without the wait.
+        let _ = conn.busy_timeout(BUSY_TIMEOUT);
         SqliteDb {
             conn: Arc::new(Mutex::new(conn)),
         }
@@ -212,9 +222,19 @@ impl Backend for SqliteBackend {
     }
 }
 
-/// Map a `rusqlite` error to the runtime's [`DbError`] (→ the wire's retryable `503`).
+/// Map a `rusqlite` error to the runtime's [`DbError`] (→ the wire's retryable `503`). A
+/// `SQLITE_BUSY`/`SQLITE_LOCKED` (a writer lost the lock race after the busy timeout) is a
+/// deadlock-class failure the mutation path may retry (D65); everything else is opaque.
 fn dberr(e: rusqlite::Error) -> DbError {
-    DbError::new(e.to_string())
+    let kind = match &e {
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+        {
+            DbErrorKind::Deadlock
+        }
+        _ => DbErrorKind::Other,
+    };
+    DbError::of(kind, e.to_string())
 }
 
 /// A poisoned connection mutex (a prior holder panicked mid-statement) is an operational
@@ -310,5 +330,31 @@ mod tests {
     #[test]
     fn ping_ok_on_a_live_db() {
         assert!(SqliteBackend::in_memory().unwrap().ping().is_ok());
+    }
+
+    #[test]
+    fn busy_lock_is_classified_as_a_retryable_deadlock() {
+        // A real SQLite `SQLITE_BUSY` maps to the deadlock kind (D65) so the mutation path
+        // retries it. Two connections to one file DB: A holds a write lock, B (busy_timeout
+        // 0, so it fails immediately rather than waiting) hits BUSY on its own write lock.
+        let path = std::env::temp_dir().join(format!("based_busy_{}.db", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        let a = Connection::open(path_str).unwrap();
+        a.execute_batch("CREATE TABLE IF NOT EXISTS t (id INTEGER)")
+            .unwrap();
+        a.execute_batch("BEGIN IMMEDIATE").unwrap(); // A now holds the reserved write lock
+
+        let b = Connection::open(path_str).unwrap();
+        b.busy_timeout(Duration::ZERO).unwrap(); // don't wait — surface BUSY at once
+        let err = b.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+        assert_eq!(
+            dberr(err).kind,
+            DbErrorKind::Deadlock,
+            "SQLITE_BUSY should be a retryable deadlock-class failure"
+        );
+
+        let _ = a.execute_batch("ROLLBACK");
+        drop((a, b));
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -29,15 +29,35 @@
 //! below (like `from_mysql`); connecting/executing can only be compile-verified here and is
 //! proven by `tests/postgres_integration.rs` against a live server.
 
+use std::time::Duration;
+
 use bytes::BytesMut;
+use postgres::error::SqlState;
 use postgres::types::{to_sql_checked, Format, IsNull, ToSql, Type};
 use postgres::{Client, NoTls, Row as PgRow};
 use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
 
-use crate::run::{Backend, Db, DbError, Row};
+use crate::run::{Backend, Db, DbError, DbErrorKind, Row};
 use crate::shard::{fnv1a_64, PoolConfig, ShardId, LOGICAL_SHARDS};
 use crate::value::SqlValue;
+
+/// Postgres deadlock (`40P01`, `deadlock_detected`) and serialization failure (`40001`): the
+/// server rolled the transaction back for a concurrency conflict, so the mutation path may
+/// retry it (D65). A `statement_timeout` cancel (`57014`) is *not* retried — re-running would
+/// just time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
+fn map_pg_err(e: postgres::Error) -> DbError {
+    let kind = match e.code() {
+        Some(c)
+            if *c == SqlState::T_R_DEADLOCK_DETECTED
+                || *c == SqlState::T_R_SERIALIZATION_FAILURE =>
+        {
+            DbErrorKind::Deadlock
+        }
+        _ => DbErrorKind::Other,
+    };
+    DbError::of(kind, e.to_string())
+}
 
 /// A pooled connection type: the `r2d2` manager over the sync `postgres` client, no TLS
 /// (mirrors the MariaDB driver's TLS-off choice — no system OpenSSL dependency; a
@@ -354,7 +374,7 @@ impl Db for PostgresDb {
         let rows = self
             .conn
             .query(sql, &Self::params(&bound))
-            .map_err(|e| DbError::new(e.to_string()))?;
+            .map_err(map_pg_err)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             let cols = row.columns();
@@ -373,23 +393,17 @@ impl Db for PostgresDb {
         let bound: Vec<PgValue> = params.iter().map(PgValue::from).collect();
         self.conn
             .execute(sql, &Self::params(&bound))
-            .map_err(|e| DbError::new(e.to_string()))
+            .map_err(map_pg_err)
     }
 
     fn begin(&mut self) -> Result<(), DbError> {
-        self.conn
-            .batch_execute("BEGIN")
-            .map_err(|e| DbError::new(e.to_string()))
+        self.conn.batch_execute("BEGIN").map_err(map_pg_err)
     }
     fn commit(&mut self) -> Result<(), DbError> {
-        self.conn
-            .batch_execute("COMMIT")
-            .map_err(|e| DbError::new(e.to_string()))
+        self.conn.batch_execute("COMMIT").map_err(map_pg_err)
     }
     fn rollback(&mut self) -> Result<(), DbError> {
-        self.conn
-            .batch_execute("ROLLBACK")
-            .map_err(|e| DbError::new(e.to_string()))
+        self.conn.batch_execute("ROLLBACK").map_err(map_pg_err)
     }
 }
 
@@ -439,15 +453,21 @@ impl PgRouter {
         self.checkout_shard(self.shard_for(key))
     }
 
-    /// Check out a connection to a specific physical shard.
+    /// Check out a connection to a specific physical shard. `r2d2` waits at most the pool's
+    /// configured `connection_timeout` (from [`PoolConfig::checkout_timeout`]) for a free
+    /// connection, then errors — a saturated pool becomes a fast, retryable pool-exhausted
+    /// `503` (D65), never a hung worker.
     pub fn checkout_shard(&self, shard: ShardId) -> Result<PostgresDb, DbError> {
         let pool = self
             .shards
             .get(shard)
             .ok_or_else(|| DbError::new(format!("no shard {shard}")))?;
-        let conn = pool
-            .get()
-            .map_err(|e: r2d2::Error| DbError::new(e.to_string()))?;
+        let conn = pool.get().map_err(|e: r2d2::Error| {
+            DbError::of(
+                DbErrorKind::PoolExhausted,
+                format!("connection pool exhausted: {e}"),
+            )
+        })?;
         Ok(PostgresDb::new(conn))
     }
 
@@ -478,15 +498,24 @@ impl Backend for PgRouter {
     }
 }
 
-/// Build one shard's bounded connection pool from a `postgres://…` URL.
+/// Build one shard's bounded connection pool from a `postgres://…` URL. The pool's
+/// `connection_timeout` is the checkout wait (pool-exhaustion → fast `503`, D65), and the
+/// server-side `statement_timeout` (D65) is set as a startup option so every statement on a
+/// pooled connection is capped — a runaway query is cancelled (`57014`) rather than hanging.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<PgPool, DbError> {
-    let config = url
+    let mut config = url
         .parse::<postgres::Config>()
         .map_err(|e| DbError::new(format!("bad database url: {e}")))?;
+    if cfg.statement_timeout > Duration::ZERO {
+        // Startup `options` apply the timeout to every statement on the connection (ms).
+        let ms = cfg.statement_timeout.as_millis();
+        config.options(&format!("-c statement_timeout={ms}"));
+    }
     let manager = PostgresConnectionManager::new(config, NoTls);
     Pool::builder()
         .min_idle(Some(cfg.min as u32))
         .max_size(cfg.max as u32)
+        .connection_timeout(cfg.checkout_timeout)
         .build(manager)
         .map_err(|e| DbError::new(format!("connecting to shard: {e}")))
 }

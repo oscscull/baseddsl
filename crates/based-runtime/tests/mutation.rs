@@ -335,3 +335,94 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     assert_eq!(db.calls.len(), 3);
     assert!(db.calls[2].0.starts_with("SELECT"), "{}", db.calls[2].0);
 }
+
+// ---------- deadlock-retry (D65) -------------------------------------------
+
+use based_runtime::{DbError, DbErrorKind, Row, RunError};
+
+/// A `Db` that fails its first `deadlocks` transaction attempts with a deadlock-class
+/// error, then succeeds — modelling a real server aborting the losing side of a lock
+/// conflict (D65). Each attempt is one `begin → execute → fetch(re-select) → commit`
+/// cycle; the deadlock fires on the first `execute` (as a real server would, mid-write),
+/// so the engine rolls back and re-runs the whole transaction.
+struct DeadlockThenOk {
+    deadlocks: u32,
+    executes: u32,
+    reselect: Vec<Row>,
+}
+
+impl based_runtime::Db for DeadlockThenOk {
+    fn fetch(&mut self, _sql: &str, _params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
+        Ok(self.reselect.clone())
+    }
+    fn execute(&mut self, _sql: &str, _params: &[SqlValue]) -> Result<u64, DbError> {
+        self.executes += 1;
+        if self.deadlocks > 0 {
+            self.deadlocks -= 1;
+            return Err(DbError::of(
+                DbErrorKind::Deadlock,
+                "deadlock found; try again",
+            ));
+        }
+        Ok(1)
+    }
+}
+
+#[test]
+fn mutation_retries_a_deadlocked_transaction_then_commits() {
+    // The write body deadlocks twice, then commits on the third attempt — the engine
+    // re-runs the whole transaction each time and returns the declared-shape re-select.
+    let c = compile(CREATE_SCHEMA);
+    let mut db = DeadlockThenOk {
+        deadlocks: 2,
+        executes: 0,
+        reselect: vec![row(json!({ "total": 42 }))],
+    };
+    let out = run_mutation(
+        &c,
+        &mut db,
+        &mut SeqIdGen::default(),
+        &NoStore,
+        &req(
+            "place_order",
+            json!({ "org": "o-1", "buyer": "u-1", "total": 42 }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(out, json!({ "total": 42 }));
+    // Three attempts total: two deadlocked INSERTs + one that committed.
+    assert_eq!(db.executes, 3);
+}
+
+#[test]
+fn mutation_gives_up_after_bounded_deadlock_retries() {
+    // A row that always deadlocks exhausts the bounded retries and surfaces a DbError
+    // (→ the wire's 503) rather than retrying forever — fail fast, not a hang.
+    let c = compile(CREATE_SCHEMA);
+    let mut db = DeadlockThenOk {
+        deadlocks: u32::MAX,
+        executes: 0,
+        reselect: vec![row(json!({ "total": 1 }))],
+    };
+    let err = run_mutation(
+        &c,
+        &mut db,
+        &mut SeqIdGen::default(),
+        &NoStore,
+        &req(
+            "place_order",
+            json!({ "org": "o-1", "buyer": "u-1", "total": 1 }),
+        ),
+    )
+    .unwrap_err();
+    match err {
+        RunError::Db(e) => assert_eq!(e.kind, DbErrorKind::Deadlock),
+        other => panic!("expected a deadlock DbError, got {other:?}"),
+    }
+    // Bounded: the initial attempt + a fixed number of retries, never unbounded.
+    assert!(
+        db.executes >= 2 && db.executes <= 8,
+        "attempts should be bounded, got {}",
+        db.executes
+    );
+}

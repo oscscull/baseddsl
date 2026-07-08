@@ -53,8 +53,10 @@ per target DB, all three green via `cargo run` (SQLite D60; MariaDB + Postgres a
 D61, which also surfaced + fixed a real Postgres binary-format result-decode bug). A complete, functional,
 usable BSL covers ordinary GET/PUT end-to-end (get/list, filters, sort cascade, offset + keyset pagination,
 create/update/delete/restore/`tx`, soft-delete, `@scope`, raw SQL, idempotency, declared-shape read-back on
-every surviving write). **Remaining on the critical path: DB-verification hardening (A4 — timeouts,
-deadlock-retry, pool-exhaustion under load) and Deploy Track D1 (the `based serve` container image).**
+every surviving write), and **DB-verification hardening is now done (A4/D65)**: statement timeouts,
+deadlock-retry, and pool-exhaustion→fast-503 are built into the drivers + `PoolConfig` and proven live
+against `mariadb:11.4`/`postgres:16`. **Remaining on the critical path: Deploy Track D1 (the `based serve`
+container image).**
 Track D2 — CI running the real-DB suites + example builds + extension + migration-apply — is **done (D64)**:
 portable `make` targets (env-URL override so the live suites hit a provided CI DB, readiness-wait, per-test
 reset) + a thin `.github/workflows/ci.yml`, proven green locally. The independent non-feature tracks — the
@@ -73,8 +75,8 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    (read-your-writes), pagination, soft-delete/restore, idempotency dedupe, `Backend::ping`.
    **✅ Met** — SQLite (D27), MariaDB Docker (D35), Postgres Docker (D38). Keyset + offset pagination
    and soft-delete/restore read-back are now proven live on **all three** dialects (SQLite D56/D58,
-   MariaDB + Postgres D59), so the per-DB coverage is symmetric. (The A4 *hardening* items — timeouts,
-   deadlock-retry, pool-exhaustion — are a separate open track, not a DoD-#1 coverage gap.)
+   MariaDB + Postgres D59), so the per-DB coverage is symmetric. The A4 *hardening* items — statement
+   timeouts, deadlock-retry, pool-exhaustion→fast-503 — are also **done and proven live (D65)**.
 2. **A real, copyable example project per target DB.** A standalone Rust project (in-repo, **outside**
    the workspace, under `examples/`) consuming the generated client + runtime against a live DB — the
    thing a user copies to start. Builds in CI, doubles as an end-to-end smoke test. **✅ Met** — one
@@ -170,8 +172,16 @@ on the critical path.** *Mechanism: Docker (OrbStack).*
     MariaDB/Postgres (mirroring the SQLite live tests), so DoD #1 is symmetric across all three
     dialects. Surfaced + fixed a real Postgres bug: numeric binds now go in **text format** (a binary
     i64 mismatched the `int4` Postgres infers from the keyset guard's `:keyset_active = 0` literal).
-  - A4. 🔴 **OPEN. Live-DB hardening** — statement timeouts, deadlock-retry, pool-exhaustion → 503
-    under load; verified against the live servers, not just designed.
+  - A4. ✅ **done (D65). Live-DB hardening** — **statement timeouts** (per-dialect: MariaDB session
+    `max_statement_time`, Postgres startup `statement_timeout`, SQLite `busy_timeout`), **deadlock-retry**
+    (drivers classify 1213/1205 · 40P01/40001 · `SQLITE_BUSY` into `DbErrorKind::Deadlock`; the mutation
+    path re-runs the whole transaction a bounded 5× with jittered backoff, then a 503), and
+    **pool-exhaustion → fast 503** (bounded checkout wait — MariaDB `try_get_conn`, Postgres r2d2
+    `connection_timeout` — surfaced as `DbErrorKind::PoolExhausted`, never a hang). Timeouts live on
+    `PoolConfig` (`checkout_timeout` + `statement_timeout`). **Verified live:** a `SELECT SLEEP/pg_sleep`
+    aborted at the timeout, two crossed-lock concurrent txns deadlock with exactly one aborted + one
+    committed, and a pool-of-one fails the second checkout fast as PoolExhausted — all against live
+    `mariadb:11.4` + `postgres:16` (Docker); the retry loop + SQLite busy classification are unit-proven.
 
 **Track B — example projects (DoD #2). ✅ COMPLETE (B1/B2 SQLite D60, B2 MariaDB + Postgres D61); DX
 rebuild D63.** One worked, runnable project per target DB, all three green via `cargo run`. **DX rebuild
@@ -331,7 +341,7 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57) with an **opt-in in-process embedded bridge** (`ClientOptions::embedded` / `client_with` → emits `client::embedded(&engine)` over `based_runtime::Engine`, so an embedder writes zero `Transport` plumbing; referenced by path, no based-runtime dep; D62); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
 | based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
-| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). `migrate` = live apply + ledger (D42). *Open:* live-DB hardening (Track A4 — timeouts/deadlock-retry/pool-exhaustion); container image (Track D1); durable multi-instance idempotency store. |
+| based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). Live-DB hardening (D65): per-dialect statement timeouts + bounded checkout wait on `PoolConfig`, drivers classify deadlock/serialization codes into `DbErrorKind::Deadlock` (mutation path retries the tx a bounded 5× with backoff) and pool saturation into `DbErrorKind::PoolExhausted` (fast 503), proven live on MariaDB/Postgres. `migrate` = live apply + ledger (D42). *Open:* container image (Track D1); durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
 

@@ -22,6 +22,7 @@
 mod docker_postgres;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
@@ -30,7 +31,7 @@ use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::id::UuidGen;
 use based_runtime::idempotency::{MemStore, NoStore};
-use based_runtime::run::Backend;
+use based_runtime::run::{Backend, Db, DbError, DbErrorKind};
 use based_runtime::shard::PoolConfig;
 use based_runtime::{dispatch, pg_connect, Compiled, PgRouter};
 use based_sema::check;
@@ -599,4 +600,139 @@ fn soft_delete_and_restore_read_back() {
         list().body,
         json!([{ "name": "Alpha" }, { "name": "Beta" }])
     );
+}
+
+// ---------- live-DB hardening (Track A4 / D65) ------------------------------
+
+/// Bring up a live Postgres and build a router with the given [`PoolConfig`] — the seam for
+/// the hardening tests, which each vary one knob (statement timeout, pool size, checkout
+/// wait). Resets the schema so a persistent external server (`TEST_POSTGRES_URL`) is clean.
+/// Returns `None` when Docker is unavailable (the caller skips).
+fn hardening(pool: PoolConfig) -> Option<(PgRouter, PostgresContainer)> {
+    let container = PostgresContainer::start()?;
+    let mut client = pg_connect(&container.url()).expect("setup client");
+    client.batch_execute(RESET_SQL).expect("reset schema");
+    let router = PgRouter::single(&container.url(), pool)
+        .unwrap_or_else(|e| panic!("connect to live Postgres: {e:?}"));
+    Some((router, container))
+}
+
+/// A `statement_timeout` aborts a query that runs too long, live (D65): the server cancels
+/// `pg_sleep(5)` at the 500ms ceiling and the driver surfaces a `DbError` promptly, rather
+/// than the connection hanging for the full sleep.
+#[test]
+fn statement_timeout_aborts_a_long_query() {
+    let pool = PoolConfig {
+        statement_timeout: Duration::from_millis(500),
+        ..PoolConfig::default()
+    };
+    let Some((router, _guard)) = hardening(pool) else {
+        return;
+    };
+    let mut db = router.checkout("").expect("checkout");
+    let start = Instant::now();
+    let res = db.fetch("SELECT pg_sleep(5)", &[]);
+    let elapsed = start.elapsed();
+    assert!(
+        res.is_err(),
+        "a query past statement_timeout must be aborted, not returned: {res:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "aborted at the timeout, not after the full 5s sleep: {elapsed:?}"
+    );
+}
+
+/// A saturated pool fails fast as pool-exhausted (D65), live: with a pool of one, a held
+/// connection means the next checkout waits at most `checkout_timeout` then returns a
+/// [`DbErrorKind::PoolExhausted`] `DbError` (the wire's 503) — never an unbounded hang.
+#[test]
+fn pool_exhaustion_fails_fast() {
+    let pool = PoolConfig {
+        min: 1,
+        max: 1,
+        checkout_timeout: Duration::from_millis(500),
+        statement_timeout: Duration::ZERO,
+    };
+    let Some((router, _guard)) = hardening(pool) else {
+        return;
+    };
+    let _held = router
+        .checkout("")
+        .expect("first checkout holds the only connection");
+    let start = Instant::now();
+    let res = router.checkout("");
+    let elapsed = start.elapsed();
+    match res {
+        Err(e) => assert_eq!(e.kind, DbErrorKind::PoolExhausted, "{}", e.message),
+        Ok(_) => panic!("a pool of one must not hand out a second connection while it is held"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "failed fast at the checkout timeout, not a hang: {elapsed:?}"
+    );
+}
+
+/// Two concurrent transactions that lock the same two rows in opposite order deadlock, live
+/// (D65): the server aborts exactly one side with a deadlock-class error (`40P01`) the driver
+/// classifies as [`DbErrorKind::Deadlock`] (so the mutation path would retry it), and the
+/// other commits. The barrier guarantees both hold their first lock before either reaches for
+/// the second, so the deadlock is deterministic.
+#[test]
+fn concurrent_transactions_surface_a_deadlock() {
+    let Some((router, container)) = hardening(PoolConfig::default()) else {
+        return;
+    };
+    seed(
+        &container,
+        "CREATE TABLE acct (id text primary key, bal int);\n\
+         INSERT INTO acct (id, bal) VALUES ('a', 0), ('b', 0);",
+    );
+    let barrier = std::sync::Barrier::new(2);
+    let (r1, r2) = std::thread::scope(|s| {
+        let h1 = s.spawn(|| cross_lock(&router, "a", "b", &barrier));
+        let h2 = s.spawn(|| cross_lock(&router, "b", "a", &barrier));
+        (h1.join().unwrap(), h2.join().unwrap())
+    });
+    let results = [r1, r2];
+    assert!(
+        results
+            .iter()
+            .any(|r| matches!(r, Err(e) if e.kind == DbErrorKind::Deadlock)),
+        "one side must be aborted with a deadlock-class error: {results:?}"
+    );
+    assert!(
+        results.iter().any(|r| r.is_ok()),
+        "the other side must commit: {results:?}"
+    );
+}
+
+/// One transaction of the crossed-lock deadlock: lock `first`, wait for the peer to lock its
+/// own first row (the barrier), then reach for `second` — the loser is aborted.
+fn cross_lock(
+    router: &PgRouter,
+    first: &str,
+    second: &str,
+    barrier: &std::sync::Barrier,
+) -> Result<(), DbError> {
+    let mut db = router.checkout("")?;
+    db.begin()?;
+    db.execute(
+        &format!("UPDATE acct SET bal = bal + 1 WHERE id = '{first}'"),
+        &[],
+    )?;
+    barrier.wait();
+    match db.execute(
+        &format!("UPDATE acct SET bal = bal + 1 WHERE id = '{second}'"),
+        &[],
+    ) {
+        Ok(_) => {
+            db.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = db.rollback();
+            Err(e)
+        }
+    }
 }

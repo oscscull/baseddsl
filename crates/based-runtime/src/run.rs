@@ -26,16 +26,58 @@ pub type Row = serde_json::Map<String, serde_json::Value>;
 /// down, pool exhausted. Distinct from a [`PlanError`] (a boundary/validation failure
 /// *before* any SQL): a `DbError` is an operational failure the wire maps to a
 /// retryable `503`. The message is human-facing; the driver fills it from its error.
+///
+/// The [`kind`](DbError::kind) is the driver's classification of *how to handle* the
+/// failure (D65): every `DbError` is still a `503`, but a [`Deadlock`](DbErrorKind::Deadlock)
+/// additionally tells the mutation path the transaction is safe to auto-retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbError {
     pub message: String,
+    pub kind: DbErrorKind,
+}
+
+/// The operational class of a [`DbError`], set by the driver from the server's error code
+/// (D65). Only [`Deadlock`](DbErrorKind::Deadlock) changes engine behaviour (bounded
+/// transaction retry); the rest are informational — every kind is still a wire `503`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DbErrorKind {
+    /// An unclassified operational failure (connection lost, a statement timeout, a
+    /// constraint violation). A `503` the caller may retry, but the engine does **not**
+    /// auto-retry — re-running a statement timeout or a lost connection just fails again.
+    #[default]
+    Other,
+    /// A deadlock or serialization failure: the server *already rolled the transaction
+    /// back*, and re-running it usually succeeds (the contending transaction has moved
+    /// on). The mutation path retries the whole transaction a bounded number of times
+    /// (D65). MariaDB 1213/1205, Postgres 40P01/40001, SQLite `SQLITE_BUSY`/`SQLITE_LOCKED`.
+    Deadlock,
+    /// No connection became free within the pool's checkout timeout — the pool is
+    /// saturated. Fails fast as a `503` (the client/LB backs off), never a hang and never
+    /// auto-retried in-process (the pool is still full).
+    PoolExhausted,
 }
 
 impl DbError {
+    /// An unclassified ([`Other`](DbErrorKind::Other)) operational failure.
     pub fn new(message: impl Into<String>) -> DbError {
         DbError {
             message: message.into(),
+            kind: DbErrorKind::Other,
         }
+    }
+
+    /// A failure of a specific operational [`DbErrorKind`] (the driver classifies its own
+    /// error codes into these).
+    pub fn of(kind: DbErrorKind, message: impl Into<String>) -> DbError {
+        DbError {
+            message: message.into(),
+            kind,
+        }
+    }
+
+    /// Is this a deadlock / serialization abort the mutation path may safely retry?
+    pub fn is_deadlock(&self) -> bool {
+        self.kind == DbErrorKind::Deadlock
     }
 }
 
@@ -188,17 +230,55 @@ pub fn run_mutation(
     }
 }
 
-/// Execute a mutation plan's writes in order under one transaction, then assemble the
-/// write response. If any write fails the transaction is rolled back and the error
-/// surfaced — a mutation is all-or-nothing, never a partial write (principle 7,
-/// dependability).
+/// How many times the mutation path re-runs a transaction the server aborted for a
+/// deadlock / serialization conflict before giving up (D65). Bounded so a pathological
+/// hot row fails fast as a `503` rather than retrying forever; a handful of attempts
+/// clears an ordinary two-transaction deadlock (the loser re-runs after the winner
+/// commits). Total attempts = 1 + this.
+const TX_RETRY_LIMIT: u32 = 5;
+
+/// Backoff before re-running a deadlocked transaction: a short exponential step (capped
+/// at 100ms — a deadlock clears in milliseconds once the winner commits) plus jitter, so
+/// two transactions that just deadlocked don't retry in lockstep and collide again.
+fn deadlock_backoff(attempt: u32) -> std::time::Duration {
+    let step_ms = 2u64.saturating_pow(attempt).saturating_mul(2).min(100);
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.subsec_nanos() as u64) % step_ms.max(1))
+        .unwrap_or(0);
+    std::time::Duration::from_millis(step_ms + jitter)
+}
+
+/// Execute a mutation's transaction, retrying the whole thing on a deadlock (D65). A
+/// deadlock/serialization abort ([`DbErrorKind::Deadlock`]) rolled the transaction back
+/// server-side, so re-running it from the top on the same connection usually succeeds once
+/// the contending transaction commits; a bounded [`TX_RETRY_LIMIT`] then a `503` prevents a
+/// hot row retrying forever. Every other failure surfaces immediately (no auto-retry).
+fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
+    let mut attempt = 0u32;
+    loop {
+        match apply_once(db, plan) {
+            Err(e) if e.is_deadlock() && attempt < TX_RETRY_LIMIT => {
+                attempt += 1;
+                std::thread::sleep(deadlock_backoff(attempt));
+                // The server already rolled the aborted transaction back; re-run it.
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Run a mutation plan's writes in order under one transaction, then assemble the write
+/// response. If any write fails the transaction is rolled back and the error surfaced — a
+/// mutation is all-or-nothing, never a partial write (principle 7, dependability). Wrapped
+/// by [`apply`] for the deadlock-retry loop.
 ///
 /// The response is the written row read back in the mutation's **declared shape** (D12
 /// create-keyed / D58 where-keyed): when the plan carries a re-select, it runs inside the
 /// same transaction (read-your-writes, atomic with the writes) and its single row *is* the
 /// response — matching the client's decoded output type. Only a mutation whose row does not
 /// survive the write (a real DELETE) has no re-select and falls back to `{ id }` / `{}`.
-fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
+fn apply_once(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
     db.begin()?;
     for stmt in &plan.stmts {
