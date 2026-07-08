@@ -1,0 +1,12 @@
+{
+  // The `examples/**` crates are deliberately excluded from the root workspace
+  // (see Cargo.toml `exclude`), so rust-analyzer's auto-discovery never loads them.
+  // List each one explicitly here so the editor works inside the examples too.
+  // Note: `linkedProjects` REPLACES auto-discovery — the root "Cargo.toml" must stay.
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "examples/mariadb-quickstart/Cargo.toml",
+    "examples/postgres-quickstart/Cargo.toml",
+    "examples/sqlite-quickstart/Cargo.toml"
+  ]
+}
