@@ -13,6 +13,15 @@
 //! `cargo test --workspace --all-features` stays green on a machine with no Docker — the
 //! real-DB proof runs *when infra is present* and is simply absent otherwise (it never
 //! turns a missing daemon into a red build).
+//!
+//! **CI-provided server ⇒ use it, don't spin one (D64).** When `TEST_MARIADB_URL` is set,
+//! [`MariaDbContainer::start`] connects to *that* server (a CI service container, a shared
+//! dev DB, …) instead of launching its own container — after the same readiness-wait, so the
+//! suite never races a still-booting server. `Drop` then leaves the external server alone.
+//! This is what lets the portable `make ci-live-mariadb` target run the live suite against a
+//! GitHub Actions `services:` container while a laptop with a Docker daemon keeps the
+//! self-spun behaviour with no env set. Because an external server *persists* across tests,
+//! every suite helper resets its tables before creating them (idempotent, re-runnable).
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -27,24 +36,55 @@ const IMAGE: &str = "mariadb:11.4";
 const ROOT_PASSWORD: &str = "based_test_pw";
 const DATABASE: &str = "based_test";
 
+/// The env var that points the suite at an externally-provided server (a CI service
+/// container). When set, the harness connects to it instead of spinning its own container.
+const URL_ENV: &str = "TEST_MARIADB_URL";
+
 /// How long to wait for the freshly-started server to accept a real connection before
 /// giving up (MariaDB's first boot initializes the data dir + creates the database).
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// A running ephemeral MariaDB container. Owns the container's lifetime: [`Drop`] removes
-/// it (force `docker rm`), so a panicking test still cleans up. Hand [`url`] to the driver.
+/// A live MariaDB the suite runs against. Either a **self-spun** ephemeral container (owned:
+/// [`Drop`] force-`docker rm`s it, so a panicking test still cleans up) or an **external**
+/// server named by `TEST_MARIADB_URL` (unowned: `Drop` leaves it alone). Hand [`url`] to the
+/// driver in both cases.
 pub struct MariaDbContainer {
-    id: String,
-    port: u16,
+    kind: Kind,
+}
+
+enum Kind {
+    /// A container this process launched and must remove.
+    Spun { id: String, port: u16 },
+    /// A server provided by the environment (`TEST_MARIADB_URL`); not ours to tear down.
+    External { url: String },
 }
 
 impl MariaDbContainer {
-    /// Start an ephemeral MariaDB and wait until it accepts connections.
+    /// Connect to a live MariaDB and wait until it accepts connections.
     ///
-    /// Returns `None` (after logging why) when Docker is unreachable or the container never
-    /// becomes ready — the caller skips the test rather than failing it. On success the
-    /// returned container is live and its [`url`] connects to an empty `based_test` database.
+    /// Prefers an externally-provided server (`TEST_MARIADB_URL`, e.g. a CI service
+    /// container); otherwise spins an ephemeral container via Docker. Returns `None` (after
+    /// logging why) when neither is reachable/ready — the caller skips the test rather than
+    /// failing it.
     pub fn start() -> Option<MariaDbContainer> {
+        // CI-provided server takes precedence: connect to it after the readiness-wait.
+        if let Ok(url) = std::env::var(URL_ENV) {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                eprintln!("[docker-mariadb] using external {URL_ENV}={url}");
+                if !wait_ready(&url) {
+                    eprintln!(
+                        "[docker-mariadb] SKIP: external server at {URL_ENV} not ready within {}s",
+                        READY_TIMEOUT.as_secs()
+                    );
+                    return None;
+                }
+                return Some(MariaDbContainer {
+                    kind: Kind::External { url },
+                });
+            }
+        }
+
         if !docker_available() {
             eprintln!(
                 "[docker-mariadb] SKIP: Docker daemon not reachable (`docker info` failed). \
@@ -91,9 +131,11 @@ impl MariaDbContainer {
                 return None;
             }
         };
-        let container = MariaDbContainer { id, port };
+        let container = MariaDbContainer {
+            kind: Kind::Spun { id, port },
+        };
 
-        if !container.wait_ready() {
+        if !wait_ready(&container.url()) {
             eprintln!(
                 "[docker-mariadb] SKIP: MariaDB did not become ready within {}s",
                 READY_TIMEOUT.as_secs()
@@ -101,50 +143,56 @@ impl MariaDbContainer {
             // `container` drops here, removing the container.
             return None;
         }
-        eprintln!(
-            "[docker-mariadb] ready: {} on 127.0.0.1:{}",
-            &container.id[..12.min(container.id.len())],
-            container.port
-        );
+        if let Kind::Spun { id, port } = &container.kind {
+            eprintln!(
+                "[docker-mariadb] ready: {} on 127.0.0.1:{}",
+                &id[..12.min(id.len())],
+                port
+            );
+        }
         Some(container)
     }
 
-    /// A `mysql://` URL the `mariadb` driver connects to (root user, the provisioned
-    /// database, on the mapped loopback port).
+    /// A `mysql://` URL the `mariadb` driver connects to: the external URL as-provided, or
+    /// (for a self-spun container) root user + provisioned database on the mapped loopback port.
     pub fn url(&self) -> String {
-        format!(
-            "mysql://root:{ROOT_PASSWORD}@127.0.0.1:{}/{DATABASE}",
-            self.port
-        )
+        match &self.kind {
+            Kind::Spun { port, .. } => {
+                format!("mysql://root:{ROOT_PASSWORD}@127.0.0.1:{port}/{DATABASE}")
+            }
+            Kind::External { url } => url.clone(),
+        }
     }
+}
 
-    /// Poll a real connection until the server answers `SELECT 1` or the timeout elapses.
-    /// A fresh MariaDB rejects connections for a few seconds while it initializes; we retry
-    /// rather than sleeping a fixed amount so a fast machine starts the suite promptly.
-    fn wait_ready(&self) -> bool {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let url = self.url();
-        while Instant::now() < deadline {
-            if let Ok(pool) = mysql::Pool::new(url.as_str()) {
-                if let Ok(mut conn) = pool.get_conn() {
-                    use mysql::prelude::Queryable;
-                    if conn.query_drop("SELECT 1").is_ok() {
-                        return true;
-                    }
+/// Poll a real connection until the server answers `SELECT 1` or the timeout elapses. A fresh
+/// (or still-booting CI) MariaDB rejects connections for a few seconds while it initializes;
+/// we retry rather than sleeping a fixed amount so a ready server starts the suite promptly.
+/// This is the portable readiness-wait — the same poll for a self-spun container and a CI
+/// service container, so `based migrate apply` / the live suite never races a booting DB.
+fn wait_ready(url: &str) -> bool {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(pool) = mysql::Pool::new(url) {
+            if let Ok(mut conn) = pool.get_conn() {
+                use mysql::prelude::Queryable;
+                if conn.query_drop("SELECT 1").is_ok() {
+                    return true;
                 }
             }
-            std::thread::sleep(Duration::from_millis(500));
         }
-        false
+        std::thread::sleep(Duration::from_millis(500));
     }
+    false
 }
 
 impl Drop for MariaDbContainer {
     fn drop(&mut self) {
-        // Force-remove the container (it was started `--rm`, but a stopped-but-not-removed
-        // container or a still-running one both get cleaned up here). Best effort — a failed
-        // teardown must not mask a test result.
-        remove(&self.id);
+        // Force-remove a self-spun container (best effort — a failed teardown must not mask a
+        // test result). An external server (`TEST_MARIADB_URL`) is not ours to remove.
+        if let Kind::Spun { id, .. } = &self.kind {
+            remove(id);
+        }
     }
 }
 

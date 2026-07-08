@@ -85,6 +85,7 @@ fn live() -> Option<(Compiled, PgRouter, PostgresContainer)> {
     // script; the `postgres` driver's `execute` is single-statement).
     let ddl = sql::ddl(&compiled.schema, Dialect::Postgres);
     let mut client = pg_connect(&container.url()).expect("setup client");
+    client.batch_execute(RESET_SQL).expect("reset schema");
     client
         .batch_execute(&ddl)
         .expect("create tables from generated DDL");
@@ -128,11 +129,18 @@ fn live_schema(src: &str) -> Option<(Compiled, PgRouter, PostgresContainer)> {
         .unwrap_or_else(|e| panic!("connect to live Postgres: {e:?}"));
     let ddl = sql::ddl(&compiled.schema, Dialect::Postgres);
     let mut client = pg_connect(&container.url()).expect("setup client");
+    client.batch_execute(RESET_SQL).expect("reset schema");
     client
         .batch_execute(&ddl)
         .expect("create tables from generated DDL");
     Some((compiled, router, container))
 }
+
+/// Drop and recreate the `public` schema before creating tables, so a suite run against a
+/// *persistent* external server (`TEST_POSTGRES_URL`, D64) starts clean and is re-runnable.
+/// `CASCADE` clears tables + the `_based_migrations` ledger in one step; a no-op-equivalent
+/// against a fresh self-spun container.
+const RESET_SQL: &str = "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;";
 
 /// Run a fixture-seed script against the live server through a one-shot client (`batch_execute`
 /// handles a multi-statement script; the pooled driver's `execute` is single-statement).

@@ -12,6 +12,15 @@
 //! clear reason. The suite treats `None` as "skip this test", so `cargo test --workspace
 //! --all-features` stays green on a machine with no Docker — the real-DB proof runs *when
 //! infra is present* and is simply absent otherwise (never a red build for want of infra).
+//!
+//! **CI-provided server ⇒ use it, don't spin one (D64).** When `TEST_POSTGRES_URL` is set,
+//! [`PostgresContainer::start`] connects to *that* server (a CI service container, a shared
+//! dev DB, …) instead of launching its own — after the same readiness-wait, so the suite
+//! never races a still-booting server; `Drop` then leaves the external server alone. This is
+//! what lets the portable `make ci-live-postgres` target run the live suite against a GitHub
+//! Actions `services:` container while a laptop with a Docker daemon keeps the self-spun
+//! behaviour with no env set. Because an external server *persists* across tests, every suite
+//! helper resets the schema (`DROP SCHEMA public CASCADE`) before creating tables.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -29,24 +38,54 @@ const PASSWORD: &str = "based_test_pw";
 const USER: &str = "postgres";
 const DATABASE: &str = "based_test";
 
+/// The env var that points the suite at an externally-provided server (a CI service
+/// container). When set, the harness connects to it instead of spinning its own container.
+const URL_ENV: &str = "TEST_POSTGRES_URL";
+
 /// How long to wait for the freshly-started server to accept a real connection before
 /// giving up (Postgres's first boot initializes the data dir + creates the database).
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// A running ephemeral Postgres container. Owns the container's lifetime: [`Drop`] removes
-/// it (force `docker rm`), so a panicking test still cleans up. Hand [`url`] to the driver.
+/// A live Postgres the suite runs against. Either a **self-spun** ephemeral container (owned:
+/// [`Drop`] force-`docker rm`s it, so a panicking test still cleans up) or an **external**
+/// server named by `TEST_POSTGRES_URL` (unowned: `Drop` leaves it alone). Hand [`url`] to the
+/// driver in both cases.
 pub struct PostgresContainer {
-    id: String,
-    port: u16,
+    kind: Kind,
+}
+
+enum Kind {
+    /// A container this process launched and must remove.
+    Spun { id: String, port: u16 },
+    /// A server provided by the environment (`TEST_POSTGRES_URL`); not ours to tear down.
+    External { url: String },
 }
 
 impl PostgresContainer {
-    /// Start an ephemeral Postgres and wait until it accepts connections.
+    /// Connect to a live Postgres and wait until it accepts connections.
     ///
-    /// Returns `None` (after logging why) when Docker is unreachable or the container never
-    /// becomes ready — the caller skips the test rather than failing it. On success the
-    /// returned container is live and its [`url`] connects to an empty `based_test` database.
+    /// Prefers an externally-provided server (`TEST_POSTGRES_URL`, e.g. a CI service
+    /// container); otherwise spins an ephemeral container via Docker. Returns `None` (after
+    /// logging why) when neither is reachable/ready — the caller skips rather than failing.
     pub fn start() -> Option<PostgresContainer> {
+        // CI-provided server takes precedence: connect to it after the readiness-wait.
+        if let Ok(url) = std::env::var(URL_ENV) {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                eprintln!("[docker-postgres] using external {URL_ENV}={url}");
+                if !wait_ready(&url) {
+                    eprintln!(
+                        "[docker-postgres] SKIP: external server at {URL_ENV} not ready within {}s",
+                        READY_TIMEOUT.as_secs()
+                    );
+                    return None;
+                }
+                return Some(PostgresContainer {
+                    kind: Kind::External { url },
+                });
+            }
+        }
+
         if !docker_available() {
             eprintln!(
                 "[docker-postgres] SKIP: Docker daemon not reachable (`docker info` failed). \
@@ -90,9 +129,11 @@ impl PostgresContainer {
                 return None;
             }
         };
-        let container = PostgresContainer { id, port };
+        let container = PostgresContainer {
+            kind: Kind::Spun { id, port },
+        };
 
-        if !container.wait_ready() {
+        if !wait_ready(&container.url()) {
             eprintln!(
                 "[docker-postgres] SKIP: Postgres did not become ready within {}s",
                 READY_TIMEOUT.as_secs()
@@ -100,47 +141,53 @@ impl PostgresContainer {
             // `container` drops here, removing the container.
             return None;
         }
-        eprintln!(
-            "[docker-postgres] ready: {} on 127.0.0.1:{}",
-            &container.id[..12.min(container.id.len())],
-            container.port
-        );
+        if let Kind::Spun { id, port } = &container.kind {
+            eprintln!(
+                "[docker-postgres] ready: {} on 127.0.0.1:{}",
+                &id[..12.min(id.len())],
+                port
+            );
+        }
         Some(container)
     }
 
-    /// A `postgres://` URL the `postgres` driver connects to (superuser, the provisioned
-    /// database, on the mapped loopback port).
+    /// A `postgres://` URL the `postgres` driver connects to: the external URL as-provided, or
+    /// (for a self-spun container) superuser + provisioned database on the mapped loopback port.
     pub fn url(&self) -> String {
-        format!(
-            "postgres://{USER}:{PASSWORD}@127.0.0.1:{}/{DATABASE}",
-            self.port
-        )
-    }
-
-    /// Poll a real connection until the server answers `SELECT 1` or the timeout elapses. A
-    /// fresh Postgres rejects connections for a moment while it initializes; we retry rather
-    /// than sleeping a fixed amount so a fast machine starts the suite promptly.
-    fn wait_ready(&self) -> bool {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let url = self.url();
-        while Instant::now() < deadline {
-            if let Ok(mut client) = pg_connect(&url) {
-                if client.simple_query("SELECT 1").is_ok() {
-                    return true;
-                }
+        match &self.kind {
+            Kind::Spun { port, .. } => {
+                format!("postgres://{USER}:{PASSWORD}@127.0.0.1:{port}/{DATABASE}")
             }
-            std::thread::sleep(Duration::from_millis(500));
+            Kind::External { url } => url.clone(),
         }
-        false
     }
+}
+
+/// Poll a real connection until the server answers `SELECT 1` or the timeout elapses. A fresh
+/// (or still-booting CI) Postgres rejects connections for a moment while it initializes; we
+/// retry rather than sleeping a fixed amount so a ready server starts the suite promptly. This
+/// is the portable readiness-wait — the same poll for a self-spun and a CI service container,
+/// so `based migrate apply` / the live suite never races a booting DB.
+fn wait_ready(url: &str) -> bool {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(mut client) = pg_connect(url) {
+            if client.simple_query("SELECT 1").is_ok() {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
 }
 
 impl Drop for PostgresContainer {
     fn drop(&mut self) {
-        // Force-remove the container (started `--rm`, but a stopped-but-not-removed or a
-        // still-running container both get cleaned up here). Best effort — a failed teardown
-        // must not mask a test result.
-        remove(&self.id);
+        // Force-remove a self-spun container (best effort — a failed teardown must not mask a
+        // test result). An external server (`TEST_POSTGRES_URL`) is not ours to remove.
+        if let Kind::Spun { id, .. } = &self.kind {
+            remove(id);
+        }
     }
 }
 

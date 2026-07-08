@@ -67,11 +67,18 @@ fn scenario() -> Scratch {
     s
 }
 
-/// Bring up a live MariaDB; `None` (skip) when Docker is unavailable.
+/// Bring up a live MariaDB; `None` (skip) when Docker is unavailable. Drops this scenario's
+/// table + the migrations ledger first, so a run against a *persistent* external server
+/// (`TEST_MARIADB_URL`, D64) starts clean and is re-runnable (a no-op on a fresh container).
 fn live() -> Option<(ShardRouter, MariaDbContainer)> {
     let container = MariaDbContainer::start()?;
     let router = ShardRouter::single(&container.url(), PoolConfig::default())
         .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
+    let mut db = router.checkout("").expect("checkout for reset");
+    for t in ["widget", "_based_migrations"] {
+        db.execute(&format!("DROP TABLE IF EXISTS `{t}`"), &[])
+            .unwrap_or_else(|e| panic!("reset drop of `{t}` failed: {e:?}"));
+    }
     Some((router, container))
 }
 

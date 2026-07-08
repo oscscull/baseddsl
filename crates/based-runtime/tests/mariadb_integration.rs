@@ -69,6 +69,7 @@ fn live() -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
 
     // Create every commerce table from the *generated* MariaDB DDL (not a hand copy), then
     // seed fixtures — so this suite exercises the whole `based gen sql` artifact (DDL + DML).
+    reset_tables(&router, &compiled);
     let ddl = sql::ddl(&compiled.schema, Dialect::MariaDb);
     run_batch(&router, &ddl);
     run_batch(
@@ -110,9 +111,25 @@ fn live_schema(src: &str) -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
     let compiled = compile(src, Dialect::MariaDb);
     let router = ShardRouter::single(&container.url(), PoolConfig::default())
         .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
+    reset_tables(&router, &compiled);
     let ddl = sql::ddl(&compiled.schema, Dialect::MariaDb);
     run_batch(&router, &ddl);
     Some((compiled, router, container))
+}
+
+/// Drop this schema's tables (+ the migrations ledger) before recreating them, so a suite run
+/// against a *persistent* external server (`TEST_MARIADB_URL`, D64) starts clean and is
+/// re-runnable. A no-op against a fresh self-spun container (nothing exists yet). FK checks are
+/// disabled for the drop so relation order doesn't matter; the whole batch runs on one
+/// connection (session-scoped `FOREIGN_KEY_CHECKS`), which `run_batch` guarantees.
+fn reset_tables(router: &ShardRouter, compiled: &Compiled) {
+    let mut script = String::from("SET FOREIGN_KEY_CHECKS = 0;\n");
+    for m in &compiled.schema.models {
+        script.push_str(&format!("DROP TABLE IF EXISTS `{}`;\n", m.table));
+    }
+    script.push_str("DROP TABLE IF EXISTS `_based_migrations`;\n");
+    script.push_str("SET FOREIGN_KEY_CHECKS = 1;\n");
+    run_batch(router, &script);
 }
 
 /// Run a `;`-separated batch of statements against the live server, one at a time (the

@@ -43,7 +43,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   scanner), D38 (Postgres driver + live suite), D61 (Postgres binary-format result decode: uuid/
   timestamptz/date/jsonb columns → canonical strings)
 - **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite), D59
-  (live pagination + soft-delete/restore coverage on MariaDB/Postgres; Postgres numeric text-bind fix)
+  (live pagination + soft-delete/restore coverage on MariaDB/Postgres; Postgres numeric text-bind fix),
+  D64 (`TEST_*_URL` env override: live suites connect to a provided server instead of self-spinning)
+- **CI / deploy (keep-proven)** — D64 (Track D2 CI: portable `make` targets + `.github/workflows/ci.yml`
+  thin example wrapper; env-URL override, readiness-wait, migrate-apply/examples/extension in CI)
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
@@ -2196,3 +2199,46 @@ checked in (reviewable artifacts, migrations.md), so the run is just steps 1 + 4
   SQLite locally, MariaDB `11.4` + Postgres `16` via Docker/OrbStack (live `migrate apply` + `cargo
   run`, output pasted in the iteration). `cargo test --workspace --all-features` green, `fmt --check` +
   `clippy` clean across the workspace and all three example crates, `examples/` still workspace-excluded.
+
+## D64 — Track D2 CI: portable "keep-proven" targets + a thin GitHub Actions example
+
+DoD #4's CI half (keep the real-DB suites + example scenarios + migration-apply + the extension
+build from rotting). Framing (user, 2026-07-08): **GitHub Actions is an example, not the
+substance** — the runnable commands live in portable `make` targets any CI (or a laptop) invokes;
+the workflow is a thin wrapper that only provisions infra and calls them. D1 (the `based serve`
+Dockerfile/image) stays open — a separate iteration.
+
+- **Env-URL override is the crux (the "migrations/tests in CI" ergonomic).** The live suites used
+  to always self-spin a container via `docker-tests`. Now `support/docker_{mariadb,postgres}.rs`
+  first check `TEST_MARIADB_URL` / `TEST_POSTGRES_URL`: when set, the harness connects to *that*
+  server (a CI service container) after the same in-process readiness-wait, and its `Drop` leaves
+  the external server alone; when unset, the existing self-spun-container path runs unchanged
+  (still skips cleanly with no daemon). `MariaDbContainer`/`PostgresContainer` became a two-variant
+  enum (`Spun { id, port }` / `External { url }`); the readiness poll (`wait_ready`) is now a free
+  fn over a URL, shared by both. Proven: the suites logged `using external TEST_…` and connected to
+  the provided servers (11 Postgres, 10 MariaDB, + 2 live `migrate apply`), and `--all-features`
+  still self-spins them locally.
+- **External DBs persist ⇒ reset per test.** A self-spun container is fresh; a shared CI server is
+  not, and tests would collide on `CREATE TABLE`/seed. Each suite helper now resets before creating:
+  MariaDB drops its schema's tables + `_based_migrations` with `FOREIGN_KEY_CHECKS=0` (one
+  connection, session-scoped); Postgres does `DROP SCHEMA public CASCADE; CREATE SCHEMA public`;
+  the MariaDB apply suite drops `widget` + the ledger. Idempotent + re-runnable (verified by a
+  second green run). The live targets pass `--test-threads=1` so the resets stay serial.
+- **Portable readiness-wait for the CLI path.** The live suites wait in-process; the *examples* call
+  `based migrate apply` as an external command, so `ci/wait-for-db.sh <url> [timeout]` blocks on a
+  bash-builtin `/dev/tcp` connect (no psql/mysql client) before apply — a sqlite file path is a
+  no-op. GH service `--health-cmd`s are belt-and-suspenders on top.
+- **Portable targets (`Makefile`).** `ci-workspace` (fmt + clippy `-D warnings` + test),
+  `ci-extension` (`npm ci` + compile + `vsce package`), `ci-live-mariadb` / `ci-live-postgres`
+  (the live suites against `$(MARIADB_URL)` / `$(POSTGRES_URL)` via `TEST_*_URL`), `ci-examples`
+  (build `based`, then apply + `cargo run` each quickstart against provided URLs), plus
+  `dev-db-up`/`dev-db-down` throwaway `mariadb:11.4` + `postgres:16` for local runs. URLs are
+  overridable vars defaulting to the throwaway containers.
+- **Thin GH Actions example (`.github/workflows/ci.yml`).** Five jobs (`workspace`, `extension`,
+  `live-mariadb`, `live-postgres`, `examples`); the DB jobs declare `services:` `mariadb:11.4` +
+  `postgres:16` with health checks and pass the service URL to the matching `make` target. No
+  bespoke marketplace choreography — checkout + toolchain + `make`. Valid YAML, sane structure.
+- **Gate.** `cargo test --workspace --all-features` green (docker suites self-spun in the fallback
+  path); `fmt --check` + `clippy -D warnings` clean; all portable targets ran green locally against
+  live `mariadb:11.4` + `postgres:16` — both live suites + `migrate apply` against provided URLs,
+  all three example scenarios, and the extension `.vsix` packaged.

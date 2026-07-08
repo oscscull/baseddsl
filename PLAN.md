@@ -54,10 +54,12 @@ D61, which also surfaced + fixed a real Postgres binary-format result-decode bug
 usable BSL covers ordinary GET/PUT end-to-end (get/list, filters, sort cascade, offset + keyset pagination,
 create/update/delete/restore/`tx`, soft-delete, `@scope`, raw SQL, idempotency, declared-shape read-back on
 every surviving write). **Remaining on the critical path: DB-verification hardening (A4 — timeouts,
-deadlock-retry, pool-exhaustion under load) and Deploy (D — Dockerfile + CI running the real-DB suites +
-example builds + extension + migration-apply).** The independent non-feature tracks — the extension (C4)
-and migrations (E5) — may still run in parallel (they share no files with the rest). Batch-by-batch history
-is in `PLAN-archive.md`.
+deadlock-retry, pool-exhaustion under load) and Deploy Track D1 (the `based serve` container image).**
+Track D2 — CI running the real-DB suites + example builds + extension + migration-apply — is **done (D64)**:
+portable `make` targets (env-URL override so the live suites hit a provided CI DB, readiness-wait, per-test
+reset) + a thin `.github/workflows/ci.yml`, proven green locally. The independent non-feature tracks — the
+extension (C4) and migrations (E5) — may still run in parallel (they share no files with the rest).
+Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -84,8 +86,11 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    `based-lsp`, surfaces diagnostics + inlay hints + hover + go-to-def + symbols + completion.
    **✅ Installable (D36); feature-parity fill-in in progress (Track C4).**
 4. **Deployable + kept-proven.** A container image / Dockerfile for `based serve`, and CI running the
-   real-DB suites + example builds + extension build so none of it rots. **🔴 Not started (Track D);
-   the serve-side behaviour (health/readiness/drain) is done (D26).**
+   real-DB suites + example builds + extension build so none of it rots. **🟡 CI half done (D2, D64):**
+   portable `make` targets (workspace, live MariaDB/Postgres, examples, extension) + a thin
+   `.github/workflows/ci.yml` example, all proven green locally against live `mariadb:11.4`/`postgres:16`;
+   the live suites honor an external `TEST_*_URL` (CI service container). **Remaining: D1** — the
+   `based serve` container image/Dockerfile (serve-side health/readiness/drain already done, D26).
 5. **Schema evolution: migration generation.** A `.bsl` change produces a reviewable, editable
    migration you can safely apply to an existing DB — not just from-scratch DDL. **✅ Core met** —
    spec (E1), snapshot + diff (D39), per-dialect render (D41), apply + `_based_migrations` ledger +
@@ -258,15 +263,21 @@ a callable confines by a set ⊇ one alternative. Landed across three iterations
 rename is deferred to the C4 rename iteration** (needs the full reference-site index). Full iteration
 detail: `PLAN-archive.md`.
 
-**Track D — deploy + keep-proven (DoD #4, last). 🔴 OPEN.**
-  - D1. Dockerfile / image for `based serve` (health/readiness + graceful drain already done, D26 —
-    this is packaging).
-  - D2. CI running the real-DB suites (A) + example builds (B) + extension build (C) + migration apply
-    tests (E4) so the whole thing stays green.
-  - D3. **CI ergonomics for migrations** (queued, user-raised 2026-07-08). Make `based migrate apply`
-    run cleanly from GitHub Actions + in test runs — the quickstarts now depend on it for schema setup
-    (D63), so CI must stand up the DB, apply, and run each example non-interactively. Part of DoD #4 CI
-    (folds into D2). Not yet implemented.
+**Track D — deploy + keep-proven (DoD #4, last). 🟡 CI half done (D2/D3 via D64); D1 open.**
+  - D1. 🔴 **OPEN.** Dockerfile / image for `based serve` (health/readiness + graceful drain already
+    done, D26 — this is packaging). Not started; separate iteration.
+  - D2. ✅ **done (D64).** CI running the real-DB suites (A) + example builds (B) + extension build (C) +
+    migration apply (E4). Substance lives in portable `make` targets (`ci-workspace`, `ci-live-mariadb`,
+    `ci-live-postgres`, `ci-examples`, `ci-extension`; `dev-db-up`/`dev-db-down` for local DBs) invoked
+    by plain `cargo`/`based`/`npm` — runnable on any CI or a laptop. `.github/workflows/ci.yml` is a
+    **thin example wrapper**: five jobs provisioning `services:` `mariadb:11.4` + `postgres:16` (health
+    checks) + Node, each calling a `make` target. All targets ran **green locally** against live servers.
+  - D3. ✅ **done (D64), satisfies the CI-migrations ask.** The live suites now honor an external
+    `TEST_MARIADB_URL`/`TEST_POSTGRES_URL` (connect to a CI service container instead of self-spinning;
+    fall back to self-spun locally when unset) with a portable readiness-wait (`ci/wait-for-db.sh`
+    `/dev/tcp` for the CLI path, an in-process poll for the suites) and per-test schema reset so a shared
+    server is re-runnable. `based migrate apply` runs non-interactively against the provided DB in both
+    the live MariaDB apply suite and all three example scenarios.
 
 **Track F — source hygiene pass (quality, cross-cutting; standalone value, off the DoD critical
 path — worked when it won't preempt A/B/D/E).**

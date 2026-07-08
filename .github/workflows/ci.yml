@@ -1,0 +1,105 @@
+# CI (D64) — a THIN example wrapper. The substance lives in the portable `make` targets
+# (see Makefile); this file only provisions infra (DB service containers, a Node toolchain)
+# and calls those targets. Anyone on GitLab/Buildkite/a laptop runs the same `make` targets;
+# this is the demonstration, not the pipeline logic. Keep it thin — no bespoke marketplace
+# choreography, just services + `make`.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Infra-free gate: fmt + clippy + the full test suite.
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: make ci-workspace
+
+  # Build + package the VS Code extension so it never rots (DoD #4, extension half).
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: make ci-extension
+
+  # Live MariaDB: the integration suite + `based migrate apply` against a service container.
+  # The suite honors TEST_MARIADB_URL (set by the make target from MARIADB_URL) and connects
+  # to this service instead of spinning its own container.
+  live-mariadb:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: based_test_pw
+          MARIADB_DATABASE: based_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make ci-live-mariadb MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test
+
+  # Live Postgres: the integration suite against a service container (TEST_POSTGRES_URL).
+  live-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: based_test_pw
+          POSTGRES_DB: based_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make ci-live-postgres POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
+
+  # The three quickstart scenarios end-to-end: `based migrate apply` then `cargo run`, each
+  # against a fresh service container (SQLite runs on a throwaway file, no service needed).
+  examples:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: based_test_pw
+          MARIADB_DATABASE: based_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: based_test_pw
+          POSTGRES_DB: based_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: >-
+          make ci-examples
+          MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test
+          POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
