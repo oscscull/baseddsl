@@ -33,7 +33,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client), D62
   (emitted in-process embedded bridge `client::embedded(&engine)`, opt-in via `ClientOptions`; inner
-  `#![allow]` wart fixed), D63 (`based gen client --embedded` CLI flag)
+  `#![allow]` wart fixed), D63 (`based gen client --embedded` CLI flag), D70 (typed ids: per-entity
+  phantom `Id<entity::M>` newtypes, transparent wire, `from_raw` escape, no blanket `From<String>`)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
@@ -2452,3 +2453,39 @@ PLAN.md / the roadmap `.md`s, not source, unless genuinely blocking.
 and the project is fully done per the Definition of Done — only deferred nice-to-haves remain. Comment-only,
 so the gate is `cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace --all-features`,
 all clean.
+
+## D70 — Typed ids in the generated client (per-entity phantom `Id<E>` newtypes)
+Post-DoD backlog item **H1**. The client lowered every id/relation param to a bare `Uuid = String` alias,
+discarding the schema type the front end already knew: `place_order(buyer: Id)` where `buyer -> User` emitted
+`buyer: String`, identical to `org`, `id`, and every `create` result's `.id` — so any id transposition (an
+`Org` id where a `User` id belongs, or a literal string) type-checks and fails only at runtime (FK violation /
+empty result), undercutting the DB-first-typed-access thesis at the one place a human/LLM writes a call by hand.
+
+**Decision: emit per-entity phantom-typed newtypes.** `based gen client` now emits `pub struct Id<E>` — a
+`#[serde(transparent, bound = "")]` newtype over the raw id string, plus a `pub mod entity { pub enum <Model> {} … }`
+of zero-value phantom tags — so a model's own `id`, a relation param/FK, and a `$ctx` relation are all typed
+`Id<entity::M>`, distinct per entity. `Id<User>` and `Id<Org>` are different types → the transposition is a
+compile error, not a runtime FK failure. (A single undifferentiated `Id` would still let org/user ids swap, so
+the phantom tag is load-bearing.)
+
+- **Wire unchanged.** `transparent` means the JSON/OpenAPI surface is still the underlying string
+  (`{ type: string, format: uuid }`), so `based-codegen::openapi` needed **no** change — its `uuid_schema()` is
+  already coherent. No custom serde. The skipped `PhantomData<fn() -> E>` field keeps `Id<E>` `Send`/`Sync`/
+  covariant and imposes no bound on the tag.
+- **Safe edges only; the unsafe edge is greppable.** A `create_*` result already *is* the typed id, so
+  create→use chains need no conversion. There is deliberately **no** blanket `From<String>` (that reopens the
+  hole); a raw string becomes a typed id only through the explicit `Id::from_raw(s)` — mirroring how `unscoped(…)`
+  makes the unsafe escape visible (principle 1/6). The trait impls (`Clone`/`Eq`/`Ord`/`Hash`/`Display`/`Debug`)
+  are hand-written so the marker `E` carries no bounds (a derive would demand `E: Clone`, … of a pure tag).
+- **"Stop discarding what the front end knows," not new analysis.** Param entities are resolved from the same
+  edges sema type-checks: a query param via its binding (`-> edge` / `op col` / same-name column) against the
+  target model; a mutation param by walking the write body (assigned to a Forward FK / `id`, or compared in a
+  `where`). A bare `Id` annotation whose body use resolves to `placed_by -> User` becomes `Id<entity::User>`.
+- **Per-target idiom** (future): Rust newtype now; a TS branded type / Go named type when those targets land.
+
+Touched `based-codegen::client` (the codegen), its `tests/client.rs` (typed-id assertions + a new phantom-newtype
+test), the regenerated verbatim client in `based-runtime/tests/embed.rs` (its test bodies now build ids via
+`Id::from_raw`, the one boundary that has raw literals), and all three `examples/*/src/{client.rs,main.rs}`
+(regenerated client; helper signatures take typed ids, no `.to_string()`). Gate: `cargo test --workspace
+--all-features` + `fmt --check` + `clippy` all clean; all three quickstarts ran green live via `cargo run`
+(SQLite bundled; Postgres `postgres:16` + MariaDB `mariadb:11.4` over Docker).

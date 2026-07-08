@@ -9,12 +9,87 @@
 // pattern for generated code — an inner `#![allow]` would be rejected by `include!`).
 
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
-// Semantic aliases for the wire types (mirrors the DDL mapping, D10).
+// Semantic aliases for the wire types (mirrors the DDL mapping).
 pub type Uuid = String;
 pub type Timestamp = String;
 pub type Date = String;
 pub type Json = serde_json::Value;
+
+/// A typed id: the primary key of entity `E`, carried on the wire as its raw string
+/// (`#[serde(transparent)]`, so the wire is unchanged). The `E` marker keeps ids of
+/// different entities distinct types, so a `User` id can't be passed where an `Org` id
+/// is wanted. A `create_*` result already hands one back typed; turn a raw string into
+/// one only through the explicit, greppable `Id::from_raw`.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent, bound = "")]
+pub struct Id<E> {
+    raw: String,
+    #[serde(skip)]
+    _entity: PhantomData<fn() -> E>,
+}
+
+impl<E> Id<E> {
+    /// Wrap a raw id string as a typed id — the explicit escape from an untyped string,
+    /// used only where the string's entity is known (an id from outside the client).
+    pub fn from_raw(raw: impl Into<String>) -> Self {
+        Id {
+            raw: raw.into(),
+            _entity: PhantomData,
+        }
+    }
+    /// The underlying id string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+    /// Consume into the raw id string.
+    pub fn into_raw(self) -> String {
+        self.raw
+    }
+}
+
+// Hand-written so the marker `E` carries no trait bounds (a derive would demand
+// `E: Clone`, `E: Ord`, … of a type that only ever tags).
+impl<E> Clone for Id<E> {
+    fn clone(&self) -> Self {
+        Id {
+            raw: self.raw.clone(),
+            _entity: PhantomData,
+        }
+    }
+}
+impl<E> std::fmt::Debug for Id<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Id({:?})", self.raw)
+    }
+}
+impl<E> std::fmt::Display for Id<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+impl<E> PartialEq for Id<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+impl<E> Eq for Id<E> {}
+impl<E> PartialOrd for Id<E> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<E> Ord for Id<E> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+impl<E> std::hash::Hash for Id<E> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
 
 /// Pagination envelope (calling.md): a paginated query returns rows + an opaque
 /// cursor, never a bare array. Next page = the same call carrying `cursor`.
@@ -46,18 +121,25 @@ pub struct Client<T> {
     pub transport: T,
 }
 
+/// Phantom entity tags for `Id<entity::M>` (types only, never constructed).
+pub mod entity {
+    pub enum Order {}
+    pub enum Org {}
+    pub enum User {}
+}
+
 // ---------- output types ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgRow {
-    pub id: Uuid,
+    pub id: Id<entity::Org>,
     pub name: String,
     pub slug: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderCard {
-    pub id: Uuid,
+    pub id: Id<entity::Order>,
     pub status: String,
     pub total: i64,
     pub placed_by: OrderCardPlacedBy,
@@ -71,7 +153,7 @@ pub struct OrderCardPlacedBy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRow {
-    pub id: Uuid,
+    pub id: Id<entity::User>,
     pub email: String,
     pub name: String,
 }
@@ -88,11 +170,11 @@ pub const CREATE_ORG_ROUTE: &str = "/m/create_org";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderByIdInput {
-    pub id: Uuid,
+    pub id: Id<entity::Order>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderByIdCtx {
-    pub org: Uuid,
+    pub org: Id<entity::Org>,
 }
 /// Wire route for `order_by_id`.
 pub const ORDER_BY_ID_ROUTE: &str = "/q/order_by_id";
@@ -101,7 +183,7 @@ pub const ORDER_BY_ID_ROUTE: &str = "/q/order_by_id";
 pub struct MyOrdersInput;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MyOrdersCtx {
-    pub org: Uuid,
+    pub org: Id<entity::Org>,
 }
 /// Wire route for `my_orders`.
 pub const MY_ORDERS_ROUTE: &str = "/q/my_orders";
@@ -112,41 +194,41 @@ pub struct RecentOrdersInput {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentOrdersCtx {
-    pub org: Uuid,
+    pub org: Id<entity::Org>,
 }
 /// Wire route for `recent_orders`.
 pub const RECENT_ORDERS_ROUTE: &str = "/q/recent_orders";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderInput {
-    pub buyer: Uuid,
+    pub buyer: Id<entity::User>,
     pub total: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderCtx {
-    pub org: Uuid,
+    pub org: Id<entity::Org>,
 }
 /// Wire route for `place_order`.
 pub const PLACE_ORDER_ROUTE: &str = "/m/place_order";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelOrderInput {
-    pub id: Uuid,
+    pub id: Id<entity::Order>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelOrderCtx {
-    pub org: Uuid,
+    pub org: Id<entity::Org>,
 }
 /// Wire route for `cancel_order`.
 pub const CANCEL_ORDER_ROUTE: &str = "/m/cancel_order";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreOrderInput {
-    pub id: Uuid,
+    pub id: Id<entity::Order>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreOrderCtx {
-    pub org: Uuid,
+    pub org: Id<entity::Org>,
 }
 /// Wire route for `restore_order`.
 pub const RESTORE_ORDER_ROUTE: &str = "/m/restore_order";
@@ -167,51 +249,27 @@ impl<T: Transport> Client<T> {
         self.transport.call(CREATE_ORG_ROUTE, &input, &ctx)
     }
     /// `POST /q/order_by_id`
-    pub fn order_by_id(
-        &self,
-        input: OrderByIdInput,
-        ctx: OrderByIdCtx,
-    ) -> Result<Option<OrderCard>, ClientError> {
+    pub fn order_by_id(&self, input: OrderByIdInput, ctx: OrderByIdCtx) -> Result<Option<OrderCard>, ClientError> {
         self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx)
     }
     /// `POST /q/my_orders`
-    pub fn my_orders(
-        &self,
-        input: MyOrdersInput,
-        ctx: MyOrdersCtx,
-    ) -> Result<Vec<OrderCard>, ClientError> {
+    pub fn my_orders(&self, input: MyOrdersInput, ctx: MyOrdersCtx) -> Result<Vec<OrderCard>, ClientError> {
         self.transport.call(MY_ORDERS_ROUTE, &input, &ctx)
     }
     /// `POST /q/recent_orders`
-    pub fn recent_orders(
-        &self,
-        input: RecentOrdersInput,
-        ctx: RecentOrdersCtx,
-    ) -> Result<Page<OrderCard>, ClientError> {
+    pub fn recent_orders(&self, input: RecentOrdersInput, ctx: RecentOrdersCtx) -> Result<Page<OrderCard>, ClientError> {
         self.transport.call(RECENT_ORDERS_ROUTE, &input, &ctx)
     }
     /// `POST /m/place_order`
-    pub fn place_order(
-        &self,
-        input: PlaceOrderInput,
-        ctx: PlaceOrderCtx,
-    ) -> Result<OrderCard, ClientError> {
+    pub fn place_order(&self, input: PlaceOrderInput, ctx: PlaceOrderCtx) -> Result<OrderCard, ClientError> {
         self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx)
     }
     /// `POST /m/cancel_order`
-    pub fn cancel_order(
-        &self,
-        input: CancelOrderInput,
-        ctx: CancelOrderCtx,
-    ) -> Result<OrderCard, ClientError> {
+    pub fn cancel_order(&self, input: CancelOrderInput, ctx: CancelOrderCtx) -> Result<OrderCard, ClientError> {
         self.transport.call(CANCEL_ORDER_ROUTE, &input, &ctx)
     }
     /// `POST /m/restore_order`
-    pub fn restore_order(
-        &self,
-        input: RestoreOrderInput,
-        ctx: RestoreOrderCtx,
-    ) -> Result<OrderCard, ClientError> {
+    pub fn restore_order(&self, input: RestoreOrderInput, ctx: RestoreOrderCtx) -> Result<OrderCard, ClientError> {
         self.transport.call(RESTORE_ORDER_ROUTE, &input, &ctx)
     }
     /// `POST /m/create_user`
@@ -238,21 +296,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(|e| ClientError(e.to_string()))?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| {
-                if v.is_object() {
-                    v
-                } else {
-                    serde_json::json!({})
-                }
-            })
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
             .map_err(|e| ClientError(e.to_string()))?;
         let resp = self.engine.call(route, args, ctx);
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(|e| ClientError(e.to_string()))
         } else {
-            let msg = resp.body["error"]["message"]
-                .as_str()
-                .unwrap_or("call failed");
+            let msg = resp.body["error"]["message"].as_str().unwrap_or("call failed");
             Err(ClientError(msg.to_string()))
         }
     }

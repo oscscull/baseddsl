@@ -21,9 +21,11 @@
 //! ## Type mapping (mirrors the DDL side, D10)
 //! Primitives map through readable aliases so the generated structs read
 //! semantically: `Uuid`/`Timestamp`/`Date` alias `String`, `Json` aliases
-//! `serde_json::Value`. A relation param (or a shape field reaching a relation's FK)
-//! is a `Uuid` — the wire carries the id, per D1. `optional` -> `Option<T>`, a
-//! to-many scalar -> `Vec<T>`.
+//! `serde_json::Value`. An **entity id** — a model's own `id`, a relation param/FK, or a
+//! `$ctx` relation — is a phantom-typed `Id<entity::M>` newtype (`#[serde(transparent)]`,
+//! so the wire is an unchanged string): distinct per entity, so a `User` id can't be
+//! passed where an `Org` id is wanted, and a raw string only becomes one through the
+//! explicit `Id::from_raw`. `optional` -> `Option<T>`, a to-many scalar -> `Vec<T>`.
 //!
 //! ## Per-callable `$ctx` (D4/D5, D30)
 //! `$ctx` is per-request and inferred, not a global type: each callable requires
@@ -132,6 +134,10 @@ struct Callable<'a> {
     /// how this callable paginates (pagination.md), so the input struct carries the
     /// right page control: a keyset page a `cursor`, an offset page an `offset`.
     page: PageInput,
+    /// Params that resolve to an **entity id** → the model they identify (a Forward FK's
+    /// target, or the model's own `id`). Drives the `Id<entity::M>` param type; a param
+    /// absent here (and not model-annotated) is a plain scalar.
+    param_entities: std::collections::HashMap<String, String>,
 }
 
 /// How a callable paginates, driving its extra input field (calling.md / pagination.md).
@@ -166,6 +172,14 @@ mod rust {
 
         let mut out = String::new();
         out.push_str(PREAMBLE);
+
+        // Entity markers — one phantom tag per model, so `Id<entity::User>` and
+        // `Id<entity::Org>` are distinct types (the tags are types only, never values).
+        out.push_str("\n/// Phantom entity tags for `Id<entity::M>` (types only, never constructed).\npub mod entity {\n");
+        for m in &schema.models {
+            out.push_str(&format!("    pub enum {} {{}}\n", m.name));
+        }
+        out.push_str("}\n");
 
         // Output structs first (deduped by name; a shape shared by two queries is one
         // struct). Emitted in first-seen order for deterministic output.
@@ -246,6 +260,7 @@ mod rust {
                         out_struct: os,
                         ctx_requires: &rq.ctx_requires,
                         page: page_input(q),
+                        param_entities: query_param_entities(root, &q.params),
                     });
                 }
                 Decl::Mutation(m) => {
@@ -275,12 +290,147 @@ mod rust {
                         out_struct: os,
                         ctx_requires: &rm.ctx_requires,
                         page: PageInput::None,
+                        param_entities: mutation_param_entities(schema, m),
                     });
                 }
                 _ => {}
             }
         }
         out
+    }
+
+    // ---------- entity-id resolution --------------------------------------
+
+    /// The Rust type of an entity id: a phantom-typed `Id<entity::M>` newtype, distinct
+    /// per model so ids of different entities can't be swapped.
+    fn id_type(entity: &str) -> String {
+        format!("Id<entity::{entity}>")
+    }
+
+    /// The model a member identifies as an id: a Forward FK's target, or the model's own
+    /// `id` column (`Primitive::Id`). `None` for any other scalar or an inverse edge.
+    fn member_entity(model: &RModel, field: &str) -> Option<String> {
+        match model.member(field).map(|m| &m.kind)? {
+            MemberKind::Forward { target, .. } => Some(target.clone()),
+            MemberKind::Scalar {
+                ty: Primitive::Id, ..
+            } => Some(model.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Resolve each query param to the entity it identifies, from its binding (`-> edge`
+    /// / `op col`) or same-named column on the target model. Params that identify no
+    /// entity (plain scalars) are absent from the map.
+    fn query_param_entities(
+        root: Option<&RModel>,
+        params: &[Param],
+    ) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let Some(root) = root else { return map };
+        for p in params {
+            let field = match &p.binding {
+                Some(ParamBinding::Edge(e)) => e.node.as_str(),
+                Some(ParamBinding::ColOp { col, .. }) => col.node.as_str(),
+                None => p.name.node.as_str(),
+            };
+            if let Some(entity) = member_entity(root, field) {
+                map.insert(p.name.node.clone(), entity);
+            }
+        }
+        map
+    }
+
+    /// Resolve each mutation param to the entity it identifies, by walking the write
+    /// body: a param assigned to a Forward FK / `id`, or compared against one in a
+    /// `where`, identifies that member's model. This is the front end's own resolution
+    /// (the same edges sema type-checks), surfaced instead of discarded.
+    fn mutation_param_entities(
+        schema: &CheckedSchema,
+        m: &Mutation,
+    ) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for stmt in &m.body {
+            scan_write(schema, stmt, &mut map);
+        }
+        map
+    }
+
+    fn scan_write(
+        schema: &CheckedSchema,
+        stmt: &WriteStmt,
+        map: &mut std::collections::HashMap<String, String>,
+    ) {
+        match stmt {
+            WriteStmt::Create { model, assigns } => {
+                let m = schema.model(&model.node);
+                for a in assigns {
+                    scan_assign(m, a, map);
+                }
+            }
+            WriteStmt::Update {
+                model,
+                where_,
+                assigns,
+            } => {
+                let m = schema.model(&model.node);
+                for a in assigns {
+                    scan_assign(m, a, map);
+                }
+                scan_pred(m, where_, map);
+            }
+            WriteStmt::Delete { model, where_ }
+            | WriteStmt::Restore { model, where_ }
+            | WriteStmt::HardDelete { model, where_ } => {
+                scan_pred(schema.model(&model.node), where_, map);
+            }
+            WriteStmt::Tx(stmts) => {
+                for s in stmts {
+                    scan_write(schema, s, map);
+                }
+            }
+            WriteStmt::Raw(_) => {}
+        }
+    }
+
+    /// Record `col = $param` when `col` is a Forward FK / `id` on `model`.
+    fn scan_assign(
+        model: Option<&RModel>,
+        a: &Assign,
+        map: &mut std::collections::HashMap<String, String>,
+    ) {
+        if let Value::Param(pr) = &a.value {
+            if pr.path.is_empty() {
+                if let Some(entity) = model.and_then(|m| member_entity(m, &a.col.node)) {
+                    map.insert(pr.name.node.clone(), entity);
+                }
+            }
+        }
+    }
+
+    /// Record `col = $param` comparisons in a `where` where `col` is an id member.
+    fn scan_pred(
+        model: Option<&RModel>,
+        pred: &Predicate,
+        map: &mut std::collections::HashMap<String, String>,
+    ) {
+        match pred {
+            Predicate::And(a, b) | Predicate::Or(a, b) => {
+                scan_pred(model, a, map);
+                scan_pred(model, b, map);
+            }
+            Predicate::Not(p) => scan_pred(model, p, map),
+            Predicate::Cmp {
+                path,
+                value: Value::Param(pr),
+                ..
+            } if path.segments.len() == 1 && pr.path.is_empty() => {
+                if let Some(entity) = model.and_then(|m| member_entity(m, &path.segments[0].node)) {
+                    map.insert(pr.name.node.clone(), entity);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// A query's return wrapper: paginated -> `Page<T>`, many -> `Vec<T>`, single
@@ -436,19 +586,29 @@ mod rust {
         }
     }
 
-    /// Every stored column of a bare-model return: scalars by their type, forward
-    /// FKs as a `Uuid` under the relation field name (matching the SELECT alias).
-    /// Inverse edges store nothing, so they are omitted.
+    /// Every stored column of a bare-model return: scalars by their type (the `id`
+    /// column as this model's typed id), forward FKs as the target's typed id under the
+    /// relation field name (matching the SELECT alias). Inverse edges store nothing, so
+    /// they are omitted.
     fn model_fields(model: &RModel) -> Vec<(String, String)> {
         let mut fields = Vec::new();
         for mem in &model.members {
             match &mem.kind {
                 MemberKind::Scalar {
+                    ty: Primitive::Id,
+                    optional,
+                    many,
+                    ..
+                } => fields.push((
+                    mem.name.clone(),
+                    wrap(&id_type(&model.name), *optional, *many),
+                )),
+                MemberKind::Scalar {
                     ty, optional, many, ..
                 } => fields.push((mem.name.clone(), wrap(primitive(*ty), *optional, *many))),
-                MemberKind::Forward { optional, .. } => {
-                    fields.push((mem.name.clone(), wrap("Uuid", *optional, false)))
-                }
+                MemberKind::Forward {
+                    target, optional, ..
+                } => fields.push((mem.name.clone(), wrap(&id_type(target), *optional, false))),
                 MemberKind::Inverse { .. } => {}
             }
         }
@@ -463,7 +623,7 @@ mod rust {
         let mut fields: Vec<(String, String)> = c
             .params
             .iter()
-            .map(|p| (p.name.node.clone(), param_type(schema, c.root, p)))
+            .map(|p| (p.name.node.clone(), param_type(schema, c, p)))
             .collect();
         // Page control (pagination.md): a keyset page takes the opaque cursor back, an
         // offset page an explicit offset. Both optional — absence is the first page.
@@ -492,21 +652,40 @@ mod rust {
             .unwrap_or(PageInput::None)
     }
 
-    /// A param's Rust type. Explicit annotation wins (a model type -> `Uuid`, the FK
-    /// the wire carries, D1); otherwise infer from the bound/same-named column. A
-    /// param with a default (or an optional annotation) becomes `Option<T>` — the
-    /// client may omit it and let the engine apply the default (calling.md).
-    fn param_type(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> String {
+    /// A param's Rust type. An **entity id** — a model-typed annotation, or a param the
+    /// front end resolved to a relation/`id` (`param_entity`) — is the phantom-typed
+    /// `Id<entity::M>`; otherwise an explicit annotation wins, else infer from the
+    /// bound/same-named column. A param with a default (or an optional annotation)
+    /// becomes `Option<T>` — the client may omit it and let the engine apply the
+    /// default (calling.md).
+    fn param_type(schema: &CheckedSchema, c: &Callable, p: &Param) -> String {
         let optional = p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional);
-        let base = match &p.ty {
-            Some(te) => wrap(base_type(&te.base), false, te.many),
-            None => infer_param(schema, root, p),
+        let base = if let Some(entity) = param_entity(c, p) {
+            let many = p.ty.as_ref().is_some_and(|t| t.many);
+            wrap(&id_type(&entity), false, many)
+        } else {
+            match &p.ty {
+                Some(te) => wrap(base_type(&te.base), false, te.many),
+                None => infer_param(schema, c.root, p),
+            }
         };
         if optional && !base.starts_with("Option<") {
             format!("Option<{base}>")
         } else {
             base
         }
+    }
+
+    /// The entity a param identifies, if any: an explicit model annotation, else the
+    /// model the front end resolved it to (its query binding or mutation-body use).
+    /// `None` for a plain scalar param.
+    fn param_entity(c: &Callable, p: &Param) -> Option<String> {
+        if let Some(te) = &p.ty {
+            if let BaseType::Model(name) = &te.base {
+                return Some(name.node.clone());
+            }
+        }
+        c.param_entities.get(p.name.node.as_str()).cloned()
     }
 
     /// Infer an untyped param's type from how it filters: an `-> edge` or same-name
@@ -536,6 +715,13 @@ mod rust {
         for (i, seg) in path.iter().enumerate() {
             let last = i + 1 == n;
             match cur.member(seg).map(|m| &m.kind) {
+                // The model's own `id` is that model's typed id.
+                Some(MemberKind::Scalar {
+                    ty: Primitive::Id,
+                    optional,
+                    many,
+                    ..
+                }) => return wrap(&id_type(&cur.name), *optional, *many),
                 Some(MemberKind::Scalar {
                     ty, optional, many, ..
                 }) => return wrap(primitive(*ty), *optional, *many),
@@ -543,7 +729,7 @@ mod rust {
                     target, optional, ..
                 }) => {
                     if last {
-                        return wrap("Uuid", *optional, false);
+                        return wrap(&id_type(target), *optional, false);
                     }
                     match schema.model(target) {
                         Some(m) => cur = m,
@@ -552,8 +738,8 @@ mod rust {
                 }
                 Some(MemberKind::Inverse { target, .. }) => {
                     if last {
-                        // Terminal to-many reach: a collection of ids.
-                        return "Vec<Uuid>".to_string();
+                        // Terminal to-many reach: a collection of the target's typed ids.
+                        return format!("Vec<{}>", id_type(target));
                     }
                     match schema.model(target) {
                         Some(m) => cur = m,
@@ -648,12 +834,12 @@ mod rust {
             .collect()
     }
 
-    /// A `$ctx` field's Rust type: a scalar by its alias, a relation as the `Uuid`
-    /// key the wire carries (D1) — the same mapping the input side uses.
+    /// A `$ctx` field's Rust type: a scalar by its alias, a relation as that model's
+    /// typed id (`Id<entity::M>`) — the same mapping the input side uses.
     fn ctx_field_type(ty: &CtxField) -> String {
         match ty {
             CtxField::Scalar(p) => primitive(*p).to_string(),
-            CtxField::Relation(_) => "Uuid".to_string(),
+            CtxField::Relation(model) => id_type(model),
         }
     }
 
@@ -720,12 +906,87 @@ mod rust {
 // pattern for generated code — an inner `#![allow]` would be rejected by `include!`).
 
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
-// Semantic aliases for the wire types (mirrors the DDL mapping, D10).
+// Semantic aliases for the wire types (mirrors the DDL mapping).
 pub type Uuid = String;
 pub type Timestamp = String;
 pub type Date = String;
 pub type Json = serde_json::Value;
+
+/// A typed id: the primary key of entity `E`, carried on the wire as its raw string
+/// (`#[serde(transparent)]`, so the wire is unchanged). The `E` marker keeps ids of
+/// different entities distinct types, so a `User` id can't be passed where an `Org` id
+/// is wanted. A `create_*` result already hands one back typed; turn a raw string into
+/// one only through the explicit, greppable `Id::from_raw`.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent, bound = "")]
+pub struct Id<E> {
+    raw: String,
+    #[serde(skip)]
+    _entity: PhantomData<fn() -> E>,
+}
+
+impl<E> Id<E> {
+    /// Wrap a raw id string as a typed id — the explicit escape from an untyped string,
+    /// used only where the string's entity is known (an id from outside the client).
+    pub fn from_raw(raw: impl Into<String>) -> Self {
+        Id {
+            raw: raw.into(),
+            _entity: PhantomData,
+        }
+    }
+    /// The underlying id string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+    /// Consume into the raw id string.
+    pub fn into_raw(self) -> String {
+        self.raw
+    }
+}
+
+// Hand-written so the marker `E` carries no trait bounds (a derive would demand
+// `E: Clone`, `E: Ord`, … of a type that only ever tags).
+impl<E> Clone for Id<E> {
+    fn clone(&self) -> Self {
+        Id {
+            raw: self.raw.clone(),
+            _entity: PhantomData,
+        }
+    }
+}
+impl<E> std::fmt::Debug for Id<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Id({:?})", self.raw)
+    }
+}
+impl<E> std::fmt::Display for Id<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+impl<E> PartialEq for Id<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+impl<E> Eq for Id<E> {}
+impl<E> PartialOrd for Id<E> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<E> Ord for Id<E> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+impl<E> std::hash::Hash for Id<E> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
 
 /// Pagination envelope (calling.md): a paginated query returns rows + an opaque
 /// cursor, never a bare array. Next page = the same call carrying `cursor`.

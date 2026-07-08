@@ -76,9 +76,9 @@ fn list_query_returns_vec() {
         out.contains("pub fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError>"),
         "\n{out}"
     );
-    // A relation same-name param is the FK id on the wire.
+    // A relation same-name param is the target's typed id (the FK on the wire).
     assert!(out.contains("pub struct OrdersInOrgInput {"), "\n{out}");
-    assert!(out.contains("pub org: Uuid,"), "\n{out}");
+    assert!(out.contains("pub org: Id<entity::Org>,"), "\n{out}");
 }
 
 #[test]
@@ -132,8 +132,8 @@ fn explicit_param_type_and_relation_reach() {
         "#);
     // Reached relation column keeps its scalar type.
     assert!(out.contains("pub buyer: String,"), "\n{out}");
-    // `-> placed_by` edge param is the FK id; `since` keeps its explicit type.
-    assert!(out.contains("pub user: Uuid,"), "\n{out}");
+    // `-> placed_by` edge param is the target's typed id; `since` keeps its explicit type.
+    assert!(out.contains("pub user: Id<entity::User>,"), "\n{out}");
     assert!(out.contains("pub since: Timestamp,"), "\n{out}");
 }
 
@@ -160,8 +160,10 @@ fn mutation_returns_single_shape_and_maps_to_m_route() {
         ),
         "\n{out}"
     );
-    assert!(out.contains("pub org: Uuid,"), "\n{out}");
-    assert!(out.contains("pub buyer: Uuid,"), "\n{out}");
+    // Both params are bare `Id` annotations, but the body resolves them to their write
+    // targets (`org` → Order.org, `buyer` → placed_by), so each carries the typed id.
+    assert!(out.contains("pub org: Id<entity::Org>,"), "\n{out}");
+    assert!(out.contains("pub buyer: Id<entity::Org>,"), "\n{out}");
 }
 
 #[test]
@@ -173,11 +175,12 @@ fn bare_model_return_projects_every_stored_column() {
         Order { deleted_at: timestamp?, org: Org, status: text, total: int }
         query order_by_id(id) -> Order;
         "#);
-    // Scalars by type, the forward FK as a Uuid under the relation field name.
+    // Scalars by type, the own `id` and the forward FK as typed ids under the field name.
     assert!(out.contains("pub struct Order {"), "\n{out}");
+    assert!(out.contains("pub id: Id<entity::Order>,"), "\n{out}");
     assert!(out.contains("pub status: String,"), "\n{out}");
     assert!(out.contains("pub total: i64,"), "\n{out}");
-    assert!(out.contains("pub org: Uuid,"), "\n{out}");
+    assert!(out.contains("pub org: Id<entity::Org>,"), "\n{out}");
 }
 
 #[test]
@@ -240,7 +243,7 @@ fn ctx_transport_carries_typed_context() {
 #[test]
 fn callable_reading_ctx_gets_typed_ctx_struct() {
     // A `$ctx.<field>` requirement (D4/D5) surfaces as a per-callable `<Name>Ctx`
-    // struct the method takes; a relation field carries the model's key (Uuid, D1).
+    // struct the method takes; a relation field carries the model's typed id.
     let out = gen(r#"
         @soft_delete(deleted_at)
         Org { deleted_at: timestamp?, name: text }
@@ -249,9 +252,9 @@ fn callable_reading_ctx_gets_typed_ctx_struct() {
         shape OrderCard from Order { status }
         query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
         "#);
-    // The typed context struct exists, `org` typed as the relation key.
+    // The typed context struct exists, `org` typed as the relation's typed id.
     assert!(out.contains("pub struct MyOrgOrdersCtx {"), "\n{out}");
-    assert!(out.contains("pub org: Uuid,"), "\n{out}");
+    assert!(out.contains("pub org: Id<entity::Org>,"), "\n{out}");
     // The method takes it (not `()`) and forwards it to the transport.
     assert!(
         out.contains("pub fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError>"),
@@ -375,6 +378,37 @@ fn embedded_bridge_is_gated_on_the_option() {
         embed.contains("self.engine.call(route, args, ctx)"),
         "\n{embed}"
     );
+}
+
+#[test]
+fn typed_ids_are_phantom_newtypes_per_entity() {
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Org { deleted_at: timestamp?, name: text }
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text }
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, org: Org, placed_by: User, total: int }
+        shape OrderCard from Order { id, total, owner = org.id }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    // The transparent phantom newtype + its explicit raw constructor.
+    assert!(out.contains("pub struct Id<E> {"), "\n{out}");
+    assert!(
+        out.contains("#[serde(transparent, bound = \"\")]"),
+        "\n{out}"
+    );
+    assert!(out.contains("pub fn from_raw("), "\n{out}");
+    // A marker per model, so `Id<entity::Org>` and `Id<entity::User>` differ.
+    assert!(out.contains("pub mod entity {"), "\n{out}");
+    assert!(out.contains("pub enum Org {}"), "\n{out}");
+    assert!(out.contains("pub enum User {}"), "\n{out}");
+    assert!(out.contains("pub enum Order {}"), "\n{out}");
+    // The shape's `id` is the row's own typed id; a reached FK's id is the target's.
+    assert!(out.contains("pub id: Id<entity::Order>,"), "\n{out}");
+    assert!(out.contains("pub owner: Id<entity::Org>,"), "\n{out}");
+    // The blanket `From<String>` hole stays closed — no such impl is emitted.
+    assert!(!out.contains("impl<E> From<String> for Id<E>"), "\n{out}");
 }
 
 #[test]

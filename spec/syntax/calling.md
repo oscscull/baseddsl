@@ -14,6 +14,24 @@ GraphQL's field-picking is moot (shape + filter fixed server-side) -> RPC-style 
 2. Wire endpoint — one route per query, e.g. `POST /q/products`, JSON body = typed inputs, returns typed output. No query string on the wire -> no injection surface, client can ask only what signatures pre-authorize.
 3. Input validation — typed params validated at the boundary before SQL; defaults applied.
 
+## Typed ids
+An id is never a bare string on the typed surface. Every id the client touches — a
+model's own `id`, a relation param/FK, or a `$ctx` relation — is a per-entity phantom
+newtype `Id<E>` (Rust: `Id<entity::User>`, `Id<entity::Org>`; a branded/named type in
+other targets). Distinct entities are distinct types, so an `Org` id can never be passed
+where a `User` id is wanted — the transposition that a shared string type type-checks and
+fails only at runtime (an FK violation) is now a compile error. The compiler already
+resolves which entity a param identifies (the same edge it type-checks); the client stops
+discarding that and carries it to the language boundary — the one place a human/LLM writes
+a call by hand.
+
+The wire is unchanged: `Id<E>` is transparent over the underlying id string (no custom
+serialization), so the OpenAPI/JSON surface is still `{ type: string, format: uuid }`. A
+`create_*` result already hands back the typed id, so a create→use chain needs no
+conversion. There is deliberately **no** blanket `From<String>` — that would reopen the
+hole; turning a raw string into a typed id is an explicit, greppable `Id::from_raw(s)`
+(mirroring how `unscoped(...)` makes the unsafe escape visible, principle 1/6).
+
 ## Pagination envelope
 A query with `page (N)` returns `{ rows, cursor }`, never a bare array (cursor must come back). Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).
 

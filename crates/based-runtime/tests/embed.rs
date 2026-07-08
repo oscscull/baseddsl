@@ -24,21 +24,105 @@ use serde_json::json;
 #[allow(dead_code)]
 mod client {
     use serde::{Deserialize, Serialize};
+    use std::marker::PhantomData;
 
+    // Semantic aliases for the wire types (mirrors the DDL mapping).
     pub type Uuid = String;
     pub type Timestamp = String;
     pub type Date = String;
     pub type Json = serde_json::Value;
 
+    /// A typed id: the primary key of entity `E`, carried on the wire as its raw string
+    /// (`#[serde(transparent)]`, so the wire is unchanged). The `E` marker keeps ids of
+    /// different entities distinct types, so a `User` id can't be passed where an `Org` id
+    /// is wanted. A `create_*` result already hands one back typed; turn a raw string into
+    /// one only through the explicit, greppable `Id::from_raw`.
+    #[derive(Serialize, Deserialize)]
+    #[serde(transparent, bound = "")]
+    pub struct Id<E> {
+        raw: String,
+        #[serde(skip)]
+        _entity: PhantomData<fn() -> E>,
+    }
+
+    impl<E> Id<E> {
+        /// Wrap a raw id string as a typed id — the explicit escape from an untyped string,
+        /// used only where the string's entity is known (an id from outside the client).
+        pub fn from_raw(raw: impl Into<String>) -> Self {
+            Id {
+                raw: raw.into(),
+                _entity: PhantomData,
+            }
+        }
+        /// The underlying id string.
+        pub fn as_str(&self) -> &str {
+            &self.raw
+        }
+        /// Consume into the raw id string.
+        pub fn into_raw(self) -> String {
+            self.raw
+        }
+    }
+
+    // Hand-written so the marker `E` carries no trait bounds (a derive would demand
+    // `E: Clone`, `E: Ord`, … of a type that only ever tags).
+    impl<E> Clone for Id<E> {
+        fn clone(&self) -> Self {
+            Id {
+                raw: self.raw.clone(),
+                _entity: PhantomData,
+            }
+        }
+    }
+    impl<E> std::fmt::Debug for Id<E> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Id({:?})", self.raw)
+        }
+    }
+    impl<E> std::fmt::Display for Id<E> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.raw)
+        }
+    }
+    impl<E> PartialEq for Id<E> {
+        fn eq(&self, other: &Self) -> bool {
+            self.raw == other.raw
+        }
+    }
+    impl<E> Eq for Id<E> {}
+    impl<E> PartialOrd for Id<E> {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl<E> Ord for Id<E> {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.raw.cmp(&other.raw)
+        }
+    }
+    impl<E> std::hash::Hash for Id<E> {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.raw.hash(state);
+        }
+    }
+
+    /// Pagination envelope (calling.md): a paginated query returns rows + an opaque
+    /// cursor, never a bare array. Next page = the same call carrying `cursor`.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Page<T> {
         pub rows: Vec<T>,
         pub cursor: Option<String>,
     }
 
+    /// An error from a client call (transport failure or decode failure). The concrete
+    /// `Transport` decides how to populate it.
     #[derive(Debug, Clone)]
     pub struct ClientError(pub String);
 
+    /// Post a typed input to a route, carry the typed request context (`$ctx`, D4/D5 —
+    /// sent out of band, never a body field, auth.md/D7), and decode the typed output.
+    /// A callable with no `$ctx` requirements passes `ctx: &()`. Implemented by the
+    /// runtime's HTTP client; codegen only depends on this shape.
     pub trait Transport {
         fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
         where
@@ -47,8 +131,15 @@ mod client {
             O: serde::de::DeserializeOwned;
     }
 
+    /// The generated client, generic over a `Transport`.
     pub struct Client<T> {
         pub transport: T,
+    }
+
+    /// Phantom entity tags for `Id<entity::M>` (types only, never constructed).
+    pub mod entity {
+        pub enum Org {}
+        pub enum Order {}
     }
 
     // ---------- output types ----------
@@ -63,30 +154,34 @@ mod client {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct OrderByIdInput {
-        pub id: Uuid,
+        pub id: Id<entity::Order>,
     }
+    /// Wire route for `order_by_id`.
     pub const ORDER_BY_ID_ROUTE: &str = "/q/order_by_id";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct OrdersInOrgInput {
-        pub org: Uuid,
+        pub org: Id<entity::Org>,
     }
+    /// Wire route for `orders_in_org`.
     pub const ORDERS_IN_ORG_ROUTE: &str = "/q/orders_in_org";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MyOrgOrdersInput;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MyOrgOrdersCtx {
-        pub org: Uuid,
+        pub org: Id<entity::Org>,
     }
+    /// Wire route for `my_org_orders`.
     pub const MY_ORG_ORDERS_ROUTE: &str = "/q/my_org_orders";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct PlaceOrderInput {
-        pub org: Uuid,
+        pub org: Id<entity::Org>,
         pub status: String,
         pub total: i64,
     }
+    /// Wire route for `place_order`.
     pub const PLACE_ORDER_ROUTE: &str = "/m/place_order";
 
     // ---------- client ----------
@@ -225,7 +320,12 @@ fn typed_get_round_trips_in_process() {
     let api = client::embedded(&engine);
 
     let got = api
-        .order_by_id(client::OrderByIdInput { id: "o-1".into() }, ())
+        .order_by_id(
+            client::OrderByIdInput {
+                id: client::Id::from_raw("o-1"),
+            },
+            (),
+        )
         .expect("call ok");
     let card = got.expect("a row");
     assert_eq!(card.status, "paid");
@@ -242,7 +342,7 @@ fn typed_get_missing_is_none() {
     let got = api
         .order_by_id(
             client::OrderByIdInput {
-                id: "missing".into(),
+                id: client::Id::from_raw("missing"),
             },
             (),
         )
@@ -263,7 +363,7 @@ fn typed_list_round_trips_in_process() {
     let rows = api
         .orders_in_org(
             client::OrdersInOrgInput {
-                org: "org-1".into(),
+                org: client::Id::from_raw("org-1"),
             },
             (),
         )
@@ -288,7 +388,7 @@ fn ctx_supplied_in_process_and_required() {
         .my_org_orders(
             client::MyOrgOrdersInput,
             client::MyOrgOrdersCtx {
-                org: "org-9".into(),
+                org: client::Id::from_raw("org-9"),
             },
         )
         .expect("call ok");
@@ -340,7 +440,7 @@ fn mutation_response_is_the_created_rows_declared_shape() {
     let card = api
         .place_order(
             client::PlaceOrderInput {
-                org: "o-2".into(),
+                org: client::Id::from_raw("o-2"),
                 status: "open".into(),
                 total: 7,
             },

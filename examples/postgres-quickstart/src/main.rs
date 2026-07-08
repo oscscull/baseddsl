@@ -27,6 +27,10 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 mod client;
 
+// Typed ids: `Id<entity::User>` and `Id<entity::Org>` are distinct types, so an org id
+// can't be passed where a user id is wanted (the client hands each one back typed).
+use client::{entity, Id};
+
 fn main() {
     // `.env` supplies `DATABASE_URL` (dotenvy, the 12-factor convention) — no hard-coded URL.
     dotenvy::dotenv().ok();
@@ -227,27 +231,32 @@ fn main() {
 }
 
 /// Place an order for `buyer` at `total`, acting as `org`; return its id.
-fn place(api: &client::Client<client::Embedded>, org: &str, buyer: &str, total: i64) -> String {
+fn place(
+    api: &client::Client<client::Embedded>,
+    org: &Id<entity::Org>,
+    buyer: &Id<entity::User>,
+    total: i64,
+) -> Id<entity::Order> {
     api.place_order(
         client::PlaceOrderInput {
-            buyer: buyer.to_string(),
+            buyer: buyer.clone(),
             total,
         },
-        client::PlaceOrderCtx {
-            org: org.to_string(),
-        },
+        client::PlaceOrderCtx { org: org.clone() },
     )
     .expect("place_order")
     .id
 }
 
 /// Read an order back by id, acting as `org`.
-fn get(api: &client::Client<client::Embedded>, org: &str, id: &str) -> Option<client::OrderCard> {
+fn get(
+    api: &client::Client<client::Embedded>,
+    org: &Id<entity::Org>,
+    id: &Id<entity::Order>,
+) -> Option<client::OrderCard> {
     api.order_by_id(
-        client::OrderByIdInput { id: id.to_string() },
-        client::OrderByIdCtx {
-            org: org.to_string(),
-        },
+        client::OrderByIdInput { id: id.clone() },
+        client::OrderByIdCtx { org: org.clone() },
     )
     .expect("order_by_id")
 }
