@@ -4,11 +4,15 @@
 //! routes (calling.md's closed RPC surface).
 
 use based_ast::FileId;
-use based_codegen::client::{client, ClientTarget};
+use based_codegen::client::{client, client_with, ClientOptions, ClientTarget};
 use based_parser::parse_file;
 use based_sema::check;
 
 fn gen(src: &str) -> String {
+    gen_opts(src, ClientOptions::default())
+}
+
+fn gen_opts(src: &str, opts: ClientOptions) -> String {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
@@ -17,7 +21,7 @@ fn gen(src: &str) -> String {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    client(&schema, &sf.decls, ClientTarget::Rust)
+    client_with(&schema, &sf.decls, ClientTarget::Rust, opts)
 }
 
 #[test]
@@ -338,4 +342,54 @@ fn nested_to_many_shape_emits_vec_of_nested_struct() {
     assert!(out.contains("pub struct OrderCardItems {"), "\n{out}");
     assert!(out.contains("pub sku: String,"), "\n{out}");
     assert!(out.contains("pub qty: i64,"), "\n{out}");
+}
+
+#[test]
+fn embedded_bridge_is_gated_on_the_option() {
+    let src = r#"
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#;
+    // The wire client (default `client()`) must NOT reference based-runtime — a pure-wire
+    // consumer need not depend on it, so forcing the reference would break its build.
+    let sf = parse_file(src, FileId(0)).unwrap();
+    let (schema, _) = check(&sf.decls);
+    let wire = client(&schema, &sf.decls, ClientTarget::Rust);
+    assert!(!wire.contains("based_runtime"), "\n{wire}");
+    assert!(!wire.contains("pub fn embedded("), "\n{wire}");
+
+    // With the option on, the embedded bridge is appended: the `Embedded` transport over
+    // `based_runtime::Engine` and the one-call `embedded(&engine)` constructor.
+    let embed = gen_opts(src, ClientOptions { embedded: true });
+    assert!(
+        embed.contains("pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>>"),
+        "\n{embed}"
+    );
+    assert!(
+        embed.contains("impl Transport for Embedded<'_>"),
+        "\n{embed}"
+    );
+    assert!(
+        embed.contains("self.engine.call(route, args, ctx)"),
+        "\n{embed}"
+    );
+}
+
+#[test]
+fn no_inner_allow_attribute_so_include_accepts_it() {
+    // The module must not carry an inner `#![allow(dead_code)]` — `include!` rejects inner
+    // attributes, so consumers apply an outer `#[allow(dead_code)] mod client { … }` instead
+    // (no string surgery, D62).
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Order { deleted_at: timestamp?, status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        !out.lines().any(|l| l.trim_start().starts_with("#![")),
+        "\n{out}"
+    );
 }

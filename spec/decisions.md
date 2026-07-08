@@ -31,7 +31,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres)
-- **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client)
+- **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client), D62
+  (emitted in-process embedded bridge `client::embedded(&engine)`, opt-in via `ClientOptions`; inner
+  `#![allow]` wart fixed)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
@@ -2107,3 +2109,43 @@ one, each with its own gitignored `target/` + committed `Cargo.lock`.
   (11/11 Postgres live tests incl. the new one), `fmt --check` + `clippy` clean across the workspace and
   both new example crates, `examples/` still workspace-excluded. **Track B / DoD #2 complete** — a worked,
   runnable project per target DB (SQLite D60, MariaDB + Postgres D61).
+
+## D62 — `based gen client` emits the in-process embedded bridge (`client::embedded(&engine)`)
+The typed client is generic over a `Transport` trait it *defines itself*, so — orphan rule — a
+library-side `impl Transport for Engine` in based-runtime is forbidden (the trait is owned downstream,
+in the generated module). The prior consequence: every in-process embedder hand-copied the same ~20-line
+`InProcess` bridge (`tests/embed.rs`, all three quickstarts). Since the quickstarts are a user's first
+look at a library whose promise is *effortless* Rust↔DB access, that plumbing is exactly the wrong first
+impression. Fix at the source: **`based gen client` emits the bridge.**
+
+- **Emitted surface.** When enabled, the client module also carries an `Embedded<'a>` transport wrapping
+  a `&'a based_runtime::Engine`, its `impl Transport` (serialize typed input + `$ctx` to JSON — a
+  non-object ctx → `{}`; `engine.call(route, args, ctx)`; `200` → decode body into `O`, non-`200` →
+  `ClientError` from `error.message`, byte-for-byte what the hand bridge did), and a free constructor
+  `pub fn embedded(engine: &Engine) -> Client<Embedded<'_>>`. Ergonomics: `let api = client::embedded(&engine);`
+  then `api.place_order(input, ctx)?` — **zero** bridge code. `based_runtime::Engine` is named **by path
+  in the emitted text**; based-codegen keeps *no* based-runtime dep (that would be circular) — the
+  consuming crate is what depends on based-runtime.
+- **Gating (why opt-in, not a cfg feature).** A pure-wire/HTTP client need not depend on based-runtime,
+  so the `based_runtime::Engine` reference must not be forced on it. Chose an **emit flag on the library
+  entrypoint** (`ClientOptions { embedded: bool }`, threaded through a new `client_with(schema, decls,
+  target, opts)`; `client(…)` stays the default-off wire entry) over a `#[cfg(feature = "…")]` guard:
+  a cfg feature would need the *consuming* crate to declare and enable a matching feature (friction +
+  confusion for `include!`d generated code), whereas an emit flag makes the module text either contain
+  the bridge or not — the wire CLI path (`based gen client`) leaves it off untouched, and an embedding
+  `build.rs` opts in with one field. Keeps the wire client unaffected and the embed path a one-liner.
+- **`#![allow(dead_code)]` wart fixed at the source.** The preamble no longer emits an inner
+  `#![allow(dead_code)]` (which `include!` rejects — inner attributes must annotate an enclosing
+  file/module, forcing every embedder to do `.replace("#![allow(dead_code)]\n", "")`). Consumers now
+  apply an outer `#[allow(dead_code)] mod client { … }` (the standard pattern for generated code); the
+  quickstarts already did, so their now-vestigial `.replace(…)` is a harmless no-op until the next
+  iteration removes it. Existing `based gen client` consumers keep working.
+- **Seam proven, plumbing deleted.** `tests/embed.rs` now consumes the emitted `client::embedded(&engine)`
+  instead of its hand-written `InProcess` impl (the committed verbatim `mod client` was regenerated with
+  `embedded: true`), validating the bridge end-to-end and removing duplicated code. A codegen unit test
+  asserts the bridge is present with the flag and absent (no `based_runtime` reference) without it, plus
+  that no inner attribute is emitted.
+- **Gate.** `cargo test --workspace --all-features` green (incl. the reworked embed test + the new codegen
+  tests), `fmt --check` + `clippy --workspace --all-features` clean, all three `examples/` still `cargo
+  build` (their own bridge stands for now — the quickstart DX rebuild onto `client::embedded` is the next
+  iteration). **Unblocks the quickstart rebuild.**

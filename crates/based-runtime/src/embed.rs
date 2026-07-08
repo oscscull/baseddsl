@@ -17,36 +17,24 @@
 //!
 //! ## Wiring the generated client
 //! The generated client (`based gen client`) is generic over a `Transport` trait it
-//! *defines itself*, so — by the orphan rule — the `impl Transport` bridging it to an
-//! `Engine` lives in your crate, next to the generated module. It is a few lines: serialize
-//! the typed input *and* the typed `$ctx` to JSON, call [`Engine::call`], then decode the
-//! `200` body into the output type (a non-`200` becomes the client's `ClientError`). `$ctx`
-//! is a typed method argument (D30) supplied straight in — no header dance (auth.md/D7 still
-//! holds: the *app*, not the caller, sets it); a public callable passes `&()`, which the
-//! bridge maps to an empty context bag. A worked example lives in `tests/embed.rs`:
+//! *defines itself*, so — by the orphan rule — a library-side `impl Transport for Engine`
+//! in this crate is forbidden (the trait is owned by the generated module downstream).
+//! Rather than make every embedder hand-copy the bridge, `based gen client` **emits** it
+//! when asked (`ClientOptions::embedded`, D62): the generated module carries an `Embedded`
+//! transport over `Engine` plus an `embedded(&engine)` constructor, so wiring a client is
+//! one call and **zero** bridge code:
 //!
 //! ```ignore
-//! struct InProcess<'a> { engine: &'a Engine }
-//!
-//! impl client::Transport for InProcess<'_> {
-//!     fn call<I: Serialize, C: Serialize, O: DeserializeOwned>(
-//!         &self, route: &str, input: &I, ctx: &C,
-//!     ) -> Result<O, client::ClientError> {
-//!         let args = serde_json::to_value(input).map_err(|e| client::ClientError(e.to_string()))?;
-//!         // `&()` → JSON `null`; a non-object context is treated as empty.
-//!         let ctx = serde_json::to_value(ctx)
-//!             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
-//!             .map_err(|e| client::ClientError(e.to_string()))?;
-//!         let resp = self.engine.call(route, args, ctx);
-//!         if resp.status == 200 {
-//!             serde_json::from_value(resp.body).map_err(|e| client::ClientError(e.to_string()))
-//!         } else {
-//!             let msg = resp.body["error"]["message"].as_str().unwrap_or("call failed");
-//!             Err(client::ClientError(msg.to_string()))
-//!         }
-//!     }
-//! }
+//! let api = client::embedded(&engine);          // no Transport impl to write
+//! let out = api.place_order(input, ctx)?;        // typed, in-process, no socket
 //! ```
+//!
+//! The emitted bridge serializes the typed input *and* the typed `$ctx` to JSON, calls
+//! [`Engine::call`], then decodes the `200` body into the output type (a non-`200` becomes
+//! the client's `ClientError`). `$ctx` is a typed method argument (D30) supplied straight in
+//! — no header dance (auth.md/D7 still holds: the *app*, not the caller, sets it); a public
+//! callable passes `()`, which the bridge maps to an empty context bag. `tests/embed.rs`
+//! consumes the emitted `embedded(&engine)` end-to-end over [`crate::run::MockDb`].
 //!
 //! ## Concurrency
 //! `Engine` holds its one connection behind a [`RefCell`], so a call needs only `&self`

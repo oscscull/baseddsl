@@ -35,6 +35,19 @@
 //! common public case stays clean. This makes the client honest about the context
 //! contract instead of smuggling `$ctx` on the side.
 //!
+//! ## The embedded bridge (opt-in, D62)
+//! The abstract `Transport` is defined *in this generated module*, so the orphan rule
+//! forbids a library-side `impl Transport for Engine` in based-runtime — every embedder
+//! would otherwise hand-copy the same ~20-line bridge. So when [`ClientOptions::embedded`]
+//! is set, the module *also* emits that bridge over `based_runtime::Engine`: an `Embedded`
+//! transport plus a `embedded(&engine)` constructor, giving an in-process consumer a
+//! working `Client` with one call and **zero** bridge code (`let api = client::embedded(&engine)`).
+//! It is opt-in because a pure-wire/HTTP client need not depend on based-runtime, so the
+//! `based_runtime::Engine` reference must not be forced on it; the CLI wire path leaves it
+//! off, an embedding build (the quickstarts, `tests/embed.rs`) turns it on. based-codegen
+//! itself gains no based-runtime dep — the reference is by path in the emitted *text*, and
+//! the consuming crate is what depends on based-runtime.
+//!
 //! ## Deferred (documented, not silently wrong)
 //! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct; a to-**many**
 //!   nest (`items { … }`) emits a nested struct wrapped in `Vec<…>`, both matching the
@@ -64,10 +77,35 @@ impl ClientTarget {
     }
 }
 
-/// Render the whole schema as a typed client module for `target`.
+/// Emit options beyond the target language.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClientOptions {
+    /// Also emit the in-process **embedded bridge** — an `Embedded` `Transport` over
+    /// `based_runtime::Engine` plus an `embedded(&engine)` constructor (D62). Off by
+    /// default: a pure-wire/HTTP client need not depend on based-runtime, so the
+    /// `based_runtime::Engine` reference must not be forced on it. An embedding consumer
+    /// (the quickstarts, `tests/embed.rs`) turns it on to get a working `Client` with no
+    /// hand-written bridge.
+    pub embedded: bool,
+}
+
+/// Render the whole schema as a typed *wire* client module for `target` (no embedded
+/// bridge). The socket-free embed path uses [`client_with`] with
+/// [`ClientOptions::embedded`] instead.
 pub fn client(schema: &CheckedSchema, decls: &[Decl], target: ClientTarget) -> String {
+    client_with(schema, decls, target, ClientOptions::default())
+}
+
+/// Render the whole schema as a typed client module for `target`, honoring `opts` (e.g.
+/// [`ClientOptions::embedded`] to append the in-process bridge over `based_runtime::Engine`).
+pub fn client_with(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    target: ClientTarget,
+    opts: ClientOptions,
+) -> String {
     let ClientTarget::Rust = target;
-    rust::render(schema, decls)
+    rust::render(schema, decls, opts)
 }
 
 // ---------- the resolved surface a callable contributes --------------------
@@ -123,7 +161,7 @@ struct OutStruct {
 mod rust {
     use super::*;
 
-    pub(super) fn render(schema: &CheckedSchema, decls: &[Decl]) -> String {
+    pub(super) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions) -> String {
         let callables = collect(schema, decls);
 
         let mut out = String::new();
@@ -167,6 +205,13 @@ mod rust {
             out.push_str(&render_method(c));
         }
         out.push_str("}\n");
+
+        // Opt-in in-process bridge over `based_runtime::Engine` (D62): a working client
+        // with no hand-written `Transport` impl. Gated so the wire client stays free of a
+        // based-runtime dependency.
+        if opts.embedded {
+            out.push_str(EMBEDDED);
+        }
         out
     }
 
@@ -669,7 +714,10 @@ mod rust {
 // The closed RPC surface (calling.md): one input type, one output type, and one
 // route per signature. Transport is abstract — implement `Transport` to post JSON
 // to a route and decode the reply; the runtime supplies the concrete HTTP client.
-#![allow(dead_code)]
+//
+// Some generated items may be unused by a given consumer; suppress dead-code warnings by
+// including this module under an outer `#[allow(dead_code)] mod client { … }` (the standard
+// pattern for generated code — an inner `#![allow]` would be rejected by `include!`).
 
 use serde::{Deserialize, Serialize};
 
@@ -707,6 +755,53 @@ pub trait Transport {
 /// The generated client, generic over a `Transport`.
 pub struct Client<T> {
     pub transport: T,
+}
+"#;
+
+    /// The opt-in in-process bridge (D62), appended when [`ClientOptions::embedded`] is
+    /// set. It references `based_runtime::Engine` *by path* — the consuming crate depends
+    /// on based-runtime (based-codegen itself does not; that would be circular). This
+    /// reproduces the bridge every embedder used to hand-copy: serialize the typed input
+    /// and `$ctx` to JSON (a non-object ctx → `{}`), call `engine.call`, decode a `200`
+    /// body into `O`, map a non-`200` to a `ClientError` from `error.message`.
+    const EMBEDDED: &str = r#"
+// ---------- embedded bridge (based_runtime::Engine, D62) ----------
+
+/// A `Transport` backed by an in-process `based_runtime::Engine` — every callable runs
+/// through the engine's dispatch core with no socket. Build one with [`embedded`].
+pub struct Embedded<'a> {
+    engine: &'a based_runtime::Engine,
+}
+
+impl Transport for Embedded<'_> {
+    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    where
+        I: Serialize,
+        C: Serialize,
+        O: serde::de::DeserializeOwned,
+    {
+        let args = serde_json::to_value(input).map_err(|e| ClientError(e.to_string()))?;
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map_err(|e| ClientError(e.to_string()))?;
+        let resp = self.engine.call(route, args, ctx);
+        if resp.status == 200 {
+            serde_json::from_value(resp.body).map_err(|e| ClientError(e.to_string()))
+        } else {
+            let msg = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            Err(ClientError(msg.to_string()))
+        }
+    }
+}
+
+/// A ready-to-use client over an in-process `based_runtime::Engine` — no bridge to write.
+/// `$ctx` is a typed per-call argument (auth.md/D7 still holds: the app sets it, not the
+/// caller); a public callable passes `()`, which maps to an empty context bag.
+pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
+    Client {
+        transport: Embedded { engine },
+    }
 }
 "#;
 }
