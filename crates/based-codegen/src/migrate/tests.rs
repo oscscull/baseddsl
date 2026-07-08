@@ -76,6 +76,8 @@ fn render_then_parse_round_trips_every_attribute() {
                 inferred: true,
             }],
         }],
+
+        renames: Vec::new(),
     };
     let text = snap.render();
     let parsed = Snapshot::parse(&text).expect("parse round-trip");
@@ -89,6 +91,8 @@ fn parse_tolerates_a_quoted_default_with_spaces() {
     let snap = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("job", vec![c])],
+
+        renames: Vec::new(),
     };
     let parsed = Snapshot::parse(&snap.render()).expect("parse");
     assert_eq!(snap, parsed);
@@ -102,6 +106,8 @@ fn init_diff_from_empty_is_a_full_create_set() {
             table("a", vec![col("x", "int", false)]),
             table("b", vec![col("y", "text", true)]),
         ],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&Snapshot::default(), &now);
     assert_eq!(steps.len(), 2);
@@ -114,6 +120,8 @@ fn add_column_and_add_index_between_versions() {
     let prev = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("product", vec![col("name", "text", false)])],
+
+        renames: Vec::new(),
     };
     let mut now_t = table(
         "product",
@@ -128,6 +136,8 @@ fn add_column_and_add_index_between_versions() {
     let now = Snapshot {
         scopes: Vec::new(),
         tables: vec![now_t],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&prev, &now);
     assert_eq!(steps.len(), 2);
@@ -147,10 +157,14 @@ fn dropping_a_column_and_a_table_is_destructive() {
             table("keep", vec![col("a", "int", false), col("b", "int", false)]),
             table("gone", vec![col("c", "int", false)]),
         ],
+
+        renames: Vec::new(),
     };
     let now = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("keep", vec![col("a", "int", false)])],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&prev, &now);
     // drop column keep.b + drop table gone.
@@ -169,11 +183,15 @@ fn narrowing_type_and_new_not_null_without_default_are_destructive() {
     let prev = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("t", vec![col("v", "text", true)])],
+
+        renames: Vec::new(),
     };
     // text -> int (narrowing) AND null -> not_null with no default.
     let now = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("t", vec![col("v", "int", false)])],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&prev, &now);
     assert_eq!(steps.len(), 1);
@@ -183,10 +201,14 @@ fn narrowing_type_and_new_not_null_without_default_are_destructive() {
     let prev2 = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("t", vec![col("v", "int", false)])],
+
+        renames: Vec::new(),
     };
     let now2 = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("t", vec![col("v", "text", true)])],
+
+        renames: Vec::new(),
     };
     let steps2 = diff_snapshots(&prev2, &now2);
     assert_eq!(steps2.len(), 1);
@@ -198,6 +220,8 @@ fn adding_a_unique_index_is_destructive_over_existing_data() {
     let prev = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("t", vec![col("email", "text", false)])],
+
+        renames: Vec::new(),
     };
     let mut now_t = table("t", vec![col("email", "text", false)]);
     now_t.indexes.push(IndexSnap {
@@ -209,6 +233,8 @@ fn adding_a_unique_index_is_destructive_over_existing_data() {
     let now = Snapshot {
         scopes: Vec::new(),
         tables: vec![now_t],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&prev, &now);
     assert_eq!(steps.len(), 1);
@@ -221,6 +247,8 @@ fn no_changes_yields_no_steps() {
     let snap = Snapshot {
         scopes: Vec::new(),
         tables: vec![table("t", vec![col("a", "int", false)])],
+
+        renames: Vec::new(),
     };
     assert!(diff_snapshots(&snap, &snap).is_empty());
 }
@@ -240,6 +268,8 @@ fn multi_alternative_scope_serializes_parses_and_diffs() {
             scope_decl("Page", &[("page", "Page", "page")]),
         ],
         tables: vec![post.clone()],
+
+        renames: Vec::new(),
     };
 
     // Round-trip: both the OR alternatives and the two top-level decls survive.
@@ -264,6 +294,8 @@ fn multi_alternative_scope_serializes_parses_and_diffs() {
     let prev = Snapshot {
         scopes: vec![scope_decl("Page", &[("page", "Page", "page")])],
         tables: vec![prev_post],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&prev, &now);
     assert!(
@@ -305,6 +337,8 @@ fn init_diff_omits_scope_change_steps() {
     let now = Snapshot {
         scopes: vec![scope_decl("Page", &[("page", "Page", "page")])],
         tables: vec![t],
+
+        renames: Vec::new(),
     };
     let steps = diff_snapshots(&Snapshot::default(), &now);
     assert!(
@@ -562,6 +596,118 @@ fn sql_statements_errs_on_sqlite_alter_column() {
     }];
     let err = sql_statements(&steps, Sqlite).unwrap_err();
     assert!(err.contains("SQLite cannot ALTER COLUMN t.v"), "{err}");
+}
+
+// ---- E5: @was renames + raw(dialect) escape -------------------------
+
+/// A field `@was` (persisted as a `Rename::Column`) turns what would be a drop+add into a
+/// single `rename column` step — data-preserving, non-destructive — and renders per dialect.
+#[test]
+fn column_rename_via_was_is_one_step_not_drop_add() {
+    let prev = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![table("product", vec![col("upc", "text", true)])],
+        renames: Vec::new(),
+    };
+    let now = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![table("product", vec![col("barcode", "text", true)])],
+        renames: vec![Rename::Column {
+            table: "product".to_string(),
+            from: "upc".to_string(),
+            to: "barcode".to_string(),
+        }],
+    };
+    let steps = diff_snapshots(&prev, &now);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(&steps[0], Step::RenameColumn { from, to, .. } if from == "upc" && to == "barcode")
+    );
+    assert!(!steps[0].destructive());
+    assert!(render_up(&steps).contains("rename column product.upc -> barcode"));
+    assert!(render_sql(&steps, Postgres)
+        .contains("ALTER TABLE \"product\" RENAME COLUMN \"upc\" TO \"barcode\";"));
+    assert!(render_sql(&steps, MariaDb)
+        .contains("ALTER TABLE `product` RENAME COLUMN `upc` TO `barcode`;"));
+    assert!(render_sql(&steps, Sqlite)
+        .contains("ALTER TABLE `product` RENAME COLUMN `upc` TO `barcode`;"));
+}
+
+/// A model `@was` renames the table; a spent rename (old name already gone from `prev`)
+/// is inert — no step — so leaving `@was` in place after capture is harmless.
+#[test]
+fn table_rename_and_spent_rename_is_inert() {
+    let prev = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![table("legacy_product", vec![col("name", "text", false)])],
+        renames: Vec::new(),
+    };
+    let now = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![table("product", vec![col("name", "text", false)])],
+        renames: vec![Rename::Table {
+            from: "legacy_product".to_string(),
+            to: "product".to_string(),
+        }],
+    };
+    let steps = diff_snapshots(&prev, &now);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(&steps[0], Step::RenameTable { from, to } if from == "legacy_product" && to == "product")
+    );
+    assert!(render_sql(&steps, Postgres)
+        .contains("ALTER TABLE \"legacy_product\" RENAME TO \"product\";"));
+
+    // `product` already exists in prev and the `@was` still names the (gone) old table:
+    // the rename is spent, so the diff produces nothing (migrations.md — inert `@was`).
+    let spent = diff_snapshots(&now, &now);
+    assert!(spent.is_empty(), "{spent:?}");
+}
+
+/// A rename hint round-trips through `schema.snap` render/parse, so `apply`/`render`
+/// recover it from the stored snapshot with no database.
+#[test]
+fn rename_hint_round_trips_through_schema_snap() {
+    let snap = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![table("product", vec![col("barcode", "text", true)])],
+        renames: vec![
+            Rename::Table {
+                from: "legacy".to_string(),
+                to: "product".to_string(),
+            },
+            Rename::Column {
+                table: "product".to_string(),
+                from: "upc".to_string(),
+                to: "barcode".to_string(),
+            },
+        ],
+    };
+    let parsed = Snapshot::parse(&snap.render()).expect("round-trip");
+    assert_eq!(snap, parsed, "\n{}", snap.render());
+}
+
+/// A `raw(dialect)` escape parsed from an `up.mig` emits its SQL only for the matching
+/// target and is a no-op for the others (migrations.md — one raw step per dialect).
+#[test]
+fn raw_step_renders_only_for_its_dialect() {
+    let up = "add column product.note text null\n\
+              raw(postgres) `UPDATE \"product\" SET note = ''`\n\
+              raw(sqlite) `UPDATE \"product\" SET note = ''`\n";
+    assert!(has_raw_step(up));
+    let raws = parse_raw_steps(up);
+    assert_eq!(raws.len(), 2);
+    // Postgres target: only the postgres raw runs.
+    let pg = sql_statements(&raws, Postgres).unwrap();
+    assert_eq!(pg.len(), 1);
+    assert!(pg[0].contains("SET note"));
+    // MariaDB target: neither raw matches → nothing runs.
+    assert!(sql_statements(&raws, MariaDb).unwrap().is_empty());
+    // The structural residue drops the raw lines (for verify).
+    assert_eq!(
+        strip_raw_steps(up).trim(),
+        "add column product.note text null"
+    );
 }
 
 #[test]

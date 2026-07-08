@@ -129,6 +129,11 @@ pub struct Field {
     pub modifiers: Vec<Modifier>,
     pub relation_on: Option<Predicate>,
     pub sort: Option<Vec<SortTerm>>,
+    /// `@was("old_col")` — the field's previous physical column name, driving a clean
+    /// `rename column` in the diff instead of drop+add (migrations.md). Transient by
+    /// nature (removed once the rename is captured). The `Ident` carries the old name
+    /// (unquoted) and the string-literal span for diagnostics.
+    pub was: Option<Ident>,
     pub span: Span,
 }
 

@@ -54,9 +54,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Editor / LSP** — D36 (VS Code thin LSP client), D40 (per-file manifest resolution), D43
   (go-to-def + type coloring), D44 (document symbols + capability audit), D45 (completion),
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
-  filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T)
+  filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T), D67 (offline
+  migration-drift diagnostic W0108 + spent-`@was` W0107)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
-  renderer), D42 (apply + `_based_migrations` ledger)
+  renderer), D42 (apply + `_based_migrations` ledger), D67 (`@was` renames + offline drift diagnostic
+  + `raw(dialect)` up step — Track E5, DoD #5 fully met)
 - **Example projects** — D60 (`examples/` outside the workspace; SQLite quickstart: build-time
   codegen + in-process `Engine` + typed client, end-to-end scenario), D61 (MariaDB + Postgres
   quickstart slices against live Docker servers; Track B / DoD #2 complete), D63 (quickstart DX
@@ -2333,3 +2335,55 @@ container — `create_org`/`create_user` (public) → `place_order` (scoped writ
 → `my_orders` (scoped read returns it) → a different tenant's `$ctx` sees `[]` (isolation). `SIGTERM`
 drained ("shutdown signal received, draining…") and exited 0. `make ci-image` also green (SQLite smoke).
 Gate: `fmt --check` + `clippy --all-features -D warnings` + `cargo test --workspace --all-features` clean.
+
+## D67 — `@was` renames + offline drift diagnostic + `raw(dialect)` up step (Track E5, DoD #5 fully met)
+The last migration gap: the `@was` rename directive end-to-end, the offline schema-vs-migrations drift
+diagnostic, and the `raw(dialect)` escape step. Settles migrations.md's open E5 items; DoD #5 goes
+Core-met → **fully met** ("a `.bsl` change produces a reviewable, editable migration you can safely
+apply to an existing DB" — now including renames that preserve data).
+
+- **`@was` is parsed both forms** (grammar already anticipated it): field-level `<field>: <ty>
+  @was("old_col")` sits in the field modifier position (parsed in `field_after_colon`, stored on
+  `Field.was: Option<Ident>` carrying the old name + literal span); model-level `@was("old_table")` is a
+  generic decorator (read in `model::model_was`). Sema threads them onto `RModel.was` / `RMember.was`.
+- **Sema validation** (`based-sema::model::validate_was`, D-codes in `ir::code`): `@was` names a
+  *previous* name that lives only in the migration snapshot, so sema can't confirm it existed (the diff
+  does) — it catches the two locally-decidable mistakes: **`E0190`** a no-op self-rename (old == current
+  name), **`E0191`** the old name is still a *live* column/table (then it can't be the rename's source).
+  `"was"` joins `KNOWN_DECORATORS` (no more `W0101`).
+- **Renames are snapshot-authoritative, never auto-guessed** (principle 2). `Snapshot` gains a
+  `renames: Vec<Rename>` (Table/Column) built from the schema's `@was` in `from_schema`, **persisted in
+  `schema.snap`** (`rename table <old> -> <new>` / `rename column <table>.<old> -> <new>` lines,
+  round-tripping through `parse`) so `apply`/`render`/`verify` re-derive the rename from the stored
+  snapshots with no DB. `diff_snapshots` reads `now.renames`: a valid rename (old in `prev`, new in
+  `now`, new absent from `prev`) emits one `Step::RenameTable`/`RenameColumn` instead of a drop+add — a
+  **spent** `@was` (old already gone) is inert (no step), so leaving it in the `.bsl` is harmless.
+  `verify`'s "uncaptured changes" check switched from raw snapshot equality to `diff_snapshots(...).
+  is_empty()` so a lingering/spent `@was` never reads as false drift.
+- **Per-dialect rename SQL** (`migrate::sql`): `ALTER TABLE … RENAME TO …` (table) and `ALTER TABLE …
+  RENAME COLUMN … TO …` (column) — a safe in-place ALTER on all three (Postgres always; MariaDB ≥10.5.2
+  / SQLite ≥3.25 for `RENAME COLUMN`; `RENAME TO` universal), so data survives. Non-destructive.
+- **`raw(dialect)` escape step** (`Step::Raw { dialect, sql }`). The diff never *generates* it (opaque
+  SQL the neutral vocabulary can't model); it is **authored into `up.mig`** and recovered by
+  `migrate::parse_raw_steps` (dialect between `raw(` `)`, SQL between the first/last backtick so an inner
+  MariaDB identifier-backtick survives). `apply`/`render` layer the matching-dialect raw steps after the
+  snapshot-derived structural steps; a non-matching dialect is a no-op (its per-dialect twin carries the
+  change). Not offline-verifiable — `verify` compares the stored `up.mig` with its `raw(` lines stripped
+  (`has_raw_step`/`strip_raw_steps`) and reports the migration **`partial`** (principle 6, never silent).
+- **Offline drift diagnostic** (LSP, `based-lsp::compile`; `based migrate verify` is the CLI twin, D42).
+  `compile_manifest` passes the project root to `compile_paths`, which — only when the project has
+  captured migrations — diffs the latest `schema.snap` against the current schema (`migrate::drift`) and
+  publishes **`W0108`** "N uncaptured schema changes — run `based migrate gen`", anchored per changed
+  model (`Step::table_name`/`describe`). A **spent `@was`** (rename already captured) surfaces as
+  **`W0107`** at the `@was` literal, "rename already captured — remove it".
+
+**Verified live** (Docker: `postgres:16` + `mariadb:11.4`). Postgres: `0001_init` created `product` with
+`name`/`upc`, seeded a row (`Widget`/`012345678905`); renamed `upc → barcode` via `@was`, `migrate gen`
+emitted the one `rename column` step, `render` showed `ALTER TABLE "product" RENAME COLUMN "upc" TO
+"barcode"`, `apply` ran it, and `SELECT name, barcode` returned the *same* row (data survived a real
+RENAME, not drop+recreate). Removing the spent `@was` kept `verify` clean + `gen` a no-op. A hand-authored
+`raw(postgres)` backfill (`UPDATE … SET note = 'seeded'`) added-column-then-backfilled live and `verify`
+reported that migration `partial`. MariaDB: the same `@was` cycle (twice, on valid-uuid data) applied
+`ALTER TABLE `product` RENAME COLUMN …` and the row survived. Gate: `cargo test --workspace --all-features`
++ `fmt --check` + `clippy --all-features` clean; new sema cases (E0190/E0191 ± clean), codegen diff/render
+unit tests (rename one-step, spent-inert, snap round-trip, raw per-dialect), and LSP drift/spent tests.

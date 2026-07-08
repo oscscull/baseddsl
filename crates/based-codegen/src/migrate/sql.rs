@@ -44,6 +44,22 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
             );
             continue;
         }
+        // A raw escape: emit its SQL only for the matching target, else a note (its
+        // per-dialect twin carries the change there). Always flagged not-verifiable (P6).
+        if let Step::Raw { dialect: d, sql } = step {
+            if *d == dialect {
+                let _ = writeln!(out, "-- raw({}) escape — not offline-verifiable", d.name());
+                let _ = writeln!(out, "{sql};");
+            } else {
+                let _ = writeln!(
+                    out,
+                    "-- raw({}) step — skipped for target {}",
+                    d.name(),
+                    dialect.name()
+                );
+            }
+            continue;
+        }
         if step.destructive() {
             out.push_str(
                 "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
@@ -108,6 +124,29 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
         }
         Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
             vec![drop_index_sql(dialect, table, name)]
+        }
+        // Renames are a safe in-place ALTER on every target (Postgres always; MariaDB
+        // ≥10.5.2 / SQLite ≥3.25 for `RENAME COLUMN`; `RENAME TO` universal) — existing
+        // data survives, so this is a real rename, never a drop+recreate.
+        Step::RenameTable { from, to } => vec![format!(
+            "ALTER TABLE {} RENAME TO {}",
+            dialect.quote(from),
+            dialect.quote(to),
+        )],
+        Step::RenameColumn { table, from, to } => vec![format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            dialect.quote(table),
+            dialect.quote(from),
+            dialect.quote(to),
+        )],
+        // A raw escape runs verbatim only when its dialect matches the target; for any
+        // other dialect it is a no-op here (its per-dialect twin carries that target).
+        Step::Raw { dialect: d, sql } => {
+            if *d == dialect {
+                vec![sql.clone()]
+            } else {
+                vec![]
+            }
         }
         // A scope change is code-level (an injected filter), not DDL — no SQL to run.
         Step::ScopeChange(_) => vec![],

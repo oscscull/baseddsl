@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 based-ast.workspace = true
+based-codegen.workspace = true
 based-diagnostics.workspace = true
 based-manifest.workspace = true
 based-parser.workspace = true

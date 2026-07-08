@@ -48,9 +48,13 @@ mod model;
 mod sql;
 mod up_mig;
 
-pub use diff::{diff, diff_snapshots, ColumnChange, ScopeChange, Step};
+pub use diff::{
+    diff, diff_snapshots, drift, has_raw_step, parse_raw_steps, strip_raw_steps, ColumnChange,
+    ScopeChange, Step,
+};
 pub use model::{
-    snapshot, ColumnSnap, IndexSnap, ParseError, ScopeDeclSnap, ScopeTermSnap, Snapshot, TableSnap,
+    snapshot, ColumnSnap, IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot,
+    TableSnap,
 };
 pub use sql::{content_hash, render_sql, sql_statements};
 pub use up_mig::render_up;

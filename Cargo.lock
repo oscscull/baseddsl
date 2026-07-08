@@ -167,6 +167,7 @@ name = "based-lsp"
 version = "0.0.0"
 dependencies = [
  "based-ast",
+ "based-codegen",
  "based-diagnostics",
  "based-facts",
  "based-manifest",

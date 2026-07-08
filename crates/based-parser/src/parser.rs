@@ -478,9 +478,28 @@ impl<'a> Parser<'a> {
         let mut modifiers = Vec::new();
         let mut relation_on = None;
         let mut sort = None;
+        let mut was = None;
         let mut end = ty.span.end;
 
         loop {
+            // `@was("old_col")` — the field's previous physical column name (migrations.md).
+            if self.at(Tok::At) && self.ident_at(1) == Some("was") {
+                self.bump(); // @
+                self.bump(); // was
+                self.expect(Tok::LParen, "`(`")?;
+                let s = self.expect(Tok::Str, "a quoted previous column name")?;
+                let end_p = self.expect(Tok::RParen, "`)`")?.end;
+                was = Some(Spanned {
+                    node: unquote(self.text(s)),
+                    span: Span {
+                        file: self.file,
+                        start: s.start,
+                        end: s.end,
+                    },
+                });
+                end = end_p;
+                continue;
+            }
             if self.at(Tok::At) && self.ident_at(1) == Some("sort") {
                 self.bump(); // @
                 self.bump(); // sort
@@ -526,6 +545,7 @@ impl<'a> Parser<'a> {
             modifiers,
             relation_on,
             sort,
+            was,
             span: Span {
                 file: self.file,
                 start,

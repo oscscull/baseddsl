@@ -414,7 +414,12 @@ fn cmd_migrate_render(
             read_snap(&existing[idx - 1].1)?
         };
         let now = read_snap(dir)?;
-        let steps = migrate::diff_snapshots(&prev, &now);
+        let mut steps = migrate::diff_snapshots(&prev, &now);
+        // `raw(<dialect>)` escapes are authored into `up.mig`, not derivable from the
+        // snapshots — append them so the rendered SQL matches what `apply` runs.
+        if let Ok(up_text) = std::fs::read_to_string(dir.join("up.mig")) {
+            steps.extend(migrate::parse_raw_steps(&up_text));
+        }
 
         let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
         println!("-- migrations/{}/up.mig", name.as_deref().unwrap_or("?"));
@@ -547,25 +552,38 @@ fn cmd_migrate_verify(root: &Path) -> anyhow::Result<()> {
             }
         };
         // The up.mig the snapshots imply must still match the stored one (byte-canonical).
+        // A `raw(<dialect>)` escape isn't derivable from the snapshots (opaque SQL), so it
+        // is compared against the stored up.mig with its raw lines stripped and the
+        // migration reported `partial` (not offline-verifiable — migrations.md).
         let steps = migrate::diff_snapshots(&prev, &snap);
         let expected = migrate::render_up(&steps);
         let stored = std::fs::read_to_string(dir.join("up.mig"))
             .with_context(|| format!("reading {}/up.mig", name))?;
-        if migrate::content_hash(&expected) != migrate::content_hash(&stored) {
+        let partial = migrate::has_raw_step(&stored);
+        let structural = if partial {
+            migrate::strip_raw_steps(&stored)
+        } else {
+            stored.clone()
+        };
+        if migrate::content_hash(&expected) != migrate::content_hash(&structural) {
             eprintln!("  {name}: up.mig has drifted from schema.snap (re-run `based migrate gen`)");
             problems += 1;
+        } else if partial {
+            println!("  {name}: partial (carries a raw step — not offline-verifiable)");
         }
         prev = snap;
     }
 
-    // The latest snapshot must equal the current schema — else there are uncaptured changes.
+    // The latest snapshot must equal the current schema — else there are uncaptured
+    // changes. Compared via the diff (not raw equality) so a spent `@was` — whose rename
+    // is already captured — reads as no change even while it lingers in the `.bsl`.
     let current = migrate::Snapshot::from_schema(&schema);
     if existing.is_empty() {
         if !current.tables.is_empty() {
             eprintln!("  no migrations yet — run `based migrate gen` to capture the schema");
             problems += 1;
         }
-    } else if prev != current {
+    } else if !migrate::diff_snapshots(&prev, &current).is_empty() {
         eprintln!("  schema has uncaptured changes not in any migration — run `based migrate gen`");
         problems += 1;
     }

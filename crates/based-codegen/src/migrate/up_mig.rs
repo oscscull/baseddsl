@@ -71,6 +71,15 @@ fn render_step(out: &mut String, step: &Step) {
         Step::DropUnique { name, .. } => {
             let _ = writeln!(out, "drop unique {name}");
         }
+        Step::RenameTable { from, to } => {
+            let _ = writeln!(out, "rename table {from} -> {to}");
+        }
+        Step::RenameColumn { table, from, to } => {
+            let _ = writeln!(out, "rename column {table}.{from} -> {to}");
+        }
+        Step::Raw { dialect, sql } => {
+            let _ = writeln!(out, "raw({}) `{sql}`", dialect.name());
+        }
         Step::ScopeChange(sc) => {
             let _ = writeln!(out, "{}  # code-level; no DDL", scope_change_line(sc));
         }

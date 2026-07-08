@@ -188,10 +188,18 @@ pub fn load_migrations(
         let snap = Snapshot::parse(&snap_text)
             .map_err(|e| MigrateError::Artifact(format!("{}/schema.snap: {e}", name)))?;
         let steps = migrate::diff_snapshots(&prev, &snap);
-        let up_sql = migrate::sql_statements(&steps, dialect)
+        let mut up_sql = migrate::sql_statements(&steps, dialect)
             .map_err(|e| MigrateError::Artifact(format!("{}/up.mig: {e}", name)))?;
 
         let up_text = read_file(&path.join("up.mig"))?;
+        // `raw(<dialect>)` escape steps can't be re-derived from the snapshots (opaque
+        // SQL) — recover them from the authored `up.mig` and layer them after the
+        // structural steps for the matching target (migrations.md).
+        let raw_steps = migrate::parse_raw_steps(&up_text);
+        up_sql.extend(
+            migrate::sql_statements(&raw_steps, dialect)
+                .map_err(|e| MigrateError::Artifact(format!("{}/up.mig: {e}", name)))?,
+        );
         let up_hash = migrate::content_hash(&up_text);
         let destructive = steps.iter().any(|s| s.destructive());
 

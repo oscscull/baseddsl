@@ -58,10 +58,12 @@ deadlock-retry, and pool-exhaustion→fast-503 are built into the drivers + `Poo
 against `mariadb:11.4`/`postgres:16`. **Track D — deploy — is now COMPLETE:** D2/D3 CI (D64) plus the
 `based serve` **container image (D1/D66)** — a multi-stage `docker/Dockerfile` (dialect-aware serve, env
 config, `/healthz` HEALTHCHECK, graceful drain), built + verified serving live `postgres:16` end-to-end,
-smoke-booted in CI via `make ci-image`. The only DoD item still open is E5 (migration `@was` renames +
-LSP drift diagnostic). The independent non-feature tracks — the extension (C4) and migrations (E5) — may
-still run in parallel (they share no files with the rest).
-Batch-by-batch history is in `PLAN-archive.md`.
+smoke-booted in CI via `make ci-image`. **Track E — migrations — is now COMPLETE (E5/D67):** `@was`
+data-preserving renames (snapshot-authoritative, per-dialect `ALTER … RENAME`), the offline
+schema-vs-migrations drift diagnostic (LSP `W0108` + `based migrate verify`), and the `raw(dialect)` up
+step, all proven live — so **DoD #5 is fully met** and **every DoD item is now met**. The only remaining
+open work is the **VS Code extension feature-parity fill-in (C4)** — folding + selection ranges — which
+shares no files with the rest. Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -95,10 +97,11 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    `.github/workflows/ci.yml` example, all proven green locally against live `mariadb:11.4`/`postgres:16`;
    the live suites honor an external `TEST_*_URL` (CI service container).
 5. **Schema evolution: migration generation.** A `.bsl` change produces a reviewable, editable
-   migration you can safely apply to an existing DB — not just from-scratch DDL. **✅ Core met** —
+   migration you can safely apply to an existing DB — not just from-scratch DDL. **✅ Met** —
    spec (E1), snapshot + diff (D39), per-dialect render (D41), apply + `_based_migrations` ledger +
-   status/verify + raw-SQL `down.mig` (D42), proven live. *Remaining:* E5 (`@was` renames + offline
-   LSP drift diagnostic) + the `raw(dialect)` up step.
+   status/verify + raw-SQL `down.mig` (D42), and **`@was` renames + offline drift diagnostic +
+   `raw(dialect)` up step (D67)** — all proven live. **✅ Fully met** — a `.bsl` change (including a
+   data-preserving column/table rename) produces a reviewable, editable migration you safely apply.
 
 Deferred items (durable multi-instance idempotency store, shutdown grace deadline, incremental LSP
 sync, `^^` multi-level back-refs) stay deferred — worked only if they land on the critical path or a
@@ -243,7 +246,8 @@ First **live Postgres `migrate apply`** landed here (worked unchanged). User flo
       declaration: a field → `name: Type` (+ relation note), a model/shape/scope/callable reference or
       its own decl name → a one-line signature. Appended above the existing derived-fact "why".
 
-**Track E — migration generation (DoD #5, independent, spec-first).** *Design settled 2026-07-06;
+**Track E — migration generation (DoD #5, independent, spec-first). ✅ COMPLETE (E1–E4 D37/D39/D41/D42,
+E5 D67).** *Design settled 2026-07-06;
 recorded in `spec/syntax/migrations.md` + D37. Model: declarative `.bsl` source, versioned artifacts
 (`migrations/NNNN_slug/{up.mig,schema.snap}`), dialect-neutral step list rendered per-dialect over the
 `Dialect` seam, offline/deterministic diff against the last stored snapshot, destructive changes loud
@@ -260,8 +264,16 @@ optional hand-written `down.mig`, `_based_migrations` ledger with a tamper-hash.
     snapshot-authoritative execution, one tx per migration + ledger insert, FNV content-hash tamper
     guard, `--allow-destructive` gate, raw-SQL `down.mig` rollback, offline `verify` CI gate. Ran green
     against real mariadb:11.4 + SQLite.
-  - E5. 🔴 **OPEN. `@was` rename directive** (sema) + the **offline schema-vs-migrations LSP drift
-    diagnostic** ("N uncaptured changes — run `based migrate gen`"). Also the `raw(dialect)` up step.
+  - E5. ✅ **done (D67). `@was` rename directive** + offline drift diagnostic + `raw(dialect)` up step.
+    Field/model `@was("old")` (parser → `Field.was`/model decorator → `RModel.was`/`RMember.was`; sema
+    `E0190` no-op / `E0191` old-name-still-live). Renames are snapshot-authoritative: `Snapshot.renames`
+    persisted in `schema.snap`, so `diff_snapshots` emits one `rename table`/`rename column` step (never
+    an auto-guess; a spent `@was` is inert) rendered as a data-preserving `ALTER … RENAME` per dialect.
+    `raw(dialect)` escape (`Step::Raw`) authored into `up.mig`, recovered by `parse_raw_steps`, layered
+    onto structural steps for the matching target; `verify` reports a raw-carrying migration `partial`.
+    Offline drift: LSP `W0108` ("N uncaptured changes — run `based migrate gen`", anchored per model) +
+    spent-`@was` `W0107`; `based migrate verify` is the CLI twin. Proven live on `postgres:16` +
+    `mariadb:11.4` (rename preserves data; raw backfill applies).
 
 **Track G — named + multi-scope (user-raised 2026-07-07). ✅ COMPLETE.** Scope is a first-class
 **named** declaration referenced on both sides (`scope Name (col: Type = $ctx.field)`, `@scope Name`
@@ -345,11 +357,11 @@ Current capability per crate. History (which D# added what) is in `PLAN-archive.
 | based-diagnostics | ✅ stable | `Diagnostic` + `Severity`; stable codes; builder API. |
 | based-manifest | ✅ works | `based.toml` + `**/*.bsl` glob (D5). `$ctx` is inferred in sema, not declared here (D4). |
 | based-parser | ✅ works | hand-written RD parser + lexer; golden + unit tests. |
-| based-sema | ✅ stable | resolution + checks + lints + `CheckedSchema` IR. Detailed behaviour in the next section. |
+| based-sema | ✅ stable | resolution + checks + lints + `CheckedSchema` IR (incl. `@was` rename directive on `RModel`/`RMember` + `E0190`/`E0191`, D67). Detailed behaviour in the next section. |
 | based-cli | ✅ works | `based check`; `based gen sql\|client\|openapi`; `based facts [--json]`; `based migrate gen\|render\|apply\|status\|verify`; `based serve`. |
-| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57) with an **opt-in in-process embedded bridge** (`ClientOptions::embedded` / `client_with` → emits `client::embedded(&engine)` over `based_runtime::Engine`, so an embedder writes zero `Transport` plumbing; referenced by path, no based-runtime dep; D62); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50). |
+| based-codegen | ✅ stable | `sql::ddl\|dml\|mutations` → dialect-aware DDL/SELECT/INSERT-UPDATE-DELETE (MariaDB/SQLite/Postgres, D28/D29) through one `Dialect` quoting/type seam; declared-shape re-select on every surviving write (create-keyed D12 + update/delete/restore where-keyed D58); nested to-one shape sub-objects (D55) + to-many nested arrays via correlated-subquery JSON aggregation incl. self-ref aliasing (D57) + keyset-cursor pagination (lexicographic `WHERE` + hidden `__keyset_` columns, D56); `client` → typed Rust client (nested `Vec<…>` for to-many, paginated inputs carry `cursor`/`offset`, D56/D57) with an **opt-in in-process embedded bridge** (`ClientOptions::embedded` / `client_with` → emits `client::embedded(&engine)` over `based_runtime::Engine`, so an embedder writes zero `Transport` plumbing; referenced by path, no based-runtime dep; D62); `openapi` → OpenAPI 3.1 (D24); `migrate` → `schema.snap`/`up.mig` diff (D39) + `render_sql` per-dialect migration SQL (D41) + `sql_statements`/`content_hash` for apply (D42) + scope serialization (D50) + `@was` snapshot-authoritative renames (`Snapshot.renames` persisted → `rename table`/`rename column` steps → per-dialect `ALTER … RENAME`), the `raw(dialect)` escape step (`parse_raw_steps`), and the offline `drift` helper (D67). |
 | based-facts | ✅ stable | pure `facts(&CheckedSchema, &[Decl]) -> Vec<Fact>` — the "show, don't write" facts (inferred inverses, join-key indexes, per-callable `$ctx` bags, resolved query shapes, scope contract), span-anchored, editor-string-scrubbed of internal refs (D50). |
-| based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54). Remaining C4: folding, selection ranges. |
+| based-lsp | ✅ works (C4 in progress) | tower-lsp server; recompiles on edit (unsaved buffers overlaid on disk), publishes diagnostics + inlay + hover + go-to-def (D43) + document symbols (D44) + completion (D45); per-file manifest resolution (D40); scope go-to-def/hover (D50); field-reference go-to-def + broad declaration hover + command-clickable inverse inlay (D51); find-references incl. filter calls + inverse back-edge, filter go-to-def (D52); rename + prepareRename reusing the reference index, back-edge excluded (D53); workspace symbols (⌘T) across every open project, fuzzy-filtered (D54); offline migration-drift diagnostic `W0108` + spent-`@was` `W0107` (diffs the latest `schema.snap` against the schema, no DB, D67). Remaining C4: folding, selection ranges. |
 | based-runtime | ✅ works (M6) | in-process engine (D18): `Compiled::load` reuses the front end + codegen lowering; `plan_query`/`plan_mutation` validate + bind (`?`/`$n` per dialect), `run_*` shapes rows / runs writes under one tx with declared-shape re-select on every surviving write (create-keyed D12 + update/soft-delete/restore where-keyed D58, read-your-writes); `nest_row` reassembles to-one sub-objects (dotted alias) + parses to-many JSON-array columns (`field[]`) into sub-object arrays (D55/D57); keyset pagination decodes the incoming `cursor` → `:keyset_` binds + mints the next opaque, checksum-validated cursor (`cursor`, D56). `serve::dispatch` is the wire core; `http` the `based serve` listener (D21) with health/readiness/drain (D26); `embed` the socket-free door (D22); `idempotency` keyed write dedupe + fingerprint (D25/D31). Concrete drivers: `sqlite` (D27), `driver::MariaDb` + `ShardRouter` (D20/D35), `postgres` + `PgRouter` (D38; numeric binds are text-format so an i64 never mismatches an inferred `int4`, D59; result columns are read in binary format — uuid/timestamptz/date/jsonb decoded to their canonical strings, D61). Keyset/offset pagination + soft-delete/restore proven live on all three dialects (D59). Live-DB hardening (D65): per-dialect statement timeouts + bounded checkout wait on `PoolConfig`, drivers classify deadlock/serialization codes into `DbErrorKind::Deadlock` (mutation path retries the tx a bounded 5× with backoff) and pool saturation into `DbErrorKind::PoolExhausted` (fast 503), proven live on MariaDB/Postgres. `migrate` = live apply + ledger (D42). `based serve` is dialect-aware — the CLI branches on the manifest dialect to build the MariaDB/Postgres/SQLite backend (D66). Packaged as a container image (`docker/Dockerfile`, D66). *Open:* durable multi-instance idempotency store. |
 
 ## based-sema — what it does now
@@ -387,7 +399,13 @@ holds `&mut`.
   column — the write-side twin of `=` operand typing; `^` back-refs typed by the field they read.
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/`@updated`
-  (timestamp role), `@sort` (paths), `@table` (name override), unknown `@foo` → `W0101`.
+  (timestamp role), `@sort` (paths), `@table` (name override), `@was` (rename directive, below),
+  unknown `@foo` → `W0101`.
+- **`@was` rename directive** (migrations.md / D67): field-level `@was("old_col")` (modifier position)
+  and model-level `@was("old_table")` (decorator) name a *previous* physical name for the migration
+  diff. Sema catches the two locally-decidable mistakes: `E0190` (no-op self-rename) and `E0191` (old
+  name is still a live column/table, so it can't be the rename source). The rename itself is
+  snapshot-authoritative (codegen); the offline drift + spent-`@was` lints (`W0108`/`W0107`) are the LSP.
 - **Named scope** (auth.md, D48/D49): a `scope Name (col: Type = $ctx.field)` decl (predicate = the
   restricted `col = $ctx.field` conjunction, checked at the decl site → `E0180`); `@scope Name`
   (repeatable → a DNF of alternatives) on the model; `scoped Name` / `unscoped("reason")` on the
@@ -418,7 +436,7 @@ unique_cols), resolved summaries `shapes/queries/mutations/filters`, a `model_in
 `scopes` (the named scope decls). Codegen reads this alongside the AST (`RQuery` carries inferred
 verb/target/many/paginated that are *not* in the AST).
 
-Tests: `crates/based-sema/tests/check.rs` (~109 cases, positive + negative, keyed on diagnostic
+Tests: `crates/based-sema/tests/check.rs` (~115 cases, positive + negative, keyed on diagnostic
 codes) + `tests/conformance.rs` (a golden harness over `tests/conformance-sema/<case>/`, re-bless with
 `BLESS=1`). Commerce (`spec/examples/commerce`) checks clean.
 

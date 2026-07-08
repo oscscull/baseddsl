@@ -72,7 +72,12 @@ pub mod code {
     pub const SCOPE_MODEL_COLUMN: &str = "E0184"; // `@scope` model lacks the scope's column / wrong type
     pub const SCOPE_ACK_MISMATCH: &str = "E0185"; // `scoped …` set ⊉ any alternative of a touched scoped model
     pub const SCOPE_CREATE_UNSAT: &str = "E0186"; // a `create` can satisfy no alternative (D47 — deferred)
-                                                  // lints
+
+    // `@was("old")` rename directive (migrations.md / E5): declares a field's/model's
+    // previous physical name so the diff emits a clean rename instead of drop+add.
+    pub const WAS_NOOP: &str = "E0190"; // `@was` names the field's/model's own current name (a no-op)
+    pub const WAS_LIVE: &str = "E0191"; // `@was("old")` but `old` is still a live column/table (can't be the rename source)
+                                        // lints
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
@@ -81,6 +86,8 @@ pub mod code {
     pub const USELESS_INDEX: &str = "W0104"; // declared index no query uses (pure write-tax)
     pub const STALE_UNINDEXED: &str = "W0105"; // unindexed(...) on a query that is indexed
     pub const STALE_UNSCOPED: &str = "W0106"; // unscoped(...) on a callable whose model has no @scope
+    pub const WAS_SPENT: &str = "W0107"; // `@was` rename already captured — remove it (offline, LSP)
+    pub const MIGRATE_DRIFT: &str = "W0108"; // schema is ahead of migrations — run `based migrate gen` (offline, LSP)
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
@@ -92,6 +99,7 @@ pub const KNOWN_DECORATORS: &[&str] = &[
     "created",
     "updated",
     "table",
+    "was",
 ];
 
 /// The closed set of value-position functions (grammar defers the set to sema).
@@ -194,6 +202,10 @@ pub struct RModel {
     /// Field names that are individually unique (id, `(unique)`, single-col unique
     /// index). Drives `get`-must-be-keyed lint and codegen constraints.
     pub unique_cols: Vec<String>,
+    /// `@was("old_table")` — the model's previous table name, driving a `rename table`
+    /// step in the migration diff instead of drop+add (migrations.md / E5). `None` for
+    /// an un-renamed model. Transient: removed once the rename migration is captured.
+    pub was: Option<String>,
 }
 
 impl RModel {
@@ -269,6 +281,10 @@ pub struct RMember {
     pub name: String,
     pub span: Span,
     pub kind: MemberKind,
+    /// `@was("old_col")` — the field's previous physical column name, driving a
+    /// `rename column` step in the migration diff (migrations.md / E5). `None` for an
+    /// un-renamed field. Transient: removed once the rename migration is captured.
+    pub was: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +311,19 @@ pub enum MemberKind {
     /// Back edge (to-many, or a one-to-one inverse): FK lives on `target`, paired
     /// with its forward field `via`.
     Inverse { target: String, via: String },
+}
+
+impl RMember {
+    /// The member's physical column name: a scalar's `column`, a forward relation's
+    /// `fk_col`, else the field name (an inverse owns no column). The rename target a
+    /// `@was` maps its old name to (migrations.md).
+    pub fn physical_col(&self) -> &str {
+        match &self.kind {
+            MemberKind::Scalar { column, .. } => column,
+            MemberKind::Forward { fk_col, .. } => fk_col,
+            MemberKind::Inverse { .. } => &self.name,
+        }
+    }
 }
 
 impl MemberKind {

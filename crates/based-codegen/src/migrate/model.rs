@@ -25,6 +25,28 @@ pub struct Snapshot {
     pub scopes: Vec<ScopeDeclSnap>,
     /// Tables, sorted by name — the stable order that makes a git diff readable.
     pub tables: Vec<TableSnap>,
+    /// Declared renames (`@was`), captured so the diff emits a clean `rename` step
+    /// instead of a data-losing drop+add and so `apply`/`render`/`verify` re-derive that
+    /// rename from the stored snapshots (snapshot-authoritative, migrations.md / E5). A
+    /// rename hint lives only in the migration where the rename happened; it does not
+    /// participate in the "is the current schema captured?" check (that uses [`diff`], so
+    /// a spent `@was` — one whose old name is already gone — produces no step). Sorted.
+    pub renames: Vec<Rename>,
+}
+
+/// One declared rename (`@was`), the diff-time bridge between an old and new physical
+/// name. Persisted in `schema.snap` so the rename survives to `apply`/`render` without a
+/// database round-trip (migrations.md).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Rename {
+    /// A model `@was("old_table")`: table `from` → `to`.
+    Table { from: String, to: String },
+    /// A field `@was("old_col")`: column `from` → `to` on `table` (the current table name).
+    Column {
+        table: String,
+        from: String,
+        to: String,
+    },
 }
 
 /// A `scope Name (col: Type = $ctx.field, …)` decl, captured neutrally: the column, the
@@ -105,7 +127,13 @@ impl Snapshot {
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let mut scopes: Vec<ScopeDeclSnap> = schema.scopes.iter().map(scope_decl_snap).collect();
         scopes.sort_by(|a, b| a.name.cmp(&b.name));
-        Snapshot { scopes, tables }
+        let mut renames = collect_renames(schema);
+        renames.sort();
+        Snapshot {
+            scopes,
+            tables,
+            renames,
+        }
     }
 
     pub fn scope(&self, name: &str) -> Option<&ScopeDeclSnap> {
@@ -188,6 +216,31 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
         columns,
         indexes,
     }
+}
+
+/// The declared renames (`@was`) across the schema: model-level `@was` → a table rename,
+/// field-level `@was` → a column rename on that model's (current) table. The old name
+/// lives only in a prior snapshot; the diff matches it there (migrations.md / E5).
+fn collect_renames(schema: &CheckedSchema) -> Vec<Rename> {
+    let mut out = Vec::new();
+    for m in &schema.models {
+        if let Some(old) = &m.was {
+            out.push(Rename::Table {
+                from: old.clone(),
+                to: m.table.clone(),
+            });
+        }
+        for mem in &m.members {
+            if let Some(old) = &mem.was {
+                out.push(Rename::Column {
+                    table: m.table.clone(),
+                    from: old.clone(),
+                    to: mem.physical_col().to_string(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A resolved scope decl → its neutral snapshot form. The term type is a model name for a
@@ -369,6 +422,10 @@ impl Snapshot {
             out.push_str(&render_scope_decl(s));
             out.push('\n');
         }
+        for r in &self.renames {
+            out.push_str(&render_rename(r));
+            out.push('\n');
+        }
         for t in &self.tables {
             out.push('\n');
             render_table(&mut out, t);
@@ -386,6 +443,15 @@ pub(crate) fn render_scope_decl(s: &ScopeDeclSnap) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("scope {} ({terms})", s.name)
+}
+
+/// One `rename table <old> -> <new>` / `rename column <table>.<old> -> <new>` line —
+/// the `@was` directive persisted so the diff re-derives the rename offline.
+fn render_rename(r: &Rename) -> String {
+    match r {
+        Rename::Table { from, to } => format!("rename table {from} -> {to}"),
+        Rename::Column { table, from, to } => format!("rename column {table}.{from} -> {to}"),
+    }
 }
 
 fn render_table(out: &mut String, t: &TableSnap) {
@@ -476,6 +542,7 @@ impl Snapshot {
     pub fn parse(text: &str) -> Result<Snapshot, ParseError> {
         let mut scopes: Vec<ScopeDeclSnap> = Vec::new();
         let mut tables: Vec<TableSnap> = Vec::new();
+        let mut renames: Vec<Rename> = Vec::new();
         for (i, raw) in text.lines().enumerate() {
             let line_no = i + 1;
             let line = raw.trim();
@@ -484,6 +551,8 @@ impl Snapshot {
             }
             if let Some(rest) = line.strip_prefix("scope ") {
                 scopes.push(parse_scope_decl(rest, line_no)?);
+            } else if let Some(rest) = line.strip_prefix("rename ") {
+                renames.push(parse_rename(rest, line_no)?);
             } else if let Some(rest) = line.strip_prefix("table ") {
                 tables.push(parse_table_header(rest, line_no)?);
             } else if let Some(rest) = line.strip_prefix("column ") {
@@ -505,7 +574,37 @@ impl Snapshot {
                 });
             }
         }
-        Ok(Snapshot { scopes, tables })
+        Ok(Snapshot {
+            scopes,
+            tables,
+            renames,
+        })
+    }
+}
+
+/// Parse a `table <old> -> <new>` / `column <table>.<old> -> <new>` rename line (the
+/// `rename ` prefix already stripped).
+fn parse_rename(rest: &str, line: usize) -> Result<Rename, ParseError> {
+    let malformed = || ParseError {
+        line,
+        message: format!("malformed rename: {rest}"),
+    };
+    if let Some(spec) = rest.strip_prefix("table ") {
+        let (from, to) = spec.split_once("->").ok_or_else(malformed)?;
+        Ok(Rename::Table {
+            from: from.trim().to_string(),
+            to: to.trim().to_string(),
+        })
+    } else if let Some(spec) = rest.strip_prefix("column ") {
+        let (lhs, to) = spec.split_once("->").ok_or_else(malformed)?;
+        let (table, from) = lhs.trim().split_once('.').ok_or_else(malformed)?;
+        Ok(Rename::Column {
+            table: table.trim().to_string(),
+            from: from.trim().to_string(),
+            to: to.trim().to_string(),
+        })
+    } else {
+        Err(malformed())
     }
 }
 

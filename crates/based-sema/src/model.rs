@@ -41,6 +41,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
             name: f.name.node.clone(),
             span: f.name.span,
             kind: classify(f),
+            was: f.was.as_ref().map(|w| w.node.clone()),
         });
     }
 
@@ -59,6 +60,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
                     unique: false, // PK, expressed as PRIMARY KEY not a UNIQUE constraint
                     default: None, // engine-generated on insert (D1), no SQL default
                 },
+                was: None,
             },
         );
     }
@@ -78,7 +80,21 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
         indexes: Vec::new(),
         inferred_indexes: Vec::new(),
         unique_cols: Vec::new(),
+        was: model_was(m),
     }
+}
+
+/// The model-level `@was("old_table")` rename directive's old table name, if declared
+/// (migrations.md). A generic decorator (`@was` is not a distinct grammar form model-side).
+fn model_was(m: &Model) -> Option<String> {
+    for d in &m.decorators {
+        if d.name.node == "was" {
+            if let Some(DecoArg::Lit(Literal::Str(s))) = d.args.first() {
+                return Some(s.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Physical table name: `@table("…")` override else `snake_case(Name)`.
@@ -156,7 +172,66 @@ pub fn validate(
     validate_relations(mi, models, index, sink);
     validate_indexes(ast, mi, models, sink);
     validate_decorators(ast, mi, models, sink);
+    validate_was(ast, mi, models, sink);
     compute_unique(ast, &mut models[mi]);
+}
+
+/// Validate `@was` rename directives (migrations.md / E5). A `@was` names a *previous*
+/// name — one that lives only in the migration snapshot, so sema can't confirm it existed
+/// (the diff does). It can catch the two locally-decidable mistakes: a no-op self-rename
+/// (`E0190`) and an old name that is still a *live* column/table (`E0191` — then it can't
+/// be the rename's source). Field-level `@was` sits in the field modifier position; the
+/// model-level form is a generic decorator.
+fn validate_was(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Sink) {
+    // Field-level: `<field>: <ty> @was("old_col")`.
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        let Some(was) = &f.was else { continue };
+        let old = &was.node;
+        let current = models[mi]
+            .member(&f.name.node)
+            .map(|m| m.physical_col().to_string());
+        if current.as_deref() == Some(old.as_str()) {
+            sink.error(
+                code::WAS_NOOP,
+                was.span,
+                format!("`@was(\"{old}\")` renames `{old}` to itself — remove it"),
+            );
+        } else if models[mi].column(old).is_some() {
+            sink.error_note(
+                code::WAS_LIVE,
+                was.span,
+                format!(
+                    "`@was(\"{old}\")` names a column that still exists in `{}`",
+                    ast.name.node
+                ),
+                "`@was` names a *previous* column name; a live column can't be a rename source",
+            );
+        }
+    }
+    // Model-level: `@was("old_table")` decorator.
+    for d in &ast.decorators {
+        if d.name.node != "was" {
+            continue;
+        }
+        let Some(DecoArg::Lit(Literal::Str(old))) = d.args.first() else {
+            continue;
+        };
+        if *old == models[mi].table {
+            sink.error(
+                code::WAS_NOOP,
+                d.span,
+                format!("`@was(\"{old}\")` renames table `{old}` to itself — remove it"),
+            );
+        } else if models.iter().any(|m| &m.table == old) {
+            sink.error_note(
+                code::WAS_LIVE,
+                d.span,
+                format!("`@was(\"{old}\")` names a table that still exists"),
+                "`@was` names a *previous* table name; a live table can't be a rename source",
+            );
+        }
+    }
 }
 
 fn validate_relations(
@@ -298,6 +373,7 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
                 }
             }
             "table" => {} // consumed for the table name in `skeleton`
+            "was" => {}   // model rename directive — validated in `validate_was`
             other => sink.warn(
                 code::UNKNOWN_DECORATOR,
                 d.name.span,
