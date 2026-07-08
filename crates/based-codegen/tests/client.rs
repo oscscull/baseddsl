@@ -97,8 +97,13 @@ fn paginated_query_returns_page_envelope() {
         ),
         "\n{out}"
     );
-    // A keyset page's input carries the opaque cursor to fetch the next page.
-    assert!(out.contains("pub cursor: Option<String>"), "\n{out}");
+    // A keyset page's input carries the opaque typed cursor to fetch the next page.
+    assert!(out.contains("pub cursor: Option<Cursor>"), "\n{out}");
+    // The cursor is a `#[serde(transparent)]` newtype, so the wire stays a bare string.
+    assert!(
+        out.contains("#[serde(transparent)]\npub struct Cursor(String);"),
+        "\n{out}"
+    );
 }
 
 #[test]

@@ -55,8 +55,9 @@
 //!   nest (`items { … }`) emits a nested struct wrapped in `Vec<…>`, both matching the
 //!   read side (the runtime decodes the SQL JSON array into it).
 //! - A `sql`…`` shape field has no statically known type, so it maps to `Json`.
-//! - The keyset cursor is an opaque `Option<String>` in `Page<T>`; its encoding is a
-//!   runtime concern (pagination.md).
+//! - The keyset cursor is an opaque `Cursor` newtype (`#[serde(transparent)]` over the
+//!   underlying string, so the wire is unchanged): a page hands one back, the caller
+//!   feeds it to the next call; its encoding stays a runtime concern (pagination.md).
 
 use based_ast::*;
 use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel, RQuery};
@@ -145,7 +146,7 @@ struct Callable<'a> {
 enum PageInput {
     /// Not paginated (a `get`, or a `list` with no `page`) — no page-control input.
     None,
-    /// Keyset (`page` without `offset`): an opaque `cursor: Option<String>` (absent =
+    /// Keyset (`page` without `offset`): an opaque `cursor: Option<Cursor>` (absent =
     /// the first page); the response's `Page.cursor` is fed straight back for the next.
     Keyset,
     /// Explicit offset (`page … offset`): an `offset: Option<i64>` (absent = offset 0).
@@ -628,7 +629,7 @@ mod rust {
         // Page control (pagination.md): a keyset page takes the opaque cursor back, an
         // offset page an explicit offset. Both optional — absence is the first page.
         match c.page {
-            PageInput::Keyset => fields.push(("cursor".into(), "Option<String>".into())),
+            PageInput::Keyset => fields.push(("cursor".into(), "Option<Cursor>".into())),
             PageInput::Offset => fields.push(("offset".into(), "Option<i64>".into())),
             PageInput::None => {}
         }
@@ -988,12 +989,48 @@ impl<E> std::hash::Hash for Id<E> {
     }
 }
 
+/// An opaque keyset pagination cursor, carried on the wire as its underlying string
+/// (`#[serde(transparent)]`, so the wire is unchanged). A page result hands one back and
+/// the caller feeds it to the next call; its contents (the sort-key basis) are a runtime
+/// concern the caller never assembles. Turn a raw string into one only through the
+/// explicit, greppable `Cursor::from_raw`.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Cursor(String);
+
+impl Cursor {
+    /// Wrap a raw cursor string — the explicit escape used only where a cursor string
+    /// arrives from outside the client (normally a page result already hands one back typed).
+    pub fn from_raw(raw: impl Into<String>) -> Self {
+        Cursor(raw.into())
+    }
+    /// The underlying cursor string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Consume into the raw cursor string.
+    pub fn into_raw(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cursor({:?})", self.0)
+    }
+}
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Pagination envelope (calling.md): a paginated query returns rows + an opaque
-/// cursor, never a bare array. Next page = the same call carrying `cursor`.
+/// cursor. Next page = the same call carrying `cursor`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page<T> {
     pub rows: Vec<T>,
-    pub cursor: Option<String>,
+    pub cursor: Option<Cursor>,
 }
 
 /// What went wrong in a client call — lets a caller branch on the class of failure

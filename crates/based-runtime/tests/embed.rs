@@ -106,12 +106,41 @@ mod client {
         }
     }
 
+    /// An opaque keyset pagination cursor, carried on the wire as its underlying string
+    /// (`#[serde(transparent)]`). A page hands one back; the caller feeds it to the next call.
+    #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Cursor(String);
+
+    impl Cursor {
+        pub fn from_raw(raw: impl Into<String>) -> Self {
+            Cursor(raw.into())
+        }
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+        pub fn into_raw(self) -> String {
+            self.0
+        }
+    }
+
+    impl std::fmt::Debug for Cursor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Cursor({:?})", self.0)
+        }
+    }
+    impl std::fmt::Display for Cursor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
     /// Pagination envelope (calling.md): a paginated query returns rows + an opaque
-    /// cursor, never a bare array. Next page = the same call carrying `cursor`.
+    /// cursor. Next page = the same call carrying `cursor`.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Page<T> {
         pub rows: Vec<T>,
-        pub cursor: Option<String>,
+        pub cursor: Option<Cursor>,
     }
 
     /// What went wrong in a client call.

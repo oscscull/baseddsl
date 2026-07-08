@@ -35,7 +35,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   (emitted in-process embedded bridge `client::embedded(&engine)`, opt-in via `ClientOptions`; inner
   `#![allow]` wart fixed), D63 (`based gen client --embedded` CLI flag), D70 (typed ids: per-entity
   phantom `Id<entity::M>` newtypes, transparent wire, `from_raw` escape, no blanket `From<String>`),
-  D71 (production-grade errors: structured `ClientError` + `std::error::Error`/`Display` on runtime errors)
+  D71 (production-grade errors: structured `ClientError` + `std::error::Error`/`Display` on runtime errors),
+  D73 (typed `Cursor` newtype in the paginated surface: single opaque `#[serde(transparent)]` type,
+  `from_raw` escape, no blanket `From<String>`)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
@@ -2590,3 +2592,35 @@ quickstart still runs green (`based migrate apply` → `cargo run`, exit 0).
 (iii) `based migrate apply` already surfaces the structured `MigrateError` (this slice stopped
 re-flattening it) — a dedicated CLI-side type beyond that is unneeded; (iv) example `main.rs` as a
 `?`-based error-handling reference matching on `ClientError::kind()`/`code()`.
+
+## D73 — Typed keyset cursor in the generated client (opaque `Cursor` newtype)
+
+**Context (user-raised, mirroring H1/D70).** D70 gave every id a per-entity phantom `Id<E>` so a bare
+`Uuid = String` could no longer stand in for a typed id. The keyset pagination **cursor** had the same
+untyped hole: the paginated surface carried it as a bare `Option<String>` — the `Page<T>.cursor` field
+and the next-page input alike — so it was interchangeable with any other string on the typed surface.
+
+**Decision: emit a single opaque `Cursor` newtype.** `based gen client` now emits `pub struct
+Cursor(String)`, a `#[serde(transparent)]` newtype over the underlying cursor string. `Page<T>.cursor`
+is `Option<Cursor>` and a keyset page's input `cursor` field is `Option<Cursor>` — so a page result
+hands one back and the caller feeds it straight to the next call, a chain that needs no conversion.
+
+- **Single type, not generic per query** (unlike `Id<E>`). A cursor is not entity-typed: it encodes a
+  sort-key basis the runtime checksum-validates (`cursor.rs`), and a mismatched cursor is already caught
+  at decode (checksum + arity → `bad_cursor`/400). A phantom `Cursor<Q>` would add type-parameter noise
+  for a safety property the runtime already enforces, so one opaque `Cursor` is correct and simpler.
+- **Wire unchanged.** `transparent` keeps the JSON/OpenAPI surface a bare opaque string
+  (`{ type: string }`), so `based-codegen::openapi` needed no change — the cursor stays a `string`/`null`
+  in both the envelope and the request body.
+- **Opaque + greppable escape.** The traits are the ergonomic subset (`Clone`/`Eq`/`Hash`/`Display`/
+  `Debug` — no `Ord`, an opaque cursor has no meaningful order) plus `from_raw`/`as_str`/`into_raw`.
+  There is deliberately **no** blanket `From<String>`; a raw string becomes a `Cursor` only through the
+  explicit `Cursor::from_raw` — mirroring `Id::from_raw` for the rare cursor that arrives from outside.
+
+Touched `based-codegen::client` (the `Cursor` type + `Page<T>` field + keyset input field), its
+`tests/client.rs` (typed-cursor + transparent-newtype assertions), the verbatim client copy in
+`based-runtime/tests/embed.rs`, and all three regenerated `examples/*/src/client.rs` (the example
+`main.rs` already reads `p.cursor` and passes it back, so it stayed unchanged — the point of the typed
+handoff). Gate: `cargo test --workspace --all-features` + `fmt --check` + `clippy` all clean; all three
+quickstarts ran **green live** exercising pagination via `cargo run` (SQLite bundled; MariaDB
+`mariadb:11.4` + Postgres `postgres:16` over Docker).

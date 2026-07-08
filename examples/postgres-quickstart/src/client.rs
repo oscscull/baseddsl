@@ -91,12 +91,48 @@ impl<E> std::hash::Hash for Id<E> {
     }
 }
 
+/// An opaque keyset pagination cursor, carried on the wire as its underlying string
+/// (`#[serde(transparent)]`, so the wire is unchanged). A page result hands one back and
+/// the caller feeds it to the next call; its contents (the sort-key basis) are a runtime
+/// concern the caller never assembles. Turn a raw string into one only through the
+/// explicit, greppable `Cursor::from_raw`.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Cursor(String);
+
+impl Cursor {
+    /// Wrap a raw cursor string — the explicit escape used only where a cursor string
+    /// arrives from outside the client (normally a page result already hands one back typed).
+    pub fn from_raw(raw: impl Into<String>) -> Self {
+        Cursor(raw.into())
+    }
+    /// The underlying cursor string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Consume into the raw cursor string.
+    pub fn into_raw(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cursor({:?})", self.0)
+    }
+}
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Pagination envelope (calling.md): a paginated query returns rows + an opaque
-/// cursor, never a bare array. Next page = the same call carrying `cursor`.
+/// cursor. Next page = the same call carrying `cursor`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page<T> {
     pub rows: Vec<T>,
-    pub cursor: Option<String>,
+    pub cursor: Option<Cursor>,
 }
 
 /// What went wrong in a client call — lets a caller branch on the class of failure
@@ -297,7 +333,7 @@ pub const MY_ORDERS_ROUTE: &str = "/q/my_orders";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentOrdersInput {
-    pub cursor: Option<String>,
+    pub cursor: Option<Cursor>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentOrdersCtx {
