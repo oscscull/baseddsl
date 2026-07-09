@@ -1,56 +1,18 @@
-//! Client codegen (M4): a `CheckedSchema` -> a typed client module (`based gen
-//! client`). Rust is the only target.
+//! Client codegen: a `CheckedSchema` -> a typed Rust client module (`based gen
+//! client`). Per signature it emits a typed input struct, a typed output type (shape
+//! struct, bare-model struct, or the `Page<T>` pagination envelope), and one wire route
+//! plus a `Client` method that posts the input and decodes the output.
 //!
-//! ## The closed RPC surface (calling.md)
-//! Clients call the pre-defined query/mutation signatures only; the wire carries
-//! *arguments*, not queries. Each signature generates three things:
-//!   1. a typed **input** struct (fields from the signature params),
-//!   2. a typed **output** type (from `-> Output`: a shape struct, a bare-model
-//!      struct, or the pagination envelope `Page<T>`),
-//!   3. one **wire route** (`POST /q/<name>` for a query, `POST /m/<name>` for a
-//!      mutation) plus a `Client` method that posts the input and decodes the output.
+//! Transport is abstract: `Client<T>` is generic over a `Transport` trait (post JSON to
+//! a route, decode JSON back), which the runtime crate implements. Entity ids map to a
+//! phantom-typed `Id<E>` newtype and the keyset cursor to an opaque `Cursor`, both
+//! `#[serde(transparent)]` so the wire stays a plain string. `$ctx` is carried out of
+//! band as request context. Shape projections nest to matching structs.
 //!
-//! ## What we emit vs. what the runtime owns
-//! Transport is abstract: the generated `Client<T>` is generic over a `Transport`
-//! trait (post JSON to a route, decode JSON back). The concrete HTTP/driver lives in
-//! the runtime crate, so codegen emits only the *typed surface* — input types, output
-//! types, routes, and method bodies that delegate to `Transport`.
-//!
-//! ## Type mapping (mirrors the DDL side)
-//! Primitives map through readable aliases: `Uuid`/`Timestamp`/`Date` alias `String`,
-//! `Json` aliases `serde_json::Value`. An **entity id** — a model's own `id`, a relation
-//! param/FK, or a `$ctx` relation — is a phantom-typed `Id<entity::M>` newtype
-//! (`#[serde(transparent)]`, so the wire is an unchanged string): distinct per entity, so
-//! a `User` id can't be passed where an `Org` id is wanted, and a raw string becomes one
-//! only through the explicit `Id::from_raw`. `optional` -> `Option<T>`, a to-many scalar
-//! -> `Vec<T>`.
-//!
-//! ## Per-callable `$ctx`
-//! `$ctx` is per-request and inferred: each callable requires exactly the `$ctx.<field>`s
-//! it (plus its `@scope`/filters) reads, each typed by inference. A callable with context
-//! requirements gets a typed `<Name>Ctx` struct (one field per requirement) that the
-//! method takes alongside its input, and the `Transport` carries it as request context
-//! (never a body field, auth.md). A callable needing *no* context takes `ctx: ()`.
-//!
-//! ## The embedded bridge (opt-in)
-//! The abstract `Transport` is defined *in this generated module*, so the orphan rule
-//! forbids a library-side `impl Transport for Engine` in based-runtime. When
-//! [`ClientOptions::embedded`] is set, the module *also* emits that bridge over
-//! `based_runtime::Engine`: an `Embedded` transport plus an `embedded(&engine)`
-//! constructor, giving an in-process consumer a working `Client` with zero bridge code.
-//! Opt-in so a pure-wire/HTTP client need not depend on based-runtime; the CLI wire path
-//! leaves it off, an embedding build (the quickstarts, `tests/embed.rs`) turns it on.
-//! based-codegen itself gains no based-runtime dep — the reference is by path in the
-//! emitted *text*, and the consuming crate is what depends on based-runtime.
-//!
-//! ## Shape projection
-//! - A to-**one** nested sub-object (`buyer { … }`) emits a nested struct; a to-**many**
-//!   nest (`items { … }`) emits a nested struct wrapped in `Vec<…>`, both matching the
-//!   read side (the runtime decodes the SQL JSON array into it).
-//! - A `sql`…`` shape field has no statically known type, so it maps to `Json`.
-//! - The keyset cursor is an opaque `Cursor` newtype (`#[serde(transparent)]` over the
-//!   underlying string, so the wire is unchanged): a page hands one back, the caller
-//!   feeds it to the next call; its encoding stays a runtime concern (pagination.md).
+//! When [`ClientOptions::embedded`] is set, the module also emits an in-process bridge
+//! over `based_runtime::Engine` (an `Embedded` transport plus an `embedded(&engine)`
+//! constructor), giving an embedding consumer a working `Client` with no bridge code.
+//! Opt-in so a pure-wire client need not depend on based-runtime.
 
 use based_ast::*;
 use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel, RQuery};
@@ -124,8 +86,8 @@ struct Callable<'a> {
     /// Empty for a public callable (no context); non-empty callables get a typed
     /// `<Name>Ctx` struct the method takes and the `Transport` carries.
     ctx_requires: &'a [CtxReq],
-    /// how this callable paginates (pagination.md), so the input struct carries the
-    /// right page control: a keyset page a `cursor`, an offset page an `offset`.
+    /// how this callable paginates, so the input struct carries the right page
+    /// control: a keyset page a `cursor`, an offset page an `offset`.
     page: PageInput,
     /// Params that resolve to an **entity id** → the model they identify (a Forward FK's
     /// target, or the model's own `id`). Drives the `Id<entity::M>` param type; a param
@@ -133,7 +95,7 @@ struct Callable<'a> {
     param_entities: std::collections::HashMap<String, String>,
 }
 
-/// How a callable paginates, driving its extra input field (calling.md / pagination.md).
+/// How a callable paginates, driving its extra input field.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PageInput {
     /// Not paginated (a `get`, or a `list` with no `page`) — no page-control input.
@@ -427,7 +389,7 @@ mod rust {
     }
 
     /// A query's return wrapper: paginated -> `Page<T>`, many -> `Vec<T>`, single
-    /// -> `Option<T>` (a `get` may match nothing). (calling.md pagination envelope.)
+    /// -> `Option<T>` (a `get` may match nothing).
     fn query_output(rq: &RQuery, ty: &str) -> String {
         if rq.paginated {
             format!("Page<{ty}>")
@@ -619,8 +581,8 @@ mod rust {
             .iter()
             .map(|p| (p.name.node.clone(), param_type(schema, c, p)))
             .collect();
-        // Page control (pagination.md): a keyset page takes the opaque cursor back, an
-        // offset page an explicit offset. Both optional — absence is the first page.
+        // Page control: a keyset page takes the opaque cursor back, an offset page an
+        // explicit offset. Both optional — absence is the first page.
         match c.page {
             PageInput::Keyset => fields.push(("cursor".into(), "Option<Cursor>".into())),
             PageInput::Offset => fields.push(("offset".into(), "Option<i64>".into())),
@@ -629,7 +591,7 @@ mod rust {
         fields
     }
 
-    /// How a query paginates, for its input page-control field (pagination.md).
+    /// How a query paginates, for its input page-control field.
     fn page_input(q: &Query) -> PageInput {
         let clauses: &[Clause] = match &q.body {
             QueryBody::Inline(cs) => cs,
@@ -651,7 +613,7 @@ mod rust {
     /// `Id<entity::M>`; otherwise an explicit annotation wins, else infer from the
     /// bound/same-named column. A param with a default (or an optional annotation)
     /// becomes `Option<T>` — the client may omit it and let the engine apply the
-    /// default (calling.md).
+    /// default.
     fn param_type(schema: &CheckedSchema, c: &Callable, p: &Param) -> String {
         let optional = p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional);
         let base = if let Some(entity) = param_entity(c, p) {
@@ -891,13 +853,13 @@ mod rust {
     /// error type, and the abstract transport the runtime later supplies.
     const PREAMBLE: &str = r#"// Generated by `based gen client` (target: rust). Do not edit by hand.
 //
-// The closed RPC surface (calling.md): one input type, one output type, and one
-// route per signature. Transport is abstract — implement `Transport` to post JSON
-// to a route and decode the reply; the runtime supplies the concrete HTTP client.
+// The closed RPC surface: one input type, one output type, and one route per
+// signature. Transport is abstract — implement `Transport` to post JSON to a route
+// and decode the reply; the runtime supplies the concrete HTTP client.
 //
 // Some generated items may be unused by a given consumer; suppress dead-code warnings by
-// including this module under an outer `#[allow(dead_code)] mod client { … }` (the standard
-// pattern for generated code — an inner `#![allow]` would be rejected by `include!`).
+// including this module under an outer `#[allow(dead_code)] mod client { … }` (an inner
+// `#![allow]` would be rejected by `include!`).
 
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -1018,8 +980,8 @@ impl std::fmt::Display for Cursor {
     }
 }
 
-/// Pagination envelope (calling.md): a paginated query returns rows + an opaque
-/// cursor. Next page = the same call carrying `cursor`.
+/// Pagination envelope: a paginated query returns rows + an opaque cursor.
+/// Next page = the same call carrying `cursor`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page<T> {
     pub rows: Vec<T>,
@@ -1138,10 +1100,10 @@ impl std::error::Error for ClientError {
     }
 }
 
-/// Post a typed input to a route, carry the typed request context (`$ctx` — sent out
-/// of band, never a body field, auth.md), and decode the typed output. A callable with
-/// no `$ctx` requirements passes `ctx: &()`. Implemented by the runtime's HTTP client;
-/// codegen only depends on this shape.
+/// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
+/// of band as request context), and decode the typed output. A callable with no `$ctx`
+/// requirements passes `ctx: &()`. Implemented by the runtime's HTTP client; codegen
+/// only depends on this shape.
 pub trait Transport {
     fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
@@ -1196,8 +1158,8 @@ impl Transport for Embedded<'_> {
 }
 
 /// A ready-to-use client over an in-process `based_runtime::Engine` — no bridge to write.
-/// `$ctx` is a typed per-call argument (auth.md still holds: the app sets it, not the
-/// caller); a public callable passes `()`, which maps to an empty context bag.
+/// `$ctx` is a typed per-call argument the app sets, not the caller; a public callable
+/// passes `()`, which maps to an empty context bag.
 pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
     Client {
         transport: Embedded { engine },
