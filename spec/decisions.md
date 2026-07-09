@@ -19,7 +19,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
   filter + create auto-set + `unscoped`), D33 (shard key ← scope `$ctx` field), D34 (`@scope` in a
   joined `ON`), D46 (named scope, spec), D47 (multi-scope DNF, spec), D48 (named scope, impl),
-  D49 (multi-scope DNF, impl + E0186), D50 (scope editor surface + snapshot serializer)
+  D49 (multi-scope DNF, impl + E0186), D50 (scope editor surface + snapshot serializer),
+  D80 (`$ctx`-field rename; scope column left alone as a polymorphic contract name)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
@@ -72,7 +73,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   migration-drift diagnostic W0108 + spent-`@was` W0107), D68 (folding + selection ranges — Track
   C4 feature-parity complete), D77 (editor gravy names symbols: trimmed scope/`$ctx` hovers +
   dropped duplicate `$ctx` inlay), D78 (`based fmt` canonical formatter + `formatting` LSP directive —
-  one printer shared by CLI and editor)
+  one printer shared by CLI and editor), D80 (comprehensive rename: params, `$ctx` fields, callable
+  names, `@was`-aware physical rename)
 - **Formatter / tooling** — D78 (`based-fmt` canonical `.bsl` printer: AST pretty-print + verbatim
   comment reattachment; deterministic/idempotent; `based fmt [--check]` + LSP `formatting`)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
@@ -2853,3 +2855,56 @@ rides the type-reference index: go-to-def, hover, find-references, rename). Work
 `placed_by -> UserRef` returns the nested object; a to-many named ref returns the nested array with a
 soft-deleted child excluded. Plus parser/sema (positive + all three negative codes) /codegen-SQL
 (identical-to-inline) /client/openapi/fmt unit tests and a sema conformance case.
+
+## D80 — comprehensive rename: params, `$ctx` fields, callable names, and `@was`-aware physical rename (Track H3)
+
+**The gap.** Rename (D53) reused the D52 reference index, which only spanned *nominal* references —
+model/shape type refs, `@scope`/`scoped` refs, filter calls, field-path segments, explicit inverse
+pairings. Three renameable-but-uncovered kinds of symbol remained, and one correctness hazard:
+- **(a) Callable params** — a `find(min: int)` param and its `$min` body uses.
+- **(b) `$ctx` bag fields** — a `$ctx.org` bound in a `scope … = $ctx.org` term and used across callables.
+- **(c) Callable names** — a `query`/`mutation`/`filter` name.
+- **(d) Physical rename** — renaming a field/model mapped to a live DB column silently produced a
+  *drop+add* migration (data loss) rather than a data-preserving `ALTER … RENAME`.
+
+**Decision: extend `references_at`/`rename_edits`, keep the reference index precise (principle 2:
+precision over recall), and tie physical rename to Track E via an inserted `@was`.**
+
+**Pinned semantics.**
+- **(a) Params are callable-local.** The rename target is the param decl's name span; references are the
+  `$param` uses (empty dotted path, matching name) *within the owning callable only* — a same-named
+  param in a sibling callable is untouched. Resolvable from either the decl or any use (`param_ref_at`).
+- **(b) `$ctx` fields are name-keyed across the schema.** The `$ctx` bag is coherent by name (D4), so one
+  field renames everywhere: every `scope … = $ctx.field` term binding and every callable-body `$ctx.field`
+  use. The rewritten span is the *field segment only* (not the `$ctx` prefix). The canonical target is the
+  first occurrence in file/offset order (`ctx_occurrences`/`ctx_canonical_span`). The **scope column**
+  (`org:` in `scope Tenant (org: … = $ctx.org)`) and same-named model columns are deliberately left
+  alone — the scope column is a *polymorphic contract name* shared by every scoped model (like a filter's
+  call-site root), so a cursor-local rename cannot safely coordinate it; excluded exactly as filters are.
+- **(c) Callable names have no in-`.bsl` references** — a query/mutation is a wire endpoint, not referenced
+  from other decls — so rename rewrites just the declaration (already reached by `decl_name_at`).
+- **(d) `@was`-aware physical rename.** When the renamed field/model maps to a **live** physical
+  column/table (present in the project's latest `migrations/NNNN/schema.snap`), `rename_edits` *also*
+  inserts a `@was("old")` — ` @was("old_col")` appended to a field's modifiers, `@was("old_table")\n`
+  as a leading model decorator — so the next `based migrate gen` emits a rename step (D67), preserving
+  data. Inserted only when the physical name actually changes: skipped for a `(column …)`/`@table`
+  override that decouples the physical name, for a field that already carries a `@was` (the existing one
+  still names the snapshot's column — a rename chain keeps the *original* source name), for an inverse
+  member (no physical column), and when there is no captured snapshot with that column/table (nothing to
+  preserve). The `Snapshot` gained `schema` (the resolved `CheckedSchema`, for field→physical-column) and
+  `migrations_root` (the dir whose latest snapshot is consulted).
+
+**Back-edge stays list-not-rewrite.** As in D53, an inverse back-edge (a differently-named field that
+merely pairs *through* the renamed symbol) is listed by find-references but not rewritten — `rename_edits`
+rewrites only sites literally spelling the old name.
+
+**Scope.** Rename spans the whole owning project (its manifest snapshot covers every `.bsl` file — the
+cross-file model rename is unit-proven); it does not cross into a *different* manifest project, whose
+schema is independent (embedded schemas resolve per-project, D40).
+
+**Landed across:** `based-lsp/src/compile.rs` only (the server handler is unchanged since D53 —
+`references_at`/`rename_edits`/`prepare_rename_range` gained the new cases). Unit tests: param
+decl+local-use-only, `$ctx`-field binding+uses (scope column + model column left alone), callable-name
+declaration-only, and `@was` insertion for a live column and a live table + the three skip cases
+(`(column …)` override, existing `@was`, no captured migration) with the applied source reparsed to
+confirm the `@was` round-trips.
