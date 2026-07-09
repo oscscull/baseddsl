@@ -399,18 +399,16 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   offer to insert `@was("old")` so the generated migration *preserves data* (rename) instead of
   drop+add — ties rename to Track E. Confirm rename spans the whole workspace, not just the cursor's
   project. Touches `based-lsp` (reference index) + parser modifier position for `@was` insertion.
-- **H4. Editor-surface conciseness (user-raised 2026-07-08).** Hover/inlay text *tutorializes* instead
-  of naming things. `based-facts::scope_detail` teaches usage ("Every read and write … is confined … a
-  callable opts in with `scoped` or out with `unscoped`") and `ctx_fact.detail` explains the client
-  wire contract — both are spec material, not hover material. The `requires [org: -> Org]` **inlay**
-  duplicates the ctx hover; if the hover carries the full contract, the inlay is redundant noise.
-  **Rule:** editor gravy states *what a symbol is* when it isn't obvious, never *how to use the system*.
-  Trim scope/ctx hovers to a one-line identity + the concrete filter/bag; drop or minimize the ctx
-  inlay. Touches `based-facts::{scope_detail,ctx_fact}` + LSP inlay wiring; update the facts tests that
-  assert the old strings. **Partial (D74):** the *positive-framing* half is done — the `Page` hover /
-  doc-string "…rows + an opaque cursor, **never a bare array**" is now stated positively, and the same
-  define-by-negation pattern was swept from source + userland (genuine behavioral guarantees kept).
-  **Still open:** trimming the scope/ctx *tutorializing* hovers + dropping the redundant ctx inlay.
+- **H4. ✅ done (D74 + D77). Editor-surface conciseness (user-raised 2026-07-08).** Editor gravy now
+  states *what a symbol is*, never *how to use the system*. **Positive-framing half (D74):** the `Page`
+  hover / doc-string reads positively (rows + an opaque cursor), and the define-by-negation pattern was
+  swept from source + userland (genuine behavioral guarantees kept). **Conciseness half (D77):** the
+  scope hover (`based-facts::scope_detail`) is trimmed to `` scope `Tenant`: filter `…`; governs … ``
+  (name + predicate + governed models; the confinement/opt-in prose moved to auth.md), the `$ctx` hover
+  (`ctx_fact.detail`) to `` request context: this query requires `$ctx` [bag] `` (the concrete bag; the
+  wire-contract sentence dropped), and the duplicate `requires […]` **inlay** is removed —
+  `FactKind::CtxRequirement` now carries no inlay (the hover holds the bag), so there is no
+  hover↔inlay redundancy. Facts tests updated to the concise strings.
 - **H5. Doc + comment critical-eye pass, project-wide (user-raised 2026-07-08).** Two rules, enforced
   everywhere a user reads: (a) **no `D#`/decision-refs in any userland surface** — editor hover/inlay
   strings, CLI output, `examples/**` (comments + READMEs), `docker/README.md`, generated-code headers.

@@ -147,9 +147,8 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
 }
 
 /// Surface each named scope as a hover fact at every site that names it: the `scope` decl
-/// itself and every `@scope Name` / `scoped Name` reference. The detail is a self-contained
-/// description of the contract — its filter terms, the models it governs, and how a callable
-/// opts in or out — so a reader learns the whole shape from any one reference.
+/// itself and every `@scope Name` / `scoped Name` reference. The detail names the scope: its
+/// filter terms and the models it governs.
 fn scope_facts(schema: &CheckedSchema, decls: &[Decl], out: &mut Vec<Fact>) {
     for scope in &schema.scopes {
         let detail = scope_detail(schema, scope);
@@ -197,8 +196,7 @@ fn scoped_refs(scoped: Option<&Scoped>, name: &str, push: &mut impl FnMut(Span))
     }
 }
 
-/// The terse inlay-style label for a scope (unused as an inlay — scope is written, not
-/// derived — but kept for the `based facts` listing): the scope name + its filter.
+/// The terse label for a scope — its name + filter — for the `based facts` listing.
 fn scope_label(scope: &RScope) -> String {
     format!("scope {} = {}", scope.name, scope_filter(scope))
 }
@@ -213,7 +211,7 @@ fn scope_filter(scope: &RScope) -> String {
         .join(" and ")
 }
 
-/// A self-contained description of a scope contract for hover.
+/// Name a scope for hover: its filter predicate and the models it governs.
 fn scope_detail(schema: &CheckedSchema, scope: &RScope) -> String {
     let filter = scope_filter(scope);
     let governed: Vec<&str> = schema
@@ -227,23 +225,16 @@ fn scope_detail(schema: &CheckedSchema, scope: &RScope) -> String {
         .map(|m| m.name.as_str())
         .collect();
     let governs = if governed.is_empty() {
-        "no models yet declare `@scope`".to_string()
+        "governs no models".to_string()
     } else {
         format!("governs {}", governed.join(", "))
     };
-    format!(
-        "scope `{}`: a standing filter `{filter}`, {governs}. Every read and write on a \
-         governed model is confined to matching rows, and a create auto-sets those columns \
-         from request context. A callable opts in with `scoped {}` or out with \
-         `unscoped(\"reason\")`.",
-        scope.name, scope.name,
-    )
+    format!("scope `{}`: filter `{filter}`; {governs}", scope.name)
 }
 
 /// The `$ctx` bag a callable requires, as one aggregate fact anchored at its
-/// declaration — `None` when it needs no context. The bag is inference-derived
-/// : each field's type comes from the column its use compares against, and
-/// the generated client sends exactly this set.
+/// declaration — `None` when it needs no context. Each field's type is inferred
+/// from the column its use compares against.
 fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
     if reqs.is_empty() {
         return None;
@@ -258,11 +249,7 @@ fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
         span,
         kind: FactKind::CtxRequirement,
         label: format!("requires [{bag}]"),
-        detail: format!(
-            "request context: this {kind} requires the `$ctx` fields [{bag}]. The \
-             generated client sends exactly these; each field's type is fixed by the \
-             scope or column it binds to.",
-        ),
+        detail: format!("request context: this {kind} requires `$ctx` [{bag}]"),
         nav: None,
     })
 }
@@ -403,11 +390,10 @@ mod tests {
         // The decl, the `@scope Tenant`, and two `scoped Tenant` references = 4 anchors.
         assert_eq!(scope_facts.len(), 4, "{scope_facts:#?}");
         let d = &scope_facts[0].detail;
-        // Self-contained: names the scope, its filter, the governed model, and opt-in.
+        // Names the scope: its filter predicate and the model it governs.
         assert!(d.contains("scope `Tenant`"), "{d}");
         assert!(d.contains("org = $ctx.org"), "{d}");
         assert!(d.contains("governs Widget"), "{d}");
-        assert!(d.contains("scoped Tenant"), "{d}");
     }
 
     /// Regression guard: no editor-facing hover/inlay string may leak an internal

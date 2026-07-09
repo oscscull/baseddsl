@@ -158,9 +158,11 @@ fn ctx_requirement_is_shown_typed() {
     let ctx = of_kind(&fs, FactKind::CtxRequirement);
     assert_eq!(ctx.len(), 1, "{fs:#?}");
     assert_eq!(ctx[0].label, "requires [org: -> Org]");
+    // The detail names the required `$ctx` bag concretely.
     assert!(
-        ctx[0].detail.contains("generated client"),
+        ctx[0].detail.contains("request context"),
         "{}",
         ctx[0].detail
     );
+    assert!(ctx[0].detail.contains("org: -> Org"), "{}", ctx[0].detail);
 }

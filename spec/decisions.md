@@ -67,7 +67,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D51 (field-reference go-to-def + broad hover + clickable inverse inlay), D52 (find-references +
   filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T), D67 (offline
   migration-drift diagnostic W0108 + spent-`@was` W0107), D68 (folding + selection ranges — Track
-  C4 feature-parity complete)
+  C4 feature-parity complete), D77 (editor gravy names symbols: trimmed scope/`$ctx` hovers +
+  dropped duplicate `$ctx` inlay)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger), D67 (`@was` renames + offline drift diagnostic
   + `raw(dialect)` up step — Track E5, DoD #5 fully met)
@@ -79,7 +80,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Source hygiene / conventions** — D69 (Track F1 comment-hygiene sweep: source reads as finished, no
   build-time/WIP narration, TODOs live in the roadmap `.md`s — the standing Conventions rule enforced),
   D74 (H4/H5 hygiene: positive framing over define-by-negation; `based-codegen` D#-refs + overlong
-  comments cleaned; userland surfaces D#-free)
+  comments cleaned; userland surfaces D#-free), D77 (editor gravy names symbols not the system:
+  trimmed scope/`$ctx` hovers, dropped duplicate `$ctx` inlay — H4 complete)
 
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
@@ -2724,3 +2726,31 @@ is identical, so the pattern transfers verbatim).
 `main.rs`) + `clippy --workspace --all-features` + the example's own `clippy` all clean; the quickstart
 ran green via `based migrate apply` → `cargo run` (exit 0), output matching the README including the new
 `rejected a malformed cursor` line.
+
+## D77 — Editor gravy names symbols, not the system (H4 still-open half)
+
+**Context (H4, closing the half D74 left open).** Editor hover/inlay text is "gravy" — it states *what a
+symbol is* when that isn't obvious from the source, and stops there. Two facts tutorialized instead: the
+scope hover (`based-facts::scope_detail`) taught how the system works ("Every read and write on a governed
+model is confined … a callable opts in with `scoped` or out with `unscoped`"), and the `$ctx` hover
+(`ctx_fact.detail`) explained the client wire contract ("The generated client sends exactly these; each
+field's type is fixed by the scope or column it binds to"). Both are spec material. Separately, the
+`requires [org: -> Org]` **inlay** and the `$ctx` hover carried the same contract on the same declaration —
+duplicate surfaces for one fact.
+
+**Decision.** Trim both hovers to a one-line identity plus the concrete filter/bag, and remove the
+duplicate inlay.
+- **Scope hover** → `` scope `Tenant`: filter `org = $ctx.org`; governs Widget `` — the scope's name, its
+  filter predicate, and the models it governs. The confinement/opt-in prose is dropped (it lives in
+  auth.md).
+- **`$ctx` hover** → `` request context: this query requires `$ctx` [org: -> Org] `` — the concrete bag the
+  callable requires. The wire-contract sentence is dropped.
+- **`$ctx` inlay dropped.** `FactKind::CtxRequirement` no longer renders an end-of-line inlay (it joins
+  `Scope` in the `continue` arm of `inlay_hints`); the hover carries the bag, so there is no
+  hover↔inlay duplication. The `requires […]` label is retained only for the `based facts` CLI listing.
+
+Also fixed a define-by-negation comment in `scope_label` ("scope is written, not derived") to positive
+phrasing. Facts tests updated to the concise strings.
+
+**Verification.** `cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace
+--all-features` all clean.

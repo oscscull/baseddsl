@@ -374,9 +374,9 @@ impl Snapshot {
     /// The inlay hints for file `fid`: one per derived fact anchored in it, each at
     /// the end of its line. The inferred-inverse hint is a command-clickable label
     /// part linking to the forward edge it pairs through (`OrderItem.order`); the
-    /// model/callable-wide facts are plain `tag label` strings; a scope is *written*,
-    /// not derived, so it carries no inlay (hover only). The caller filters by the
-    /// requested viewport range.
+    /// index and resolved-query facts are plain `tag label` strings. The scope and
+    /// `$ctx` contracts surface on hover, so they carry no inlay. The caller filters
+    /// by the requested viewport range.
     pub fn inlay_hints(&self, fid: usize) -> Vec<InlayHint> {
         let idx = &self.lines[fid];
         let mut hints = Vec::new();
@@ -385,11 +385,10 @@ impl Snapshot {
                 continue;
             }
             let position = match f.kind {
-                FactKind::InferredInverse
-                | FactKind::InferredIndex
-                | FactKind::CtxRequirement
-                | FactKind::ResolvedQuery => idx.end_of_line(f.span.start as usize),
-                FactKind::Scope => continue,
+                FactKind::InferredInverse | FactKind::InferredIndex | FactKind::ResolvedQuery => {
+                    idx.end_of_line(f.span.start as usize)
+                }
+                FactKind::Scope | FactKind::CtxRequirement => continue,
             };
             // An inferred inverse links to the forward edge it pairs through, so the
             // `via Model.field` hint is command-clickable; other facts are plain text.
