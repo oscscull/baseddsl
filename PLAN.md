@@ -422,6 +422,15 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   built surface — codegen SQL edge cases, runtime binding/nesting, scope/soft-delete predicate
   composition — driven against a live DB, not just unit tests. Scope each sweep to one subsystem; file
   what it finds as its own item. Open-ended by nature; run when the higher-value H-items are quiet.
+- **H8. ✅ done. embed.rs generated-client mirror de-staled + regen-gated (user-raised 2026-07-09).**
+  `crates/based-runtime/tests/embed.rs` inlined a hand-copied `mod client` claiming to be verbatim
+  `based gen client --embedded` output "verified by the regen gate" — but no gate existed, and it had
+  drifted (predated D71: missing `ClientError::{transport,kind,status}`, the per-kind `Display`, the
+  `source()` impl; trimmed `Cursor`/`ClientErrorKind` docs). Fix: the verbatim output now lives in
+  `tests/support/embedded_client.rs` (a subdir, so it's neither an auto test target nor rustfmt-followed
+  through `include!`), `mod client` just `include!`s it, and a new `generated_client_is_current` test
+  regenerates from `SCHEMA` via `based_codegen::client::client_with` and asserts byte-equality — the
+  real gate, so the mirror can never silently rot again.
 
 ## Pipeline (data flow)
 
