@@ -10,4 +10,4 @@ User {
 
 # The shared User projection: any shape may nest it by name (`placed_by -> UserRef`),
 # so every fetch site and mapper works against this one nominal type.
-shape UserRef from User { name, email }
+shape UserDetail from User { name, email }

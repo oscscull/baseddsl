@@ -39,5 +39,5 @@ shape OrderCard from Order {
 shape OrderDetail from Order {
   status
   total
-  placed_by -> UserRef
+  placed_by -> UserDetail
 }
