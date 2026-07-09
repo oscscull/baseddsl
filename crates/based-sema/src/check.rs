@@ -1,5 +1,5 @@
-//! Shape / query / mutation / filter checks, including the four query inferences
-//! (queries.md): verb, param type, filter, and target model.
+//! Shape / query / mutation / filter checks, including the four query inferences:
+//! verb, param type, filter, and target model.
 
 use based_ast::*;
 
@@ -85,7 +85,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
     let ret = resolve_return(&q.ret, body_model, cx, sink)?;
     let ti = cx.find(&ret.model)?;
 
-    // verb: explicit in a block, else inferred from cardinality (queries.md).
+    // verb: explicit in a block, else inferred from cardinality.
     let verb = match &q.body {
         QueryBody::Block(s) => {
             if s.model.node != ret.model {
@@ -138,7 +138,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         );
     }
 
-    // Nondeterministic-order lint (sorting.md): a `list` with no sort at any tier.
+    // Nondeterministic-order lint: a `list` with no sort at any tier.
     let paginated = matches!(&q.body, QueryBody::Inline(cs) | QueryBody::Block(Statement{clauses: cs, ..}) if cs.iter().any(|c| matches!(c, Clause::Page(_))));
     if verb == Verb::List && !has_order && cx.model(ti).sort.is_empty() {
         sink.warn(
@@ -151,7 +151,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         );
     }
 
-    // Scope acknowledgement (auth.md Handle 2 / D46): a callable touching a scoped
+    // Scope acknowledgement: a callable touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
     let touched = crate::scope::touched_query(q, ti, cx);
     crate::scope::check_ack(
@@ -428,7 +428,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         check_write(stmt, cx, &params, None, unscoped, sink);
     }
 
-    // Scope acknowledgement (auth.md Handle 2 / D46): a mutation touching a scoped
+    // Scope acknowledgement: a mutation touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
     let touched = crate::scope::touched_mutation(m, ret.shape.as_deref(), &ret.model, cx);
     crate::scope::check_ack(m.scoped.as_ref(), unscoped, &touched, cx, m.span, sink);
@@ -597,7 +597,7 @@ fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, si
 /// A `create` must assign every *required* column: a non-optional, non-defaulted
 /// stored column or forward FK. Engine-managed fields — the `id`, `@created` /
 /// `@updated` timestamps, the `@soft_delete` field, and any `@scope` column
-/// (auto-set from `$ctx` on insert, D32) — are set by the engine, so they are
+/// (auto-set from `$ctx` on insert) — are set by the engine, so they are
 /// exempt. Inverse edges own no column here, so they never count. A missing field
 /// is `E0146` (all missing fields reported in one error).
 fn check_create_required(mi: usize, assigns: &[Assign], at: &Ident, cx: &Cx, sink: &mut Sink) {
@@ -691,8 +691,7 @@ pub fn check_filter(f: &NamedFilter, cx: &Cx, sink: &mut Sink) -> RFilter {
     }
     // A named filter has no caller model at declaration, so column paths are not
     // bound here (they resolve against whichever model calls it) — only params,
-    // nested filter calls, and functions are checked. (See PLAN.md: filter-body
-    // column resolution against the call site is future work.)
+    // nested filter calls, and functions are checked.
     resolve::check_predicate(&f.pred, None, cx, &params, sink);
     RFilter {
         name: f.name.node.clone(),

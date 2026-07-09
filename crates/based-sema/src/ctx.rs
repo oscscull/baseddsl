@@ -1,6 +1,6 @@
 //! `$ctx` inference + coherence .
 //!
-//! `$ctx` is the caller-supplied request context (auth.md). It is **per-request**,
+//! `$ctx` is the caller-supplied request context. It is **per-request**,
 //! so there is no single global context type; each callable *requires* exactly the
 //! `$ctx.<field>`s it reads — directly in a `where`, through its target model's
 //! `@scope`, through an expanded filter body, or in a `create`/`update` assign.
@@ -23,7 +23,7 @@ use crate::resolve::{self, Cx, Terminal};
 /// each field typed by inference. Deduped (one entry per distinct field+type).
 pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
     let mut out = Vec::new();
-    // `@scope` is injected into every query on the model (auth.md Handle 2), so a
+    // `@scope` is injected into every query on the model, so a
     // scope that reads `$ctx` makes that field a requirement of every such query —
     // unless the query is `unscoped` , which drops the injection and the need.
     if q.unscoped.is_none() {
@@ -142,7 +142,7 @@ fn walk_filter_paths(
 }
 
 /// Walk a return shape body: an `out = path` reach may join, a `Bare` never does
-/// (single-segment), a `Nest` lowers to a subquery in codegen (no outer join → not walked, D34).
+/// (single-segment), a `Nest` lowers to a subquery in codegen (no outer join → not walked).
 fn walk_shape_scope(body: &[ShapeField], model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
     for f in body {
         if let ShapeField::Rename {
@@ -184,7 +184,7 @@ fn walk_path_scope(path: &Path, start: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
 }
 
 /// The `$ctx` a mutation requires: each write statement's `where` + its model's
-/// `@scope` (update/delete/restore inject it, D12) + `create`/`update` assigns, plus
+/// `@scope` (update/delete/restore inject it) + `create`/`update` assigns, plus
 ///  any scoped model a write `where` or the create's declared-shape re-select
 /// *joins*. `ret_shape`/`ret_model` describe that re-select's projection.
 pub fn collect_mutation(

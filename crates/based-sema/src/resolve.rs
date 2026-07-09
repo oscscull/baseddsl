@@ -1,11 +1,11 @@
 //! Path resolution + the shared predicate/value checker.
 //!
 //! One expression language is used in `where`, `@scope`, named filters, and
-//! relation joins (queries.md), so this module is the single place paths, params,
+//! relation joins, so this module is the single place paths, params,
 //! filter calls, and functions are validated. Path resolution walks declared
 //! fields: forward *and* backward edges are just fields, so forward traversal
 //! needs no inverse and backward traversal works exactly because the inverse was
-//! declared (relations.md).
+//! declared.
 
 use based_ast::*;
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ pub struct Cx<'a> {
     /// shape's relation reaches to find joined *scoped* models, whose `@scope` codegen
     /// injects into the join `ON` — so the callable must require their `$ctx` fields.
     pub shape_bodies: &'a HashMap<String, &'a [ShapeField]>,
-    /// Resolved `scope` decls (auth.md / D46) — for validating a callable's
+    /// Resolved `scope` decls — for validating a callable's
     /// `scoped Name` acknowledgement.
     pub scopes: &'a [RScope],
     /// scope name -> index into `scopes`.
@@ -294,7 +294,7 @@ pub enum Mapped<'a> {
     Relation(&'a str),
 }
 
-/// D1: an explicit param annotation must agree with the column it maps onto. A
+/// An explicit param annotation must agree with the column it maps onto. A
 /// relation param may be typed as its target model *or* as its key (`Id`/`Uuid`);
 /// a scalar param must match the column's family. Loose on purpose (family, not
 /// exact primitive) so `Uuid`↔`Id` and the like don't spuriously conflict.
@@ -410,7 +410,7 @@ pub fn resolve_path(path: &Path, start: usize, cx: &Cx, sink: &mut Sink) -> Opti
 }
 
 /// Check one predicate against an optional model context. `params` is the set of
-/// legal `$`-parameter names (besides `$ctx`, always allowed, D4). When `model`
+/// legal `$`-parameter names (besides `$ctx`, always allowed). When `model`
 /// is `None` (a named filter checked at its declaration, without a caller), column
 /// paths are not bound to a model — only params, filter calls, and functions are
 /// checked; the body's columns resolve later at each call site (see below).
@@ -511,8 +511,8 @@ fn check_predicate_in(
 }
 
 /// Re-resolve a named filter's body against the call-site `model`. The filter's
-/// *own* params are the legal `$`-set inside its body (queries.md: a filter param
-/// is referenced as `$c`, same `$`-means-bound rule as everywhere else — D14).
+/// *own* params are the legal `$`-set inside its body (a filter param is referenced
+/// as `$c`, same `$`-means-bound rule as everywhere else).
 /// `in_filters` guards against a filter that expands to itself. With no call-site
 /// model (`model` is `None`, e.g. a filter reached while checking another filter's
 /// declaration) there is nothing to resolve columns against, so this is a no-op.
@@ -630,7 +630,7 @@ pub fn check_sort_term(t: &SortTerm, model: usize, cx: &Cx, sink: &mut Sink) {
     resolve_path(&t.path, model, cx, sink);
 }
 
-/// Resolve a relation's custom `on:` join predicate (relations.md, resume #5).
+/// Resolve a relation's custom `on:` join predicate.
 /// Unlike every other predicate this one spans *two* tables — the FK-holding
 /// model `near` and its target `far` — and refers to columns table-qualified
 /// (`orders.user_ref = users.legacy_id`), for legacy keys that don't follow the

@@ -48,7 +48,7 @@ pub mod code {
     pub const RESTORE_NOT_SOFT: &str = "E0145";
     // create omits a required (non-optional, non-defaulted) column.
     pub const CREATE_MISSING: &str = "E0146";
-    // operand typing (PLAN.md sema #1)
+    // operand typing
     pub const OP_TYPE: &str = "E0150"; // operator not applicable to the operand type
     pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison
     pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column
@@ -59,11 +59,11 @@ pub mod code {
     pub const CTX_BAD_PATH: &str = "E0160"; // $ctx used without exactly one field segment
     pub const CTX_CONFLICT: &str = "E0161"; // $ctx.<field> used at incompatible types across uses
 
-    // tx back-references (mutations.md): `^.field` reads the immediately preceding
+    // tx back-references: `^.field` reads the immediately preceding
     // `create` in the same `tx`.
     pub const BACKREF_SCOPE: &str = "E0170"; // `^` outside a `tx`, or with no preceding `create`
 
-    // Named scope (auth.md Handle 2 / D46/D47): a `scope` decl referenced by
+    // Named scope: a `scope` decl referenced by
     // `@scope Name` on a model + `scoped Name` on every callable that touches it.
     pub const SCOPE_FORM: &str = "E0180"; // a `scope` decl's predicate isn't a conjunction of `col = $ctx.field`
     pub const SCOPE_ASSIGN: &str = "E0181"; // a `create` assigns a scope column (engine-managed)
@@ -73,7 +73,7 @@ pub mod code {
     pub const SCOPE_ACK_MISMATCH: &str = "E0185"; // `scoped …` set ⊉ any alternative of a touched scoped model
     pub const SCOPE_CREATE_UNSAT: &str = "E0186"; // a `create` can satisfy no alternative
 
-    // `@was("old")` rename directive (migrations.md / E5): declares a field's/model's
+    // `@was("old")` rename directive: declares a field's/model's
     // previous physical name so the diff emits a clean rename instead of drop+add.
     pub const WAS_NOOP: &str = "E0190"; // `@was` names the field's/model's own current name (a no-op)
     pub const WAS_LIVE: &str = "E0191"; // `@was("old")` but `old` is still a live column/table (can't be the rename source)
@@ -81,7 +81,7 @@ pub mod code {
     pub const NONDET_SORT: &str = "W0100";
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
-    // index lints (indexing.md, D15)
+    // index lints
     pub const UNINDEXED: &str = "W0103"; // a query will scan: no usable index, no annotation
     pub const USELESS_INDEX: &str = "W0104"; // declared index no query uses (pure write-tax)
     pub const STALE_UNINDEXED: &str = "W0105"; // unindexed(...) on a query that is indexed
@@ -91,7 +91,7 @@ pub mod code {
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
-/// just not one the engine understands — models.md).
+/// just not one the engine understands).
 pub const KNOWN_DECORATORS: &[&str] = &[
     "soft_delete",
     "sort",
@@ -112,7 +112,7 @@ pub const KNOWN_FUNCS: &[&str] = &["now"];
 pub struct CheckedSchema {
     pub models: Vec<RModel>,
     pub shapes: Vec<RShape>,
-    /// Named scope decls (auth.md Handle 2 / D46), keyed by name in `scope_index`.
+    /// Named scope decls, keyed by name in `scope_index`.
     pub scopes: Vec<RScope>,
     pub queries: Vec<RQuery>,
     pub mutations: Vec<RMutation>,
@@ -132,9 +132,9 @@ impl CheckedSchema {
     }
 }
 
-/// A resolved `scope` decl (auth.md Handle 2 / D46): its terms carry the column,
+/// A resolved `scope` decl: its terms carry the column,
 /// the `$ctx` field, and the type declared once here (the one source of truth for
-/// both the governed models' column and the `$ctx.field`, P4).
+/// both the governed models' column and the `$ctx.field`).
 #[derive(Debug, Clone)]
 pub struct RScope {
     pub name: String,
@@ -179,13 +179,13 @@ pub struct RModel {
     /// Model default sort (`@sort`); empty when none is declared.
     pub sort: Vec<SortTerm>,
     /// The standing scope filter injected into every read/write on this model
-    /// (auth.md Handle 2). Synthesized from the model's `@scope Name` reference(s) —
+    /// Synthesized from the model's `@scope Name` reference(s) —
     /// the conjunction of the referenced `scope` decls' `col = $ctx.field` terms
     /// (the single alternative, iteration 1). `None` when the model is not scoped.
     /// Codegen lowers it exactly like any `where` , so scope injection is
     /// unchanged in effect from the old inline `@scope(pred)`.
     pub scope: Option<Predicate>,
-    /// The model's `@scope` alternatives as scope-name sets (auth.md / D47 DNF): each
+    /// The model's `@scope` alternatives as scope-name sets (DNF): each
     /// `@scope Name[, Name]*` decorator is one alternative (an AND of names). Empty
     /// when the model is not scoped. Iteration 1 resolves exactly one alternative but
     /// stores a list so multi-scope  adds DNF without reshaping this.
@@ -194,7 +194,7 @@ pub struct RModel {
     pub created: Option<String>,
     pub updated: Option<String>,
     pub indexes: Vec<RIndex>,
-    /// Engine-inferred baseline indexes (indexing.md, D15): FK columns of inverse
+    /// Engine-inferred baseline indexes: FK columns of inverse
     /// edges the access layer actually traverses, minus anything a declared index
     /// already covers. Columns are field-level (like `indexes`); DDL prepends the
     /// soft-delete column (predicate-leading). Never `unique`.
@@ -203,7 +203,7 @@ pub struct RModel {
     /// index). Drives `get`-must-be-keyed lint and codegen constraints.
     pub unique_cols: Vec<String>,
     /// `@was("old_table")` — the model's previous table name, driving a `rename table`
-    /// step in the migration diff instead of drop+add (migrations.md / E5). `None` for
+    /// step in the migration diff instead of drop+add. `None` for
     /// an un-renamed model. Transient: removed once the rename migration is captured.
     pub was: Option<String>,
 }
@@ -215,7 +215,7 @@ impl RModel {
     /// Find a member by its *physical* column name (not the field name): a scalar's
     /// `column` or a forward relation's `fk_col`. Custom `on:` join conditions are
     /// written in terms of DB columns (legacy keys), so they resolve through this,
-    /// not `member` (relations.md).
+    /// not `member`.
     pub fn column(&self, col: &str) -> Option<&RMember> {
         self.members.iter().find(|m| match &m.kind {
             MemberKind::Scalar { column, .. } => column == col,
@@ -244,7 +244,7 @@ impl RModel {
     /// when the model has no `@scope`. A scope is a conjunction of `col = $ctx.field`
     /// ; the shard key is the *owner* the scope filters by, i.e. the `$ctx` field
     /// of the **first** scope term (`@scope(org = $ctx.org)` → `Some("org")`). This is
-    /// the one field the router hashes to pick a physical shard (D20's single-shard-
+    /// the one field the router hashes to pick a physical shard (single-shard-
     /// per-request), read from the same `@scope` that filters rows — one source of
     /// truth, so the shard a row lives in and the shard its owner's requests route to
     /// can never drift. A multi-term scope shards on its first `$ctx` field (the
@@ -282,7 +282,7 @@ pub struct RMember {
     pub span: Span,
     pub kind: MemberKind,
     /// `@was("old_col")` — the field's previous physical column name, driving a
-    /// `rename column` step in the migration diff (migrations.md / E5). `None` for an
+    /// `rename column` step in the migration diff. `None` for an
     /// un-renamed field. Transient: removed once the rename migration is captured.
     pub was: Option<String>,
 }
@@ -290,7 +290,7 @@ pub struct RMember {
 #[derive(Debug, Clone)]
 pub enum MemberKind {
     /// A stored column. `column` is the physical name (`(column "…")` override or
-    /// the field name verbatim, D3).
+    /// the field name verbatim).
     Scalar {
         ty: Primitive,
         optional: bool,
@@ -316,7 +316,7 @@ pub enum MemberKind {
 impl RMember {
     /// The member's physical column name: a scalar's `column`, a forward relation's
     /// `fk_col`, else the field name (an inverse owns no column). The rename target a
-    /// `@was` maps its old name to (migrations.md).
+    /// `@was` maps its old name to.
     pub fn physical_col(&self) -> &str {
         match &self.kind {
             MemberKind::Scalar { column, .. } => column,
@@ -369,7 +369,7 @@ pub struct RShape {
 pub struct RQuery {
     pub name: String,
     pub span: Span,
-    /// Model the query reads from (inferred from the return shape, queries.md).
+    /// Model the query reads from (inferred from the return shape).
     pub target: String,
     /// `get`/`list` — explicit in a block body, inferred from cardinality otherwise.
     pub verb: Verb,
@@ -383,12 +383,12 @@ pub struct RQuery {
     pub ctx_requires: Vec<CtxReq>,
     /// The `$ctx` field this query **shards** on : the target model's `@scope`
     /// owner field ([`RModel::shard_key_ctx_field`]), or `None` when the model has no
-    /// `@scope` *or* the query is `unscoped` (D32 — a cross-scope read has no single
+    /// `@scope` *or* the query is `unscoped` (a cross-scope read has no single
     /// owning shard, so it must route explicitly, never by a scope it disabled). The
     /// runtime pulls this field out of the request `$ctx` to route to one shard.
     pub shard_key: Option<String>,
-    /// The per-touched-model scope injection this query chose (auth.md / D47): for
-    /// each scoped model it reads (root + every D34 joined reach), the terms of the
+    /// The per-touched-model scope injection this query chose: for
+    /// each scoped model it reads (root + every joined reach), the terms of the
     /// alternative its `scoped …` clause satisfied. Empty when `unscoped` or nothing
     /// scoped is touched. Codegen injects exactly these, so a callable naming one
     /// alternative and another naming a different one filter by different predicates.
@@ -410,11 +410,11 @@ pub struct RMutation {
     pub ctx_requires: Vec<CtxReq>,
     /// The `$ctx` field this mutation **shards** on : the return model's `@scope`
     /// owner field ([`RModel::shard_key_ctx_field`]), or `None` when it has no `@scope`
-    /// *or* the mutation is `unscoped` . D20 makes a `tx` a single-shard unit, so
+    /// *or* the mutation is `unscoped` . A `tx` is a single-shard unit, so
     /// the whole mutation routes on this one field (the return model is the primary
     /// written model). The runtime pulls it out of the request `$ctx` to pick a shard.
     pub shard_key: Option<String>,
-    /// The per-touched-model scope injection this mutation chose (auth.md / D47): the
+    /// The per-touched-model scope injection this mutation chose: the
     /// twin of [`RQuery::scope_inject`] for the write side — the chosen alternative's
     /// terms per written/joined scoped model, injected into every write `WHERE`, the
     /// joined `ON`, the create auto-set, and the declared-shape re-select. Empty when
@@ -480,7 +480,7 @@ pub struct CtxReq {
 }
 
 /// A `$ctx` field's inferred type: a primitive, or a relation to a model (the
-/// caller supplies that model's key, D1).
+/// caller supplies that model's key).
 #[derive(Debug, Clone)]
 pub enum CtxField {
     Scalar(Primitive),

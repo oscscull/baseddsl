@@ -84,8 +84,8 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
     }
 }
 
-/// The model-level `@was("old_table")` rename directive's old table name, if declared
-/// (migrations.md). A generic decorator (`@was` is not a distinct grammar form model-side).
+/// The model-level `@was("old_table")` rename directive's old table name, if declared.
+/// A generic decorator (`@was` is not a distinct grammar form model-side).
 fn model_was(m: &Model) -> Option<String> {
     for d in &m.decorators {
         if d.name.node == "was" {
@@ -176,7 +176,7 @@ pub fn validate(
     compute_unique(ast, &mut models[mi]);
 }
 
-/// Validate `@was` rename directives (migrations.md / E5). A `@was` names a *previous*
+/// Validate `@was` rename directives. A `@was` names a *previous*
 /// name — one that lives only in the migration snapshot, so sema can't confirm it existed
 /// (the diff does). It can catch the two locally-decidable mistakes: a no-op self-rename
 /// (`E0190`) and an old name that is still a *live* column/table (`E0191` — then it can't

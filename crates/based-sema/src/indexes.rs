@@ -1,4 +1,4 @@
-//! Index inference + the bidirectional index lints (indexing.md, D15).
+//! Index inference + the bidirectional index lints.
 //!
 //! Runs after every query/shape/mutation is resolved, because the whole point is
 //! closed-world reasoning: the access layer *is* the set of generated SQL, so the
@@ -16,7 +16,7 @@
 //!     `unindexed(max_rows: N)` / `unindexed(unsafe)` annotation (a query-body
 //!     clause; a bulk write has no such clause, so it simply shows). Filter-path
 //!     indexes are *not* auto-created (whether one is worth its write tax is a
-//!     human call — principle 8: shown, not written); this lint is how they show.
+//!     human call — shown, not written); this lint is how they show.
 //!   * **W0104 `useless-index`**: a declared non-unique index nothing in the access
 //!     layer (queries *and* mutation `where`s) filters, sorts, or joins on — pure
 //!     write tax. (Unique indexes are constraints, not perf, so they are exempt.)
@@ -204,12 +204,12 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
             Clause::Unindexed(u) => pat.annotation = Some(u.clone()),
         }
     }
-    // Sort cascade (sorting.md): the model default applies when the query is bare.
+    // Sort cascade: the model default applies when the query is bare.
     if !has_order && !cx.model(mi).sort.is_empty() {
         let terms = cx.model(mi).sort.clone();
         pat.note_sort(&terms, mi, cx, usage);
     }
-    // `@scope` rides into every query on the model (auth.md), filters included.
+    // `@scope` rides into every query on the model, filters included.
     if let Some(scope) = cx.model(mi).scope.clone() {
         pat.walk(&scope, mi, cx, usage, &mut Vec::new());
     }
@@ -250,7 +250,7 @@ fn collect_write(
 }
 
 /// The access pattern of one write `where`: its conjunctive eq/range spine plus the
-/// model's `@scope` (which rides into every write, auth.md). No sort or pagination
+/// model's `@scope` (which rides into every write). No sort or pagination
 /// applies to a write, and there is no annotation to suppress it.
 fn write_pattern(
     name: &str,

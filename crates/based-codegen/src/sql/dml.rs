@@ -61,7 +61,7 @@ use crate::Dialect;
 /// columns in a SELECT output alias (`buyer` + `name` → `buyer.name`). A `.` cannot
 /// occur in a BSL identifier, so any output alias containing it is unambiguously a
 /// nested projection — the runtime (`run.rs`) splits on it to reassemble the flat row
-/// into a sub-object. One source of truth for the convention (principle 4): codegen
+/// into a sub-object. One source of truth for the convention: codegen
 /// emits it, the runtime reads it.
 pub const NEST_SEP: char = '.';
 
@@ -70,8 +70,8 @@ pub const NEST_SEP: char = '.';
 /// [`crate::Dialect::json_array_agg`]) of the nested sub-objects; the runtime (`run.rs`)
 /// sees the `[]` suffix, parses the string into a real JSON array, and stores it under
 /// the field name without the suffix. `[`/`]` cannot occur in a BSL identifier, so the
-/// marker never collides with a projected field. One source of the convention (principle
-/// 4): codegen emits it, the runtime reads it. Composes with [`NEST_SEP`] — a to-many
+/// marker never collides with a projected field. One source of the convention: codegen
+/// emits it, the runtime reads it. Composes with [`NEST_SEP`] — a to-many
 /// inside a to-one nests as `parent.items[]`.
 pub const ARRAY_MARK: &str = "[]";
 
@@ -79,8 +79,8 @@ pub const ARRAY_MARK: &str = "[]";
 /// sort key `k_i` is projected an extra time as `<k_i> AS __keyset_<i>` so the runtime
 /// can read the last row's sort-key values to mint the next cursor, then strip these
 /// columns from the response. The `__` prefix cannot begin a BSL identifier, so it can
-/// never collide with a projected field. One source of the convention (principle 4):
-/// codegen emits it, the runtime (`run.rs`) reads + strips it.
+/// never collide with a projected field. One source of the convention: codegen
+/// emits it, the runtime (`run.rs`) reads + strips it.
 pub const KEYSET_PREFIX: &str = "__keyset_";
 
 /// Render every query in the schema as a parameterized SELECT (mutations join in a
@@ -89,7 +89,7 @@ pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
     // The SELECT text now branches on the dialect: identifier quoting (`` `x` `` vs
     // `"x"`), the bare-bool literal, and JSON containment (`MEMBER OF` vs `@>`). The
     // one lowering below is shared with the runtime, so the emitted and executed SQL
-    // can never disagree per dialect (principle 4).
+    // can never disagree per dialect.
     let queries: HashMap<&str, &RQuery> = schema
         .queries
         .iter()
@@ -119,7 +119,7 @@ pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
 /// `with count` page, the live-row COUNT. Both carry the `:name` placeholders
 /// verbatim — the runtime binds them; the text emitter frames them with
 /// `-- query` headers (`dml`). This is the one lowering; `render_query` and the
-/// runtime both read it, so the SQL and its bind surface can never drift (P4).
+/// runtime both read it, so the SQL and its bind surface can never drift.
 #[derive(Debug, Clone)]
 pub struct LoweredQuery {
     pub name: String,
@@ -133,7 +133,7 @@ pub struct LoweredQuery {
     /// `:keyset_active` + `:keyset_<i>` placeholders it binds from the incoming cursor.
     /// `None` for a non-paginated or offset-paginated query. The runtime reads `n` to
     /// bind the cursor in and extract the next one — one source of the keyset convention
-    /// (principle 4): codegen emits it, the runtime reads it.
+    /// codegen emits it, the runtime reads it.
     pub keyset: Option<usize>,
 }
 
@@ -189,7 +189,7 @@ fn lower_query(
 ) -> LoweredQuery {
     let root = schema.model(&rq.target).expect("target resolved by sema");
     // `unscoped` opts the whole query out of scope handling — the joined
-    // tables' `@scope` as well as the root's, kept in one decision (P4).
+    // tables' `@scope` as well as the root's, kept in one decision.
     let mut sel = Select::new(schema, decls, root, dialect)
         .with_scope_inject(q.unscoped.is_none())
         .with_scope_terms(&rq.scope_inject);
@@ -703,7 +703,7 @@ impl<'a> Select<'a> {
     /// :ctx_<field>`, ANDed. `None` when the callable confines this model by no scope
     /// (unscoped callable, or a model carrying none of the named axes). The bind name
     /// `:ctx_<field>` is the *same* one every scope site uses, so the runtime binds it
-    /// once from the request `$ctx` (P4). For a single-alternative model this is the
+    /// once from the request `$ctx`. For a single-alternative model this is the
     /// model's whole scope.
     pub(crate) fn scope_where(&self, alias: &str, model: &RModel) -> Option<String> {
         let terms: Vec<String> = self
@@ -1369,7 +1369,7 @@ pub(crate) fn render_func(f: &FuncCall) -> String {
 /// Render a raw-SQL fragment: text verbatim, `${param}` -> `:param`,
 /// `{table}`/`{id}` -> safe engine interpolation (root table / its `id`). Only the
 /// engine-interpolated identifiers are dialect-quoted; the raw text is the user's and
-/// is emitted verbatim (an escape hatch, principle 6 — they own its portability).
+/// is emitted verbatim (an escape hatch — they own its portability).
 pub(crate) fn render_raw(dialect: Dialect, raw: &RawSql, root_alias: &str, table: &str) -> String {
     let mut s = String::new();
     for part in &raw.parts {

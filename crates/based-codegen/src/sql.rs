@@ -276,7 +276,7 @@ fn constraint_name(prefix: &str, table: &str, columns: &[String]) -> String {
 /// A to-many scalar has no columnar form, so it is stored as a JSON array — the
 /// dialect's JSON type (`JSON` on MariaDB, `TEXT` on SQLite, which has no JSON type).
 /// `pub(crate)` so the migration renderer (`migrate`) maps neutral snapshot types
-/// through the *same* table — one dialect type map, never a second that can drift (P4).
+/// through the *same* table — one dialect type map, never a second that can drift.
 pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static str {
     match dialect {
         Dialect::MariaDb => {

@@ -4,7 +4,7 @@
 //!   * name + casing resolution : `Order` <-> model `Order`, paths, inverses
 //!   * implicit `id` column ; engine-managed timestamp roles
 //!   * type checking: fields, shape paths, predicate operands, param bindings
-//!   * the four query inferences (queries.md): verb, param type, filter, target
+//!   * the four query inferences: verb, param type, filter, target
 //!   * lints: nondeterministic sort, raw soft-delete gaps, get-not-keyed
 //!
 //! Output is a [`CheckedSchema`] (the IR seed for codegen) plus diagnostics.
@@ -100,7 +100,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             filter_defs.insert(f.name.node.clone(), *f);
         }
     }
-    // Queries and mutations share the wire namespace (one route each, calling.md).
+    // Queries and mutations share the wire namespace (one route each).
     let mut callable: HashSet<&str> = HashSet::new();
     for (name, span) in queries
         .iter()
@@ -125,7 +125,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         model::validate(ast, mi, &mut rmodels, &index, &mut sink);
     }
 
-    // 3b. Named scopes (auth.md / D46): resolve the `scope` decls, then attach each
+    // 3b. Named scopes: resolve the `scope` decls, then attach each
     // model's `@scope Name` refs (E0183/E0184) + synthesize the injected predicate.
     let (rscopes, scope_index) = scope::resolve_decls(&scope_decls, &index, &mut sink);
     scope::attach_models(&models, &mut rmodels, &rscopes, &scope_index, &mut sink);
@@ -163,8 +163,8 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             .map(|f| check::check_filter(f, &cx, &mut sink))
             .collect();
 
-        // 6. Index inference + lints (indexing.md, D15). Last on purpose: it
-        // reasons over the *whole* resolved access layer (closed world, D5).
+        // 6. Index inference + lints. Last on purpose: it
+        // reasons over the *whole* resolved access layer (closed world).
         let inferred = indexes::run(
             &models, &queries, &shapes, &mutations, &rqueries, &cx, &mut sink,
         );

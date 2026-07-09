@@ -17,8 +17,8 @@
 //! - [`up_mig`] — renders the neutral step list to the reviewable `up.mig` text.
 //! - [`sql`] — [`render_sql`] renders the step list to per-dialect
 //!   `CREATE`/`ALTER`/`DROP` SQL over the `Dialect` seam, reusing the DDL type map
-//!   ([`crate::sql::sql_type`]) so a migration's SQL can never drift from `based gen sql`
-//!   (principle 4); [`sql_statements`] is its executable twin and [`content_hash`] anchors
+//!   ([`crate::sql::sql_type`]) so a migration's SQL can never drift from `based gen sql`;
+//!   [`sql_statements`] is its executable twin and [`content_hash`] anchors
 //!   the ledger's tamper guard.
 //!
 //! The snapshot text and step list stay decoupled from SQL: everything outside [`sql`]

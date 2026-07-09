@@ -120,7 +120,7 @@ impl Step {
 
 /// Is a type change `from -> to` narrowing (potentially truncating/failing)? Widening
 /// is safe (`int -> text`); a same-family no-op is not a change at all. Anything that is
-/// not a recognized safe widening is treated as narrowing (conservative — principle 1).
+/// not a recognized safe widening is treated as narrowing (conservative).
 fn is_narrowing(from: &str, to: &str) -> bool {
     if from == to {
         return false;

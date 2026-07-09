@@ -4,7 +4,7 @@
 //! executable twin for `based migrate apply` (both go through the same lowering, so
 //! applied SQL == reviewed SQL). [`content_hash`] anchors the `_based_migrations` ledger's
 //! tamper guard. The neutral type map goes through [`crate::sql::sql_type`], so a
-//! migration's DDL can never drift from `based gen sql` (principle 4).
+//! migration's DDL can never drift from `based gen sql`.
 
 use super::diff::{ColumnChange, Step};
 use super::model::{index_name, ColumnSnap, IndexSnap, TableSnap};
@@ -18,14 +18,14 @@ use std::fmt::Write as _;
 /// Render a neutral step list to executable per-dialect SQL over the `Dialect` seam.
 /// This is the "review the SQL" surface (`based migrate render`):
 /// `0001_init`'s create steps render to the same DDL `based gen sql` builds from scratch
-/// (the neutral type map goes through `sql::sql_type`, so the two can't drift, P4).
-/// A destructive step is preceded by a loud `-- DESTRUCTIVE` comment (principle 1).
+/// (the neutral type map goes through `sql::sql_type`, so the two can't drift).
+/// A destructive step is preceded by a loud `-- DESTRUCTIVE` comment.
 ///
 /// Deliberate dialect divergences: MariaDB alters a column with a full `MODIFY COLUMN`
 /// (it has no piecemeal `SET NOT NULL`); Postgres emits one `ALTER COLUMN` per change;
 /// SQLite has no in-place `ALTER COLUMN` at all, so such a step renders as a loud comment
-/// pointing at a hand-authored `raw(sqlite)` table-rebuild (the neutral vocabulary's edge,
-/// principle 6). `DROP INDEX` also differs (MySQL/MariaDB need `ON <table>`).
+/// pointing at a hand-authored `raw(sqlite)` table-rebuild (the neutral vocabulary's
+/// edge). `DROP INDEX` also differs (MySQL/MariaDB need `ON <table>`).
 pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -45,7 +45,7 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
             continue;
         }
         // A raw escape: emit its SQL only for the matching target, else a note (its
-        // per-dialect twin carries the change there). Always flagged not-verifiable (P6).
+        // per-dialect twin carries the change there). Always flagged not-verifiable.
         if let Step::Raw { dialect: d, sql } = step {
             if *d == dialect {
                 let _ = writeln!(out, "-- raw({}) escape — not offline-verifiable", d.name());
@@ -73,7 +73,7 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
                 }
             }
             // A step with no in-place rendering for this dialect (SQLite `ALTER COLUMN`):
-            // a loud, greppable comment, never broken SQL (principle 6).
+            // a loud, greppable comment, never broken SQL.
             Err(msg) => {
                 let _ = writeln!(out, "-- {msg}");
             }
@@ -85,8 +85,8 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
 /// The executable statements for a step list, for `based migrate apply` — bare (no
 /// trailing `;`, no comments), so a driver can run each through `Db::execute`. `Err(msg)`
 /// = a step the dialect can't render in place (a SQLite `ALTER COLUMN` — the author must
-/// supply a `raw(sqlite)` rebuild); apply surfaces it loudly rather than emit broken SQL
-/// (principle 6). This is the execution twin of [`render_sql`]'s review text; both go
+/// supply a `raw(sqlite)` rebuild); apply surfaces it loudly rather than emit broken SQL.
+/// This is the execution twin of [`render_sql`]'s review text; both go
 /// through [`step_statements`], so the SQL applied is exactly the SQL reviewed.
 pub fn sql_statements(steps: &[Step], dialect: Dialect) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
@@ -309,7 +309,7 @@ fn alter_column_statements(
         // SQLite has no in-place ALTER COLUMN — a type/null/default change requires the
         // 12-step table rebuild, which the neutral vocabulary can't safely auto-generate.
         // Surface a loud, greppable message pointing at a hand-authored raw(sqlite) step
-        // (principle 6 — the escape hatch is never silent) rather than broken SQL.
+        // (the escape hatch is never silent) rather than broken SQL.
         Dialect::Sqlite => {
             return Err(format!(
                 "SQLite cannot ALTER COLUMN {table}.{column} in place; author a raw(sqlite) table-rebuild migration."
@@ -364,7 +364,7 @@ fn column_ddl(c: &ColumnSnap, dialect: Dialect) -> String {
 }
 
 /// Map a neutral snapshot type (`int`/`text`/`uuid`/…, `[]` for a to-many scalar) to the
-/// dialect's SQL type — through `sql::sql_type`, the *same* map `based gen sql` uses (P4).
+/// dialect's SQL type — through `sql::sql_type`, the *same* map `based gen sql` uses.
 fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
     let (base, many) = match neutral.strip_suffix("[]") {
         Some(b) => (b, true),

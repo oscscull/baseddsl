@@ -1,9 +1,9 @@
-//! Named-scope resolution (auth.md Handle 2 / D46/D47).
+//! Named-scope resolution.
 //!
-//! A `scope Name (col: Type = $ctx.field, …)` decl is the one source of truth (P4)
+//! A `scope Name (col: Type = $ctx.field, …)` decl is the one source of truth
 //! for a standing row-visibility filter: the predicate form (a conjunction of
 //! `col = $ctx.field`, `E0180`) and the scope column's — hence `$ctx.field`'s — type.
-//! A model opts in with `@scope Name` (a set of alternatives, D47); a callable
+//! A model opts in with `@scope Name` (a set of alternatives); a callable
 //! acknowledges with `scoped Name` or opts out with `unscoped(…)`.
 //!
 //! This module resolves the decls into [`RScope`], then attaches each model's
@@ -71,7 +71,7 @@ fn resolve_term(
             CtxField::Relation(m.node.clone())
         }
     };
-    // The binding must be `$ctx.<field>` (the D32 restricted form) — else `E0180`.
+    // The binding must be `$ctx.<field>` (the restricted form) — else `E0180`.
     let ctx_field = if t.ctx.name.node == "ctx" && t.ctx.path.len() == 1 {
         t.ctx.path[0].node.clone()
     } else {
@@ -111,8 +111,7 @@ pub fn attach_models(
             continue;
         }
         let mut alts: Vec<Vec<String>> = Vec::new();
-        // Terms of the first alternative feed the synthesized injection predicate
-        // (iteration 1 resolves a single alternative; D47 generalizes codegen).
+        // Terms of the first alternative feed the synthesized injection predicate.
         let mut inject_terms: Vec<&RScopeTerm> = Vec::new();
         for (ai, sref) in ast.scopes.iter().enumerate() {
             let mut names = Vec::new();
@@ -212,8 +211,8 @@ fn ident(s: &str, span: Span) -> Ident {
 use crate::resolve::Cx;
 
 /// Validate a callable's scope acknowledgement against the scoped models it touches
-/// (auth.md Handle 2 / D46/D47). `touched` is the set of scoped model indices reached
-/// (root + D34 joined reaches). Enforces:
+/// `touched` is the set of scoped model indices reached
+/// (root + joined reaches). Enforces:
 ///  - `E0182`: a scoped target with neither `scoped …` nor `unscoped(…)`.
 ///  - `E0183`: `scoped …` names a scope decl that doesn't exist.
 ///  - `E0185`: the named set doesn't ⊇ ≥1 alternative of some touched model, or names
@@ -277,7 +276,7 @@ pub fn check_ack(
     }
 
     // The superset rule: the named set must ⊇ ≥1 declared alternative of each touched
-    // scoped model (auth.md / D47). For a single-alternative model this degenerates to
+    // scoped model. For a single-alternative model this degenerates to
     // "names that one scope".
     for &mi in touched {
         let alts = &cx.model(mi).scope_alts;
@@ -300,7 +299,7 @@ pub fn check_ack(
 
 // ---------- per-callable chosen-alternative injection  ----------------
 
-/// Resolve the scope a callable injects **per touched scoped model** (auth.md / D47):
+/// Resolve the scope a callable injects **per touched scoped model**:
 /// the alternative its `scoped …` clause satisfied, expanded to that alternative's
 /// `(column, ctx_field)` terms. For model `M`, the chosen axes are the callable's named
 /// axes that `M` declares a `@scope` for (a superset of ≥1 of `M`'s alternatives, which
@@ -355,7 +354,7 @@ pub fn resolve_inject(
 /// `E0186` — every `create` on a scoped model must set a full `@scope` alternative:
 /// the mutation's `scoped …` set must be a superset of ≥1 of the created model's
 /// alternatives, so the engine can auto-set all of that alternative's columns from
-/// `$ctx` and no row is ever created unowned (auth.md). Fires at the create when the
+/// `$ctx` and no row is ever created unowned. Fires at the create when the
 /// named set satisfies no alternative — e.g. an `@scope A, B` (AND) model whose create
 /// names only `A`, leaving `B`'s column with no `$ctx` value. Skipped for `unscoped`
 /// (the auto-set is dropped and the caller owns the columns, E0181 no longer applies).

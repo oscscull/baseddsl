@@ -22,14 +22,14 @@
 //! - `hard delete M where (p)` -> real `DELETE FROM m WHERE p` (soft-delete opt-out;
 //!   `@scope` still applies).
 //! - `tx { ... }` -> the inner statements, run in one engine-owned transaction
-//!   (principle 7; the engine, not this SQL, owns BEGIN/COMMIT). Sibling `create`s
+//!   (the engine, not this SQL, owns BEGIN/COMMIT). Sibling `create`s
 //!   get distinct id binds (`:id_<step>`), and a `^.field` back-reference reads the
 //!   immediately preceding create — `^.id` binds that create's generated id.
 //!
 //! ## Returning the declared shape (create-keyed + where-keyed)
 //! Every mutation reads its written row back in its declared shape via a trailing
 //! re-select (`ret_select`), reusing the read side's `project_return` so the projection
-//! can't drift from a `get` (principle 4). The re-select is keyed one of two ways:
+//! can't drift from a `get`. The re-select is keyed one of two ways:
 //! - **Create-keyed.** A mutation that *creates* its return row keys on the engine id
 //!   (`WHERE id = :result_id`, bound by the runtime to that create's generated id).
 //! - **Where-keyed.** A mutation whose return row *survives* an `update` / soft `delete` /
@@ -56,11 +56,11 @@ use crate::sql::dml::{
 use crate::Dialect;
 
 /// A mutation lowered to its ordered write statements. The whole body already runs
-/// under one engine-owned transaction (principle 7), so a `tx { ... }` block is
+/// under one engine-owned transaction, so a `tx { ... }` block is
 /// flattened here — its statements sit inline in execution order. The in-process
 /// runtime (write path) consumes this directly, exactly as it consumes
 /// [`super::LoweredQuery`] for reads, so the executed SQL and its bind surface can
-/// never drift from `based gen sql` (principle 4). `render_mutation` (the text
+/// never drift from `based gen sql`. `render_mutation` (the text
 /// emitter) and the runtime both read this one lowering.
 #[derive(Debug, Clone)]
 pub struct LoweredMutation {
@@ -69,7 +69,7 @@ pub struct LoweredMutation {
     /// The declared-shape re-select: a `SELECT <return shape> FROM <return model> WHERE
     /// <key> [AND <live>] AND <scope>` that reads back the mutation's written row, so the
     /// write response matches the client's decoded output type (the same projection a `get`
-    /// of that shape emits, principle 4). `<key>` is either `id = :result_id` for a create
+    /// of that shape emits). `<key>` is either `id = :result_id` for a create
     /// or the write's own `where` for a surviving update / soft delete / restore. `None`
     /// only when the row does not survive the write — a real DELETE (plain-model `delete` /
     /// `hard delete`) — where the response falls back to `{}`.
@@ -218,7 +218,7 @@ enum RetKey<'a> {
 
 /// Build the declared-shape re-select for a mutation's written row: the same projection a
 /// `get` of that shape emits (`project_return`, reused from the read side so the two can't
-/// drift, principle 4), keyed per `key` (created-id or write-`where`). The
+/// drift), keyed per `key` (created-id or write-`where`). The
 /// soft-delete live predicate (when the row is live) and `@scope` ride the read path
 /// exactly as a `get` would, so a row that lands / lives out of scope reads back as
 /// absent, consistent with every other read.
@@ -403,7 +403,7 @@ fn lower_write<'a>(
                     step += 1;
                 }
             }
-            // The tx is one engine-owned transaction (principle 7): the runtime wraps
+            // The tx is one engine-owned transaction: the runtime wraps
             // the whole body, so the flattened statements need no per-tx marker beyond
             // this banner on the first write (text surface only).
             if let Some(first) = out.get_mut(start) {
