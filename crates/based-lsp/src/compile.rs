@@ -13,9 +13,9 @@
 //! fallback.
 
 use based_ast::{
-    Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Model, Mutation, NamedFilter,
-    Param, ParamRef, Predicate, Primitive, Query, QueryBody, ScopeDecl, Shape, ShapeField,
-    ShapeValue, Span, TypeExpr, Value, WriteStmt,
+    Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Modifier, Model, Mutation,
+    NamedFilter, Param, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart, RawSql,
+    ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -43,6 +43,12 @@ pub struct Snapshot {
     pub diagnostics: Vec<Diagnostic>,
     /// Project-level diagnostics with no span (e.g. a malformed manifest).
     pub project_diagnostics: Vec<Diagnostic>,
+    /// The resolved schema, when every file parsed clean. Read by rename to map a
+    /// field/model to its physical column/table for the data-preserving `@was` edit.
+    pub schema: Option<based_sema::CheckedSchema>,
+    /// The manifest root, when this snapshot is a manifest project — the dir whose
+    /// `migrations/` a `@was`-preserving rename consults.
+    pub migrations_root: Option<PathBuf>,
 }
 
 impl Snapshot {
@@ -84,6 +90,17 @@ impl Snapshot {
         // from the statically-known root.
         if let Some(f) = self.field_ref_at(fid, offset) {
             return Some(f.name.span);
+        }
+        // A callable param (`buyer: Id` decl or a `$buyer` use in its body) → the param
+        // decl's name. Params are callable-local, so the target span scopes the rename.
+        if let Some(s) = self.param_ref_at(fid, offset) {
+            return Some(s);
+        }
+        // A `$ctx.<field>` bag field (a callable use or a `scope … = $ctx.field` term) →
+        // the field's canonical occurrence. The `$ctx` bag is coherent by name across
+        // the schema, so one field renames everywhere it is used.
+        if let Some(s) = self.ctx_ref_at(fid, offset) {
+            return Some(s);
         }
         // A declaration's own name resolves to itself. Conventional for go-to-def on a
         // definition, and load-bearing for the inverse inlay: VS Code activates a label
@@ -170,6 +187,31 @@ impl Snapshot {
                 out.push(id.1.span);
             }
         }
+        // Callable param uses: every `$param` in the callable owning the target param.
+        for d in &self.decls {
+            if let Some(p) = decl_params(d).iter().find(|p| p.name.span == target) {
+                for pr in callable_param_refs(d) {
+                    if pr.path.is_empty() && pr.name.node == p.name.node {
+                        out.push(pr.name.span);
+                    }
+                }
+            }
+        }
+        // `$ctx.<field>` uses: every occurrence of the bag field whose canonical is the
+        // target (the scope-term binding and every callable use share one name).
+        let ctx = self.ctx_occurrences();
+        if let Some(name) = ctx
+            .iter()
+            .map(|(n, _)| n)
+            .find(|n| self.ctx_canonical_span(n) == Some(target))
+            .cloned()
+        {
+            for (n, span) in &ctx {
+                if *n == name {
+                    out.push(*span);
+                }
+            }
+        }
 
         if include_decl {
             out.push(target);
@@ -211,6 +253,11 @@ impl Snapshot {
                 range: span_range(span, &self.lines[f]),
                 new_text: new_name.to_string(),
             });
+        }
+        // If the renamed symbol maps to a live DB column/table, also insert a `@was`
+        // so the generated migration preserves data (rename, not drop+add).
+        if let Some((uri, edit)) = self.was_edit_for_rename(target, &old, new_name) {
+            edits.entry(uri).or_default().push(edit);
         }
         (!edits.is_empty()).then_some(edits)
     }
@@ -338,6 +385,151 @@ impl Snapshot {
     fn span_text(&self, span: Span) -> Option<&str> {
         let (_, src) = self.sources.get(span.file.0 as usize)?;
         src.get(span.start as usize..span.end as usize)
+    }
+
+    /// The param-decl name span a cursor resolves to — whether it sits on a callable's
+    /// `buyer: Id` param declaration or on a `$buyer` use in that callable's body.
+    /// `None` off any param. Params are callable-local, so the returned span identifies
+    /// exactly one callable's param.
+    fn param_ref_at(&self, fid: usize, offset: u32) -> Option<Span> {
+        let under = |id: &Ident| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        };
+        for d in &self.decls {
+            let params = decl_params(d);
+            if params.is_empty() {
+                continue;
+            }
+            if let Some(p) = params.iter().find(|p| under(&p.name)) {
+                return Some(p.name.span);
+            }
+            for pr in callable_param_refs(d) {
+                if pr.path.is_empty() && under(&pr.name) {
+                    if let Some(p) = params.iter().find(|p| p.name.node == pr.name.node) {
+                        return Some(p.name.span);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The canonical occurrence span of the `$ctx` bag field under the cursor, or
+    /// `None` off any `$ctx.<field>`. A `$ctx` field is keyed by name (the bag is
+    /// coherent across the schema), so every occurrence of one field maps to the same
+    /// canonical (its first occurrence in file/offset order).
+    fn ctx_ref_at(&self, fid: usize, offset: u32) -> Option<Span> {
+        for (name, span) in self.ctx_occurrences() {
+            if span.file.0 as usize == fid && span.start <= offset && offset < span.end {
+                return self.ctx_canonical_span(&name);
+            }
+        }
+        None
+    }
+
+    /// Every `$ctx.<field>` occurrence in the project as `(field_name, segment_span)` —
+    /// the field segment of each `scope … = $ctx.field` binding and each callable-body
+    /// use. The span is the `field` segment (not the `$ctx` prefix), so a rename
+    /// rewrites only the bag field name.
+    fn ctx_occurrences(&self) -> Vec<(String, Span)> {
+        let mut out = Vec::new();
+        let mut push = |pr: &ParamRef| {
+            if pr.name.node == "ctx" {
+                if let Some(seg) = pr.path.first() {
+                    out.push((seg.node.clone(), seg.span));
+                }
+            }
+        };
+        for d in &self.decls {
+            if let Decl::Scope(s) = d {
+                for t in &s.terms {
+                    push(&t.ctx);
+                }
+            }
+            for pr in callable_param_refs(d) {
+                push(pr);
+            }
+        }
+        out
+    }
+
+    /// The first-in-order occurrence span of `$ctx.<name>` — the rename target every
+    /// occurrence of that bag field resolves to.
+    fn ctx_canonical_span(&self, name: &str) -> Option<Span> {
+        self.ctx_occurrences()
+            .into_iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, s)| s)
+            .min_by_key(|s| (s.file.0, s.start, s.end))
+    }
+
+    /// The extra edit that makes a field/model rename **data-preserving**: a `@was("old")`
+    /// naming the declaration's current physical column/table, so the next generated
+    /// migration renames it (keeping data) instead of drop+add. Emitted only when the
+    /// rename actually changes the physical name (no `(column …)` / `@table` override
+    /// decouples it), the declaration has no `@was` already (an existing one still names
+    /// the snapshot's column — a rename chain must keep the original), and the physical
+    /// name is a **live** column/table in the project's latest captured snapshot (an
+    /// uncaptured column needs no rename step). `None` outside those conditions.
+    fn was_edit_for_rename(&self, target: Span, old: &str, new_name: &str) -> Option<(Url, TextEdit)> {
+        if old == new_name {
+            return None;
+        }
+        let schema = self.schema.as_ref()?;
+        let prev = latest_snapshot(self.migrations_root.as_deref()?)?;
+        for d in &self.decls {
+            let Decl::Model(m) = d else { continue };
+            // Model rename → `@was("old_table")` as a leading decorator line.
+            if m.name.span == target {
+                if m.decorators.iter().any(|dc| dc.name.node == "was")
+                    || m.decorators.iter().any(|dc| dc.name.node == "table")
+                {
+                    return None;
+                }
+                let table = &schema.model(&m.name.node)?.table;
+                prev.table(table)?;
+                let fid = m.name.span.file.0 as usize;
+                let at = line_start(&self.sources[fid].1, m.name.span.start);
+                return self.insertion(fid, at, format!("@was(\"{table}\")\n"));
+            }
+            // Field rename → ` @was("old_col")` appended to the field's modifiers.
+            for mem in &m.members {
+                let Member::Field(f) = mem else { continue };
+                if f.name.span != target {
+                    continue;
+                }
+                if f.was.is_some()
+                    || f.modifiers
+                        .iter()
+                        .any(|md| matches!(md, Modifier::Column(_)))
+                {
+                    return None;
+                }
+                let rmodel = schema.model(&m.name.node)?;
+                let rmem = rmodel.member(&f.name.node)?;
+                if matches!(rmem.kind, based_sema::MemberKind::Inverse { .. }) {
+                    return None;
+                }
+                let col = rmem.physical_col().to_string();
+                prev.table(&rmodel.table)?.column(&col)?;
+                let fid = f.span.file.0 as usize;
+                return self.insertion(fid, f.span.end as usize, format!(" @was(\"{col}\")"));
+            }
+        }
+        None
+    }
+
+    /// A zero-width `TextEdit` inserting `text` at byte `offset` in file `fid`.
+    fn insertion(&self, fid: usize, offset: usize, text: String) -> Option<(Url, TextEdit)> {
+        let uri = Url::from_file_path(&self.sources[fid].0).ok()?;
+        let pos = self.lines[fid].position(offset);
+        Some((
+            uri,
+            TextEdit {
+                range: Range::new(pos, pos),
+                new_text: text,
+            },
+        ))
     }
 
     /// Resolve an explicit inverse's `(Model.field)` to that field's name span.
@@ -1344,6 +1536,102 @@ fn assign_paths<'a>(assigns: &'a [Assign], model: &'a str, out: &mut Vec<(&'a st
     }
 }
 
+// ---- Param / `$ctx` reference collectors ------------------------------------
+
+/// A callable's declared params, or an empty slice for a non-callable declaration.
+fn decl_params(d: &Decl) -> &[Param] {
+    match d {
+        Decl::Query(q) => &q.params,
+        Decl::Mutation(m) => &m.params,
+        Decl::Filter(f) => &f.params,
+        _ => &[],
+    }
+}
+
+/// Every `$param` / `$ctx.field` reference in a callable's body (query clauses,
+/// mutation writes, or a filter predicate) — the sites that name a param or bag field.
+fn callable_param_refs(d: &Decl) -> Vec<&ParamRef> {
+    let mut out = Vec::new();
+    match d {
+        Decl::Query(q) => match &q.body {
+            QueryBody::Inline(cs) => cs.iter().for_each(|c| clause_param_refs(c, &mut out)),
+            QueryBody::Block(stmt) => stmt
+                .clauses
+                .iter()
+                .for_each(|c| clause_param_refs(c, &mut out)),
+            QueryBody::Bare => {}
+        },
+        Decl::Mutation(m) => write_param_refs(&m.body, &mut out),
+        Decl::Filter(f) => pred_param_refs(&f.pred, &mut out),
+        _ => {}
+    }
+    out
+}
+
+fn clause_param_refs<'a>(c: &'a Clause, out: &mut Vec<&'a ParamRef>) {
+    if let Clause::Where(p) = c {
+        pred_param_refs(p, out);
+    }
+}
+
+fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
+    for w in body {
+        match w {
+            WriteStmt::Create { assigns, .. } => {
+                assigns.iter().for_each(|a| value_param_refs(&a.value, out))
+            }
+            WriteStmt::Update {
+                where_, assigns, ..
+            } => {
+                pred_param_refs(where_, out);
+                assigns.iter().for_each(|a| value_param_refs(&a.value, out));
+            }
+            WriteStmt::Delete { where_, .. }
+            | WriteStmt::Restore { where_, .. }
+            | WriteStmt::HardDelete { where_, .. } => pred_param_refs(where_, out),
+            WriteStmt::Tx(inner) => write_param_refs(inner, out),
+            WriteStmt::Raw(r) => raw_param_refs(r, out),
+        }
+    }
+}
+
+fn pred_param_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a ParamRef>) {
+    match p {
+        Predicate::Or(a, b) | Predicate::And(a, b) => {
+            pred_param_refs(a, out);
+            pred_param_refs(b, out);
+        }
+        Predicate::Not(inner) => pred_param_refs(inner, out),
+        Predicate::Cmp { value, .. } => value_param_refs(value, out),
+        Predicate::FilterCall { args, .. } => args.iter().for_each(|v| value_param_refs(v, out)),
+        Predicate::Raw(r) => raw_param_refs(r, out),
+        Predicate::Bare(_) => {}
+    }
+}
+
+fn value_param_refs<'a>(v: &'a Value, out: &mut Vec<&'a ParamRef>) {
+    match v {
+        Value::Param(pr) => out.push(pr),
+        Value::Func(fc) => fc.args.iter().for_each(|a| value_param_refs(a, out)),
+        _ => {}
+    }
+}
+
+fn raw_param_refs<'a>(r: &'a RawSql, out: &mut Vec<&'a ParamRef>) {
+    for part in &r.parts {
+        if let RawPart::Param(pr) = part {
+            out.push(pr);
+        }
+    }
+}
+
+/// The byte offset of the start of the line containing `off` (the char after the
+/// preceding newline, or 0). Where a leading `@was` decorator line is inserted.
+fn line_start(src: &str, off: u32) -> usize {
+    let o = (off as usize).min(src.len());
+    src[..o].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
 // ---- Hover renderers ("what", rust-analyzer baseline) -----------------------
 
 /// A `TypeExpr` as source writes it: base spelling + `?` (optional) + `[]` (many).
@@ -1719,6 +2007,7 @@ fn compile_paths(
     }
 
     let mut facts = Vec::new();
+    let mut checked = None;
     if parse_ok {
         let (schema, diags) = based_sema::check(&decls);
         diagnostics.extend(diags);
@@ -1728,6 +2017,7 @@ fn compile_paths(
         if let Some(root) = migrations_root {
             diagnostics.extend(drift_diagnostics(root, &schema, &decls));
         }
+        checked = Some(schema);
     }
 
     let lines = sources.iter().map(|(_, s)| LineIndex::new(s)).collect();
@@ -1738,6 +2028,8 @@ fn compile_paths(
         decls,
         diagnostics,
         project_diagnostics,
+        schema: checked,
+        migrations_root: migrations_root.map(Path::to_path_buf),
     }
 }
 
@@ -2721,6 +3013,297 @@ mod tests {
             codes.contains(&"W0107"),
             "expected spent-@was W0107: {codes:?}"
         );
+    }
+
+    /// Apply a file's rename edits to its source, returning the rewritten text.
+    /// Edits are non-overlapping (a zero-width `@was` insertion may share a start
+    /// offset with the name replacement); applying highest-offset-first, and for an
+    /// equal start the wider replacement before the empty insertion, lands the
+    /// inserted decorator before the renamed name.
+    fn apply_edits(snap: &Snapshot, fid: usize, edits: &[TextEdit]) -> String {
+        let idx = &snap.lines[fid];
+        let mut spans: Vec<(usize, usize, &str)> = edits
+            .iter()
+            .map(|e| {
+                (
+                    idx.offset(e.range.start),
+                    idx.offset(e.range.end),
+                    e.new_text.as_str(),
+                )
+            })
+            .collect();
+        spans.sort_by_key(|(s, e, _)| (*s, *e));
+        let mut out = snap.sources[fid].1.clone();
+        for (s, e, t) in spans.into_iter().rev() {
+            out.replace_range(s..e, t);
+        }
+        out
+    }
+
+    /// (a) A callable param renames its declaration and every `$param` use in *that*
+    /// callable's body — and only that callable's (params are callable-local).
+    #[test]
+    fn rename_param_rewrites_decl_and_local_uses_only() {
+        let ws = TempWorkspace::new("rename_param");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Widget { qty: int? }\n\
+             shape W from Widget { qty }\n\
+             query find(min: int) -> W[] { list Widget where (qty > $min); }\n\
+             query other(min: int) -> W[] { list Widget where (qty < $min); }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // Cursor on the `$min` use in `find` → rename to `floor`.
+        let use_off = (src.find("qty > $min").unwrap() + "qty > $".len()) as u32;
+        let changes = snap
+            .rename_edits(fid, use_off, "floor")
+            .expect("param is renameable");
+        let texts = rename_texts(&snap, &changes);
+        // The decl `min` + its one body use — both spelling `min`, nothing from `other`.
+        assert_eq!(texts.len(), 2, "decl + local use only: {texts:?}");
+        assert!(texts.iter().all(|t| t == "min"), "{texts:?}");
+
+        // Applied: `find`'s param + use become `floor`; `other`'s `min` is untouched.
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        assert!(out.contains("query find(floor: int)"), "{out}");
+        assert!(out.contains("qty > $floor"), "{out}");
+        assert!(out.contains("query other(min: int)"), "{out}");
+        assert!(out.contains("qty < $min"), "{out}");
+    }
+
+    /// (b) A `$ctx.<field>` bag field renames its `scope … = $ctx.field` binding and
+    /// every callable use, leaving the scope *column* and same-named model columns alone.
+    #[test]
+    fn rename_ctx_field_rewrites_binding_and_uses() {
+        let ws = TempWorkspace::new("rename_ctx");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "scope Tenant (org: Org = $ctx.org)\n\
+             Org { name: text }\n\
+             @scope Tenant\n\
+             Widget { org: Org  name: text }\n\
+             query mine() -> Widget[] scoped Tenant { list Widget where (org = $ctx.org); }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // Cursor on the query's `$ctx.org` field segment → rename bag field to `tenant`.
+        let off = (src.find("= $ctx.org)").unwrap() + "= $ctx.".len()) as u32;
+        let changes = snap
+            .rename_edits(fid, off, "tenant")
+            .expect("ctx field is renameable");
+        let texts = rename_texts(&snap, &changes);
+        // The scope-term binding and the query use — two `org` segments, nothing else.
+        assert_eq!(texts.len(), 2, "scope binding + query use: {texts:?}");
+        assert!(texts.iter().all(|t| t == "org"), "{texts:?}");
+
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        // Both `$ctx.org` become `$ctx.tenant`; the scope column `org:` and the model
+        // field `org: Org` (and the `where` LHS `org`) keep their name.
+        assert!(out.contains("scope Tenant (org: Org = $ctx.tenant)"), "{out}");
+        assert!(out.contains("where (org = $ctx.tenant)"), "{out}");
+        assert!(out.contains("Widget { org: Org"), "{out}");
+    }
+
+    /// (c) A query name is a wire endpoint with no in-`.bsl` references, so rename
+    /// rewrites just its declaration.
+    #[test]
+    fn rename_query_name_rewrites_declaration() {
+        let ws = TempWorkspace::new("rename_query");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Widget { qty: int? }\n\
+             shape W from Widget { qty }\n\
+             query find() -> W[] { list Widget order (qty asc); }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let off = (snap.sources[fid].1.find("find()").unwrap() + 1) as u32;
+        let changes = snap
+            .rename_edits(fid, off, "list_widgets")
+            .expect("query name is renameable");
+        let texts = rename_texts(&snap, &changes);
+        assert_eq!(texts, vec!["find".to_string()], "just the decl: {texts:?}");
+    }
+
+    /// (d) Renaming a field mapped to a *live* DB column also inserts `@was("old_col")`
+    /// so the next generated migration renames the column (preserving data) — but only
+    /// when the physical name actually changes and the column is captured in a snapshot.
+    #[test]
+    fn rename_field_inserts_was_for_live_column() {
+        let ws = TempWorkspace::new("rename_was");
+        ws.write("based.toml", "");
+        ws.write("schema.bsl", "Product {\n  name: text\n  barcode: text?\n}\n");
+        ws.write(
+            "migrations/0001_init/schema.snap",
+            "snapshot v1 dialect=neutral\n\ntable product\n  \
+             column name text not_null\n  column barcode text null\n",
+        );
+        ws.write("migrations/0001_init/up.mig", "# up\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap.diagnostics.iter().any(|d| d.code == "W0108"),
+            "no drift expected: {:?}",
+            snap.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let off = (snap.sources[fid].1.find("barcode:").unwrap() + 1) as u32;
+        let changes = snap
+            .rename_edits(fid, off, "code")
+            .expect("field is renameable");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        // The rename + the data-preserving `@was` land on the field, and reparse clean.
+        assert!(out.contains("code: text? @was(\"barcode\")"), "{out}");
+        let reparsed = based_parser::parse_file(&out, FileId(0)).expect("applied source parses");
+        let has_was = reparsed.decls.iter().any(|d| match d {
+            Decl::Model(m) => m.members.iter().any(|mem| match mem {
+                Member::Field(f) => {
+                    f.name.node == "code"
+                        && f.was.as_ref().map(|w| w.node.as_str()) == Some("barcode")
+                }
+                _ => false,
+            }),
+            _ => false,
+        });
+        assert!(has_was, "reparsed field carries @was(\"barcode\"): {out}");
+    }
+
+    /// A field with a `(column …)` override, an existing `@was`, or no captured
+    /// migration snapshot gets no inserted `@was` (its physical name is decoupled,
+    /// already named, or has no live column to preserve).
+    #[test]
+    fn rename_field_skips_was_when_not_data_preserving() {
+        // Override decouples the physical name → renaming the field changes nothing in the DB.
+        let ws = TempWorkspace::new("rename_was_skip");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Product {\n  name: text\n  barcode: text? (column \"upc\")\n}\n",
+        );
+        ws.write(
+            "migrations/0001_init/schema.snap",
+            "snapshot v1 dialect=neutral\n\ntable product\n  \
+             column name text not_null\n  column upc text null\n",
+        );
+        ws.write("migrations/0001_init/up.mig", "# up\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let off = (snap.sources[fid].1.find("barcode:").unwrap() + 1) as u32;
+        let out = apply_edits(
+            &snap,
+            fid,
+            &snap.rename_edits(fid, off, "code").unwrap()[&file_uri(&snap, fid)],
+        );
+        assert!(!out.contains("@was"), "column override → no @was: {out}");
+
+        // No captured migrations at all → nothing to preserve, no @was.
+        let ws2 = TempWorkspace::new("rename_was_nomig");
+        ws2.write("based.toml", "");
+        ws2.write("schema.bsl", "Product {\n  barcode: text?\n}\n");
+        let snap2 = compile_manifest(&ws2.root, &HashMap::new());
+        let fid2 = snap2.file_id_of(&ws2.path("schema.bsl")).unwrap();
+        let off2 = (snap2.sources[fid2].1.find("barcode:").unwrap() + 1) as u32;
+        let out2 = apply_edits(
+            &snap2,
+            fid2,
+            &snap2.rename_edits(fid2, off2, "code").unwrap()[&file_uri(&snap2, fid2)],
+        );
+        assert!(!out2.contains("@was"), "no migrations → no @was: {out2}");
+    }
+
+    /// Renaming a field already carrying `@was("orig")` keeps the *original* physical
+    /// name as the was-source (the snapshot's column), so a rename chain still preserves
+    /// data — it does not become `@was("<intermediate>")`.
+    #[test]
+    fn rename_field_keeps_original_was_across_a_chain() {
+        let ws = TempWorkspace::new("rename_was_chain");
+        ws.write("based.toml", "");
+        // `barcode @was("upc")` is an uncaptured rename upc→barcode; the snapshot still
+        // has `upc`. Renaming barcode→code must keep `@was("upc")`.
+        ws.write(
+            "schema.bsl",
+            "Product {\n  name: text\n  barcode: text? @was(\"upc\")\n}\n",
+        );
+        ws.write(
+            "migrations/0001_init/schema.snap",
+            "snapshot v1 dialect=neutral\n\ntable product\n  \
+             column name text not_null\n  column upc text null\n",
+        );
+        ws.write("migrations/0001_init/up.mig", "# up\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let off = (snap.sources[fid].1.find("barcode:").unwrap() + 1) as u32;
+        let out = apply_edits(
+            &snap,
+            fid,
+            &snap.rename_edits(fid, off, "code").unwrap()[&file_uri(&snap, fid)],
+        );
+        assert!(out.contains("code: text? @was(\"upc\")"), "{out}");
+        assert!(!out.contains("@was(\"barcode\")"), "chain keeps orig: {out}");
+    }
+
+    /// Renaming a model mapped to a live table inserts a leading `@was("old_table")`
+    /// decorator, so the migration renames the table instead of drop+recreate.
+    #[test]
+    fn rename_model_inserts_was_for_live_table() {
+        let ws = TempWorkspace::new("rename_model_was");
+        ws.write("based.toml", "");
+        ws.write("schema.bsl", "Product {\n  name: text\n}\n");
+        ws.write(
+            "migrations/0001_init/schema.snap",
+            "snapshot v1 dialect=neutral\n\ntable product\n  column name text not_null\n",
+        );
+        ws.write("migrations/0001_init/up.mig", "# up\n");
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let off = (snap.sources[fid].1.find("Product").unwrap() + 1) as u32;
+        let out = apply_edits(
+            &snap,
+            fid,
+            &snap.rename_edits(fid, off, "Item").unwrap()[&file_uri(&snap, fid)],
+        );
+        assert!(
+            out.starts_with("@was(\"product\")\nItem {"),
+            "leading @was decorator + renamed model: {out}"
+        );
+        let reparsed = based_parser::parse_file(&out, FileId(0)).expect("applied source parses");
+        assert!(reparsed.decls.iter().any(|d| matches!(d, Decl::Model(m) if m.name.node == "Item")));
+    }
+
+    /// The URI of file `fid` in a snapshot — a test convenience for indexing rename edits.
+    fn file_uri(snap: &Snapshot, fid: usize) -> Url {
+        Url::from_file_path(&snap.sources[fid].0).unwrap()
     }
 
     struct TempWorkspace {
