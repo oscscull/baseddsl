@@ -41,7 +41,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
-  failure 1; reuses D71's typed errors as the cause instead of re-stringifying; `anyhow` dropped)
+  failure 1; reuses D71's typed errors as the cause instead of re-stringifying; `anyhow` dropped),
+  D75 (HTTP listener edge `EdgeError` registry: shared `code()`/`status()`, pool checkout reuses the
+  driver's classified `DbError::code()`), D76 (example `main.rs` as a `?`-based error-handling reference
+  matching on `ClientError::kind()`/`code()`)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
@@ -2692,3 +2695,32 @@ edge registry mirrors the core's convention without leaking transport concerns i
 `edge_error_registry_maps_code_status_and_message` unit test pins each variant's code/status/message and
 the `WireResponse` it builds. No live-DB behavior changed (the checkout path is still a 503; only its
 `code` sharpens to the driver's existing classification), so no live-DB run was required.
+
+## D76 — Example `main.rs` as an error-handling reference (H7 sub-item iv)
+
+**Context (final H7 sub-item, closing D71/D72/D75).** D71 made the generated client's `ClientError` a
+real `std::error::Error` with `kind()` / `code()` / `status()`, but the example quickstarts still met it
+through `.expect(...)` on every call — the scenario ran, yet it taught a reader nothing about handling
+the typed error surface. The three `examples/*/src/main.rs` are the first thing a user copies, so one
+should double as the copyable error-handling reference.
+
+**Decision.** Convert `examples/sqlite-quickstart/src/main.rs` to an idiomatic `?`-based `Result` flow.
+`main` now returns `Result<(), Box<dyn std::error::Error>>`; every client call threads `?` (a
+`ClientError` converts straight into the boxed error), and the two helpers (`place`/`get`) return
+`Result<_, ClientError>`. Scenario invariants stay `assert!`/`assert_eq!` (a demo doubles as a smoke
+test — a broken invariant should panic non-zero). A new **step 6** demonstrates the typed surface: it
+feeds a deliberately malformed `Cursor::from_raw("not-a-real-cursor")` to `recent_orders`, then matches
+the returned `ClientError` on `kind()` — asserting the `Api { status: 400, code: "bad_cursor" }` class
+and reading back `code()` / `status()` — so a reader sees exactly how to branch on a failure by class
+rather than by message text. The SQLite slice was chosen because it runs anywhere (bundled SQLite, no
+Docker). The module doc block + README gained an error-handling section and the new expected-output line.
+
+**Scope.** Only the SQLite quickstart was converted (it runs on `cargo run` with no live server). The
+MariaDB/Postgres quickstarts still use `.expect(...)`; converting them the same way needs a live
+`mariadb:11.4` / `postgres:16` to re-verify green and is left as a follow-up (their client/error surface
+is identical, so the pattern transfers verbatim).
+
+**Verification.** `cargo test --workspace --all-features` + `fmt --check` (workspace and the example's own
+`main.rs`) + `clippy --workspace --all-features` + the example's own `clippy` all clean; the quickstart
+ran green via `based migrate apply` → `cargo run` (exit 0), output matching the README including the new
+`rejected a malformed cursor` line.

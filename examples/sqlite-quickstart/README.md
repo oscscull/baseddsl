@@ -37,6 +37,7 @@ Expected output (ids come from the demo `SeqIdGen`):
 created order id-3 for Ada
 paged 3 orders across 2 pages
 soft-deleted then restored order id-3
+rejected a malformed cursor: server error 400 [bad_cursor]: invalid cursor: malformed cursor
 
 end-to-end scenario passed
 ```
@@ -60,6 +61,13 @@ The scenario in `src/main.rs` runs the full ordinary GET/PUT surface end-to-end:
    opaque cursor.
 5. **soft-delete + restore** — `cancel_order` (a soft `delete`) tombstones a row and reads
    it back in its shape; `restore_order` lifts the tombstone.
+6. **typed error handling** — a deliberately malformed cursor is rejected; the client
+   surfaces it as a structured `ClientError` matched on `kind()` / `code()` / `status()`.
+
+Every client call returns `Result<_, ClientError>`, so `main` threads `?` and returns a
+`Result` — the copyable shape for a real program. A `ClientError` is a `std::error::Error`
+carrying a failure `kind()` (`Transport` / `Decode` / `Api`), a stable machine `code()`,
+and, for a server-side failure, the HTTP `status()`.
 
 ## How it's wired — the two checked-in artifacts
 

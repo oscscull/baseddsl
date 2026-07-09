@@ -374,11 +374,18 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   failures now share a `code()`/`status()`-keyed `EdgeError` registry (`BadContext`/`BadBody`/`Draining`/
   `NotReady` — one source of truth, `From<EdgeError> for WireResponse`) instead of scattered string
   literals, mirroring `PlanError`/`DbError`; the pool-checkout path now reuses the driver's own classified
-  `DbError::code()` (so a `pool_exhausted` checkout no longer masquerades as `database_error`). **Remaining
-  deferred H7 sub-item:** (iv) **example `main.rs` as an error-handling reference** — convert the scenario
-  to a `?`-based `Result` flow that demonstrates matching on `ClientError::kind()`/`code()`.
+  `DbError::code()` (so a `pool_exhausted` checkout no longer masquerades as `database_error`). **✅
+  reference slice done (D76):** `examples/sqlite-quickstart/src/main.rs` is now an idiomatic `?`-based
+  `Result` flow (`main -> Result<(), Box<dyn Error>>`, every client call threads `?`, helpers return
+  `Result<_, ClientError>`) with a **step 6** that matches a deliberately malformed cursor's `ClientError`
+  on `kind()` — asserting the `Api { status: 400, code: "bad_cursor" }` class and reading `code()`/
+  `status()` — so it teaches handling the typed surface rather than unwrapping; scenario invariants stay
+  asserts (a demo doubles as a smoke test); ran green via `based migrate apply` → `cargo run` (exit 0).
   (Sub-item (iii), a structured migration error type, is subsumed — `based migrate apply` now surfaces
-  the typed `MigrateError` through the `CliError` chain, no longer re-stringified.)
+  the typed `MigrateError` through the `CliError` chain, no longer re-stringified.) **Follow-up:** the
+  MariaDB/Postgres quickstarts still use `.expect(...)`; the identical pattern transfers verbatim but
+  needs a live server to re-verify. **H7 is now complete** across its four sub-items (client/runtime D71,
+  CLI D72, edge D75, example D76).
 - **H2. `based fmt` formatter + `format-document` LSP directive.** The canonical `.bsl` formatter; the
   editor's `format-document` handler delegates to it. Queued off C4/D68 (§Track C notes) — the one
   baseline editor feature deliberately left out of the C4 parity fill-in. Standalone user-visible value.
