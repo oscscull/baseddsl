@@ -407,8 +407,9 @@ fn check_create_sat_stmt(stmt: &WriteStmt, named: &[&str], cx: &Cx, sink: &mut S
 }
 
 /// Scoped model indices a query touches: the root (if scoped) plus every scoped model
-/// reached through a relation . Mirrors codegen's join sources — the
-/// same reaches `ctx::collect_joined_scope` walks (a `Nest` sub-object produces no join).
+/// reached through a relation . Mirrors codegen's join sources — the same reaches
+/// `ctx::collect_joined_scope` walks, including nested sub-objects (a `Nest`/`NestRef`
+/// lowers to a scope-carrying join or correlated subquery).
 pub fn touched_query(q: &Query, ti: usize, cx: &Cx) -> Vec<usize> {
     let mut out = Vec::new();
     if is_scoped(cx, ti) {
@@ -516,14 +517,63 @@ fn walk_pred_join(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<usize>)
 }
 
 fn walk_shape_join(body: &[ShapeField], model: usize, cx: &Cx, out: &mut Vec<usize>) {
+    walk_shape_join_in(body, model, cx, &mut Vec::new(), out);
+}
+
+/// A nested sub-object (`field { … }` or `field -> Shape`) lowers to a real join
+/// (to-one) or correlated subquery (to-many) that carries the child model's `@scope`,
+/// so a nest-reached scoped child is *touched* — it must be walked, in the child model
+/// context, exactly like an `out = path` reach. `stack` guards a `NestRef` cycle.
+/// Kept byte-for-byte parallel with `ctx::walk_shape_scope`.
+fn walk_shape_join_in(
+    body: &[ShapeField],
+    model: usize,
+    cx: &Cx,
+    stack: &mut Vec<String>,
+    out: &mut Vec<usize>,
+) {
     for f in body {
-        if let ShapeField::Rename {
-            value: ShapeValue::Path(p),
-            ..
-        } = f
-        {
-            walk_path_join(p, model, cx, out);
+        match f {
+            ShapeField::Rename {
+                value: ShapeValue::Path(p),
+                ..
+            } => walk_path_join(p, model, cx, out),
+            ShapeField::Nest { field, body } => {
+                if let Some(ti) = nest_target(model, &field.node, cx) {
+                    if is_scoped(cx, ti) {
+                        push(out, ti);
+                    }
+                    walk_shape_join_in(body, ti, cx, stack, out);
+                }
+            }
+            ShapeField::NestRef { field, shape } => {
+                if let Some(ti) = nest_target(model, &field.node, cx) {
+                    if is_scoped(cx, ti) {
+                        push(out, ti);
+                    }
+                    if stack.iter().any(|s| s == &shape.node) {
+                        continue;
+                    }
+                    if let Some(body) = cx.shape_bodies.get(&shape.node) {
+                        stack.push(shape.node.clone());
+                        walk_shape_join_in(body, ti, cx, stack, out);
+                        stack.pop();
+                    }
+                }
+            }
+            ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }
+    }
+}
+
+/// The model index a nest field reaches through its relation, or `None` for a scalar
+/// / unresolved field (already reported elsewhere).
+fn nest_target(model: usize, field: &str, cx: &Cx) -> Option<usize> {
+    match cx.model(model).member(field).map(|m| &m.kind) {
+        Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
+            cx.find(target)
+        }
+        _ => None,
     }
 }
 

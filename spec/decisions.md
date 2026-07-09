@@ -20,7 +20,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   filter + create auto-set + `unscoped`), D33 (shard key ← scope `$ctx` field), D34 (`@scope` in a
   joined `ON`), D46 (named scope, spec), D47 (multi-scope DNF, spec), D48 (named scope, impl),
   D49 (multi-scope DNF, impl + E0186), D50 (scope editor surface + snapshot serializer),
-  D80 (`$ctx`-field rename; scope column left alone as a polymorphic contract name)
+  D80 (`$ctx`-field rename; scope column left alone as a polymorphic contract name),
+  D81 (`@scope` confines a nest-only scoped child: both shape walks recurse into `Nest`/`NestRef`,
+  E0185 at compile time + runtime enforcement kept; type optionality mirrors the schema only)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
@@ -2908,3 +2910,61 @@ decl+local-use-only, `$ctx`-field binding+uses (scope column + model column left
 declaration-only, and `@was` insertion for a live column and a live table + the three skip cases
 (`(column …)` override, existing `@was`, no captured migration) with the applied source reparsed to
 confirm the `@was` round-trips.
+
+## D81 — `@scope` confines a nest-only scoped child: compile-time first, runtime enforcement kept (Track H9)
+
+**The leak (correctness/security).** A `@scope`d model reached **only** through a nested shape
+sub-object — `field { … }` (to-one/to-many) or `field -> Shape` (D79) — was *not* confined by its
+`@scope`, though soft-delete *was*. So a nested array/object could return rows the caller's `$ctx`
+should exclude — a cross-scope read leak. Not a crash: both SQL sides skipped nests *identically*, so
+they stayed aligned; the confinement was just silently absent. This contradicted shapes.md ("child …
+`@scope` stay governed by the nest context"), D57, and the to-many subquery's own docstring.
+
+**Root cause (a stale D34 invariant).** Codegen's scope predicate is gated by `scope_inject`, keyed by
+model (`Select::scope_terms_for`, `dml.rs`); `scope_inject` is built from sema's `touched_query`/
+`touched_mutation`, whose shape walk (`walk_shape_join`, `scope.rs`) only descended an `out = path`
+reach (`ShapeField::Rename{Path}`) and *skipped* `Nest`/`NestRef` — mirrored by
+`ctx::collect_joined_scope`'s `walk_shape_scope`. Correct when D34 landed (nests were deferred → no
+join). Stale since D55/D57/D79 made nests emit real joins (to-one, via the `scope_join_pred`
+chokepoint) and correlated subqueries (to-many, the `json_array_subquery` `WHERE`) that *have*
+scope-injection call sites but were handed an empty term list. A child *also* reached via a
+`where`/order/reach path was already in `scope_inject`, so the nest inherited the predicate — hence
+inconsistent behaviour depending on unrelated clauses.
+
+**Decision: compile-time is the primary guarantee; runtime enforcement is defense-in-depth (Option A).**
+Two parts, in priority order.
+
+- **Part 1 — the leak fix.** Both shape walks now recurse into `Nest` and `NestRef`, switching to the
+  nested child model context (for `NestRef`, resolving the referenced shape's body via `cx.shape_bodies`
+  and guarding a reference cycle with the same in-progress stack as D14/D79). A nest-reached scoped child
+  therefore lands in **both** `scope_inject` (codegen emits the predicate) and `ctx_requires` (its
+  `:ctx_<field>` bind is supplied). **Nesting into a scoped model now counts as *touching* it**, so a
+  callable that nests into a scoped model but does not satisfy that model's `@scope` alternative fails to
+  compile with **E0185** — "unscoped access fails at compile time, unambiguously; you cannot write a query
+  that reads a scope you lack context for." The two walks are kept **byte-for-byte parallel** (the SQL
+  sides must skip/descend identically — the alignment is load-bearing).
+- **Part 2 — runtime enforcement kept.** Because Part 1 guarantees the callable carries the required
+  `$ctx`, the existing mechanism binds it and injects `child.scope_col = :ctx` into the to-one nest join
+  `ON` and the to-many correlated-subquery `WHERE`, exactly as D34 does for reach-joins. This is
+  enforcement, *not* a fallback for missing context (missing context is now a compile error).
+
+**Hard constraint — generated type optionality mirrors the schema only.** Scope filtering must never
+widen a shape field's Rust type to `Option`. A nested to-one is `Sub` iff its relation/FK is
+non-nullable, `Option<Sub>` iff the relation itself is nullable; a nested to-many is always `Vec<Sub>`.
+The client derives this from the relation's own nullability (`client::to_one_relation`'s `optional`
+flag) — never from anything scope-related — and the H9 change lives entirely in sema, touching no
+codegen type path. The runtime scope predicate can in principle NULL a non-nullable to-one *only* when a
+genuine cross-scope FK exists (a data-integrity violation); that surfaces as a decode error on the
+non-optional field — it must not soften the generated type to `Option`. Asserted by a codegen unit test
+(non-nullable nest into a scoped child → `Sub`, nullable → `Option<Sub>`, to-many → `Vec<Sub>`).
+
+**Landed across:** `based-sema/src/scope.rs` (`walk_shape_join` recurses; `nest_target` helper) +
+`based-sema/src/ctx.rs` (`walk_shape_scope` recurses; parallel) — codegen unchanged (the predicate falls
+out of `scope_inject` gaining the child). **Verified:** sema (a nest-only scoped child on a divergent
+axis → E0185; naming both axes → clean); codegen SQL (the scope predicate appears in the to-one nest
+join `ON` and the to-many subquery `WHERE` for a nest-only child) + the type-optionality assertion; and
+**live** on in-memory SQLite (a properly-scoped `order_by_id` nesting a to-one `contact { name }` and a
+to-many `items { sku }` into children scoped on a *divergent* `Region` axis returns only in-scope
+children — the out-of-region line item is absent from the array, the out-of-region contact reads back
+NULL on an *optional* relation, never leaking its name). No commerce/`examples/**` fallout: their only
+scoped model (`Order`/`Tenant`) nests into the unscoped `User`, so they still check clean.

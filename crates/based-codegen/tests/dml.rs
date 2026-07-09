@@ -506,6 +506,55 @@ fn nest_ref_recurses_through_named_shapes() {
     );
 }
 
+// ---------- nest-reached scoped children carry their `@scope` (H9) ----------
+
+#[test]
+fn nest_only_to_one_scoped_child_injects_scope_in_join_on() {
+    // A scoped child reached *only* through a to-one nest (`raised_by { … }`, not via
+    // any where/order/reach) still carries its `@scope` into the nest join's `ON`, so
+    // a nested sub-object can't read a row across the scope boundary. `Contact` is
+    // org-scoped; `Ticket` is not.
+    let ddl = gen(r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Contact { org: Org, name: text }
+        Ticket { raised_by: Contact, subject: text }
+        shape TicketCard from Ticket { subject, raised_by { name } }
+        query ticket_by_id(id) -> TicketCard scoped Tenant;
+        "#);
+    assert!(
+        ddl.contains(
+            "JOIN `contact` AS `j_raised_by` ON `j_raised_by`.`id` = `ticket`.`raised_by_id` AND `j_raised_by`.`org_id` = :ctx_org"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn nest_only_to_many_scoped_child_injects_scope_in_subquery_where() {
+    // A scoped child reached *only* through a to-many nest (`items { … }`) carries its
+    // `@scope` into the correlated subquery's `WHERE`, beside the correlation and the
+    // tombstone. `LineItem` is org-scoped; `Order` is not.
+    let ddl = gen(r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @sort(id asc)
+        Order { total: int, items: LineItem[] }
+        @scope Tenant
+        @sort(id asc)
+        LineItem { order: Order, org: Org, sku: text }
+        shape OrderCard from Order { total, items { sku } }
+        query order_by_id(id) -> OrderCard scoped Tenant;
+        "#);
+    assert!(
+        ddl.contains(
+            "FROM `line_item` AS `s1_line_item` WHERE `s1_line_item`.`order_id` = `order`.`id` AND `s1_line_item`.`org_id` = :ctx_org) AS `items[]`"
+        ),
+        "\n{ddl}"
+    );
+}
+
 #[test]
 fn nested_to_many_aggregates_into_a_json_array_column() {
     // A to-many nest (`items { … }`, an inverse collection) lowers to a correlated

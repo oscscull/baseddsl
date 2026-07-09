@@ -334,6 +334,48 @@ fn nested_to_one_shape_emits_nested_struct() {
 }
 
 #[test]
+fn nest_into_scoped_child_keeps_relation_optionality() {
+    // Scope confinement must never widen a nested field's type: a to-one nest into a
+    // scoped child mirrors the *relation's* nullability only. A non-nullable FK stays
+    // `Sub` (the runtime raises a decode error if a genuine cross-scope FK ever NULLs
+    // it — the type never softens to `Option`); a to-many stays `Vec`, never `Option`.
+    let out = gen(r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Contact { org: Org, name: text }
+        @scope Tenant
+        @sort(id asc)
+        LineItem { org: Org, order: Ticket, sku: text }
+        @sort(id asc)
+        Ticket { raised_by: Contact, backup: Contact?, items: LineItem[], subject: text }
+        shape TicketCard from Ticket {
+          subject
+          raised_by { name }
+          backup { name }
+          items { sku }
+        }
+        query ticket_by_id(id) -> TicketCard scoped Tenant;
+        "#);
+    // Non-nullable to-one into a scoped child → `Sub`, NOT `Option<Sub>`.
+    assert!(
+        out.contains("pub raised_by: TicketCardRaisedBy,"),
+        "non-nullable nest must not gain scope-driven optionality\n{out}"
+    );
+    assert!(
+        !out.contains("pub raised_by: Option<"),
+        "scope must not widen a non-nullable to-one to Option\n{out}"
+    );
+    // Nullable relation → `Option<Sub>` (mirrors the schema, unchanged).
+    assert!(
+        out.contains("pub backup: Option<TicketCardBackup>,"),
+        "\n{out}"
+    );
+    // To-many into a scoped child → `Vec<Sub>`, never `Option`.
+    assert!(out.contains("pub items: Vec<TicketCardItems>,"), "\n{out}");
+}
+
+#[test]
 fn nested_to_many_shape_emits_vec_of_nested_struct() {
     // A to-many `items { … }` nest emits an element struct `<Parent><Field>` and the
     // parent field takes `Vec<…>` (the runtime decodes the SQL JSON array into it).

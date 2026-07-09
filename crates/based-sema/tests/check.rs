@@ -1217,6 +1217,46 @@ fn scoped_naming_untouched_scope_is_e0185() {
 }
 
 #[test]
+fn nest_only_scoped_child_is_touched_e0185() {
+    // A scoped child reached *only* through a nested shape sub-object counts as touched
+    // (its `@scope` is injected into the nest join/subquery), so the callable must
+    // satisfy it. Here `LineItem` is `@scope Region`, reached only via `items { … }`;
+    // `scoped Tenant` covers the root `Order` but not `LineItem`'s Region axis → `E0185`.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Region { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        scope Region (region: Region = $ctx.region)
+        @scope Tenant
+        Order { org: Org, total: int, items: LineItem[], @index org }
+        @scope Region
+        LineItem { order: Order, region: Region, sku: text, @index region }
+        shape OrderCard from Order { total, items { sku } }
+        query order_by_id(id) -> OrderCard scoped Tenant;
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0185"), "{:?}", codes(&d));
+
+    // Naming both axes satisfies every touched model's alternative → checks clean.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        Region { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        scope Region (region: Region = $ctx.region)
+        @scope Tenant
+        Order { org: Org, total: int, items: LineItem[], @index org }
+        @scope Region
+        LineItem { order: Order, region: Region, sku: text, @index region }
+        shape OrderCard from Order { total, items { sku } }
+        query order_by_id(id) -> OrderCard scoped Tenant, Region;
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
 fn scope_field_type_sourced_from_the_decl() {
     // The scope field's `$ctx` type comes from the decl (`org: Org`), so a scoped query
     // requires `$ctx.org` typed as an `Org` relation — no per-callable inference needed.
