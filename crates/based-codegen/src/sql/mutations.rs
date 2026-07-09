@@ -1,11 +1,11 @@
-//! SQL DML generation (M3, write side): a `mutation` body lowers to INSERT /
+//! SQL DML generation (write side): a `mutation` body lowers to INSERT /
 //! UPDATE / DELETE statements.
 //!
-//! The headline guarantee here mirrors the read side (soft-delete.md): a `delete`
+//! The headline guarantee here mirrors the read side: a `delete`
 //! on a `@soft_delete` model is **rewritten to the tombstone UPDATE — never a real
 //! DELETE**. `restore` is its inverse. `hard delete` is the loud, explicit opt-out
-//! that does emit a real `DELETE`. The soft-delete live predicate (and `@scope`,
-//! auth.md) is injected into every UPDATE/DELETE `WHERE` so a write can't touch a
+//! that does emit a real `DELETE`. The soft-delete live predicate (and `@scope`)
+//! is injected into every UPDATE/DELETE `WHERE` so a write can't touch a
 //! tombstoned — or out-of-scope — row. The user writes none of this.
 //!
 //! ## What each action lowers to
@@ -58,7 +58,7 @@ use crate::Dialect;
 /// A mutation lowered to its ordered write statements. The whole body already runs
 /// under one engine-owned transaction (principle 7), so a `tx { ... }` block is
 /// flattened here — its statements sit inline in execution order. The in-process
-/// runtime (M6 write path) consumes this directly, exactly as it consumes
+/// runtime (write path) consumes this directly, exactly as it consumes
 /// [`super::LoweredQuery`] for reads, so the executed SQL and its bind surface can
 /// never drift from `based gen sql` (principle 4). `render_mutation` (the text
 /// emitter) and the runtime both read this one lowering.
@@ -148,7 +148,7 @@ fn lower_mutation<'a>(
     dialect: Dialect,
 ) -> LoweredMutation {
     // `unscoped(...)` drops `@scope` from every write in this mutation *and* the
-    // create-time auto-set — the greppable, linted cross-scope escape hatch (auth.md).
+    // create-time auto-set — the greppable, linted cross-scope escape hatch.
     let unscoped = m.unscoped.is_some();
     // The per-touched-model scope this mutation injects (the chosen alternative),
     // resolved by sema. Empty when `unscoped`. Threaded into every write's `Select`.
@@ -316,7 +316,7 @@ fn flat_writes(body: &[WriteStmt]) -> Vec<&WriteStmt> {
 /// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`
 /// is the bind name a `create`'s app-generated `id` is emitted under (`id` at top
 /// level, `id_<step>` inside a `tx` so sibling creates stay distinct); `back` is the
-/// preceding create a `^.field` reads from (mutations.md). A `tx` flattens: it
+/// preceding create a `^.field` reads from. A `tx` flattens: it
 /// pushes its inner writes inline and prepends the tx banner to the first of them.
 // The lowering context (schema/decls/dialect) + the per-write threading (id_param, back,
 // unscoped) genuinely need to ride together; bundling them into a struct would obscure more
@@ -413,7 +413,7 @@ fn lower_write<'a>(
                 );
             }
         }
-        // A raw write is an escape hatch (raw.md): text verbatim, `${param}` -> `:param`.
+        // A raw write is an escape hatch: text verbatim, `${param}` -> `:param`.
         // No model is attached, so `{table}`/`{id}` interpolation has no root to bind.
         WriteStmt::Raw(raw) => out.push(LoweredWrite {
             header: String::new(),
@@ -754,7 +754,7 @@ fn updated_bump(sel: &Select, model: &RModel, assigned: &[String]) -> Option<Str
 }
 
 /// The `SET` fragment that writes (or clears) the tombstone for the covered subset
-/// (soft-delete.md): timestamp `CURRENT_TIMESTAMP`/`NULL`, bool `TRUE`/`FALSE`.
+/// timestamp `CURRENT_TIMESTAMP`/`NULL`, bool `TRUE`/`FALSE`.
 fn tombstone_set(sel: &Select, model: &RModel, sd: &SoftDelete, deleting: bool) -> String {
     let col = physical_col(model, &sd.field);
     let val = match (sd.mode, deleting) {

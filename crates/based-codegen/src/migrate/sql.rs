@@ -1,4 +1,4 @@
-//! Render a neutral [`Step`] list to per-dialect SQL (E3/E4).
+//! Render a neutral [`Step`] list to per-dialect SQL.
 //!
 //! [`render_sql`] is the reviewable "show me the SQL" surface; [`sql_statements`] is its
 //! executable twin for `based migrate apply` (both go through the same lowering, so
@@ -13,10 +13,10 @@ use crate::Dialect;
 use based_ast::Primitive;
 use std::fmt::Write as _;
 
-// ---------- per-dialect SQL rendering (E3) --------------------------------
+// ---------- per-dialect SQL rendering --------------------------------------
 
-/// Render a neutral step list to executable per-dialect SQL over the `Dialect` seam
-/// (migrations.md, E3). This is the "review the SQL" surface (`based migrate render`):
+/// Render a neutral step list to executable per-dialect SQL over the `Dialect` seam.
+/// This is the "review the SQL" surface (`based migrate render`):
 /// `0001_init`'s create steps render to the same DDL `based gen sql` builds from scratch
 /// (the neutral type map goes through `sql::sql_type`, so the two can't drift, P4).
 /// A destructive step is preceded by a loud `-- DESTRUCTIVE` comment (principle 1).
@@ -154,7 +154,7 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
 }
 
 /// A stable content hash of an `up.mig`'s canonical bytes — the `_based_migrations`
-/// ledger's tamper guard (migrations.md). Canonicalization drops comment (`#…`) and blank
+/// ledger's tamper guard. Canonicalization drops comment (`#…`) and blank
 /// lines and trims each remaining line, so a cosmetic whitespace/comment edit doesn't trip
 /// the guard but any change to a step does. FNV-1a-64 (the same family the runtime uses for
 /// request fingerprints), rendered as 16 lowercase hex digits — collision resistance

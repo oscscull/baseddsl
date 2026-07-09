@@ -1,4 +1,4 @@
-//! Migration snapshot + diff engine (Track E2, `spec/syntax/migrations.md`).
+//! Migration snapshot + diff engine.
 //!
 //! Pure, dialect-neutral, deterministic passes over a [`CheckedSchema`](based_sema::CheckedSchema),
 //! split by concern:
@@ -12,10 +12,10 @@
 //!   *prior* snapshot to the *current* schema and returns the `up.mig` step list.
 //!   `0001_init` diffs against the empty schema, so its steps are the full create set —
 //!   exactly what `based gen sql` builds from scratch. Renames are never auto-guessed: a
-//!   changed name is a drop + add pair (the `@was`-driven rename is E5). Data-losing steps
-//!   are *marked* destructive so apply (E4) can gate on the ack — this engine only marks.
+//!   changed name is a drop + add pair (the `@was`-driven rename is the exception). Data-losing
+//!   steps are *marked* destructive so apply can gate on the ack — this engine only marks.
 //! - [`up_mig`] — renders the neutral step list to the reviewable `up.mig` text.
-//! - [`sql`] (E3/E4) — [`render_sql`] renders the step list to per-dialect
+//! - [`sql`] — [`render_sql`] renders the step list to per-dialect
 //!   `CREATE`/`ALTER`/`DROP` SQL over the `Dialect` seam, reusing the DDL type map
 //!   ([`crate::sql::sql_type`]) so a migration's SQL can never drift from `based gen sql`
 //!   (principle 4); [`sql_statements`] is its executable twin and [`content_hash`] anchors
@@ -33,7 +33,7 @@
 //!   column <name> <type> null|not_null [default=<lit>] [unique] [fk=<Model>]
 //!   index  <name> (<col>, …) [unique] [inferred]
 //! ```
-//! Named scopes (auth.md Handle 2) serialize once as top-level `scope` decls (sorted by
+//! Named scopes serialize once as top-level `scope` decls (sorted by
 //! name, before the tables — the one place a scope column's/`$ctx` field's type lives) and
 //! are referenced on each governed table by name: one `scope=(…)` group per `@scope`
 //! alternative (the DNF — commas inside a group are the AND, separate groups the OR). A

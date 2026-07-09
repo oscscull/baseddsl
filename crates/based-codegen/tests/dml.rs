@@ -79,7 +79,7 @@ fn shape_reach_joins_and_injects_soft_delete_in_on() {
 
 #[test]
 fn shape_reach_into_scoped_model_injects_scope_in_join_on() {
-    // D34: a query reaching a *scoped* model through a relation carries that model's
+    // a query reaching a *scoped* model through a relation carries that model's
     // `@scope` into the join `ON` — same slot as soft-delete — so it can't read a row
     // across the scope boundary. Here `Contact` is org-scoped and reached via a shape.
     let ddl = gen(r#"
@@ -635,7 +635,7 @@ fn query_section<'a>(ddl: &'a str, name: &str) -> &'a str {
 /// An OR model (`@scope Page` + `@scope Author`, two stacked decorators = two
 /// alternatives): a query naming `Page` injects `page = $ctx.page`; a query naming
 /// `Author` injects `author = $ctx.user`. The *same model* is filtered by a *different*
-/// predicate per callable — the headline D47 proof.
+/// predicate per callable.
 #[test]
 fn or_scope_injects_the_callable_chosen_alternative() {
     let ddl = gen(r#"

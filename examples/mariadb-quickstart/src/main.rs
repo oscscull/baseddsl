@@ -94,7 +94,7 @@ fn main() {
         .id;
 
     // `$ctx` is the per-request context the *app* derives from its auth layer, never the
-    // caller (auth.md). Here every call acts as the org `acme`.
+    // caller. Here every call acts as the org `acme`.
     let acme_ctx = || client::PlaceOrderCtx { org: acme.clone() };
 
     // --- 1. create → read the write back in its declared shape (read-your-writes) ---

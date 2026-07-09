@@ -1,7 +1,7 @@
 //! Client (query/mutation -> typed Rust surface) codegen tests. Parse + check a
 //! whole-schema snippet, then assert on the generated module text. The headline
 //! assertions are the input/output typing, the pagination envelope, and the wire
-//! routes (calling.md's closed RPC surface).
+//! routes (the closed RPC surface).
 
 use based_ast::FileId;
 use based_codegen::client::{client, client_with, ClientOptions, ClientTarget};
@@ -420,7 +420,7 @@ fn typed_ids_are_phantom_newtypes_per_entity() {
 fn no_inner_allow_attribute_so_include_accepts_it() {
     // The module must not carry an inner `#![allow(dead_code)]` — `include!` rejects inner
     // attributes, so consumers apply an outer `#[allow(dead_code)] mod client { … }` instead
-    // (no string surgery, D62).
+    // (no string surgery).
     let out = gen(r#"
         @soft_delete(deleted_at)
         Order { deleted_at: timestamp?, status: text }

@@ -37,7 +37,7 @@ fn implicit_id_is_uuid_primary_key() {
     assert!(ddl.contains("CREATE TABLE `org` ("), "\n{ddl}");
     assert!(ddl.contains("`id` UUID NOT NULL"), "\n{ddl}");
     assert!(ddl.contains("PRIMARY KEY (`id`)"), "\n{ddl}");
-    // implicit id carries no SQL default (app-generated, D1)
+    // implicit id carries no SQL default (app-generated)
     assert!(!ddl.contains("`id` UUID NOT NULL DEFAULT"), "\n{ddl}");
 }
 
@@ -109,7 +109,7 @@ fn forward_relation_emits_fk_column_no_constraint() {
     // FK column named `<field>_id`, typed as the target's PK (uuid); optional -> NULL
     assert!(ddl.contains("`org_id` UUID NOT NULL"), "\n{ddl}");
     assert!(ddl.contains("`buyer_id` UUID NULL"), "\n{ddl}");
-    // relations.md: no FK constraints by default
+    // no FK constraints by default
     assert!(!ddl.contains("FOREIGN KEY"), "\n{ddl}");
     assert!(!ddl.contains("REFERENCES"), "\n{ddl}");
 }
@@ -153,7 +153,7 @@ fn index_columns_resolve_relations_to_fk() {
 fn inferred_join_key_emitted_predicate_leading() {
     // The shape traverses `items` (an inverse edge), so the child table gets an
     // engine-inferred index on the join FK, led by the soft-delete column
-    // (predicate-leading, D15 — MariaDB has no partial indexes).
+    // (predicate-leading — MariaDB has no partial indexes).
     let ddl = gen(r#"
         @sort(placed_at desc)
         Order { placed_at: timestamp, items: OrderItem[], @index placed_at }

@@ -1,13 +1,13 @@
 //! based-codegen — turns a [`CheckedSchema`] into target artifacts.
 //!
-//! SQL **DDL** ([`sql::ddl`]): `CheckedSchema` -> `CREATE TABLE` (M2). SQL **DML**:
+//! SQL **DDL** ([`sql::ddl`]): `CheckedSchema` -> `CREATE TABLE`. SQL **DML**:
 //! queries -> parameterized `SELECT`s ([`sql::dml`]) and mutations ->
-//! INSERT/UPDATE/DELETE ([`sql::mutations`]) (M3, read + write). The typed **client**
-//! ([`client`]): `CheckedSchema` -> a Rust client module (M4). The **OpenAPI** spec
+//! INSERT/UPDATE/DELETE ([`sql::mutations`]). The typed **client**
+//! ([`client`]): `CheckedSchema` -> a Rust client module. The **OpenAPI** spec
 //! ([`openapi`]): `CheckedSchema` -> one OpenAPI document over the same wire, so
 //! `openapi-generator` yields clients in any language (polyglot via one emitter, not
 //! N). The **migration** engine ([`migrate`]): `CheckedSchema` -> a canonical
-//! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list (E2). Each
+//! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list. Each
 //! is a module reading the same resolved IR.
 //!
 //! The compiler seed is `based_sema::CheckedSchema`. Codegen never re-derives

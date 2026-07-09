@@ -178,7 +178,7 @@ fn create_mutation_advertises_its_declared_shape() {
           create Order { org = $org, placed_by = $buyer, total = 0 };
         }
         "#);
-    // A mutation posts to `/m/<name>` and (create-returning, D12) advertises the shape.
+    // A mutation posts to `/m/<name>` and (create-returning) advertises the shape.
     let op = &doc["paths"]["/m/place_order"]["post"];
     assert_eq!(op["summary"], "Mutation `place_order`");
     assert_eq!(

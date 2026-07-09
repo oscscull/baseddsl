@@ -1,4 +1,4 @@
-//! Migration snapshot + diff goldens (E2). The commerce `schema.snap` is pinned to a
+//! Migration snapshot + diff goldens. The commerce `schema.snap` is pinned to a
 //! blessed golden file (`tests/migrate/commerce.snap`) so a schema change surfaces as a
 //! reviewable diff; re-bless with `BLESS=1 cargo test -p based-codegen --test migrate`.
 //! The diff scenarios drive two schema versions through `diff_snapshots` to pin the
@@ -92,7 +92,7 @@ fn commerce_snapshot_round_trips() {
 fn init_diff_equals_the_from_scratch_create_set() {
     // `0001_init` (no prior snapshot) diffs against the empty schema, so every table in
     // the schema is a `create table` step — matching what `based gen sql` builds from
-    // scratch (migrations.md pins: 0001_init's up == the from-scratch snapshot).
+    // scratch (0001_init's up == the from-scratch snapshot).
     let schema = commerce();
     let steps = migrate::diff(&Snapshot::default(), &schema);
     let creates: Vec<_> = steps
@@ -117,7 +117,7 @@ fn init_diff_equals_the_from_scratch_create_set() {
 
 #[test]
 fn add_nullable_column_plus_index_is_the_worked_example() {
-    // The migrations.md worked example: Product gains a nullable `barcode` + an index.
+    // The worked example: Product gains a nullable `barcode` + an index.
     let base = "
         Org { name: text }
         Product { org: Org  name: text }
@@ -161,7 +161,7 @@ fn dropping_a_model_is_a_marked_drop_table() {
 
 #[test]
 fn init_render_produces_one_create_table_per_model_per_dialect() {
-    // E3: 0001_init's create steps render to real per-dialect DDL. Cross-check each
+    // 0001_init's create steps render to real per-dialect DDL. Cross-check each
     // dialect against `based gen sql`'s own DDL — same tables, same PKs, dialect quoting.
     let schema = commerce();
     let steps = migrate::diff(&Snapshot::default(), &schema);
@@ -205,7 +205,7 @@ fn init_render_produces_one_create_table_per_model_per_dialect() {
 
 #[test]
 fn renamed_column_is_a_drop_add_pair_not_a_rename() {
-    // Renames are never auto-guessed (the @was rename step is E5): a changed name reads
+    // Renames are never auto-guessed (the @was rename step is the exception): a changed name reads
     // as a drop of the old column + an add of the new one.
     let base = "Widget { label: text }";
     let evolved = "Widget { title: text }";

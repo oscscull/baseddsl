@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 /// `schema.snap` text ([`Snapshot::parse`]); a [`diff`] compares two of these.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Snapshot {
-    /// Named scope declarations (auth.md Handle 2), sorted by name and rendered above
+    /// Named scope declarations, sorted by name and rendered above
     /// the tables. A scope emits no DDL — it is an injected row-visibility filter in
     /// generated code — but it is recorded here so a change to the contract (added,
     /// dropped, renamed, or a term retyped) is captured in a reviewable migration and
@@ -27,7 +27,7 @@ pub struct Snapshot {
     pub tables: Vec<TableSnap>,
     /// Declared renames (`@was`), captured so the diff emits a clean `rename` step
     /// instead of a data-losing drop+add and so `apply`/`render`/`verify` re-derive that
-    /// rename from the stored snapshots (snapshot-authoritative, migrations.md / E5). A
+    /// rename from the stored snapshots (snapshot-authoritative). A
     /// rename hint lives only in the migration where the rename happened; it does not
     /// participate in the "is the current schema captured?" check (that uses [`diff`], so
     /// a spent `@was` — one whose old name is already gone — produces no step). Sorted.
@@ -36,7 +36,7 @@ pub struct Snapshot {
 
 /// One declared rename (`@was`), the diff-time bridge between an old and new physical
 /// name. Persisted in `schema.snap` so the rename survives to `apply`/`render` without a
-/// database round-trip (migrations.md).
+/// database round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rename {
     /// A model `@was("old_table")`: table `from` → `to`.
@@ -51,7 +51,7 @@ pub enum Rename {
 
 /// A `scope Name (col: Type = $ctx.field, …)` decl, captured neutrally: the column, the
 /// declared type (a model name or a neutral primitive), and the `$ctx` field each term
-/// binds. The one place the scope column's — and `$ctx.field`'s — type lives (auth.md).
+/// binds. The one place the scope column's — and `$ctx.field`'s — type lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeDeclSnap {
     pub name: String,
@@ -78,7 +78,7 @@ pub struct TableSnap {
     pub created: Option<String>,
     /// `@updated` engine-managed column (set on insert + every update), if any.
     pub updated: Option<String>,
-    /// The model's `@scope` alternatives, each a set of scope names (auth.md DNF). One
+    /// The model's `@scope` alternatives, each a set of scope names (DNF). One
     /// entry per `@scope` decorator — `@scope A, B` is one alternative `["A", "B"]`, two
     /// stacked `@scope` decorators are two alternatives. Canonicalized (names sorted
     /// within an alternative, alternatives sorted) so the diff is stable. Empty = unscoped.
@@ -220,7 +220,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
 
 /// The declared renames (`@was`) across the schema: model-level `@was` → a table rename,
 /// field-level `@was` → a column rename on that model's (current) table. The old name
-/// lives only in a prior snapshot; the diff matches it there (migrations.md / E5).
+/// lives only in a prior snapshot; the diff matches it there.
 fn collect_renames(schema: &CheckedSchema) -> Vec<Rename> {
     let mut out = Vec::new();
     for m in &schema.models {
@@ -466,7 +466,7 @@ fn render_table(out: &mut String, t: &TableSnap) {
         let _ = write!(header, " updated={col}");
     }
     // One `scope=(A, B)` group per `@scope` alternative (DNF): the commas inside a group
-    // are the AND-conjunction, separate groups are the OR-alternatives (auth.md).
+    // are the AND-conjunction, separate groups are the OR-alternatives.
     for alt in &t.scope_alts {
         let _ = write!(header, " scope=({})", alt.join(", "));
     }

@@ -1,7 +1,7 @@
 //! Render a neutral [`Step`] list to the canonical `up.mig` text (dialect-neutral).
 //!
-//! The reviewable migration file: one line (or a few) per step in migrations.md's
-//! vocabulary, destructive steps flagged with a trailing `# DESTRUCTIVE`. Per-dialect
+//! The reviewable migration file: one line (or a few) per step in the neutral
+//! step vocabulary, destructive steps flagged with a trailing `# DESTRUCTIVE`. Per-dialect
 //! SQL is [`super::sql`]; the step vocabulary is [`super::diff`].
 
 use super::diff::{ColumnChange, ScopeChange, Step};
@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 // ---------- `up.mig` rendering --------------------------------------------
 
 /// Render a neutral step list to the canonical `up.mig` text. Deterministic; each step
-/// is one (or a few) line(s) in migrations.md's vocabulary. A destructive step carries a
+/// is one (or a few) line(s) in the neutral step vocabulary. A destructive step carries a
 /// trailing `# DESTRUCTIVE` marker so a reviewer sees the gate before applying.
 pub fn render_up(steps: &[Step]) -> String {
     let mut out = String::new();

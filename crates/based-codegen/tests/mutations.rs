@@ -482,7 +482,7 @@ fn pg_create_double_quotes_and_keeps_named_placeholders() {
         out.contains("VALUES (:id, :org, :status, :total)"),
         "\n{out}"
     );
-    // the D12 re-select comes back double-quoted, keyed on :result_id.
+    // the create re-select comes back double-quoted, keyed on :result_id.
     assert!(
         out.contains("WHERE \"order\".\"id\" = :result_id"),
         "\n{out}"
@@ -547,7 +547,7 @@ fn pg_update_across_relation_uses_from_clause() {
         ),
         "\n{out}"
     );
-    // The UPDATE *statement* uses FROM, not an inline JOIN (the trailing D58 re-select is a
+    // The UPDATE *statement* uses FROM, not an inline JOIN (the trailing re-select is a
     // plain SELECT and may carry a JOIN — scope the assertion to the update).
     let update_stmt = &out[out.find("UPDATE").unwrap()..out.find("-- return:").unwrap()];
     assert!(

@@ -618,7 +618,7 @@ fn duplicate_model_and_field() {
     assert!(errors(&d).contains(&"E0100"));
 }
 
-// ---------- operand typing (PLAN.md sema #1) -------------------------------
+// ---------- operand typing --------------------------------------------------
 
 #[test]
 fn like_on_non_text_rejected() {
@@ -751,7 +751,7 @@ fn relation_param_typed_wrong_model_rejected() {
 
 #[test]
 fn relation_param_typed_as_id_ok() {
-    // D1: a relation param may be typed as its key (`Id`) instead of the model.
+    // a relation param may be typed as its key (`Id`) instead of the model.
     assert_clean(
         r#"
         @sort(name asc)
@@ -763,7 +763,7 @@ fn relation_param_typed_as_id_ok() {
     );
 }
 
-// ---------- index inference + lints (indexing.md, D15) ----------------------
+// ---------- index inference + lints -----------------------------------------
 
 #[test]
 fn traversed_inverse_edge_infers_join_key() {
@@ -969,7 +969,7 @@ fn or_predicate_is_opaque_to_unindexed() {
 
 #[test]
 fn scope_filter_counts_toward_pattern() {
-    // `@scope` is injected into every query on the model (auth.md), so its
+    // `@scope` is injected into every query on the model, so its
     // columns are part of every query's index pattern.
     let (_, d) = analyze(
         r#"
@@ -1029,7 +1029,7 @@ fn scope_term_must_bind_ctx_field() {
 #[test]
 fn multi_term_ctx_equality_scope_is_clean() {
     // A conjunction of `col = $ctx.field` equalities is the allowed shape (one decl
-    // with two terms, D46).
+    // with two terms).
     assert_clean(
         r#"
         Org { name: text }
@@ -1240,7 +1240,7 @@ fn unscoped_on_a_model_without_scope_is_stale_w0106() {
 #[test]
 fn ctx_inferred_from_use_is_clean() {
     // No declaration anywhere: `$ctx.org`'s type is inferred from the `org` column
-    // it compares against (auth.md Handle 1).
+    // it compares against.
     assert_clean(
         r#"
         Org { name: text }
@@ -1276,7 +1276,7 @@ fn ctx_requirement_is_recorded_per_callable() {
 #[test]
 fn ctx_scope_propagates_to_every_query() {
     // `@scope` reads `$ctx.org`, so every query on the model requires it even with
-    // no `where` of its own (auth.md Handle 2).
+    // no `where` of its own.
     let (schema, d) = analyze(
         r#"
         Org { name: text }
@@ -1295,7 +1295,7 @@ fn ctx_scope_propagates_to_every_query() {
 
 #[test]
 fn ctx_joined_scope_is_required_via_shape_reach() {
-    // D34: a query on an *unscoped* model that reaches a *scoped* model through a
+    // a query on an *unscoped* model that reaches a *scoped* model through a
     // shape relation joins it, and codegen injects the joined model's `@scope` into
     // the join `ON` — so the callable must require that model's `$ctx.org`, else the
     // injected `:ctx_org` bind is unbound at runtime.
@@ -1347,7 +1347,7 @@ fn ctx_joined_scope_is_required_via_where_reach() {
 #[test]
 fn ctx_unscoped_query_drops_joined_scope_requirement() {
     // `unscoped`  drops all scope handling, joins included, so the joined
-    // scoped model contributes no `$ctx` requirement (mirrors codegen D34).
+    // scoped model contributes no `$ctx` requirement (mirrors codegen).
     let (schema, d) = analyze(
         r#"
         Org { name: text }
@@ -1460,7 +1460,7 @@ fn ctx_from_create_assign_is_recorded() {
 
 #[test]
 fn ctx_mutation_reselect_joined_scope_is_required() {
-    // D34: a mutation's declared-shape re-select  projects the return shape, so a
+    // a mutation's declared-shape re-select  projects the return shape, so a
     // relation reach in that shape joins a scoped model and injects its `@scope` — the
     // mutation must require the joined model's `$ctx.org` too. Here `Ticket` is
     // unscoped but its re-select reaches the org-scoped `Contact`.
@@ -1490,7 +1490,7 @@ fn ctx_mutation_reselect_joined_scope_is_required() {
     );
 }
 
-// ---------- tx back-references (`^`, mutations.md) --------------------------
+// ---------- tx back-references (`^`) ----------------------------------------
 
 #[test]
 fn tx_backref_to_prior_create_is_clean() {
@@ -1572,7 +1572,7 @@ fn backref_in_query_predicate_rejected() {
     assert!(errors(&d).contains(&"E0170"), "{:?}", codes(&d));
 }
 
-// ---------- custom `on:` joins (relations.md, resume #5) --------------------
+// ---------- custom `on:` joins ----------------------------------------------
 
 #[test]
 fn custom_join_resolves_clean() {
@@ -1668,7 +1668,7 @@ fn custom_join_param_rejected() {
 #[test]
 fn or_model_query_injects_only_its_named_alternative() {
     // A model with two stacked `@scope` decorators is an OR of alternatives; each
-    // query names one and injects only that axis (auth.md worked example).
+    // query names one and injects only that axis.
     let (schema, diags) = analyze(
         r#"
         scope Page   (page:   Page = $ctx.page)
@@ -1828,7 +1828,7 @@ fn create_satisfying_an_alternative_has_no_e0186() {
     assert!(!codes(&d).contains(&"E0186"), "{:?}", codes(&d));
 }
 
-// ---------- @was rename directive (migrations.md / E5) ---------------------
+// ---------- @was rename directive -------------------------------------------
 
 #[test]
 fn field_was_rename_is_clean() {

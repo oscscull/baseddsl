@@ -1,9 +1,9 @@
-//! SQL DML generation (M3, read side): a `query` lowers to a parameterized SELECT.
+//! SQL DML generation (read side): a `query` lowers to a parameterized SELECT.
 //!
-//! This is where the headline soft-delete guarantee (soft-delete.md) becomes real:
+//! This is where the headline soft-delete guarantee becomes real:
 //! the tombstone predicate is injected into every generated SELECT — on the root
 //! table (in `WHERE`) and on every joined table (in its `ON`, so a `LEFT JOIN`
-//! stays a left join). `@scope` (auth.md) rides the same injection path. The user
+//! stays a left join). `@scope` rides the same injection path. The user
 //! never writes either; both are compiler primitives.
 //!
 //! ## What a query lowers to
@@ -23,7 +23,7 @@
 //!   A named-filter call in `where` is inlined: its body is substituted with the
 //!   call args and lowered against the call-site model (the codegen twin of the sema check).
 //! - ORDER from the sort cascade (query `order` > model `@sort`); keyset queries
-//!   get the unique `id` tiebreaker appended, shown not written (pagination.md).
+//!   get the unique `id` tiebreaker appended, shown not written.
 //! - LIMIT / OFFSET from `page (...)`; `with count` emits a second COUNT(*). A keyset
 //!   page also carries the lexicographic cursor predicate (guarded by `:keyset_active`,
 //!   a no-op on page 1) + hidden `__keyset_<i>` cursor-basis columns.
@@ -32,7 +32,7 @@
 //! Signature inputs render as `:name` named placeholders (`$ctx.org` -> `:ctx_org`).
 //! The runtime binds them to the driver's positional form (`?` on MySQL/MariaDB/SQLite,
 //! `$n` on Postgres). Named placeholders keep the emitted SQL legible — readable
-//! over terse (CLAUDE.md).
+//! over terse.
 //!
 //! ## Dialects
 //! The SELECT text branches on the [`crate::Dialect`]: identifier quoting (`` `x` `` vs
@@ -117,7 +117,7 @@ pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
 
 /// A query lowered to its structured SQL: the primary SELECT plus, for a
 /// `with count` page, the live-row COUNT. Both carry the `:name` placeholders
-/// verbatim — the runtime (M6) binds them; the text emitter frames them with
+/// verbatim — the runtime binds them; the text emitter frames them with
 /// `-- query` headers (`dml`). This is the one lowering; `render_query` and the
 /// runtime both read it, so the SQL and its bind surface can never drift (P4).
 #[derive(Debug, Clone)]
@@ -203,7 +203,7 @@ fn lower_query(
     if let Some(sd) = &root.soft_delete {
         wheres.push(soft_pred(dialect, &sel.root_alias, root, sd));
     }
-    // `@scope` rides into every query on the model (auth.md) unless the query opts out
+    // `@scope` rides into every query on the model unless the query opts out
     // with `unscoped(...)`. The injected predicate is the *chosen alternative* — the
     // axes this query named — resolved by sema per callable.
     if let Some(scope) = sel.scope_where(&sel.root_alias, root) {
@@ -218,7 +218,7 @@ fn lower_query(
         .map(|k| format!("{} {}", k.col_ref, dir(k.dir)))
         .collect();
 
-    // 4. Keyset pagination (pagination.md): a `page` without `offset` compares against
+    // 4. Keyset pagination: a `page` without `offset` compares against
     //    an opaque cursor. The runtime binds the cursor's sort-key values into
     //    `:keyset_<i>` and flips `:keyset_active`; here we emit the lexicographic
     //    "strictly after the cursor" predicate plus the hidden `__keyset_<i>` columns
@@ -267,7 +267,7 @@ fn lower_query(
     sql.push_str(";\n");
 
     // `with count`: a second query for the live-row total (soft-delete applied, no
-    // LIMIT). Meaningless for keyset, hence opt-in (pagination.md).
+    // LIMIT). Meaningless for keyset, hence opt-in.
     let count_sql = if query_page(q).is_some_and(|p| p.with_count) {
         let mut cnt = format!(
             "SELECT COUNT(*) AS {}\nFROM {}",
@@ -293,7 +293,7 @@ fn lower_query(
 }
 
 /// The keyset "strictly after the cursor" predicate over the ordered sort keys
-/// (pagination.md). For keys `k0 dir0, k1 dir1, …` and cursor values `:keyset_0, …`,
+/// For keys `k0 dir0, k1 dir1, …` and cursor values `:keyset_0, …`,
 /// the row-comparison expands lexicographically:
 /// `(k0 ▷ v0) OR (k0 = v0 AND k1 ▷ v1) OR …`, where `▷` is `>` for an ASC key and `<`
 /// for a DESC key. The expanded form (rather than a `(k0,k1) > (v0,v1)` row-value
@@ -479,7 +479,7 @@ fn collect_filter(sel: &mut Select, q: &Query, root: &RModel, out: &mut Vec<Stri
     }
 }
 
-/// One bare/inline param -> a filter condition (queries.md per-param bindings).
+/// One bare/inline param -> a filter condition (per-param bindings).
 fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
     let ph = format!(":{}", p.name.node);
     match &p.binding {
@@ -531,7 +531,7 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         });
     }
     if let Some(page) = query_page(q) {
-        // A keyset page must be deterministic (pagination.md): append the unique `id`
+        // A keyset page must be deterministic: append the unique `id`
         // tiebreaker unless the sort already ends on it. This holds even with no
         // explicit `order`/`@sort` — an empty order still yields `ORDER BY id`, so the
         // cursor comparison has a unique basis and never drops or repeats a row. Offset
@@ -592,7 +592,7 @@ pub(crate) struct Select<'a> {
     /// (sema permits recursion, so we must terminate on our own, like sema does).
     filter_stack: Vec<&'a str>,
     /// The immediately preceding `create` in an enclosing `tx`, so a `^.field`
-    /// back-reference can bind to it (mutations.md). `None` outside a `tx`.
+    /// back-reference can bind to it. `None` outside a `tx`.
     back: Option<BackCtx<'a>>,
     /// Whether to inject a *joined* scoped model's `@scope` into its join `ON`.
     /// True by default; set false for an `unscoped` callable, which opts out of
@@ -601,7 +601,7 @@ pub(crate) struct Select<'a> {
     /// `lower_write`), which already honours `unscoped`; this flag governs only the
     /// join-`ON` injection the resolver performs as it materializes each join.
     inject_scope: bool,
-    /// The per-touched-model scope the *current callable* injects (auth.md), from
+    /// The per-touched-model scope the *current callable* injects, from
     /// `RQuery`/`RMutation.scope_inject`. Keyed by model name; each entry is the
     /// chosen alternative's `(column, ctx_field)` terms. The root `WHERE`, the joined
     /// `ON`, and the create auto-set all read the terms for their model from here, so a
@@ -665,7 +665,7 @@ impl<'a> Select<'a> {
     }
 
     /// Attach a tx back-reference context so a `^.field` in this statement's assigns
-    /// binds to the preceding `create` (mutations.md).
+    /// binds to the preceding `create`.
     pub(crate) fn with_back(mut self, back: Option<BackCtx<'a>>) -> Self {
         self.back = back;
         self
@@ -1131,7 +1131,7 @@ impl<'a> Select<'a> {
         }
     }
 
-    /// Lower a `^.field` back-reference (mutations.md). `^.id` binds to the preceding
+    /// Lower a `^.field` back-reference. `^.id` binds to the preceding
     /// create's app-generated id (`:id_<step>`); any other field reuses the value the
     /// prior create assigned to it (a caller param/literal), which the engine already
     /// binds. Sema (E0170) guarantees a prior create and a real field exist.
@@ -1233,7 +1233,7 @@ fn subst_value(v: &Value, binds: &HashMap<&str, &Value>) -> Value {
 
 // ---------- small helpers --------------------------------------------------
 
-/// Soft-delete predicate for a table alias (soft-delete.md covered subset).
+/// Soft-delete predicate for a table alias.
 pub(crate) fn soft_pred(dialect: Dialect, alias: &str, model: &RModel, sd: &SoftDelete) -> String {
     let col = column_of(model, &sd.field);
     match sd.mode {
@@ -1366,7 +1366,7 @@ pub(crate) fn render_func(f: &FuncCall) -> String {
     }
 }
 
-/// Render a raw-SQL fragment (raw.md): text verbatim, `${param}` -> `:param`,
+/// Render a raw-SQL fragment: text verbatim, `${param}` -> `:param`,
 /// `{table}`/`{id}` -> safe engine interpolation (root table / its `id`). Only the
 /// engine-interpolated identifiers are dialect-quoted; the raw text is the user's and
 /// is emitted verbatim (an escape hatch, principle 6 — they own its portability).

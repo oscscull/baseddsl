@@ -58,7 +58,7 @@ curl -s -X POST http://127.0.0.1:8080/q/my_orders \
 ```
 
 The wire is `POST /q/<name>` (queries) and `POST /m/<name>` (mutations), body = the
-argument object (`calling.md`).
+argument object.
 
 ## SQLite
 

@@ -1,12 +1,12 @@
-//! SQL DDL generation (M2): `CheckedSchema` -> `CREATE TABLE` statements.
+//! SQL DDL generation: `CheckedSchema` -> `CREATE TABLE` statements.
 //!
 //! One `CREATE TABLE` per model, emitted in schema order (deterministic). Each
 //! table carries its columns, the `id` primary key, `(unique)` constraints, and
-//! declared `@index`es. No foreign-key constraints are emitted — relations.md makes
-//! them opt-in, so the FK *column* exists but no `FOREIGN KEY` clause references it.
+//! declared `@index`es. No foreign-key constraints are emitted — they are
+//! opt-in, so the FK *column* exists but no `FOREIGN KEY` clause references it.
 //!
 //! Besides declared structure, each table carries the sema-inferred baseline
-//! indexes (indexing.md): join-key indexes for inverse edges the access
+//! indexes: join-key indexes for inverse edges the access
 //! layer traverses, named `inf_…` so engine-owned keys are distinguishable from
 //! declared `idx_…` ones. On a `@soft_delete` model the soft-delete column is
 //! prepended (predicate-leading — MariaDB has no partial indexes). Filter-path
@@ -85,7 +85,7 @@ fn index_specs(model: &RModel) -> Vec<IndexSpec> {
         });
     }
 
-    // Inferred baseline indexes (indexing.md): join keys of traversed inverse
+    // Inferred baseline indexes: join keys of traversed inverse
     // edges, deduped by sema against declared structure. Neither MariaDB nor SQLite
     // has partial indexes, so "predicate-leading" means the soft-delete column is
     // physically prepended — the engine filters it on every generated query.

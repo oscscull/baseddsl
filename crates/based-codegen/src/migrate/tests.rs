@@ -347,7 +347,7 @@ fn init_diff_omits_scope_change_steps() {
     );
 }
 
-// ---- E3: per-dialect SQL rendering ----------------------------------
+// ---- per-dialect SQL rendering --------------------------------------
 
 use crate::Dialect::{MariaDb, Postgres, Sqlite};
 
@@ -537,7 +537,7 @@ fn index_add_and_drop_render_per_dialect() {
     assert!(render_sql(&drop, Postgres).contains("DROP INDEX \"idx_u_name\";"));
 }
 
-// ---- E4: executable statements + content hash -----------------------
+// ---- executable statements + content hash ---------------------------
 
 #[test]
 fn sql_statements_are_bare_and_one_per_statement() {
@@ -598,7 +598,7 @@ fn sql_statements_errs_on_sqlite_alter_column() {
     assert!(err.contains("SQLite cannot ALTER COLUMN t.v"), "{err}");
 }
 
-// ---- E5: @was renames + raw(dialect) escape -------------------------
+// ---- @was renames + raw(dialect) escape -----------------------------
 
 /// A field `@was` (persisted as a `Rename::Column`) turns what would be a drop+add into a
 /// single `rename column` step — data-preserving, non-destructive — and renders per dialect.
@@ -659,7 +659,7 @@ fn table_rename_and_spent_rename_is_inert() {
         .contains("ALTER TABLE \"legacy_product\" RENAME TO \"product\";"));
 
     // `product` already exists in prev and the `@was` still names the (gone) old table:
-    // the rename is spent, so the diff produces nothing (migrations.md — inert `@was`).
+    // the rename is spent, so the diff produces nothing (inert `@was`).
     let spent = diff_snapshots(&now, &now);
     assert!(spent.is_empty(), "{spent:?}");
 }
@@ -688,7 +688,7 @@ fn rename_hint_round_trips_through_schema_snap() {
 }
 
 /// A `raw(dialect)` escape parsed from an `up.mig` emits its SQL only for the matching
-/// target and is a no-op for the others (migrations.md — one raw step per dialect).
+/// target and is a no-op for the others (one raw step per dialect).
 #[test]
 fn raw_step_renders_only_for_its_dialect() {
     let up = "add column product.note text null\n\
