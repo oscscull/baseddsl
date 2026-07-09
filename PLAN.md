@@ -370,10 +370,13 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   exit-code convention — 2 for a config/usage mistake matching clap, 1 for an operational failure) that
   reuses D71's typed `MigrateError`/`DbError` as the cause instead of re-flattening them to strings;
   `anyhow` dropped from the crate; the rustc-style parse/sema diagnostic rendering is untouched (those
-  paths return a summary-only error). **Remaining deferred H7 sub-items:** (ii) **HTTP listener edge
-  errors** — the `http` edge's own pre-dispatch failures (bad body, bad `$ctx` header) are coherent but
-  could share the code registry; (iv) **example `main.rs` as an error-handling reference** — convert the
-  scenario to a `?`-based `Result` flow that demonstrates matching on `ClientError::kind()`/`code()`.
+  paths return a summary-only error). **✅ edge slice done (D75):** the `http` listener's own pre-dispatch
+  failures now share a `code()`/`status()`-keyed `EdgeError` registry (`BadContext`/`BadBody`/`Draining`/
+  `NotReady` — one source of truth, `From<EdgeError> for WireResponse`) instead of scattered string
+  literals, mirroring `PlanError`/`DbError`; the pool-checkout path now reuses the driver's own classified
+  `DbError::code()` (so a `pool_exhausted` checkout no longer masquerades as `database_error`). **Remaining
+  deferred H7 sub-item:** (iv) **example `main.rs` as an error-handling reference** — convert the scenario
+  to a `?`-based `Result` flow that demonstrates matching on `ClientError::kind()`/`code()`.
   (Sub-item (iii), a structured migration error type, is subsumed — `based migrate apply` now surfaces
   the typed `MigrateError` through the `CliError` chain, no longer re-stringified.)
 - **H2. `based fmt` formatter + `format-document` LSP directive.** The canonical `.bsl` formatter; the

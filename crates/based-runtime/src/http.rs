@@ -133,13 +133,7 @@ impl ContextSource for TrustedHeaderContext {
             None => serde_json::json!({}),
             Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
                 Ok(v) if v.is_object() => v,
-                _ => {
-                    return Err(WireResponse::error(
-                        400,
-                        "bad_context",
-                        "X-Based-Context is not a JSON object".to_string(),
-                    ))
-                }
+                _ => return Err(EdgeError::BadContext.into()),
             },
         };
         // The shard key is schema-derived unless a deployment forces it with an explicit
@@ -223,6 +217,70 @@ impl std::fmt::Display for ServeError {
     }
 }
 impl std::error::Error for ServeError {}
+
+/// A pre-dispatch failure the listener edge itself produces — a bad body, a malformed
+/// `$ctx` header, a drain/readiness refusal — at the transport edge, before a request
+/// reaches [`dispatch`]. The transport-edge twin of the core's [`crate::plan::PlanError`] /
+/// [`crate::run::DbError`]: each carries a stable machine [`code`](EdgeError::code) and an
+/// HTTP [`status`](EdgeError::status), so the edge's own wire codes live in one registry.
+/// This registry covers the edge's own failures; operational DB failures the edge surfaces
+/// (a checkout or ping fault) carry their own [`crate::run::DbError::code`].
+#[derive(Debug, Clone, PartialEq)]
+enum EdgeError {
+    /// The `X-Based-Context` header held a non-object JSON value.
+    BadContext,
+    /// The request body was invalid UTF-8, a non-object JSON value, or unparseable JSON. The
+    /// carried string is the specific reason.
+    BadBody(String),
+    /// This instance is draining (graceful shutdown); readiness fails first so the load
+    /// balancer stops routing while in-flight requests finish.
+    Draining,
+    /// The backend readiness probe ([`Backend::ping`]) failed. The carried string is the
+    /// driver's message.
+    NotReady(String),
+}
+
+impl EdgeError {
+    /// The stable, machine-readable code for this edge failure — the single source of
+    /// truth for its wire `error.code`, the same convention the dispatch core's errors
+    /// follow. Stable across releases.
+    fn code(&self) -> &'static str {
+        match self {
+            EdgeError::BadContext => "bad_context",
+            EdgeError::BadBody(_) => "bad_body",
+            EdgeError::Draining => "draining",
+            EdgeError::NotReady(_) => "not_ready",
+        }
+    }
+
+    /// The HTTP status this edge failure maps to: a malformed request the caller can fix
+    /// is `400`; a drain/readiness refusal is a retryable `503`.
+    fn status(&self) -> u16 {
+        match self {
+            EdgeError::BadContext | EdgeError::BadBody(_) => 400,
+            EdgeError::Draining | EdgeError::NotReady(_) => 503,
+        }
+    }
+}
+
+impl std::fmt::Display for EdgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EdgeError::BadContext => f.write_str("X-Based-Context is not a JSON object"),
+            EdgeError::BadBody(reason) => f.write_str(reason),
+            EdgeError::Draining => f.write_str("server is shutting down"),
+            EdgeError::NotReady(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for EdgeError {}
+
+impl From<EdgeError> for WireResponse {
+    fn from(e: EdgeError) -> WireResponse {
+        WireResponse::error(e.status(), e.code(), e.to_string())
+    }
+}
 
 /// How long a worker blocks on one `recv` before waking to re-check the drain flag.
 /// Short enough that shutdown is prompt even for a worker that `unblock` didn't wake,
@@ -386,7 +444,7 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
     // Decode the JSON argument object from the (size-capped) body.
     let args = match read_json_body(request) {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(e) => return e.into(),
     };
 
     // Route to one physical shard and borrow a connection for this request. A checkout
@@ -394,7 +452,9 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
     // in-flight DB fault yields.
     let mut db = match shared.backend.checkout(&shard_key) {
         Ok(db) => db,
-        Err(e) => return WireResponse::error(503, "database_error", e.message),
+        // A checkout failure is an operational DB fault: the driver's own classified
+        // code (`pool_exhausted`/`database_error`) carries through to the wire.
+        Err(e) => return WireResponse::error(503, e.code(), e.message),
     };
     let mut id_gen = UuidGen;
 
@@ -431,18 +491,18 @@ fn ready_response(shared: &Shared) -> WireResponse {
     if shared.draining.load(Ordering::SeqCst) {
         // The drain half of a zero-downtime rollout: fail readiness first so the LB stops
         // sending new requests while in-flight ones finish.
-        return WireResponse::error(503, "draining", "server is shutting down".to_string());
+        return EdgeError::Draining.into();
     }
     match shared.backend.ping() {
         Ok(()) => WireResponse::ok(serde_json::json!({ "status": "ready" })),
-        Err(e) => WireResponse::error(503, "not_ready", e.message),
+        Err(e) => EdgeError::NotReady(e.message).into(),
     }
 }
 
 /// Read the request body (capped at [`MAX_BODY`]) and parse it as the JSON argument
 /// object. An empty body is an empty object (a no-arg callable). A non-object or
 /// unparseable body is a `400` — a client mistake it can fix.
-fn read_json_body(request: &mut Request) -> Result<serde_json::Value, WireResponse> {
+fn read_json_body(request: &mut Request) -> Result<serde_json::Value, EdgeError> {
     let mut body = String::new();
     if request
         .as_reader()
@@ -450,9 +510,7 @@ fn read_json_body(request: &mut Request) -> Result<serde_json::Value, WireRespon
         .read_to_string(&mut body)
         .is_err()
     {
-        return Err(WireResponse::error(
-            400,
-            "bad_body",
+        return Err(EdgeError::BadBody(
             "request body is not valid UTF-8".to_string(),
         ));
     }
@@ -461,16 +519,10 @@ fn read_json_body(request: &mut Request) -> Result<serde_json::Value, WireRespon
     }
     match serde_json::from_str::<serde_json::Value>(&body) {
         Ok(v) if v.is_object() => Ok(v),
-        Ok(_) => Err(WireResponse::error(
-            400,
-            "bad_body",
+        Ok(_) => Err(EdgeError::BadBody(
             "request body must be a JSON object".to_string(),
         )),
-        Err(e) => Err(WireResponse::error(
-            400,
-            "bad_body",
-            format!("invalid JSON body: {e}"),
-        )),
+        Err(e) => Err(EdgeError::BadBody(format!("invalid JSON body: {e}"))),
     }
 }
 
@@ -522,6 +574,26 @@ mod tests {
         let h = headers(&[("X-Based-Context", "[1,2,3]")]);
         let err = src.derive(&HeaderView(&h)).unwrap_err();
         assert_eq!(err.status, 400);
+        assert_eq!(err.body["error"]["code"], "bad_context");
+    }
+
+    #[test]
+    fn edge_error_registry_maps_code_status_and_message() {
+        // The edge's own failures carry a stable code + status through the registry, and
+        // the `WireResponse` envelope is built from them (one source of truth for the wire).
+        for (err, code, status) in [
+            (EdgeError::BadContext, "bad_context", 400),
+            (EdgeError::BadBody("nope".into()), "bad_body", 400),
+            (EdgeError::Draining, "draining", 503),
+            (EdgeError::NotReady("db down".into()), "not_ready", 503),
+        ] {
+            assert_eq!(err.code(), code);
+            assert_eq!(err.status(), status);
+            let resp: WireResponse = err.clone().into();
+            assert_eq!(resp.status, status);
+            assert_eq!(resp.body["error"]["code"], code);
+            assert_eq!(resp.body["error"]["message"], err.to_string());
+        }
     }
 
     // ---- shard-key derivation from `@scope`  ----------------------------

@@ -2662,3 +2662,33 @@ Comments/strings only — no logic changed. Gate: `cargo test --workspace --all-
 + `clippy` all clean; `grep` finds no `D#` in `based-codegen/src` or any userland surface; the SQLite
 quickstart ran **green** (`based migrate apply` → `cargo run`, exit 0) and the MariaDB/Postgres example
 clients compile (their regenerated `client.rs` diffs are comment-only).
+
+## D75 — HTTP listener edge errors share a `code()`/`status()` registry (H7 sub-item ii)
+
+**Context.** D71 gave the dispatch core's failures (`PlanError`/`DbError`/`RunError`) a single-source
+`code()` the wire consumes. But the `http` listener's *own* pre-dispatch failures — a bad body, a
+malformed `X-Based-Context` header, a drain/readiness refusal — still built their `WireResponse`s from
+**scattered string literals** (`"bad_body"`, `"bad_context"`, `"draining"`, `"not_ready"`, and a
+hardcoded `"database_error"` on pool checkout), the exact drift risk D71 removed from the core.
+
+**Decision.** Introduce a private `EdgeError` enum in `based-runtime::http` — the transport-edge twin of
+`PlanError`/`DbError`: `BadContext` / `BadBody(String)` / `Draining` / `NotReady(String)`, each with a
+stable `code()` and an HTTP `status()` (400 for the caller-fixable body/context faults, 503 for the
+drain/readiness refusals), a `Display` (the human message), `std::error::Error`, and
+`From<EdgeError> for WireResponse` so the envelope is built from the registry in one place. The four
+edge sites (`TrustedHeaderContext::derive`, `read_json_body`, `ready_response`'s drain + ping branches)
+now yield `EdgeError`, and the pool-checkout path reuses the driver's own classified `DbError::code()`
+instead of a fixed `"database_error"` literal — so a `pool_exhausted` checkout surfaces its real code
+rather than masquerading as a generic DB error. Wire codes/statuses are unchanged for every existing
+case (`bad_body`/`not_ready` integration tests unchanged); only the pool-exhausted checkout code
+sharpens. A custom `ContextSource` still returns an arbitrary `WireResponse` (its own policy codes —
+e.g. a `401` — are the plugin's, not the edge registry's).
+
+**Why not fold these into `PlanError`.** `PlanError` is *dispatch-core* (it has no socket, no headers);
+these failures exist only at the transport edge (they never reach `dispatch`). Keeping a separate
+edge registry mirrors the core's convention without leaking transport concerns into the pure core.
+
+**Verification.** `cargo test --workspace --all-features` + `fmt --check` + `clippy` all clean; a new
+`edge_error_registry_maps_code_status_and_message` unit test pins each variant's code/status/message and
+the `WireResponse` it builds. No live-DB behavior changed (the checkout path is still a 503; only its
+`code` sharpens to the driver's existing classification), so no live-DB run was required.
