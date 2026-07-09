@@ -1,8 +1,8 @@
-//! `based migrate apply` end-to-end against a **real** engine (SQLite, feature `sqlite`, E4).
+//! `based migrate apply` end-to-end against a **real** engine (SQLite, feature `sqlite`).
 //!
 //! Infra-free proof of the apply engine: it writes a real `migrations/NNNN_slug/` tree to a
 //! temp dir, loads it ([`load_migrations`]), and applies it against a live in-memory SQLite
-//! `Db`/`Backend` — the same seam `based serve` uses. It covers the whole E4 surface: a fresh
+//! `Db`/`Backend` — the same seam `based serve` uses. It covers the whole apply surface: a fresh
 //! apply + ledger, a re-apply no-op, `status`, a `down.mig` rollback, the tamper guard, and the
 //! destructive-ack gate. The MariaDB twin (`migrate_apply_mariadb.rs`) proves the same against a
 //! live server over Docker; this one runs in the normal `cargo test` gate with no daemon.

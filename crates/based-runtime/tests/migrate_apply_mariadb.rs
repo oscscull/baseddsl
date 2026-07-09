@@ -1,5 +1,5 @@
-//! `based migrate apply` against a **real** MariaDB server, over Docker (E4, reusing the D35
-//! harness). The live twin of `migrate_apply.rs`: it writes a real `migrations/` tree, loads it
+//! `based migrate apply` against a **real** MariaDB server, over Docker. The live twin of
+//! `migrate_apply.rs`: it writes a real `migrations/` tree, loads it
 //! for the MariaDB dialect, and applies it through the concrete `MariaDb` driver checked out of a
 //! live `ShardRouter` — so a passing run proves the apply engine + `_based_migrations` ledger work
 //! against a genuine server (DDL, the ledger insert, the tamper guard, a re-apply no-op), not just
@@ -69,7 +69,7 @@ fn scenario() -> Scratch {
 
 /// Bring up a live MariaDB; `None` (skip) when Docker is unavailable. Drops this scenario's
 /// table + the migrations ledger first, so a run against a *persistent* external server
-/// (`TEST_MARIADB_URL`, D64) starts clean and is re-runnable (a no-op on a fresh container).
+/// (`TEST_MARIADB_URL`) starts clean and is re-runnable (a no-op on a fresh container).
 fn live() -> Option<(ShardRouter, MariaDbContainer)> {
     let container = MariaDbContainer::start()?;
     let router = ShardRouter::single(&container.url(), PoolConfig::default())

@@ -2,9 +2,9 @@
 //! (discover → parse → check), then codegen's query lowering, held in memory.
 //!
 //! The runtime never runs on a schema that does not check clean — a codegen
-//! precondition (PLAN pipeline). `Compiled` is the served artifact: the resolved
-//! schema, the AST (queries need their signatures for validation), and the lowered
-//! SQL keyed by callable name.
+//! precondition. `Compiled` is the served artifact: the resolved schema, the AST
+//! (queries need their signatures for validation), and the lowered SQL keyed by
+//! callable name.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,8 +22,8 @@ pub struct Compiled {
     pub schema: CheckedSchema,
     pub decls: Vec<Decl>,
     /// The compile target the SQL was lowered for. The runtime's named→positional
-    /// scanner also branches on it (`?` vs `$n`, D21/D29), so it must equal the
-    /// dialect the driver/`Backend` in use actually speaks (a deployment invariant).
+    /// scanner also branches on it (`?` vs `$n`), so it must equal the dialect the
+    /// driver/`Backend` in use actually speaks (a deployment invariant).
     pub dialect: Dialect,
     /// Lowered query SQL, keyed by callable name for O(1) request dispatch.
     pub queries: HashMap<String, LoweredQuery>,
@@ -93,17 +93,15 @@ impl Compiled {
         }
     }
 
-    /// The `$ctx` field a request on this route **shards** on , or `None` when the
-    /// callable's target model has no `@scope` (single-shard deployments route it to
-    /// shard 0) or the callable is `unscoped` (a cross-scope read/write has no single
-    /// owning shard). `is_mutation` picks the wire side (the same `/q` vs `/m` prefix the
-    /// router already keys on). An unknown name is `None` — dispatch reports the 404, and
-    /// an unroutable request never reaches a shard anyway.
+    /// The `$ctx` field a request on this route shards on, or `None` when the callable's
+    /// target model has no `@scope` (single-shard deployments route it to shard 0) or the
+    /// callable is `unscoped` (a cross-scope read/write has no single owning shard).
+    /// `is_mutation` picks the wire side. An unknown name is `None` — dispatch reports the
+    /// 404, and an unroutable request never reaches a shard anyway.
     ///
-    /// The shard key is the model's resolved scope
-    /// owner field (read off the same `@scope` that filters rows, D32), so the shard a row
-    /// lives in and the shard its owner's requests route to share one source of truth
-    /// (principle 4) — no hand-set, drift-prone `--shard-key-field` config.
+    /// The shard key is the model's resolved scope owner field (read off the same `@scope`
+    /// that filters rows), so the shard a row lives in and the shard its owner's requests
+    /// route to share one source of truth — no hand-set, drift-prone config.
     pub fn shard_key_field(&self, is_mutation: bool, name: &str) -> Option<&str> {
         if is_mutation {
             self.schema

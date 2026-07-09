@@ -5,8 +5,8 @@
 //! Headline assertions: (1) the route prefix selects query vs mutation and 404s on a
 //! bad/mismatched route; (2) success returns 200 + the shaped response; (3) every
 //! `PlanError` maps to its HTTP status + `{ error: { code, message } }`; (4) only POST
-//! is accepted (no GET query-string surface, calling.md); (5) a mutation idempotency
-//! key dedupes a retry, and (6) reusing one key for a *different* request is a 422 .
+//! is accepted (no GET query-string surface); (5) a mutation idempotency
+//! key dedupes a retry, and (6) reusing one key for a *different* request is a 422.
 
 use based_ast::FileId;
 use based_parser::parse_file;
@@ -105,7 +105,7 @@ fn list_route_returns_array() {
 }
 
 /// A mutation route runs the write path and returns the created row in its declared
-/// shape , read back inside the transaction.
+/// shape, read back inside the transaction.
 #[test]
 fn mutation_route_returns_the_created_rows_declared_shape() {
     let c = compile(SCHEMA);
@@ -314,7 +314,7 @@ fn bad_route_and_method() {
 }
 
 /// An idempotency key makes a mutation retry a no-op: the write body runs once, and the
-/// retry replays the first response with no second INSERT . The retry uses a *fresh*
+/// retry replays the first response with no second INSERT. The retry uses a *fresh*
 /// `SeqIdGen`, so a naive re-run would mint a different id — the replay proves it didn't.
 #[test]
 fn idempotency_key_dedupes_a_mutation_retry() {
@@ -444,7 +444,7 @@ fn bad_request_does_not_consume_the_key() {
 }
 
 /// Reusing one idempotency key for a *different* request is rejected with a 422, not
-/// silently answered with the first request's response . The first
+/// silently answered with the first request's response. The first
 /// attempt commits under `req-x`; a second request under the *same* key but a different
 /// `total` must not run a write and must not replay the first row.
 #[test]

@@ -1,33 +1,29 @@
-//! The concrete Postgres driver + shard router (feature `postgres`, A3/D38).
+//! The concrete Postgres driver + shard router (feature `postgres`).
 //!
 //! This is the Postgres twin of the MariaDB driver ([`crate::driver`]): the production
-//! [`Db`]/[`Backend`] that runs the *verbatim* Postgres-lowered SQL  against a real
-//! server. Postgres codegen (`ddl`/`dml`/`mutations`) and the dialect-aware `:name`→`$n`
-//! scanner are already done ; this is the runtime that executes what they emit. Two
-//! layers, exactly mirroring the MariaDB structure:
+//! [`Db`]/[`Backend`] that runs the verbatim Postgres-lowered SQL against a real server.
+//! Two layers, exactly mirroring the MariaDB structure:
 //!
 //! - [`PostgresDb`] — a [`Db`] over one pooled connection. It runs the whole request on
 //!   that single connection (a mutation's `tx` must see its own writes), converting
 //!   [`SqlValue`] binds to Postgres parameters and returned columns back to JSON. It reuses
-//!   the pure-Rust **synchronous** `postgres` crate (principle 7, and D20's sync model — no
-//!   async runtime) rather than hand-rolling the protocol.
+//!   the pure-Rust synchronous `postgres` crate (no async runtime).
 //!
 //! - [`PgRouter`] — the scale-out seam, the [`crate::driver::ShardRouter`] twin. One
-//!   **bounded** `r2d2` connection pool per physical shard, single-shard dispatch by the
-//!   same stable FNV logical-shard hash (no scatter-gather → a `tx` is one shard, no
-//!   distributed transaction; add capacity without rehashing keys — the Vitess/Citus model).
+//!   bounded `r2d2` connection pool per physical shard, single-shard dispatch by the same
+//!   stable FNV logical-shard hash (no scatter-gather → a `tx` is one shard, no distributed
+//!   transaction; add capacity without rehashing keys).
 //!
 //! **The value-mapping subtlety (Postgres-specific).** The runtime is dialect-neutral: a
 //! `uuid`/`timestamptz`/`jsonb` value is carried as [`SqlValue::Text`] (a String — on the
-//! wire these are all strings, D1). Postgres, unlike MySQL/SQLite, *infers* each `$n`
-//! parameter's type from the column it binds against and, in the extended protocol, refuses
-//! a `text`-encoded Rust `String` for an inferred `uuid`/`jsonb` OID. So [`PgValue`] is a
-//! `ToSql` newtype that (a) `accepts` those non-text OIDs and (b) encodes its bytes in
-//! **text format** ([`Format::Text`]) — the server then applies its normal string-literal
-//! coercion (the same path `'…'::uuid` takes). This keeps the runtime free of per-column
-//! Postgres types while round-tripping every family. The mapping is pure and unit-tested
-//! below (like `from_mysql`); connecting/executing can only be compile-verified here and is
-//! proven by `tests/postgres_integration.rs` against a live server.
+//! wire these are all strings). Postgres, unlike MySQL/SQLite, infers each `$n` parameter's
+//! type from the column it binds against and, in the extended protocol, refuses a
+//! `text`-encoded Rust `String` for an inferred `uuid`/`jsonb` OID. So [`PgValue`] is a
+//! `ToSql` newtype that (a) `accepts` those non-text OIDs and (b) encodes its bytes in text
+//! format ([`Format::Text`]) — the server then applies its normal string-literal coercion
+//! (the same path `'…'::uuid` takes). This keeps the runtime free of per-column Postgres
+//! types while round-tripping every family. The mapping is pure and unit-tested below;
+//! connecting/executing is proven by `tests/postgres_integration.rs` against a live server.
 
 use std::time::Duration;
 
@@ -44,8 +40,8 @@ use crate::value::SqlValue;
 
 /// Postgres deadlock (`40P01`, `deadlock_detected`) and serialization failure (`40001`): the
 /// server rolled the transaction back for a concurrency conflict, so the mutation path may
-/// retry it . A `statement_timeout` cancel (`57014`) is *not* retried — re-running would
-/// just time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
+/// retry it. A `statement_timeout` cancel (`57014`) is not retried — re-running would just
+/// time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
 fn map_pg_err(e: postgres::Error) -> DbError {
     let kind = match e.code() {
         Some(c)
@@ -154,7 +150,7 @@ impl ToSql for PgValue {
 
 /// A returned column value → JSON (the shape the wire response is built from), read by the
 /// column's Postgres type. Numbers map to JSON numbers; every string-family type
-/// (text/uuid/timestamptz/date/jsonb) rides back as a JSON string . A genuinely
+/// (text/uuid/timestamptz/date/jsonb) rides back as a JSON string. A genuinely
 /// unknown/binary type falls back to lowercase hex (never a panic), matching the
 /// MariaDB/SQLite drivers' `from_*`.
 ///
@@ -260,8 +256,8 @@ fn pg_date(b: &[u8]) -> serde_json::Value {
 }
 
 /// A binary `jsonb` (a leading version byte — always `1` today — then the JSON text) → the
-/// JSON text (the wire carries JSON as a string, D1). Strips the version byte a raw read
-/// would otherwise prepend.
+/// JSON text (the wire carries JSON as a string). Strips the version byte a raw read would
+/// otherwise prepend.
 fn pg_jsonb(b: &[u8]) -> serde_json::Value {
     match b.split_first() {
         Some((1, rest)) => match std::str::from_utf8(rest) {
@@ -285,8 +281,7 @@ fn read_i32(b: &[u8]) -> Option<i32> {
 
 /// Civil date (year, month, day) from a day count since the Unix epoch (1970-01-01) — Howard
 /// Hinnant's branchless `civil_from_days` algorithm, valid across the whole proleptic
-/// Gregorian range with no date library (principle: no heavyweight dep for a closed-form
-/// calculation). Month is `1..=12`, day `1..=31`.
+/// Gregorian range with no date library. Month is `1..=12`, day `1..=31`.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -456,7 +451,7 @@ impl PgRouter {
     /// Check out a connection to a specific physical shard. `r2d2` waits at most the pool's
     /// configured `connection_timeout` (from [`PoolConfig::checkout_timeout`]) for a free
     /// connection, then errors — a saturated pool becomes a fast, retryable pool-exhausted
-    /// `503` , never a hung worker.
+    /// `503`, never a hung worker.
     pub fn checkout_shard(&self, shard: ShardId) -> Result<PostgresDb, DbError> {
         let pool = self
             .shards
@@ -479,8 +474,8 @@ impl PgRouter {
 
 /// The router is the Postgres [`Backend`]: it checks out a pooled [`PostgresDb`] for the
 /// key's shard. The HTTP edge depends only on this trait, so it is a drop-in beside the
-/// MariaDB `ShardRouter` with no change to `based serve` (D21 — the `Db` seam is dialect-
-/// agnostic; only the `Compiled.dialect` must match the backend, a deployment invariant).
+/// MariaDB `ShardRouter` with no change to `based serve` (the `Db` seam is dialect-agnostic;
+/// only the `Compiled.dialect` must match the backend, a deployment invariant).
 impl Backend for PgRouter {
     fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
         Ok(Box::new(PgRouter::checkout(self, shard_key)?))
@@ -499,8 +494,8 @@ impl Backend for PgRouter {
 }
 
 /// Build one shard's bounded connection pool from a `postgres://…` URL. The pool's
-/// `connection_timeout` is the checkout wait (pool-exhaustion → fast `503`, D65), and the
-/// server-side `statement_timeout`  is set as a startup option so every statement on a
+/// `connection_timeout` is the checkout wait (pool-exhaustion → fast `503`), and the
+/// server-side `statement_timeout` is set as a startup option so every statement on a
 /// pooled connection is capped — a runaway query is cancelled (`57014`) rather than hanging.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<PgPool, DbError> {
     let mut config = url

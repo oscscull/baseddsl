@@ -1,75 +1,54 @@
-//! based-runtime (M6) — the engine that turns a wire request into a bound,
-//! executable statement and shapes the result.
+//! The engine that turns a wire request into a bound, executable statement and shapes
+//! the result.
 //!
 //! The runtime is **in-process**: it holds the same [`CheckedSchema`] the compiler
-//! produced and reuses codegen's *one* lowering ([`based_codegen::sql::lower_queries`])
-//! rather than re-deriving SQL or reading a serialized artifact. So the executed SQL
-//! and its bind surface can never drift from what `based gen sql` emits (principle 4).
+//! produced and reuses codegen's one lowering ([`based_codegen::sql::lower_queries`])
+//! rather than re-deriving SQL, so the executed SQL and its bind surface never drift
+//! from what `based gen sql` emits.
 //!
-//! ## Request → response (read path, this slice)
+//! ## Request → response (read path)
 //! 1. [`load::Compiled::load`] runs the front end (discover → parse → check) and
 //!    lowers every query once.
-//! 2. [`plan::plan_query`] validates the request's args against the signature
-//!    (required / defaults / coercion, calling.md #3), threads `$ctx` (the
-//!    per-callable requirement bag, D4/D5), binds the `:name` placeholders to
-//!    positional `?` values, and picks the response [`plan::Envelope`] from the
-//!    query's inferred cardinality / pagination.
-//! 3. [`run::run_query`] executes via an abstract [`run::Db`] and shapes the rows
-//!    into the JSON envelope (`Option` for `get`, an array for `list`, the
-//!    `{ rows, cursor }` page envelope for a paginated `list`).
+//! 2. [`plan::plan_query`] validates the request's args against the signature, threads
+//!    `$ctx`, binds the `:name` placeholders to positional values, and picks the
+//!    response [`plan::Envelope`] from the query's inferred cardinality / pagination.
+//! 3. [`run::run_query`] executes via an abstract [`run::Db`] and shapes the rows into
+//!    the JSON envelope (`Option` for `get`, an array for `list`, the `{ rows, cursor }`
+//!    page envelope for a paginated `list`).
 //!
 //! ## Write path (mutations)
-//! [`plan::plan_mutation`] mirrors the read path: it validates args + `$ctx`, then
-//! generates each `create`'s engine `id` ([`id::IdGen`], D1) and binds every write
-//! statement positionally (a `^.id` back-reference reuses the value its create
-//! generated). [`run::run_mutation`] executes the writes in order under one
-//! engine-owned transaction (principle 7 — [`run::Db`] grows `execute`/`begin`/
-//! `commit`) and returns the write response. Codegen's [`based_codegen::sql::lower_mutations`]
-//! is the one lowering both `based gen sql` and the runtime read, so the executed
-//! writes can never drift from the emitted SQL either.
+//! [`plan::plan_mutation`] mirrors the read path, then generates each `create`'s engine
+//! `id` ([`id::IdGen`]) and binds every write statement positionally (a `^.id`
+//! back-reference reuses the value its create generated). [`run::run_mutation`] executes
+//! the writes in order under one engine-owned transaction.
 //!
-//! A mutation may carry an **idempotency key** ([`idempotency`], D25): app-side id-gen
-//!  means a naive client retry after a `503`/timeout would double-insert, so a keyed
-//! mutation runs its write body **at most once** per key — a retry replays the first
-//! attempt's stored response via the [`idempotency::IdempotencyStore`] seam. The key is
-//! out-of-band request metadata (the `Idempotency-Key` header), never the body or a
-//! schema field.
+//! A mutation may carry an **idempotency key** ([`idempotency`]): a keyed mutation runs
+//! its write body at most once per key — a retry replays the first attempt's stored
+//! response. The key is out-of-band request metadata (the `Idempotency-Key` header),
+//! never the body or a schema field.
 //!
 //! ## Wire + driver
 //! [`serve::dispatch`] is the wire surface: it routes `POST /q|m/<name>` → the callable,
-//! runs it, and maps every outcome to a [`serve::WireResponse`] (HTTP status + JSON) —
-//! a pure core testable against [`run::MockDb`], no socket. Every [`run::Db`] method is
-//! **fallible** (a dependable driver surfaces failures, not panics); a boundary
-//! [`plan::PlanError`] maps to `4xx`, a [`run::DbError`] to a retryable `503`.
+//! runs it, and maps every outcome to a [`serve::WireResponse`] — a pure core testable
+//! against [`run::MockDb`], no socket. A boundary [`plan::PlanError`] maps to `4xx`, a
+//! [`run::DbError`] to a retryable `503`.
 //!
-//! The concrete [`driver::MariaDb`] (feature `mariadb`) is the production `Db` over one
-//! pooled connection, and [`driver::ShardRouter`] is the scale-out seam: one bounded
-//! pool per physical shard, single-shard dispatch by a stable logical-shard hash (no
-//! scatter-gather → a `tx` is one shard, no distributed transaction; add capacity
-//! without rehashing keys).
+//! The concrete [`driver::MariaDb`] is the production `Db` over one pooled connection,
+//! and [`driver::ShardRouter`] is the scale-out seam: one bounded pool per physical
+//! shard, single-shard dispatch by a stable logical-shard hash.
 //!
-//! ## The socket edge (feature `serve`, D21)
+//! ## The socket edge (feature `serve`)
 //! [`http::serve`] is the HTTP listener (`based serve`): a sync bounded worker-thread
-//! pool over `tiny_http`, decoding each request into `dispatch`'s arguments. `$ctx`
-//! comes from headers via a pluggable [`http::ContextSource`], never the body
-//! (auth.md/D7); ids come from the production [`id::UuidGen`]. The edge depends only on
-//! the driver-neutral [`run::Backend`] seam (a connection source yielding a boxed
-//! [`run::Db`]), so a second backend drops in without a change here — the `Db` trait
-//! speaks positional SQL + [`value::SqlValue`], not a MariaDB protocol (multi-dialect
-//! readiness, D21). [`sqlite::SqliteBackend`] (feature `sqlite`, D27) is that proof: an
-//! infra-free in-memory `Db`/`Backend` that runs the runtime's real read/write SQL,
-//! backing end-to-end integration tests against a genuine engine (a future Postgres /
-//! MySQL backend is the same shape).
+//! pool over `tiny_http`. `$ctx` comes from headers via a pluggable
+//! [`http::ContextSource`], never the body. The edge depends only on the driver-neutral
+//! [`run::Backend`] seam, so a second backend drops in without a change here.
+//! [`sqlite::SqliteBackend`] is an infra-free in-memory `Db`/`Backend` for end-to-end
+//! integration tests against a genuine engine.
 //!
-//! ## The in-process door (Tier 1)
+//! ## The in-process door
 //! [`embed::Engine`] is the library twin of the HTTP edge: a [`Compiled`] schema over one
-//! [`run::Db`] and an [`id::IdGen`], run straight through the same [`serve::dispatch`] core
-//! with **no socket**. It backs the *same typed generated client* (`based gen client`) via a
-//! tiny `impl Transport` in the embedding crate — one binary, no sidecar. See `embed` for the
-//! bridge and `tests/embed.rs` for a worked end-to-end example over [`run::MockDb`].
-//!
-//! A write reads its written row back in its declared shape under the same tx
-//! (declared-shape re-select, D12/D58).
+//! [`run::Db`] and an [`id::IdGen`], run straight through the same [`serve::dispatch`]
+//! core with no socket. It backs the same typed generated client (`based gen client`).
 
 pub mod cursor;
 pub mod embed;

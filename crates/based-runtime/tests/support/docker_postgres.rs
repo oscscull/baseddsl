@@ -1,11 +1,11 @@
-//! Docker-backed ephemeral Postgres harness for real-DB integration tests (A3/D38).
+//! Docker-backed ephemeral Postgres harness for real-DB integration tests.
 //!
 //! The twin of [`docker_mariadb`](super::docker_mariadb): it brings up a throwaway Postgres
 //! server in a container, waits for it to accept connections, and tears it down when the test
 //! ends — so `tests/postgres_integration.rs` can run the *verbatim* Postgres-lowered
-//! (`$n`-bound, D29) `based gen sql` output against a genuine server instead of a `MockDb`.
+//! (`$n`-bound) `based gen sql` output against a genuine server instead of a `MockDb`.
 //! It shells out to the `docker` CLI directly (a thin guard, not a heavy testcontainers
-//! dependency — principle 7, and no async runtime pulled into the sync codebase).
+//! dependency, and no async runtime pulled into the sync codebase).
 //!
 //! **No daemon ⇒ skip, never fail.** [`PostgresContainer::start`] returns `None` when the
 //! Docker daemon is unreachable or the image/run/readiness steps do not complete, logging a
@@ -13,7 +13,7 @@
 //! --all-features` stays green on a machine with no Docker — the real-DB proof runs *when
 //! infra is present* and is simply absent otherwise (never a red build for want of infra).
 //!
-//! **CI-provided server ⇒ use it, don't spin one .** When `TEST_POSTGRES_URL` is set,
+//! **CI-provided server ⇒ use it, don't spin one.** When `TEST_POSTGRES_URL` is set,
 //! [`PostgresContainer::start`] connects to *that* server (a CI service container, a shared
 //! dev DB, …) instead of launching its own — after the same readiness-wait, so the suite
 //! never races a still-booting server; `Drop` then leaves the external server alone. This is
@@ -29,7 +29,7 @@ use based_runtime::pg_connect;
 
 /// A pinned Postgres image. Pinned (not `latest`) so the suite tests a known server version
 /// and a CI cache stays warm; 16 is a current stable major with the native `uuid` /
-/// `timestamptz` / `jsonb` types the generated Postgres DDL emits .
+/// `timestamptz` / `jsonb` types the generated Postgres DDL emits.
 const IMAGE: &str = "postgres:16";
 
 /// The in-container superuser password + database the harness provisions. The server is

@@ -34,7 +34,7 @@ fn req(name: &str, args: serde_json::Value) -> Request {
     Request::new(name, args, json!({}))
 }
 
-/// A canned result row for a `MockDb` re-select response (the D12 declared-shape read-back).
+/// A canned result row for a `MockDb` re-select response (the declared-shape read-back).
 fn row(pairs: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     pairs.as_object().cloned().unwrap()
 }
@@ -97,7 +97,7 @@ fn run_create_reselects_the_declared_shape_inside_the_tx() {
     let c = compile(CREATE_SCHEMA);
     let mut ids = SeqIdGen::default();
     // The mutation returns `OrderCard { total }`, so after the INSERT the engine
-    // re-selects the created row in that shape . The mock replies to that fetch
+    // re-selects the created row in that shape. The mock replies to that fetch
     // with the shaped row — which becomes the response, not a bare `{ id }`.
     let mut db = MockDb::new(vec![vec![row(json!({ "total": 42 }))]]);
     let out = run_mutation(
@@ -116,7 +116,7 @@ fn run_create_reselects_the_declared_shape_inside_the_tx() {
     // not `{ id }`.
     assert_eq!(out, json!({ "total": 42 }));
     // The re-select runs inside the transaction: INSERT then the shaped SELECT, all
-    // between one begin/commit (principle 7).
+    // between one begin/commit.
     assert_eq!(db.tx, vec!["begin", "commit"]);
     assert_eq!(db.calls.len(), 2);
     let (write_sql, _) = &db.calls[0];
@@ -188,7 +188,7 @@ fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
         ]
     );
     // No create, so no engine id — but the updated row survives, so the declared shape is
-    // re-selected keyed off the write `where` : `id = :id`, then the live + scope
+    // re-selected keyed off the write `where`: `id = :id`, then the live + scope
     // guards, all reusing the write's already-bound params.
     assert!(plan.result_id.is_none());
     let rs = plan.ret_select.as_ref().expect("where-keyed re-select");
@@ -232,7 +232,7 @@ fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
     );
     let mut ids = SeqIdGen::default();
     // The soft-deleted row survives (tombstoned), so after the write the engine re-selects
-    // it in its declared shape  — the mock replies to that fetch with the shaped row.
+    // it in its declared shape — the mock replies to that fetch with the shaped row.
     let mut db = MockDb::new(vec![vec![row(json!({ "status": "cancelled" }))]]);
     let out = run_mutation(
         &c,
@@ -336,13 +336,13 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     assert!(db.calls[2].0.starts_with("SELECT"), "{}", db.calls[2].0);
 }
 
-// ---------- deadlock-retry  -------------------------------------------
+// ---------- deadlock-retry -------------------------------------------
 
 use based_runtime::{DbError, DbErrorKind, Row, RunError};
 
 /// A `Db` that fails its first `deadlocks` transaction attempts with a deadlock-class
 /// error, then succeeds — modelling a real server aborting the losing side of a lock
-/// conflict . Each attempt is one `begin → execute → fetch(re-select) → commit`
+/// conflict. Each attempt is one `begin → execute → fetch(re-select) → commit`
 /// cycle; the deadlock fires on the first `execute` (as a real server would, mid-write),
 /// so the engine rolls back and re-runs the whole transaction.
 struct DeadlockThenOk {

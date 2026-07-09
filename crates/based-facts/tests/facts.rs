@@ -1,5 +1,5 @@
-//! Tests for the derived-fact computation: parse a snippet, check it, and assert
-//! on the facts an editor would surface (principle 8).
+//! Tests for the derived-fact computation: parse a snippet, check it, and assert on
+//! the facts an editor would surface.
 
 use based_ast::FileId;
 use based_facts::{facts, Fact, FactKind};
@@ -116,7 +116,7 @@ fn no_derived_facts_on_a_flat_schema() {
 #[test]
 fn resolved_query_shape_is_shown() {
     // Neither `list` nor the target `Product` appears in the signature — both are
-    // inferred from the return shape + cardinality (queries.md).
+    // inferred from the return shape + cardinality.
     let fs = facts_of(
         r#"
         Product { name: text, @index name }

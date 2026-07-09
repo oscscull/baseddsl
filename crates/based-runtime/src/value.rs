@@ -1,16 +1,16 @@
 //! The driver-agnostic bound value and JSON coercion.
 //!
 //! A wire request carries JSON; the driver wants typed scalars. `SqlValue` is the
-//! neutral middle — one variant per storable family. Coercion is *family-aware*:
-//! the signature says a param is an `int`, so a JSON string is rejected at the
-//! boundary before any SQL runs (calling.md #3). Families are coarse on purpose,
-//! matching sema's `=`-operand families : `uuid`/`timestamp`/`date`/`Id` all
-//! ride as text, since on the wire they are strings.
+//! neutral middle — one variant per storable family. Coercion is family-aware: the
+//! signature says a param is an `int`, so a JSON string is rejected at the boundary
+//! before any SQL runs. Families are coarse on purpose, matching sema's `=`-operand
+//! families: `uuid`/`timestamp`/`date`/`Id` all ride as text, since on the wire they are
+//! strings.
 
 use based_ast::Primitive;
 
-/// A bound argument that fills one placeholder. Neutral across drivers: the
-/// concrete driver (next slice) maps these onto its parameter binding.
+/// A bound argument that fills one placeholder. Neutral across drivers: the concrete
+/// driver maps these onto its parameter binding.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlValue {
     Null,
@@ -23,8 +23,8 @@ pub enum SqlValue {
 
 /// The coercion target for one input: the family a JSON value must fit, plus
 /// whether `null` is allowed. `Any` accepts a value shaped however the JSON is
-/// (used for an untyped param whose column type the runtime does not re-derive
-/// this slice — the typed client already sends the right shape).
+/// (used for an untyped param whose column type the runtime does not re-derive —
+/// the typed client already sends the right shape).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Int,

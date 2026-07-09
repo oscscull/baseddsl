@@ -1,7 +1,8 @@
 //! based-ast — the shared AST vocabulary.
 //!
-//! Mirrors `spec/grammar.ebnf` node-for-node. No logic lives here; parser builds
-//! these, sema/codegen read them. Spans ride the nodes that produce diagnostics.
+//! Mirrors the canonical grammar node-for-node. No logic lives here; the parser
+//! builds these, sema/codegen read them. Spans ride the nodes that produce
+//! diagnostics.
 
 // ---------- Source positions ----------------------------------------------
 
@@ -24,14 +25,13 @@ pub struct Spanned<T> {
     pub span: Span,
 }
 
-/// An identifier token. Casing is load-bearing (decisions.md D7) — preserved verbatim.
+/// An identifier token. Casing is load-bearing — preserved verbatim.
 pub type Ident = Spanned<String>;
 
 // ---------- Files ----------------------------------------------------------
 // One extension (`.bsl`); the grammar is uniform across files. Any declaration
-// may appear in any file. Splitting schema vs access into separate files
-// (e.g. `product/model.bsl` + `product/queries.bsl`) is a recommended
-// convention, not enforced (decisions.md D6/D9).
+// may appear in any file. Splitting schema vs access into separate files is a
+// recommended convention, not enforced.
 
 /// A parsed source file: an ordered list of top-level declarations.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,13 +49,13 @@ pub enum Decl {
     Filter(NamedFilter),
 }
 
-// ---------- Scopes (auth.md Handle 2, D46/D47) -----------------------------
+// ---------- Scopes ---------------------------------------------------------
 
 /// `scope Name (col: Type = $ctx.field, …)` — a named row-visibility contract,
 /// declared once and referenced by name on the model (`@scope Name`) and every
-/// callable that touches it (`scoped Name`). The predicate is the D32 restricted
-/// form (a conjunction of `col = $ctx.field`); the term's `Type` is the one place
-/// the scope column's — and thus `$ctx.field`'s — type is declared (D46, P4).
+/// callable that touches it (`scoped Name`). The predicate is the restricted form
+/// (a conjunction of `col = $ctx.field`); the term's `Type` is the one place the
+/// scope column's — and thus `$ctx.field`'s — type is declared.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopeDecl {
     pub name: Ident,
@@ -75,9 +75,9 @@ pub struct ScopeTerm {
 }
 
 /// One `@scope Name[, Name]*` decorator on a model — **one alternative** of the
-/// model's scope DNF (auth.md / D47): the comma-separated names are a conjunction
-/// (all required together). A model stacks these; the stack is the OR of
-/// alternatives. `@scope` is repeatable, so a model carries a `Vec<ScopeRef>`.
+/// model's scope DNF: the comma-separated names are a conjunction (all required
+/// together). A model stacks these; the stack is the OR of alternatives. `@scope`
+/// is repeatable, so a model carries a `Vec<ScopeRef>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopeRef {
     pub names: Vec<Ident>,
@@ -85,9 +85,9 @@ pub struct ScopeRef {
 }
 
 /// `scoped Name[, Name]*` — the per-callable acknowledgement of the standing scope(s)
-/// injected (auth.md Handle 2 / D46). Mutually exclusive with `unscoped(…)`; sits
-/// where `unscoped` sits. The named set must be a superset of ≥1 declared `@scope`
-/// alternative of each scoped model the callable touches (`E0185`).
+/// injected. Mutually exclusive with `unscoped(…)`; sits where `unscoped` sits. The
+/// named set must be a superset of ≥1 declared `@scope` alternative of each scoped
+/// model the callable touches (`E0185`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scoped {
     pub names: Vec<Ident>,
@@ -99,9 +99,9 @@ pub struct Scoped {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     pub decorators: Vec<Decorator>,
-    /// `@scope Name[, Name]*` decorators (auth.md / D46/D47). A distinct form from
-    /// the generic parenthesized `decorators` (bare names, no predicate — the
-    /// predicate lives in the `scope` decl, P4). Each entry is one alternative.
+    /// `@scope Name[, Name]*` decorators. A distinct form from the generic
+    /// parenthesized `decorators` (bare names, no predicate — the predicate lives in
+    /// the `scope` decl). Each entry is one alternative.
     pub scopes: Vec<ScopeRef>,
     pub name: Ident,
     pub members: Vec<Member>,
@@ -109,11 +109,8 @@ pub struct Model {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-// `Field` is much larger than the other variants (it inlines `TypeExpr`,
-// optional `Predicate`, and several `Vec`s). We keep it unboxed on purpose: this
-// is a build-once AST whose ergonomics — matching `Member::Field(f)` and reading
-// `f.relation_on` without a `Box` hop — matter more than the layout win. Box the
-// heavy *fields* instead if AST size ever shows up in a profile.
+// `Field` dwarfs the other variants but is kept unboxed on purpose: this build-once
+// AST's match ergonomics matter more than the layout win.
 #[allow(clippy::large_enum_variant)]
 pub enum Member {
     Field(Field),
@@ -130,9 +127,9 @@ pub struct Field {
     pub relation_on: Option<Predicate>,
     pub sort: Option<Vec<SortTerm>>,
     /// `@was("old_col")` — the field's previous physical column name, driving a clean
-    /// `rename column` in the diff instead of drop+add (migrations.md). Transient by
-    /// nature (removed once the rename is captured). The `Ident` carries the old name
-    /// (unquoted) and the string-literal span for diagnostics.
+    /// `rename column` in the diff instead of drop+add. Transient by nature (removed
+    /// once the rename is captured). The `Ident` carries the old name (unquoted) and
+    /// the string-literal span for diagnostics.
     pub was: Option<Ident>,
     pub span: Span,
 }
@@ -148,7 +145,7 @@ pub struct TypeExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BaseType {
     Primitive(Primitive),
-    /// UpperCamel model reference; resolves to a declared model (D7).
+    /// UpperCamel model reference; resolves to a declared model.
     Model(Ident),
 }
 
@@ -175,7 +172,7 @@ pub struct InverseRef {
 pub enum Modifier {
     Unique,
     Default(DefaultVal),
-    /// `(column "legacy_name")` — alias onto a legacy / reserved-word column (D8).
+    /// `(column "legacy_name")` — alias onto a legacy / reserved-word column.
     Column(String),
 }
 
@@ -254,21 +251,20 @@ pub struct Query {
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: RetType,
-    /// `scoped Name[, Name]*` — accept the standing scope(s) on the target (auth.md / D46).
+    /// `scoped Name[, Name]*` — accept the standing scope(s) on the target.
     /// Mutually exclusive with `unscoped`.
     pub scoped: Option<Scoped>,
-    /// `unscoped("reason")` — opt this callable out of `@scope` injection (auth.md / D32).
+    /// `unscoped("reason")` — opt this callable out of `@scope` injection.
     pub unscoped: Option<Unscoped>,
     pub body: QueryBody,
     pub span: Span,
 }
 
-/// `unscoped("reason")` — a per-callable opt-out of `@scope` injection (auth.md / D32),
-/// the escape hatch cross-scope access (admin/support/jobs) needs. The reason string is
-/// mandatory: an escape hatch is never silent (principle 6). It is greppable (every
-/// cross-scope site is one `grep unscoped`) and linted (`W0106` when the target model
-/// carries no `@scope` to opt out of). It forfeits *only* `@scope`; soft-delete still
-/// applies.
+/// `unscoped("reason")` — a per-callable opt-out of `@scope` injection, the escape
+/// hatch cross-scope access (admin/support/jobs) needs. The reason string is
+/// mandatory (an escape hatch is never silent), greppable, and linted (`W0106` when
+/// the target model carries no `@scope` to opt out of). It forfeits *only* `@scope`;
+/// soft-delete still applies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unscoped {
     pub reason: String,
@@ -328,8 +324,8 @@ pub enum Clause {
     Unindexed(Unindexed),
 }
 
-/// `unindexed(...)` — the query is knowingly unindexed (indexing.md): satisfies
-/// the missing-index lint without declaring an index.
+/// `unindexed(...)` — the query is knowingly unindexed: satisfies the missing-index
+/// lint without declaring an index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unindexed {
     pub kind: UnindexedKind,
@@ -370,11 +366,11 @@ pub struct Mutation {
     pub params: Vec<Param>,
     pub ret: RetType,
     pub guard: Option<Ident>,
-    /// `scoped Name[, Name]*` — accept the standing scope(s) on the written model(s)
-    /// (auth.md / D46). Mutually exclusive with `unscoped`.
+    /// `scoped Name[, Name]*` — accept the standing scope(s) on the written model(s).
+    /// Mutually exclusive with `unscoped`.
     pub scoped: Option<Scoped>,
-    /// `unscoped("reason")` — opt this mutation out of `@scope` injection (auth.md / D32):
-    /// its writes carry no scope guard *and* a `create` does not auto-set the scope column.
+    /// `unscoped("reason")` — opt this mutation out of `@scope` injection: its writes
+    /// carry no scope guard *and* a `create` does not auto-set the scope column.
     pub unscoped: Option<Unscoped>,
     pub body: Vec<WriteStmt>,
     pub span: Span,
@@ -461,7 +457,7 @@ pub enum Value {
     Path(Path),
     Lit(Literal),
     Func(FuncCall),
-    /// `^.field` — a tx back-reference (mutations.md). Reads a field of the row the
+    /// `^.field` — a tx back-reference. Reads a field of the row the
     /// immediately preceding `create` in the enclosing `tx` produced (the FK-wiring
     /// case is `user = ^.id`). Legal only in a `tx` write body.
     Back(BackRef),
@@ -474,7 +470,7 @@ pub struct BackRef {
     pub span: Span,
 }
 
-/// `$name` or `$ctx.org` (decisions.md D4).
+/// `$name` or `$ctx.org`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamRef {
     pub name: Ident,
@@ -504,8 +500,8 @@ pub enum Literal {
 
 // ---------- Raw SQL escape hatch ------------------------------------------
 
-/// `sql`...`` with `${param}` / `{ident}` interpolations preserved as parts so
-/// the engine can bind params and lint soft-delete gaps (raw.md).
+/// `sql`...`` with `${param}` / `{ident}` interpolations preserved as parts so the
+/// engine can bind params and lint soft-delete gaps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawSql {
     pub parts: Vec<RawPart>,

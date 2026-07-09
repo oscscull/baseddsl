@@ -1,8 +1,8 @@
-//! End-to-end integration against a **real** Postgres server, over Docker (A3/D38).
+//! End-to-end integration against a **real** Postgres server, over Docker.
 //!
 //! The Postgres twin of `mariadb_integration.rs`: it loads the *actual* commerce schema (the
 //! same discover → parse → check front end the CLI uses), lowers it for **`Dialect::Postgres`**
-//! (so the DML binds `$n`, D29 — *not* the manifest's `mariadb`), creates its tables from the
+//! (so the DML binds `$n` — *not* the manifest's `mariadb`), creates its tables from the
 //! *generated* Postgres DDL (`sql::ddl(_, Dialect::Postgres)`), and drives real requests
 //! through `serve::dispatch` against the concrete `PostgresDb` driver checked out of a live
 //! `PgRouter`. What runs is the *verbatim* codegen-lowered Postgres SQL — bound positionally
@@ -122,7 +122,7 @@ fn compile(src: &str) -> Compiled {
 /// Bring up a live Postgres, compile an in-line schema for Postgres, and create its tables from
 /// the generated Postgres DDL — returning the router + schema + container for a test to seed and
 /// drive. Returns `None` when Docker is unavailable (the caller skips). The `id: text` columns
-/// these schemas declare map to `TEXT` , so the fixtures use plain string ids.
+/// these schemas declare map to `TEXT`, so the fixtures use plain string ids.
 fn live_schema(src: &str) -> Option<(Compiled, PgRouter, PostgresContainer)> {
     let container = PostgresContainer::start()?;
     let compiled = compile(src);
@@ -138,7 +138,7 @@ fn live_schema(src: &str) -> Option<(Compiled, PgRouter, PostgresContainer)> {
 }
 
 /// Drop and recreate the `public` schema before creating tables, so a suite run against a
-/// *persistent* external server (`TEST_POSTGRES_URL`, D64) starts clean and is re-runnable.
+/// *persistent* external server (`TEST_POSTGRES_URL`) starts clean and is re-runnable.
 /// `CASCADE` clears tables + the `_based_migrations` ledger in one step; a no-op-equivalent
 /// against a fresh self-spun container.
 const RESET_SQL: &str = "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;";
@@ -180,7 +180,7 @@ fn get_query_runs_against_live_postgres() {
         "POST",
         "/q/order_by_id",
         json!({ "id": ORDER_1 }),
-        // Order is `@scope`d : even a keyed `get` is org-scoped, so `$ctx.org` is
+        // Order is `@scope`d: even a keyed `get` is org-scoped, so `$ctx.org` is
         // required. order-1 belongs to org-1, visible to this caller.
         json!({ "org": ORG_1 }),
     );
@@ -247,7 +247,7 @@ fn ctx_scoped_list_filters_by_org() {
 #[test]
 fn mutation_writes_then_reselects_declared_shape() {
     // `place_order` creates an Order (engine-generated uuid) and reads it back in its declared
-    // OrderCard shape , all under one transaction — the full write path against a real
+    // OrderCard shape, all under one transaction — the full write path against a real
     // engine: INSERT commits, the re-select joins and projects (read-your-writes). Proves the
     // engine-generated uuid round-trips through the Postgres `uuid` column via the value mapping.
     let Some((c, router, _guard)) = live() else {
@@ -258,7 +258,7 @@ fn mutation_writes_then_reselects_declared_shape() {
         &router,
         "POST",
         "/m/place_order",
-        // `org` is `@scope`-managed on create : supplied via `$ctx`, auto-set on the
+        // `org` is `@scope`-managed on create: supplied via `$ctx`, auto-set on the
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
         json!({ "buyer": USER_1, "total": 99 }),
         json!({ "org": ORG_1 }),
@@ -284,7 +284,7 @@ fn mutation_writes_then_reselects_declared_shape() {
 
 #[test]
 fn joined_scope_projects_live_across_the_join() {
-    // D34 against a live server: `order_by_id` reaches org-scoped `User`/`Org` through the
+    // Against a live server: `order_by_id` reaches org-scoped `User`/`Org` through the
     // Order relations, and the joined `@scope`d `ON` still projects the joined names for an
     // in-scope caller (the same join that would come back NULL for an out-of-scope owner). The
     // dedicated cross-scope case is covered on SQLite; here we assert the join projects live.
@@ -307,7 +307,7 @@ fn joined_scope_projects_live_across_the_join() {
 
 #[test]
 fn idempotency_key_dedupes_a_retried_write() {
-    // A keyed mutation runs its write body at most once per key : a retry with the same
+    // A keyed mutation runs its write body at most once per key: a retry with the same
     // key + payload replays the recorded response instead of double-inserting. Proven against a
     // live engine — the second call must not create a second order.
     let Some((c, router, _guard)) = live() else {
@@ -362,7 +362,7 @@ fn idempotency_key_dedupes_a_retried_write() {
 
 #[test]
 fn backend_ping_succeeds_on_a_live_server() {
-    // The readiness seam  works against a real Postgres: `PgRouter::ping` runs `SELECT 1`
+    // The readiness seam works against a real Postgres: `PgRouter::ping` runs `SELECT 1`
     // on every shard's pooled connection.
     let Some((_c, router, _guard)) = live() else {
         return;
@@ -370,7 +370,7 @@ fn backend_ping_succeeds_on_a_live_server() {
     assert!(router.ping().is_ok());
 }
 
-/// Keyset-cursor pagination (L2/D56), proven against a live Postgres — the Postgres twin of the
+/// Keyset-cursor pagination, proven against a live Postgres — the Postgres twin of the
 /// SQLite live keyset test. A `page (2)` keyset query walks the whole set exactly once: each full
 /// page returns its window plus an opaque cursor, the final short page returns a `null` cursor,
 /// and the cursor works even though the sort basis (`rank`, `id`) is not projected (the runtime
@@ -430,7 +430,7 @@ fn keyset_pagination_walks_the_set() {
     assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
 }
 
-/// Explicit offset pagination (`page (2) offset`, pagination.md), proven live against Postgres.
+/// Explicit offset pagination (`page (2) offset`), proven live against Postgres.
 /// The client supplies an `offset`; the runtime binds it into `LIMIT … OFFSET …`. Paging
 /// full→full→short walks the set, and an offset page envelope carries a `null` cursor (offset is
 /// not keyset).
@@ -535,9 +535,9 @@ fn uuid_and_timestamp_columns_round_trip_and_keyset() {
     assert_eq!(p2.body["cursor"], json!(null), "last page has no cursor");
 }
 
-/// Soft-delete + restore read-back (soft-delete.md / D58), proven live against Postgres. A soft
+/// Soft-delete + restore read-back, proven live against Postgres. A soft
 /// `delete` rewrites to `deleted_at = now()` (never a real DELETE) and reads the tombstoned row
-/// back in its declared shape ; the row then
+/// back in its declared shape; the row then
 /// vanishes from a live `list` (the soft-delete predicate is injected). `restore` clears the
 /// tombstone and reads the row back with the live predicate applied — visible again.
 #[test]
@@ -568,7 +568,7 @@ fn soft_delete_and_restore_read_back() {
         json!([{ "name": "Alpha" }, { "name": "Beta" }])
     );
 
-    // Soft delete w1: rewritten to a tombstone, read back in shape .
+    // Soft delete w1: rewritten to a tombstone, read back in shape.
     let del = call(
         &c,
         &router,
@@ -602,7 +602,7 @@ fn soft_delete_and_restore_read_back() {
     );
 }
 
-// ---------- live-DB hardening (Track A4 / D65) ------------------------------
+// ---------- live-DB hardening ------------------------------
 
 /// Bring up a live Postgres and build a router with the given [`PoolConfig`] — the seam for
 /// the hardening tests, which each vary one knob (statement timeout, pool size, checkout
@@ -617,7 +617,7 @@ fn hardening(pool: PoolConfig) -> Option<(PgRouter, PostgresContainer)> {
     Some((router, container))
 }
 
-/// A `statement_timeout` aborts a query that runs too long, live : the server cancels
+/// A `statement_timeout` aborts a query that runs too long, live: the server cancels
 /// `pg_sleep(5)` at the 500ms ceiling and the driver surfaces a `DbError` promptly, rather
 /// than the connection hanging for the full sleep.
 #[test]
@@ -643,7 +643,7 @@ fn statement_timeout_aborts_a_long_query() {
     );
 }
 
-/// A saturated pool fails fast as pool-exhausted , live: with a pool of one, a held
+/// A saturated pool fails fast as pool-exhausted, live: with a pool of one, a held
 /// connection means the next checkout waits at most `checkout_timeout` then returns a
 /// [`DbErrorKind::PoolExhausted`] `DbError` (the wire's 503) — never an unbounded hang.
 #[test]
@@ -673,8 +673,8 @@ fn pool_exhaustion_fails_fast() {
     );
 }
 
-/// Two concurrent transactions that lock the same two rows in opposite order deadlock, live
-/// : the server aborts exactly one side with a deadlock-class error (`40P01`) the driver
+/// Two concurrent transactions that lock the same two rows in opposite order deadlock, live:
+/// the server aborts exactly one side with a deadlock-class error (`40P01`) the driver
 /// classifies as [`DbErrorKind::Deadlock`] (so the mutation path would retry it), and the
 /// other commits. The barrier guarantees both hold their first lock before either reaches for
 /// the second, so the deadlock is deterministic.

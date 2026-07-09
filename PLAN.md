@@ -553,10 +553,11 @@ codes) + `tests/conformance.rs` (a golden harness over `tests/conformance-sema/<
   isn't obvious from the message.
 - Audience is LLMs + reviewers: optimize tokens-to-comprehend, readable > terse
   (CLAUDE.md). Match surrounding comment density.
-- **Comments state what + why, briefly — never build-time narration.** Source is finished
-  source, not a scratch pad: no "here's what I'm building" / WIP running commentary (it reads
-  as unfinished and leads humans *and* agents off task). TODOs live in PLAN.md / roadmap `.md`,
-  not inline, unless genuinely must-do/blocking. (The one-time cleanup of existing narration was Track F1, D69.)
+- **Comments only where a reader can't infer *what* the code does from the code itself.**
+  Most code needs none; a few key entry points get a short doc block. No cross-refs to
+  D#/M#/PLAN/DoD/decisions in source. No WIP/rationale/narration — it reads as unfinished and
+  leads humans *and* agents off task; that lives in spec/decisions/PLAN. TODOs go in PLAN.md /
+  roadmap `.md`, not inline, unless genuinely must-do/blocking.
 - **Keep this file lean.** PLAN.md is the resume read; shipped-work narration goes to
   `PLAN-archive.md`, per-decision detail to `spec/decisions.md`. Add a one-line status + D# here,
   not a paragraph.

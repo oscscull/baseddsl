@@ -1,19 +1,16 @@
-//! Opaque keyset cursor encode/decode (pagination.md).
+//! Opaque keyset cursor encode/decode.
 //!
 //! A keyset page returns a cursor the caller passes back for the next page. The cursor
-//! is **opaque** (the caller never assembles keyset mechanics) and **validated** (a
-//! corrupt/tampered cursor is rejected, not fed to the query). It carries the previous
-//! page's last-row sort-key values — exactly the `ORDER BY` basis codegen emitted as
-//! hidden `__keyset_<i>` columns — which the runtime binds into the `:keyset_<i>`
-//! placeholders of the cursor comparison.
+//! is opaque and validated (a corrupt/tampered cursor is rejected, not fed to the
+//! query). It carries the previous page's last-row sort-key values — the `ORDER BY`
+//! basis codegen emitted as hidden `__keyset_<i>` columns — which the runtime binds into
+//! the `:keyset_<i>` placeholders of the cursor comparison.
 //!
 //! Wire form: `<checksum-hex>.<payload-hex>`, where the payload is the JSON array of
 //! sort-key values and the checksum is an FNV-1a hash of it. The checksum catches
-//! corruption/truncation and cheap tampering; it is **not** a cryptographic signature
-//! (that needs a server secret). The real safety property — no predicate
-//! injection — holds regardless: cursor values only ever fill bound parameters, never
-//! concatenate into SQL, so even a forged cursor can shift *which* rows are returned
-//! (values the caller could read off the results anyway) but never inject SQL.
+//! corruption/truncation and cheap tampering; it is not a cryptographic signature.
+//! Cursor values only ever fill bound parameters, never concatenate into SQL, so even a
+//! forged cursor can shift which rows are returned but never inject SQL.
 
 use crate::value::{coerce, Family, SqlValue};
 
@@ -59,8 +56,8 @@ pub fn decode(s: &str, n: usize) -> Result<Vec<SqlValue>, CursorError> {
         .collect())
 }
 
-/// FNV-1a 64-bit — the same lightweight non-cryptographic hash the idempotency
-/// fingerprint uses (plan.rs); here it is a tamper/corruption checksum, not a signature.
+/// FNV-1a 64-bit — a lightweight non-cryptographic tamper/corruption checksum, not a
+/// signature.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {

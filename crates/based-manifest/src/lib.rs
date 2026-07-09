@@ -1,4 +1,4 @@
-//! based-manifest — project manifest + schema discovery (decisions.md D5).
+//! based-manifest — project manifest + schema discovery.
 //!
 //! Resolves `based.toml` and globs `**/*.bsl` under the schema root into the
 //! closed file set the rest of the compiler consumes. Layout is free; directory
@@ -41,7 +41,7 @@ pub struct Project {
     pub files: Vec<DiscoveredFile>,
 }
 
-/// The manifest file name at a project root (decisions.md D5).
+/// The manifest file name at a project root.
 pub const MANIFEST_NAME: &str = "based.toml";
 
 /// Load the manifest at `root/based.toml` and glob `**/*.bsl` under the schema

@@ -5,17 +5,17 @@
 //! JSON body). It links no HTTP library and opens no socket, so the whole route →
 //! response path is testable against a [`crate::run::MockDb`] with no network and no
 //! database. The concrete listener (`based serve`) is a thin edge that decodes the
-//! socket into these arguments and writes the response back (D18: the network is a
-//! driver concern, kept out of the core).
+//! socket into these arguments and writes the response back (the network is a driver
+//! concern, kept out of the core).
 //!
-//! ## Wire contract (calling.md)
+//! ## Wire contract
 //! - `POST /q/<name>` runs query `<name>`; `POST /m/<name>` runs mutation `<name>`.
-//!   The route *prefix* is authoritative — a name looked up under the wrong verb is a
+//!   The route prefix is authoritative — a name looked up under the wrong verb is a
 //!   404, never a silent cross-dispatch.
-//! - The JSON body is the argument object (calling.md #2). It carries **arguments,
-//!   not `$ctx`**: request context is server-supplied out-of-band (auth.md, D7 — a
-//!   client can never inject scope), so `ctx` arrives here as a separate value the
-//!   embedding server derived from its auth layer, not from the body.
+//! - The JSON body is the argument object. It carries arguments, not `$ctx`: request
+//!   context is server-supplied out-of-band (a client can never inject scope), so `ctx`
+//!   arrives here as a separate value the embedding server derived from its auth layer,
+//!   not from the body.
 //! - Success → `200` + the shaped response (`run_query`/`run_mutation`'s JSON). A
 //!   boundary failure ([`PlanError`]) → a `4xx`/`5xx` with `{ "error": { code, message } }`.
 
@@ -54,13 +54,13 @@ impl WireResponse {
 
 /// Route + run one request. `method`/`path` come straight off the request line; `args`
 /// is the decoded JSON body; `ctx` is the server-derived request context (never the
-/// body); `idem_key` is the out-of-band mutation idempotency key (D25 — the
-/// `Idempotency-Key` header, `None` when absent, ignored by queries) and `store` is the
-/// dedupe store it consults. Every failure is a `WireResponse`, so the listener never has
-/// to branch on error kinds — it writes `status` + `body` verbatim.
+/// body); `idem_key` is the out-of-band mutation idempotency key (the `Idempotency-Key`
+/// header, `None` when absent, ignored by queries) and `store` is the dedupe store it
+/// consults. Every failure is a `WireResponse`, so the listener never has to branch on
+/// error kinds — it writes `status` + `body` verbatim.
 ///
 /// A caller that wants no idempotency passes a [`crate::idempotency::NoStore`] and a
-/// `None` key — one dispatch path, not a with/without-store fork (principle 4).
+/// `None` key — one dispatch path, not a with/without-store fork.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     compiled: &Compiled,
@@ -96,15 +96,15 @@ pub fn dispatch(
         // overwhelmingly operational, not a query bug → a retryable 503 (the client /
         // LB can retry, another shard's traffic is unaffected).
         Err(RunError::Db(e)) => WireResponse::error(503, e.code(), e.message),
-        // A concurrent mutation retry with the same idempotency key is still in flight
-        // . Rejecting rather than running a second write is what makes the key safe;
+        // A concurrent mutation retry with the same idempotency key is still in flight.
+        // Rejecting rather than running a second write is what makes the key safe;
         // 409 is retryable once the first attempt settles.
         Err(RunError::Conflict(key)) => WireResponse::error(
             409,
             "idempotency_conflict",
             format!("a request with idempotency key `{key}` is already in progress"),
         ),
-        // The idempotency key was reused for a *different* request . Not retryable —
+        // The idempotency key was reused for a *different* request. Not retryable —
         // replaying the first request's response would be wrong; the client must use a fresh
         // key. 422 (well-formed request, but its key/payload pairing is unprocessable).
         Err(RunError::KeyReuse(key)) => WireResponse::error(
@@ -122,8 +122,8 @@ pub fn dispatch(
 /// calls this too, so the two never diverge.
 pub fn preflight(method: &str, path: &str) -> Option<WireResponse> {
     if !method.eq_ignore_ascii_case("POST") {
-        // Only POST carries a body; a GET query string is exactly the injection
-        // surface calling.md's closed RPC removes.
+        // Only POST carries a body; a GET query string is exactly the injection surface
+        // the closed RPC surface removes.
         return Some(WireResponse::error(
             405,
             "method_not_allowed",
@@ -147,9 +147,9 @@ enum Kind {
 }
 
 /// The routable target of a path: `(is_mutation, name)`, or `None` when unroutable.
-/// Exposed so the listener edge can resolve a request's callable — to look up its
-/// shard key  — *before* it borrows a connection, using the same route grammar
-/// `dispatch` enforces (one source of truth for what `/q|m/<name>` means).
+/// Exposed so the listener edge can resolve a request's callable — to look up its shard
+/// key — before it borrows a connection, using the same route grammar `dispatch` enforces
+/// (one source of truth for what `/q|m/<name>` means).
 pub fn route_target(path: &str) -> Option<(bool, &str)> {
     parse_route(path).map(|(kind, name)| (matches!(kind, Kind::Mutation), name))
 }

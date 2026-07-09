@@ -1,48 +1,39 @@
-//! In-process embedding (Tier 1) — run callables with **no socket**.
+//! In-process embedding — run callables with no socket.
 //!
 //! [`Engine`] is the library twin of `based serve`: it owns a [`Compiled`] schema, one
 //! database connection ([`Db`]), and an id generator ([`IdGen`]), and runs a callable
-//! straight through [`crate::serve::dispatch`] — the *same* wire core the HTTP listener
+//! straight through [`crate::serve::dispatch`] — the same wire core the HTTP listener
 //! uses, minus the socket. So an embedded call and an HTTP call take the identical
-//! plan → run → shape path and yield the identical [`WireResponse`] (principle 4 — one
-//! engine, two front doors).
+//! plan → run → shape path and yield the identical [`WireResponse`].
 //!
-//! ## Why in-process
-//! The per-call cost is the DB round-trip (0.2–5 ms, D20); over the wire it is also the
-//! loopback TCP + HTTP framing. Dropping the socket removes that framing while keeping
-//! the *same typed generated client* — a Rust app gets one binary (no sidecar), lower
-//! and steadier latency, and `MockDb`-backed end-to-end tests. It is also the path
-//! toward app-owned transactions (composing several callables over one connection),
-//! which stateless HTTP RPC cannot express.
+//! Dropping the socket removes the loopback TCP + HTTP framing while keeping the same
+//! typed generated client — one binary (no sidecar), lower and steadier latency, and
+//! `MockDb`-backed end-to-end tests.
 //!
 //! ## Wiring the generated client
 //! The generated client (`based gen client`) is generic over a `Transport` trait it
-//! *defines itself*, so — by the orphan rule — a library-side `impl Transport for Engine`
-//! in this crate is forbidden (the trait is owned by the generated module downstream).
-//! Rather than make every embedder hand-copy the bridge, `based gen client` **emits** it
-//! when asked (`ClientOptions::embedded`, D62): the generated module carries an `Embedded`
-//! transport over `Engine` plus an `embedded(&engine)` constructor, so wiring a client is
-//! one call and **zero** bridge code:
+//! defines itself, so — by the orphan rule — a library-side `impl Transport for Engine`
+//! in this crate is forbidden. Instead `based gen client` emits the bridge when asked
+//! (`ClientOptions::embedded`): the generated module carries an `Embedded` transport over
+//! `Engine` plus an `embedded(&engine)` constructor, so wiring a client is one call and
+//! zero bridge code:
 //!
 //! ```ignore
 //! let api = client::embedded(&engine);          // no Transport impl to write
 //! let out = api.place_order(input, ctx)?;        // typed, in-process, no socket
 //! ```
 //!
-//! The emitted bridge serializes the typed input *and* the typed `$ctx` to JSON, calls
+//! The emitted bridge serializes the typed input and the typed `$ctx` to JSON, calls
 //! [`Engine::call`], then decodes the `200` body into the output type (a non-`200` becomes
-//! the client's `ClientError`). `$ctx` is a typed method argument  supplied straight in
-//! — no header dance (auth.md/D7 still holds: the *app*, not the caller, sets it); a public
-//! callable passes `()`, which the bridge maps to an empty context bag. `tests/embed.rs`
-//! consumes the emitted `embedded(&engine)` end-to-end over [`crate::run::MockDb`].
+//! the client's `ClientError`). `$ctx` is a typed method argument supplied straight in —
+//! the app, not the caller, sets it; a public callable passes `()`, which the bridge maps
+//! to an empty context bag.
 //!
 //! ## Concurrency
 //! `Engine` holds its one connection behind a [`RefCell`], so a call needs only `&self`
-//! (which is what backs the `&self` `Transport::call`). That makes it single-threaded by
-//! design — one embedded connection, used from one thread at a time. A multi-threaded or
-//! pooled embed routes through the [`crate::run::Backend`] seam instead (check out a
-//! connection per request, build a short-lived `Engine` around it) — the same seam
-//! `based serve` uses.
+//! (which backs the `&self` `Transport::call`). That makes it single-threaded by design —
+//! one embedded connection, used from one thread at a time. A multi-threaded or pooled
+//! embed routes through the [`crate::run::Backend`] seam instead.
 
 use std::cell::RefCell;
 
@@ -63,7 +54,7 @@ pub struct Engine {
     // connection ⇒ one thread at a time — a pooled embed uses `Backend` instead.
     db: RefCell<Box<dyn Db>>,
     id_gen: RefCell<Box<dyn IdGen>>,
-    // An in-process idempotency store  for keyed mutation retries via
+    // An in-process idempotency store for keyed mutation retries via
     // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
     // `Engine::call` (no key) never consults it.
     store: MemStore,
@@ -73,7 +64,7 @@ impl Engine {
     /// Build an engine over a compiled schema, a database connection, and an id
     /// generator. For a `MockDb`-backed test pass [`crate::id::SeqIdGen`]; a real embed
     /// passes its own [`Db`] (e.g. the caller's existing pool checkout) and a uuid
-    /// generator .
+    /// generator.
     pub fn new(compiled: Compiled, db: impl Db + 'static, id_gen: impl IdGen + 'static) -> Engine {
         Engine {
             compiled,
@@ -86,9 +77,8 @@ impl Engine {
     /// Run one callable and return the wire response — the same status + JSON body the
     /// HTTP edge would produce. `route` is `/q/<name>` or `/m/<name>` (the generated
     /// client supplies the constant), `args` is the JSON argument object, and `ctx` is
-    /// the request `$ctx` the app derived from its auth layer (never from the caller —
-    /// auth.md/D7). The method is always `POST`: the closed RPC surface has no other
-    /// verb (calling.md).
+    /// the request `$ctx` the app derived from its auth layer (never from the caller). The
+    /// method is always `POST`: the closed RPC surface has no other verb.
     pub fn call(
         &self,
         route: &str,
@@ -98,7 +88,7 @@ impl Engine {
         self.call_with_key(route, args, ctx, None)
     }
 
-    /// Like [`Engine::call`], with a mutation idempotency key . A retry of a
+    /// Like [`Engine::call`], with a mutation idempotency key. A retry of a
     /// `/m/<name>` mutation with the same non-empty `idem_key` replays the first
     /// attempt's response instead of writing again (queries ignore the key). This is the
     /// in-process twin of the HTTP edge's `Idempotency-Key` header — supplied straight in,
@@ -176,7 +166,7 @@ mod tests {
     }
 
     /// A write call runs the transaction and returns the created row in its declared
-    /// shape , read back inside the tx — no socket.
+    /// shape, read back inside the tx — no socket.
     #[test]
     fn engine_runs_a_mutation() {
         let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);

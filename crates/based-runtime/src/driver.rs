@@ -2,25 +2,19 @@
 //!
 //! This is the production [`Db`] behind the seam the mock stands in for. Two layers:
 //!
-//! - [`MariaDb`] — a [`Db`] over one pooled connection. It runs the *whole* request on
+//! - [`MariaDb`] — a [`Db`] over one pooled connection. It runs the whole request on
 //!   that single connection (a mutation's `tx` must see its own writes), converting
 //!   [`SqlValue`] binds to the driver's `?` parameters and driver rows back to JSON.
-//!   It reuses the `mysql` crate's hardened protocol + pool rather than hand-rolling
-//!   either (principle 7).
 //!
-//! - [`ShardRouter`] — the scale-out seam. It owns one **bounded** connection pool per
+//! - [`ShardRouter`] — the scale-out seam. It owns one bounded connection pool per
 //!   physical shard and routes each request to exactly one shard (single-shard, no
-//!   scatter-gather — the dependable, low-complexity model: a `tx` is one shard, so no
-//!   distributed transaction; a down shard fails only its own traffic). Routing goes
-//!   through a large fixed space of **logical shards** (a stable FNV hash of the shard
-//!   key), which a small `logical → physical` assignment maps to a pool — so adding a
-//!   physical shard moves *some* logical shards without rehashing every key (the
-//!   Vitess/Citus model). Bounded pools cap concurrency per box (you scale for load by
-//!   adding shards + app instances behind a load balancer, not threads-per-process).
+//!   scatter-gather: a `tx` is one shard, so no distributed transaction; a down shard
+//!   fails only its own traffic). Routing goes through a large fixed space of logical
+//!   shards (a stable FNV hash of the shard key), which a small `logical → physical`
+//!   assignment maps to a pool — so adding a physical shard moves some logical shards
+//!   without rehashing every key.
 //!
-//! The pieces that touch a live server (connecting, executing) can only be
-//! compile-verified here; the value conversions ([`to_mysql`]/[`from_mysql`]) are pure
-//! and unit-tested below.
+//! The value conversions ([`to_mysql`]/[`from_mysql`]) are pure and unit-tested below.
 
 use std::time::Duration;
 
@@ -33,7 +27,7 @@ use crate::value::SqlValue;
 
 /// MariaDB deadlock (1213, `ER_LOCK_DEADLOCK`) and lock-wait timeout (1205,
 /// `ER_LOCK_WAIT_TIMEOUT`): the server rolled the transaction back for lock contention, so
-/// the mutation path may retry it . Everything else is an opaque operational `503`.
+/// the mutation path may retry it. Everything else is an opaque operational `503`.
 fn map_mysql_err(e: mysql::Error) -> DbError {
     let kind = match &e {
         mysql::Error::MySqlError(se) if se.code == 1213 || se.code == 1205 => DbErrorKind::Deadlock,
@@ -42,16 +36,15 @@ fn map_mysql_err(e: mysql::Error) -> DbError {
     DbError::of(kind, e.to_string())
 }
 
-// The shard-routing primitives now live in the backend-agnostic `crate::shard` module (a
-// key must route identically to MariaDB or Postgres). Re-exported here so the historical
-// `based_runtime::driver::{PoolConfig, ShardId}` paths (used by `based serve`) still resolve.
+// Re-exported so `based_runtime::driver::{PoolConfig, ShardId}` paths still resolve; the
+// routing primitives live in the backend-agnostic `crate::shard` module.
 pub use crate::shard::{PoolConfig, ShardId};
 
 // ---------- value conversion (pure, unit-tested) ---------------------------
 
-/// A bound [`SqlValue`] → the driver's parameter value. The families line up with
-/// `SqlValue`'s : a `bool` binds as MySQL's tinyint `0/1`; `json` is sent as its
-/// serialized text (MySQL parses it into the `JSON` column).
+/// A bound [`SqlValue`] → the driver's parameter value. A `bool` binds as MySQL's
+/// tinyint `0/1`; `json` is sent as its serialized text (MySQL parses it into the `JSON`
+/// column).
 pub(crate) fn to_mysql(v: &SqlValue) -> Value {
     match v {
         SqlValue::Null => Value::NULL,
@@ -65,13 +58,12 @@ pub(crate) fn to_mysql(v: &SqlValue) -> Value {
 
 /// A returned column value → JSON (the shape the wire response is built from). Numbers
 /// map to JSON numbers; `Bytes` is decoded as UTF-8 text (text/uuid/json/timestamp all
-/// ride the wire as strings, D1), falling back to lowercase hex for genuinely binary
-/// columns (e.g. a `BINARY(16)` uuid where native `UUID` is unavailable). Date/Time
-/// render as their canonical SQL string.
+/// ride the wire as strings), falling back to lowercase hex for genuinely binary columns
+/// (e.g. a `BINARY(16)` uuid where native `UUID` is unavailable). Date/Time render as
+/// their canonical SQL string.
 ///
-/// A `JSON` column comes back as a JSON-encoded *string*, not a reconstructed object:
-/// the runtime does not carry per-column types into row shaping (matching the shape
-/// limits noted in codegen).
+/// A `JSON` column comes back as a JSON-encoded string, not a reconstructed object: the
+/// runtime does not carry per-column types into row shaping.
 pub(crate) fn from_mysql(v: Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {
@@ -185,7 +177,7 @@ pub struct ShardRouter {
     shards: Vec<Pool>,
     /// `logical shard → physical shard index`; length is always [`LOGICAL_SHARDS`].
     assign: Vec<ShardId>,
-    /// Max wait for a free connection before a checkout fails fast as pool-exhausted .
+    /// Max wait for a free connection before a checkout fails fast as pool-exhausted.
     checkout_timeout: Duration,
 }
 
@@ -231,7 +223,7 @@ impl ShardRouter {
     }
 
     /// Check out a connection to a specific physical shard. Waits at most the configured
-    /// `checkout_timeout` for a free connection, then fails fast as pool-exhausted  —
+    /// `checkout_timeout` for a free connection, then fails fast as pool-exhausted —
     /// a saturated pool becomes a retryable `503`, never a hung worker.
     pub fn checkout_shard(&self, shard: ShardId) -> Result<MariaDb, DbError> {
         let pool = self
@@ -281,9 +273,9 @@ impl Backend for ShardRouter {
 }
 
 /// Build one shard's bounded connection pool from a `mysql://…` URL. Each new connection
-/// runs an `init` that sets the session `max_statement_time`  — MariaDB's per-query
+/// runs an `init` that sets the session `max_statement_time` — MariaDB's per-query
 /// server-side timeout (seconds; unlike MySQL's SELECT-only `max_execution_time`, it caps
-/// *every* statement), so a runaway query is aborted rather than hanging the connection.
+/// every statement), so a runaway query is aborted rather than hanging the connection.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<Pool, DbError> {
     let opts = Opts::from_url(url).map_err(|e| DbError::new(format!("bad database url: {e}")))?;
     let constraints = PoolConstraints::new(cfg.min, cfg.max)

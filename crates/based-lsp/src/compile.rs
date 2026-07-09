@@ -6,12 +6,11 @@
 //! diagnostic requests are served without recompiling. The `FileId` a span carries
 //! is the index into `sources`, exactly as the CLI builds it.
 //!
-//! A workspace holds *many* projects: `.bsl` rides along inside a host repo, so the
-//! opened folder is rarely the schema's `based.toml` dir . Each open file is
-//! resolved to its owning project by walking up to the nearest `based.toml`
-//! ([`find_manifest_root`]) and one snapshot is compiled per project — so cross-file
-//! references inside a manifest resolve, and multiple embedded schemas in one
-//! workspace stay independent. A file under no manifest keeps a single-file fallback.
+//! A workspace holds many projects: each open file resolves to its owning project by
+//! walking up to the nearest `based.toml` ([`find_manifest_root`]), and one snapshot
+//! is compiled per project — so cross-file references inside a manifest resolve and
+//! embedded schemas stay independent. A file under no manifest gets a single-file
+//! fallback.
 
 use based_ast::{
     Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Model, Mutation, NamedFilter,
@@ -1485,10 +1484,10 @@ pub fn find_manifest_root(file: &Path) -> Option<PathBuf> {
     None
 }
 
-// ---- Offline migration-drift diagnostic (migrations.md / E5) ----------------
+// ---- Offline migration-drift diagnostic -------------------------------------
 
 /// The offline drift diagnostics for a project: the schema-vs-migrations delta the editor
-/// can compute with no database (migrations.md). Empty unless the project has captured
+/// can compute with no database. Empty unless the project has captured
 /// migrations *and* the current `.bsl` has structural changes not yet in one. Each change
 /// is anchored at the declaration it touches (a model's name) and the whole set is
 /// reported with the total count ("N uncaptured schema changes — run `based migrate gen`").
@@ -1547,7 +1546,7 @@ fn drift_diagnostics(
 
 /// Spent `@was` directives: a rename already reflected in the latest snapshot (the old
 /// name is gone, the new name present), so the `@was` no longer does anything and should
-/// be removed (`W0107`, migrations.md). Anchored at the `@was` literal.
+/// be removed (`W0107`). Anchored at the `@was` literal.
 fn spent_was_diagnostics(
     prev: &based_codegen::migrate::Snapshot,
     schema: &based_sema::CheckedSchema,
@@ -1717,7 +1716,7 @@ fn compile_paths(
         diagnostics.extend(diags);
         facts = based_facts::facts(&schema, &decls);
         // Offline migration-drift diagnostic: if the project has captured migrations and
-        // the `.bsl` has structural changes not yet in one, flag them (migrations.md).
+        // the `.bsl` has structural changes not yet in one, flag them.
         if let Some(root) = migrations_root {
             diagnostics.extend(drift_diagnostics(root, &schema, &decls));
         }
@@ -1871,7 +1870,7 @@ mod tests {
     }
 
     /// A file embedded in a host repo resolves to its own schema's `based.toml`,
-    /// not the opened workspace root — this is the C3 fix's core.
+    /// not the opened workspace root.
     #[test]
     fn find_manifest_root_walks_up_to_nearest_manifest() {
         let ws = TempWorkspace::new("walkup");

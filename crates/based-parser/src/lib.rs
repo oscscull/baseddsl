@@ -1,8 +1,7 @@
 //! based-parser — lexer + hand-written recursive-descent parser.
 //!
 //! One extension (`.bsl`), one uniform grammar: any top-level declaration may
-//! appear in any file (grammar.ebnf). Hand-written (not generated) for
-//! error-message quality.
+//! appear in any file. Hand-written (not generated) for error-message quality.
 
 mod lexer;
 mod parser;

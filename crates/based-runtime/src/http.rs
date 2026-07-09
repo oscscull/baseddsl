@@ -1,46 +1,42 @@
 //! The HTTP listener (`based serve`) — the thin socket edge over [`crate::serve::dispatch`].
 //!
-//! Everything interesting already lives in the pure dispatch core; this module only
-//! decodes the socket into `dispatch`'s arguments and writes its [`WireResponse`] back.
-//! Per D20 it is a **sync, bounded worker-thread pool** over the driver's **bounded
-//! connection pool**: `workers` threads share one blocking [`tiny_http::Server`], each
-//! looping `recv → handle → respond`. Capacity is added by adding shards + app
-//! instances behind a load balancer, not threads-per-process — so the thread count is
-//! bounded and matched to the pool, never unbounded.
+//! The interesting logic lives in the pure dispatch core; this module only decodes the
+//! socket into `dispatch`'s arguments and writes its [`WireResponse`] back. It is a sync,
+//! bounded worker-thread pool over the driver's bounded connection pool: `workers`
+//! threads share one blocking [`tiny_http::Server`], each looping `recv → handle →
+//! respond`, so the thread count is bounded and matched to the pool.
 //!
 //! ## Per-request flow
 //! 1. Decode the request line (`POST /q|m/<name>`), headers, and the JSON body (the
-//!    argument object — calling.md #2). A non-POST or unroutable path is rejected
-//!    *before* a connection is borrowed ([`crate::serve::preflight`]).
-//! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`] — **never the
-//!    body** (auth.md, D7: a client cannot inject scope; request context is
-//!    server-supplied out of band by the auth edge). The shard key is then derived from
-//!    the callable's resolved `@scope` owner field pulled out of `$ctx`  — the same
-//!    `@scope` that filters the row, so routing and row-visibility share one source of
-//!    truth (an explicit `X-Based-Shard-Key` header can override it).
-//! 3. Check a connection out of the [`Backend`] for that shard key (single-shard
-//!    dispatch, D20) and run [`dispatch`] with a fresh per-request [`UuidGen`]. The
-//!    edge is `Backend`-generic — it never names a concrete driver — so a Postgres /
+//!    argument object). A non-POST or unroutable path is rejected before a connection is
+//!    borrowed ([`crate::serve::preflight`]).
+//! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`] — never the
+//!    body (a client cannot inject scope; request context is server-supplied out of band
+//!    by the auth edge). The shard key is derived from the callable's resolved `@scope`
+//!    owner field pulled out of `$ctx` — the same `@scope` that filters the row, so
+//!    routing and row-visibility share one source of truth (an explicit
+//!    `X-Based-Shard-Key` header can override it).
+//! 3. Check a connection out of the [`Backend`] for that shard key and run [`dispatch`]
+//!    with a fresh per-request [`UuidGen`]. The edge is `Backend`-generic, so a Postgres /
 //!    MySQL / SQLite backend drops in without a change here.
 //! 4. Write `WireResponse.status` + JSON body back. A pool checkout failure is a
 //!    [`crate::run::DbError`] → a retryable `503`, exactly like an in-flight DB fault.
 //!
-//! ## Operational endpoints (the container story)
-//! Two unauthenticated `GET` probes an orchestrator / load balancer uses, answered
-//! before any routing so they never touch a database connection except where readiness
-//! deliberately does:
-//! - `GET /healthz` — **liveness**: the process is up and its worker loop is running.
-//!   Always `200` while serving; a container that fails this is restarted. No DB touch.
-//! - `GET /readyz` — **readiness**: this instance should receive traffic. `200` only when
-//!   the backend can serve (`Backend::ping`) *and* we are not draining. On shutdown it
-//!   flips to `503` first, so the load balancer pulls the instance out of rotation before
-//!   in-flight requests finish — the drain half of a zero-downtime rolling deploy.
+//! ## Operational endpoints
+//! Two unauthenticated `GET` probes an orchestrator / load balancer uses, answered before
+//! any routing:
+//! - `GET /healthz` — liveness: the process is up and its worker loop is running. Always
+//!   `200` while serving; a container that fails this is restarted. No DB touch.
+//! - `GET /readyz` — readiness: this instance should receive traffic. `200` only when the
+//!   backend can serve (`Backend::ping`) and we are not draining. On shutdown it flips to
+//!   `503` first, so the load balancer pulls the instance out of rotation before in-flight
+//!   requests finish — the drain half of a zero-downtime rolling deploy.
 //!
 //! ## Graceful shutdown
 //! [`Handle::shutdown`] (wired to SIGTERM/SIGINT by the CLI) flips a shared flag: workers
 //! poll it between requests (via `recv_timeout`, so a blocked worker wakes on its own),
-//! stop accepting new work, and exit once their *current* request finishes — in-flight
-//! requests always run to completion, none is cut off mid-response.
+//! stop accepting new work, and exit once their current request finishes — in-flight
+//! requests always run to completion.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,10 +68,10 @@ pub struct ServeConfig {
 }
 
 /// Derives the request `$ctx` and shard key from a request's headers — the seam
-/// between the transport and the auth edge. `$ctx` is **server-supplied, never the
-/// body** (auth.md, D7): a real deployment fronts `based serve` with an auth proxy
-/// that authenticates the caller and sets these headers (stripping any client-sent
-/// copy). The implementation is pluggable so that policy lives outside the runtime.
+/// between the transport and the auth edge. `$ctx` is server-supplied, never the body:
+/// a real deployment fronts `based serve` with an auth proxy that authenticates the
+/// caller and sets these headers (stripping any client-sent copy). The implementation
+/// is pluggable so that policy lives outside the runtime.
 pub trait ContextSource: Send + Sync {
     /// Return the derived context, or a [`WireResponse`] to write back instead (e.g. a
     /// `401` when required auth is absent). The default [`TrustedHeaderContext`] reads
@@ -86,17 +82,17 @@ pub trait ContextSource: Send + Sync {
 /// What a [`ContextSource`] produces: the request `$ctx` (passed to `dispatch` as the
 /// out-of-band context) and an **optional explicit** shard-key override.
 ///
-/// The shard key is *normally* derived from the schema : the callable's target
-/// model's resolved `@scope` owner field, pulled out of `$ctx` by the listener — so the
-/// shard a row lives in and the shard its owner's requests route to share one source of
-/// truth (the `@scope`, D32), never a hand-set config. `shard_key_override` is the escape
-/// hatch: a deployment (or a callable with no `@scope`) that must route by some other key
-/// sets the `X-Based-Shard-Key` header, and it wins over the schema-derived field.
+/// The shard key is normally derived from the schema: the callable's target model's
+/// resolved `@scope` owner field, pulled out of `$ctx` by the listener — so the shard a
+/// row lives in and the shard its owner's requests route to share one source of truth,
+/// never a hand-set config. `shard_key_override` is the escape hatch: a deployment (or a
+/// callable with no `@scope`) that must route by some other key sets the
+/// `X-Based-Shard-Key` header, and it wins over the schema-derived field.
 #[derive(Debug, Clone)]
 pub struct Context {
     pub ctx: serde_json::Value,
     /// An explicit shard key from `X-Based-Shard-Key`, or `None` to let the listener
-    /// derive it from the callable's `@scope` field .
+    /// derive it from the callable's `@scope` field.
     pub shard_key_override: Option<String>,
 }
 
@@ -120,9 +116,9 @@ impl HeaderView<'_> {
 ///   which is correct for a callable that requires no `$ctx`). Present-but-invalid or
 ///   non-object → `400` (a misconfigured edge, surfaced loudly rather than silently
 ///   dropped).
-/// - The shard key is normally *not* read here — the listener derives it from the
-///   callable's `@scope` field . This source only surfaces the `X-Based-Shard-Key`
-///   header as an explicit override (usually absent), which the listener honours over the
+/// - The shard key is normally not read here — the listener derives it from the
+///   callable's `@scope` field. This source only surfaces the `X-Based-Shard-Key` header
+///   as an explicit override (usually absent), which the listener honours over the
 ///   schema-derived field.
 ///
 /// This is the trusted-edge seam, not an authenticator: it assumes the proxy strips
@@ -146,9 +142,9 @@ impl ContextSource for TrustedHeaderContext {
                 }
             },
         };
-        // The shard key is schema-derived  unless a deployment forces it with an
-        // explicit header. Only that override is read here; the derivation needs the
-        // route, which the listener knows.
+        // The shard key is schema-derived unless a deployment forces it with an explicit
+        // header. Only that override is read here; the derivation needs the route, which
+        // the listener knows.
         let shard_key_override = headers.get("X-Based-Shard-Key").map(str::to_string);
         Ok(Context {
             ctx,
@@ -157,7 +153,7 @@ impl ContextSource for TrustedHeaderContext {
     }
 }
 
-/// Resolve the shard key for a routable request : the explicit `X-Based-Shard-Key`
+/// Resolve the shard key for a routable request: the explicit `X-Based-Shard-Key`
 /// override wins; else the callable's `@scope` owner field pulled out of `$ctx`; else the
 /// empty string (an unscoped callable, or a single-shard deployment — both route to shard
 /// 0). Pure, so the derivation is unit-testable without a socket. `$ctx.<field>` is read
@@ -182,8 +178,8 @@ struct Shared {
     compiled: Compiled,
     backend: Box<dyn Backend>,
     ctx_source: Box<dyn ContextSource>,
-    /// The mutation idempotency store , shared across all workers so a retry that
-    /// lands on any worker dedupes. `MemStore` dedupes within this one process; a
+    /// The mutation idempotency store, shared across all workers so a retry that lands on
+    /// any worker dedupes. `MemStore` dedupes within this one process; a
     /// multi-instance deployment wants a shared/durable store behind the same
     /// `IdempotencyStore` trait.
     idempotency: MemStore,
@@ -234,10 +230,10 @@ impl std::error::Error for ServeError {}
 const DRAIN_POLL: Duration = Duration::from_millis(100);
 
 /// Bind `config.listen` and serve requests until the process is killed. Spawns
-/// `config.workers` threads over one shared blocking server (D20: a bounded
-/// worker-thread pool, not a thread-per-connection). Blocks the calling thread until
-/// every worker returns. A caller that wants **graceful shutdown** uses
-/// [`serve_with_handle`] instead and triggers the returned [`Handle`] from a signal.
+/// `config.workers` threads over one shared blocking server (a bounded worker-thread
+/// pool, not a thread-per-connection). Blocks the calling thread until every worker
+/// returns. A caller that wants graceful shutdown uses [`serve_with_handle`] instead and
+/// triggers the returned [`Handle`] from a signal.
 pub fn serve(
     compiled: Compiled,
     backend: impl Backend + 'static,
@@ -358,7 +354,7 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
         return resp;
     }
     // Preflight guaranteed a routable path, so this is the callable to run — needed now
-    // to derive the shard key from its `@scope` field , before checkout.
+    // to derive the shard key from its `@scope` field, before checkout.
     let (is_mutation, name) = route_target(&path).expect("preflight guaranteed a routable path");
 
     // Derive $ctx (never the body) + the explicit shard-key override, from the headers.
@@ -378,13 +374,13 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
         Err(resp) => return resp,
     };
 
-    // The shard key: the callable's `@scope` owner field pulled out of `$ctx` , or
-    // an explicit header override, or "" (unscoped / single-shard → shard 0). Derived from
+    // The shard key: the callable's `@scope` owner field pulled out of `$ctx`, or an
+    // explicit header override, or "" (unscoped / single-shard → shard 0). Derived from
     // the same `@scope` that filters the row, so routing and row-visibility can't drift.
     let shard_key = resolve_shard_key(&shared.compiled, is_mutation, name, &context);
 
-    // The mutation idempotency key  rides the standard `Idempotency-Key` header —
-    // out of band, never the body. Absent/blank → no dedupe; queries ignore it.
+    // The mutation idempotency key rides the standard `Idempotency-Key` header — out of
+    // band, never the body. Absent/blank → no dedupe; queries ignore it.
     let idem_key = header_view.get("Idempotency-Key").map(str::to_string);
 
     // Decode the JSON argument object from the (size-capped) body.
@@ -445,7 +441,7 @@ fn ready_response(shared: &Shared) -> WireResponse {
 
 /// Read the request body (capped at [`MAX_BODY`]) and parse it as the JSON argument
 /// object. An empty body is an empty object (a no-arg callable). A non-object or
-/// unparseable body is a `400` — a client mistake it can fix (calling.md #2).
+/// unparseable body is a `400` — a client mistake it can fix.
 fn read_json_body(request: &mut Request) -> Result<serde_json::Value, WireResponse> {
     let mut body = String::new();
     if request

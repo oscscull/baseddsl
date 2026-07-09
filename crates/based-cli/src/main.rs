@@ -3,7 +3,7 @@
 //! `based check`: discover `.bsl` files -> parse -> sema -> render diagnostics.
 //! `based gen sql`: the same front end, then emit SQL DDL from the checked schema.
 //! `based gen client`: a typed Rust client module. `based gen openapi`: an OpenAPI 3.1
-//! spec over the same wire (polyglot clients via `openapi-generator`, D23).
+//! spec over the same wire (polyglot clients via `openapi-generator`).
 
 mod error;
 mod render;
@@ -37,7 +37,7 @@ enum Command {
         #[command(subcommand)]
         target: GenTarget,
     },
-    /// Show the engine-derived facts (inferred inverses + indexes) — principle 8.
+    /// Show the engine-derived facts (inferred inverses + indexes).
     Facts {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -46,7 +46,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Generate + manage schema migrations (E2: `gen` — snapshot + diff, offline).
+    /// Generate + manage schema migrations (snapshot + diff, offline).
     Migrate {
         #[command(subcommand)]
         action: MigrateAction,
@@ -81,7 +81,7 @@ enum Command {
 enum MigrateAction {
     /// Diff the current `.bsl` against the latest `schema.snap` and write the next
     /// `migrations/NNNN_slug/{up.mig, schema.snap}`. No changes ⇒ writes nothing.
-    /// Offline + deterministic — never touches a database (E2).
+    /// Offline + deterministic — never touches a database.
     Gen {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -91,7 +91,7 @@ enum MigrateAction {
         name: Option<String>,
     },
     /// Render migrations' neutral `up.mig` steps to per-dialect SQL and print it — the
-    /// review-the-SQL step (E3). Offline: reads the stored `schema.snap`s, never a DB.
+    /// review-the-SQL step. Offline: reads the stored `schema.snap`s, never a DB.
     Render {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -106,7 +106,7 @@ enum MigrateAction {
         dialect: Option<String>,
     },
     /// Apply pending migrations to a live database, each under one transaction with a
-    /// `_based_migrations` ledger insert + tamper-hash check (E4). Destructive steps require
+    /// `_based_migrations` ledger insert + tamper-hash check. Destructive steps require
     /// `--allow-destructive`. Applies to every `--database-url` (a sharded fleet migrates
     /// each shard).
     Apply {
@@ -130,7 +130,7 @@ enum MigrateAction {
         down: bool,
     },
     /// Show applied vs. pending migrations, flagging any hash mismatch (an edited applied
-    /// migration). Reads the ledger from a live database (E4).
+    /// migration). Reads the ledger from a live database.
     Status {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -141,7 +141,7 @@ enum MigrateAction {
         database_url: Vec<String>,
     },
     /// Offline CI gate: confirm each `up.mig` still matches its `schema.snap` (no hand-edit
-    /// drift) and the latest snapshot matches the current `.bsl` (no uncaptured changes). E4.
+    /// drift) and the latest snapshot matches the current `.bsl` (no uncaptured changes).
     Verify {
         /// Project root (holds based.toml). Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -251,7 +251,7 @@ fn cmd_check(root: &Path) -> Result<(), CliError> {
 fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
-    // Schema DDL first, then the parameterized query templates (M3 read side).
+    // Schema DDL first, then the parameterized query templates.
     let mut sql = based_codegen::sql::ddl(&schema, dialect);
     if !schema.queries.is_empty() {
         sql.push_str(
@@ -310,7 +310,7 @@ fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
 
 /// `based migrate gen [name]`: diff the current `.bsl` against the latest captured
 /// snapshot and, if there are changes, write the next `migrations/NNNN_slug/{up.mig,
-/// schema.snap}` (E2). Offline + deterministic: the baseline is a stored snapshot, never
+/// schema.snap}`. Offline + deterministic: the baseline is a stored snapshot, never
 /// a database. No changes ⇒ writes nothing and says so (a clean exit).
 fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     use based_codegen::migrate;
@@ -337,7 +337,7 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // Next number is a count of existing dirs (never a timestamp — determinism, E2).
+    // Next number is a count of existing dirs (never a timestamp — determinism).
     let next = existing.last().map(|(n, _)| n + 1).unwrap_or(1);
     let slug = migration_slug(name, next);
     let dir_name = format!("{next:04}_{slug}");
@@ -365,10 +365,10 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
 }
 
 /// `based migrate render [--number NNNN] [--dialect D]`: render stored migrations' neutral
-/// steps to per-dialect SQL and print it — the review-the-SQL step (E3). Fully offline: the
+/// steps to per-dialect SQL and print it — the review-the-SQL step. Fully offline: the
 /// steps for migration NNNN are re-derived as `diff(snapshot[NNNN-1], snapshot[NNNN])` from
-/// the stored `schema.snap`s (the snapshot-authoritative model migrations.md defines, which
-/// `based migrate verify` asserts equals the `up.mig`), so no `up.mig` parser is needed here.
+/// the stored `schema.snap`s (the snapshot-authoritative model, which `based migrate verify`
+/// asserts equals the `up.mig`), so no `up.mig` parser is needed here.
 /// The dialect defaults to the manifest's; `--dialect` overrides for a cross-target review.
 fn cmd_migrate_render(
     root: &Path,
@@ -439,7 +439,7 @@ fn cmd_migrate_render(
 }
 
 /// `based migrate apply`: apply pending migrations (or roll back) against a live database,
-/// reconciling the `_based_migrations` ledger (E4). Runs against every `--database-url` in
+/// reconciling the `_based_migrations` ledger. Runs against every `--database-url` in
 /// turn — a sharded fleet migrates each shard with the same migration set.
 fn cmd_migrate_apply(
     root: &Path,
@@ -485,7 +485,7 @@ fn cmd_migrate_apply(
 }
 
 /// `based migrate status`: read the ledger and show applied vs. pending migrations, flagging
-/// any hash mismatch (an edited applied migration) or an applied row missing from disk (E4).
+/// any hash mismatch (an edited applied migration) or an applied row missing from disk.
 fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<(), CliError> {
     use based_runtime::migrate::{self, MigrationState};
 
@@ -540,7 +540,7 @@ fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<(), CliE
 
 /// `based migrate verify`: the offline CI gate. Confirms each `up.mig` still matches the steps
 /// its `schema.snap` chain implies (no hand-edit drift) and the latest snapshot matches the
-/// current `.bsl` (no uncaptured schema changes). Never touches a database (E4).
+/// current `.bsl` (no uncaptured schema changes). Never touches a database.
 fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
     use based_codegen::migrate;
 
@@ -570,7 +570,7 @@ fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
         // The up.mig the snapshots imply must still match the stored one (byte-canonical).
         // A `raw(<dialect>)` escape isn't derivable from the snapshots (opaque SQL), so it
         // is compared against the stored up.mig with its raw lines stripped and the
-        // migration reported `partial` (not offline-verifiable — migrations.md).
+        // migration reported `partial` (not offline-verifiable).
         let steps = migrate::diff_snapshots(&prev, &snap);
         let expected = migrate::render_up(&steps);
         let up_path = dir.join("up.mig");
@@ -720,7 +720,7 @@ fn redact(url: &str) -> String {
 
 /// Existing `migrations/NNNN_slug/` directories, sorted by their `NNNN` number. A
 /// non-conforming entry (no `NNNN_` prefix) is ignored — only zero-padded sequential
-/// dirs order the ledger (migrations.md).
+/// dirs order the ledger.
 fn existing_migrations(dir: &Path) -> Result<Vec<(u32, PathBuf)>, CliError> {
     let mut out = Vec::new();
     if !dir.exists() {
@@ -747,7 +747,7 @@ fn existing_migrations(dir: &Path) -> Result<Vec<(u32, PathBuf)>, CliError> {
 }
 
 /// The migration slug: the snake-cased `name` argument, or a default (`init` for the
-/// first migration, else `schema_update`). Cosmetic — only `NNNN` orders (migrations.md).
+/// first migration, else `schema_update`). Cosmetic — only `NNNN` orders.
 fn migration_slug(name: Option<&str>, number: u32) -> String {
     match name {
         Some(n) => based_sema::snake_case(&n.replace([' ', '-'], "_")),
@@ -815,7 +815,7 @@ fn load_checked(root: &Path) -> Result<Loaded, CliError> {
     Ok((project, schema, all_decls, sources, warnings))
 }
 
-/// `based facts`: surface the engine-derived facts (principle 8) — the inferred
+/// `based facts`: surface the engine-derived facts — the inferred
 /// inverse pairings and join-key indexes an editor would show as hints.
 fn cmd_facts(root: &Path, json: bool) -> Result<(), CliError> {
     let (_project, schema, decls, sources, _warnings) = load_checked(root)?;
@@ -856,7 +856,7 @@ fn cmd_serve(
     let dialect = Dialect::parse(&project.manifest.dialect);
     let compiled = Compiled::from_checked(schema, decls, dialect);
 
-    // Pool sizing from the flags; the hardening timeouts (checkout + statement, D65) keep
+    // Pool sizing from the flags; the hardening timeouts (checkout + statement) keep
     // their conservative defaults (a saturated pool → fast 503, a runaway query aborted).
     let pool = PoolConfig {
         min: pool_min,

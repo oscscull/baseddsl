@@ -27,18 +27,18 @@ pub type Row = serde_json::Map<String, serde_json::Value>;
 /// *before* any SQL): a `DbError` is an operational failure the wire maps to a
 /// retryable `503`. The message is human-facing; the driver fills it from its error.
 ///
-/// The [`kind`](DbError::kind) is the driver's classification of *how to handle* the
-/// failure : every `DbError` is still a `503`, but a [`Deadlock`](DbErrorKind::Deadlock)
-/// additionally tells the mutation path the transaction is safe to auto-retry.
+/// The [`kind`](DbError::kind) is the driver's classification of how to handle the failure:
+/// every `DbError` is still a `503`, but a [`Deadlock`](DbErrorKind::Deadlock) additionally
+/// tells the mutation path the transaction is safe to auto-retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbError {
     pub message: String,
     pub kind: DbErrorKind,
 }
 
-/// The operational class of a [`DbError`], set by the driver from the server's error code
-/// . Only [`Deadlock`](DbErrorKind::Deadlock) changes engine behaviour (bounded
-/// transaction retry); the rest are informational — every kind is still a wire `503`.
+/// The operational class of a [`DbError`], set by the driver from the server's error code.
+/// Only [`Deadlock`](DbErrorKind::Deadlock) changes engine behaviour (bounded transaction
+/// retry); the rest are informational — every kind is still a wire `503`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DbErrorKind {
     /// An unclassified operational failure (connection lost, a statement timeout, a
@@ -48,8 +48,8 @@ pub enum DbErrorKind {
     Other,
     /// A deadlock or serialization failure: the server *already rolled the transaction
     /// back*, and re-running it usually succeeds (the contending transaction has moved
-    /// on). The mutation path retries the whole transaction a bounded number of times
-    /// . MariaDB 1213/1205, Postgres 40P01/40001, SQLite `SQLITE_BUSY`/`SQLITE_LOCKED`.
+    /// on). The mutation path retries the whole transaction a bounded number of times.
+    /// MariaDB 1213/1205, Postgres 40P01/40001, SQLite `SQLITE_BUSY`/`SQLITE_LOCKED`.
     Deadlock,
     /// No connection became free within the pool's checkout timeout — the pool is
     /// saturated. Fails fast as a `503` (the client/LB backs off), never a hang and never
@@ -101,21 +101,21 @@ impl std::error::Error for DbError {}
 /// Why running a request failed: a boundary [`PlanError`] (bad/missing input, unknown
 /// callable — the caller can fix it), a [`DbError`] (the database failed — an
 /// operational, retryable failure), or an idempotency [`Conflict`](RunError::Conflict)
-/// (a concurrent attempt with the same key is still in flight — D25). The wire (`serve`)
-/// maps each to its HTTP status.
+/// (a concurrent attempt with the same key is still in flight). The wire maps each to its
+/// HTTP status.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunError {
     Plan(PlanError),
     Db(DbError),
     /// A mutation retry arrived while a prior attempt with the same idempotency key is
-    /// still running . Running a second write would risk the double-insert the key
-    /// exists to prevent, so the retry is rejected as a retryable conflict (`409`): the
-    /// client retries once the first attempt settles.
+    /// still running. Running a second write would risk the double-insert the key exists to
+    /// prevent, so the retry is rejected as a retryable conflict (`409`): the client retries
+    /// once the first attempt settles.
     Conflict(String),
-    /// The idempotency key was reused for a **different** request — same key, different
-    /// args/`$ctx` . Replaying the first attempt's response would answer the wrong
-    /// request, so the reuse is rejected loudly (a non-retryable `422`) rather than run or
-    /// replayed. The client must use a fresh key for a genuinely different request.
+    /// The idempotency key was reused for a different request — same key, different
+    /// args/`$ctx`. Replaying the first attempt's response would answer the wrong request,
+    /// so the reuse is rejected loudly (a non-retryable `422`) rather than run or replayed.
+    /// The client must use a fresh key for a genuinely different request.
     KeyReuse(String),
 }
 
@@ -175,10 +175,9 @@ impl std::error::Error for RunError {
 
 /// The database seam. The runtime hands it positional SQL + values; the read path
 /// `fetch`es rows, the write path `execute`s statements under an engine-owned
-/// transaction (principle 7 — the engine, not the emitted SQL, owns BEGIN/COMMIT).
-/// Every method is **fallible**: a dependable driver surfaces connection/query
-/// failures rather than panicking (the concrete `MariaDb` under the `mariadb`
-/// feature). The write methods default so a read-only [`Db`] need not implement them.
+/// transaction (the engine, not the emitted SQL, owns BEGIN/COMMIT). Every method is
+/// fallible: a dependable driver surfaces connection/query failures rather than
+/// panicking. The write methods default so a read-only [`Db`] need not implement them.
 pub trait Db {
     fn fetch(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError>;
 
@@ -204,11 +203,11 @@ pub trait Db {
 
 /// A source of per-request database connections for the listener, keyed by shard.
 /// Given a request's shard key it hands back a boxed [`Db`] to run that request on
-/// (single-shard dispatch, D20). This is the seam that keeps the HTTP edge
-/// **driver-neutral**: the MariaDB [`crate::driver::ShardRouter`] is one implementation;
-/// a Postgres / MySQL / SQLite backend is another (the [`Db`] trait below is already
-/// dialect-agnostic — it speaks positional SQL + [`SqlValue`], not a MariaDB protocol).
-/// A single-file SQLite backend simply ignores the key and returns the one connection.
+/// (single-shard dispatch). This is the seam that keeps the HTTP edge driver-neutral:
+/// the MariaDB [`crate::driver::ShardRouter`] is one implementation; a Postgres / MySQL /
+/// SQLite backend is another (the [`Db`] trait below is already dialect-agnostic — it
+/// speaks positional SQL + [`SqlValue`], not a MariaDB protocol). A single-file SQLite
+/// backend simply ignores the key and returns the one connection.
 pub trait Backend: Send + Sync {
     /// Check out a connection for the shard the key routes to. A failure (pool
     /// exhausted, shard/host down) is a [`DbError`] → the wire's retryable `503`.
@@ -242,11 +241,11 @@ pub fn run_query(
 /// Plan and run a mutation request: id-gen + bind, then execute every write under one
 /// engine-owned transaction, returning the write response.
 ///
-/// When the request carries an idempotency key  the write body runs **at most once**
-/// per `(callable, key)`: a first attempt claims the key, runs, and records its response;
-/// a retry replays that recorded response with no writes (exactly-once), and a concurrent
+/// When the request carries an idempotency key the write body runs at most once per
+/// `(callable, key)`: a first attempt claims the key, runs, and records its response; a
+/// retry replays that recorded response with no writes (exactly-once), and a concurrent
 /// retry while the first is still in flight is a [`RunError::Conflict`]. Planning (arg /
-/// `$ctx` validation) happens *before* the store is consulted, so a malformed request is a
+/// `$ctx` validation) happens before the store is consulted, so a malformed request is a
 /// clean `4xx` that never claims a key. Without a key this is the plain run-every-time path.
 pub fn run_mutation(
     compiled: &Compiled,
@@ -267,7 +266,7 @@ pub fn run_mutation(
     };
 
     // Fingerprint the request payload (args + `$ctx`) so the store can tell a genuine
-    // retry (same payload) from one key reused for a different request .
+    // retry (same payload) from one key reused for a different request.
     match store.begin(&req.callable, key, req.fingerprint()) {
         // A prior attempt with the same payload already committed: replay it, run no writes.
         KeyState::Done(response) => Ok(response),
@@ -291,10 +290,10 @@ pub fn run_mutation(
 }
 
 /// How many times the mutation path re-runs a transaction the server aborted for a
-/// deadlock / serialization conflict before giving up . Bounded so a pathological
-/// hot row fails fast as a `503` rather than retrying forever; a handful of attempts
-/// clears an ordinary two-transaction deadlock (the loser re-runs after the winner
-/// commits). Total attempts = 1 + this.
+/// deadlock / serialization conflict before giving up. Bounded so a pathological hot row
+/// fails fast as a `503` rather than retrying forever; a handful of attempts clears an
+/// ordinary two-transaction deadlock (the loser re-runs after the winner commits). Total
+/// attempts = 1 + this.
 const TX_RETRY_LIMIT: u32 = 5;
 
 /// Backoff before re-running a deadlocked transaction: a short exponential step (capped
@@ -309,7 +308,7 @@ fn deadlock_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(step_ms + jitter)
 }
 
-/// Execute a mutation's transaction, retrying the whole thing on a deadlock . A
+/// Execute a mutation's transaction, retrying the whole thing on a deadlock. A
 /// deadlock/serialization abort ([`DbErrorKind::Deadlock`]) rolled the transaction back
 /// server-side, so re-running it from the top on the same connection usually succeeds once
 /// the contending transaction commits; a bounded [`TX_RETRY_LIMIT`] then a `503` prevents a
@@ -330,14 +329,14 @@ fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbEr
 
 /// Run a mutation plan's writes in order under one transaction, then assemble the write
 /// response. If any write fails the transaction is rolled back and the error surfaced — a
-/// mutation is all-or-nothing, never a partial write (principle 7, dependability). Wrapped
-/// by [`apply`] for the deadlock-retry loop.
+/// mutation is all-or-nothing, never a partial write. Wrapped by [`apply`] for the
+/// deadlock-retry loop.
 ///
-/// The response is the written row read back in the mutation's **declared shape** (D12
-/// create-keyed / D58 where-keyed): when the plan carries a re-select, it runs inside the
-/// same transaction (read-your-writes, atomic with the writes) and its single row *is* the
-/// response — matching the client's decoded output type. Only a mutation whose row does not
-/// survive the write (a real DELETE) has no re-select and falls back to `{ id }` / `{}`.
+/// The response is the written row read back in the mutation's declared shape: when the
+/// plan carries a re-select, it runs inside the same transaction (read-your-writes, atomic
+/// with the writes) and its single row is the response — matching the client's decoded
+/// output type. Only a mutation whose row does not survive the write (a real DELETE) has no
+/// re-select and falls back to `{ id }` / `{}`.
 fn apply_once(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
     db.begin()?;
@@ -378,12 +377,12 @@ fn apply_once(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value,
 /// A nested to-one shape sub-object (`buyer { name, email }`) is projected by codegen
 /// as columns aliased `buyer.name`, `buyer.email` ([`based_codegen::sql::NEST_SEP`] is
 /// the `.`); this splits each such key back into a nested object, recursing for
-/// nested-within-nested (`buyer.org.name`). A to-**many** nest (`items { … }`) is
-/// projected as a single JSON-array *string* column aliased `items[]`
+/// nested-within-nested (`buyer.org.name`). A to-many nest (`items { … }`) is projected as
+/// a single JSON-array string column aliased `items[]`
 /// ([`based_codegen::sql::ARRAY_MARK`]); this parses the string into a real JSON array of
 /// sub-objects (their own nesting already fully formed by the SQL JSON aggregation). A
 /// `.`/`[`/`]` cannot occur in a BSL identifier, so a flat query (no nest) has no such key
-/// and passes through unchanged. One convention, owned by codegen, read here (principle 4).
+/// and passes through unchanged.
 fn nest_row(row: Row) -> serde_json::Value {
     let mut root = serde_json::Map::new();
     for (key, val) in row {
@@ -435,10 +434,10 @@ fn insert_path(
     }
 }
 
-/// Mint the "more" cursor for a keyset page (pagination.md): the last row's sort-key
-/// values, read from the hidden `__keyset_<i>` columns codegen projected. Only a *full*
-/// page (`page_size` rows) can have a next page — a short page is the last, so it gets
-/// no cursor (the caller stops paging rather than making one more empty request).
+/// Mint the "more" cursor for a keyset page: the last row's sort-key values, read from the
+/// hidden `__keyset_<i>` columns codegen projected. Only a full page (`page_size` rows) can
+/// have a next page — a short page is the last, so it gets no cursor (the caller stops
+/// paging rather than making one more empty request).
 fn next_cursor(rows: &[Row], ks: KeysetPlan) -> Option<String> {
     use serde_json::Value as J;
     if (rows.len() as u64) < ks.page_size {

@@ -1,8 +1,7 @@
 //! based-diagnostics — diagnostic model shared across parser and sema.
 //!
-//! Stable codes (e.g. `E0001`, `W0100`) so lints can be referenced in the spec
-//! and ratcheted warn -> error in CI (indexing.md, sorting.md). Rendering with
-//! `ariadne` lands with the parser milestone.
+//! Stable codes (e.g. `E0001`, `W0100`) so lints can be referenced in the spec and
+//! ratcheted warn -> error in CI.
 
 use based_ast::Span;
 

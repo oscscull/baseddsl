@@ -125,7 +125,7 @@ fn field_inverse_ref_and_unique() {
 
 #[test]
 fn legacy_reserved_word_field_name() {
-    // `order` is a D8 reserved word; it must still parse as a field name (the
+    // `order` is a reserved word; it must still parse as a field name (the
     // canonical OrderItem model uses it).
     let m = only_model(
         r#"
@@ -435,7 +435,7 @@ fn separators_are_insignificant() {
 
 #[test]
 fn unindexed_clause_forms() {
-    // Both annotation forms (indexing.md), inline and in a block statement.
+    // Both annotation forms, inline and in a block statement.
     let sf = parse_ok(
         r#"
         query a(status) -> P[] unindexed(max_rows: 500);
@@ -475,9 +475,9 @@ fn unindexed_clause_forms() {
 
 #[test]
 fn scope_decl_and_refs() {
-    // The named-scope surface (auth.md / D46/D47): a `scope` decl, the `@scope Name`
-    // model decorator (an alternative; comma-separated names are one conjunction), and
-    // the `scoped Name` callable acknowledgement.
+    // The named-scope surface: a `scope` decl, the `@scope Name` model decorator (an
+    // alternative; comma-separated names are one conjunction), and the `scoped Name`
+    // callable acknowledgement.
     let sf = parse_ok(
         r#"
         scope Tenant (org: Org = $ctx.org, region: Region = $ctx.region)

@@ -1,4 +1,4 @@
-//! End-to-end integration against a **real** MariaDB server, over Docker .
+//! End-to-end integration against a **real** MariaDB server, over Docker.
 //!
 //! This is the MariaDB twin of `sqlite_integration.rs`: it loads the *actual* commerce
 //! schema (`Compiled::load` — the same discover → parse → check front end + codegen lowering
@@ -6,8 +6,8 @@
 //! `Dialect::MariaDb`), and drives real requests through `serve::dispatch` against the
 //! concrete `MariaDb` driver checked out of a live `ShardRouter`. What runs is the *verbatim*
 //! codegen-lowered SQL — bound positionally (`?`) by the runtime — so a passing test proves
-//! the whole engine (the `MariaDb` `Db`/`Backend`/`ping` seams, D20/D26) works against a
-//! genuine server, not just compile-verified as before.
+//! the whole engine (the `MariaDb` `Db`/`Backend`/`ping` seams) works against a
+//! genuine server, not just compile-verified.
 //!
 //! Unlike SQLite this needs infra: an ephemeral MariaDB container. The harness
 //! ([`support::docker_mariadb`]) starts one on a random port and tears it down after; when
@@ -52,8 +52,7 @@ fn live() -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
     let container = MariaDbContainer::start()?;
 
     // The commerce manifest's dialect is `mariadb`, so `Compiled::load` lowers the DML for
-    // MariaDB (`?` binds) — exactly the SQL this driver must run. (SQLite reused the same
-    // load because its DML is byte-identical to MariaDB's; here the dialect genuinely matters.)
+    // MariaDB (`?` binds) — exactly the SQL this driver must run.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../spec/examples/commerce")
         .canonicalize()
@@ -106,7 +105,7 @@ fn compile(src: &str, dialect: Dialect) -> Compiled {
 /// Bring up a live MariaDB, compile an in-line schema **lowered for MariaDB**, and create its
 /// tables from the generated MariaDB DDL — returning the router + schema for a test to seed and
 /// drive. Returns `None` when Docker is unavailable (the caller skips). The `id: text` columns
-/// these schemas declare map to `VARCHAR(255)` , so the fixtures use plain string ids.
+/// these schemas declare map to `VARCHAR(255)`, so the fixtures use plain string ids.
 fn live_schema(src: &str) -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
     let container = MariaDbContainer::start()?;
     let compiled = compile(src, Dialect::MariaDb);
@@ -119,7 +118,7 @@ fn live_schema(src: &str) -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
 }
 
 /// Drop this schema's tables (+ the migrations ledger) before recreating them, so a suite run
-/// against a *persistent* external server (`TEST_MARIADB_URL`, D64) starts clean and is
+/// against a *persistent* external server (`TEST_MARIADB_URL`) starts clean and is
 /// re-runnable. A no-op against a fresh self-spun container (nothing exists yet). FK checks are
 /// disabled for the drop so relation order doesn't matter; the whole batch runs on one
 /// connection (session-scoped `FOREIGN_KEY_CHECKS`), which `run_batch` guarantees.
@@ -191,7 +190,7 @@ fn get_query_runs_against_live_mariadb() {
         "POST",
         "/q/order_by_id",
         json!({ "id": ORDER_1 }),
-        // Order is `@scope`d : even a keyed `get` is org-scoped, so `$ctx.org` is
+        // Order is `@scope`d: even a keyed `get` is org-scoped, so `$ctx.org` is
         // required. order-1 belongs to org-1, visible to this caller.
         json!({ "org": ORG_1 }),
     );
@@ -256,7 +255,7 @@ fn ctx_scoped_list_filters_by_org() {
 #[test]
 fn mutation_writes_then_reselects_declared_shape() {
     // `place_order` creates an Order (engine-generated uuid) and reads it back in its
-    // declared OrderCard shape , all under one transaction — the full write path
+    // declared OrderCard shape, all under one transaction — the full write path
     // against a real engine: INSERT commits, the re-select joins and projects
     // (read-your-writes). The created row is then visible to a follow-up read.
     let Some((c, router, _guard)) = live() else {
@@ -267,7 +266,7 @@ fn mutation_writes_then_reselects_declared_shape() {
         &router,
         "POST",
         "/m/place_order",
-        // `org` is `@scope`-managed on create : supplied via `$ctx`, auto-set on the
+        // `org` is `@scope`-managed on create: supplied via `$ctx`, auto-set on the
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
         json!({ "buyer": USER_1, "total": 99 }),
         json!({ "org": ORG_1 }),
@@ -293,7 +292,7 @@ fn mutation_writes_then_reselects_declared_shape() {
 
 #[test]
 fn joined_scope_hides_cross_scope_row() {
-    // D34 against a live server: `my_org_orders` reaches org-scoped `User`/`Org` through the
+    // Against a live server: `my_org_orders` reaches org-scoped `User`/`Org` through the
     // Order relations. Here we prove the joined-`ON` scope with the commerce topology by
     // confirming an in-scope caller sees the joined `buyer`/`org` names — the same join that
     // would come back NULL for an out-of-scope owner. (The dedicated cross-scope `Ticket →
@@ -317,7 +316,7 @@ fn joined_scope_hides_cross_scope_row() {
 
 #[test]
 fn idempotency_key_dedupes_a_retried_write() {
-    // A keyed mutation runs its write body at most once per key : a retry with the same
+    // A keyed mutation runs its write body at most once per key: a retry with the same
     // key + payload replays the recorded response instead of double-inserting. Proven against
     // a live engine — the second call must not create a second order.
     let Some((c, router, _guard)) = live() else {
@@ -372,7 +371,7 @@ fn idempotency_key_dedupes_a_retried_write() {
 
 #[test]
 fn backend_ping_succeeds_on_a_live_server() {
-    // The readiness seam  works against a real MariaDB: `ShardRouter::ping` runs
+    // The readiness seam works against a real MariaDB: `ShardRouter::ping` runs
     // `SELECT 1` on every shard's pooled connection.
     let Some((_c, router, _guard)) = live() else {
         return;
@@ -380,7 +379,7 @@ fn backend_ping_succeeds_on_a_live_server() {
     assert!(router.ping().is_ok());
 }
 
-/// Keyset-cursor pagination (L2/D56), proven against a live MariaDB — the MariaDB twin of the
+/// Keyset-cursor pagination, proven against a live MariaDB — the MariaDB twin of the
 /// SQLite live keyset test. A `page (2)` keyset query walks the whole set exactly once: each
 /// full page returns its window plus an opaque cursor, the final short page returns a `null`
 /// cursor, and the cursor works even though the sort basis (`rank`, `id`) is not projected (the
@@ -440,7 +439,7 @@ fn keyset_pagination_walks_the_set() {
     assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
 }
 
-/// Explicit offset pagination (`page (2) offset`, pagination.md), proven live against MariaDB.
+/// Explicit offset pagination (`page (2) offset`), proven live against MariaDB.
 /// The client supplies an `offset`; the runtime binds it into `LIMIT … OFFSET …`. Paging
 /// full→full→short walks the set, and an offset page envelope carries a `null` cursor (offset
 /// is not keyset). The soft-delete filter is `n/a` here — this schema has no tombstone.
@@ -490,9 +489,9 @@ fn offset_pagination_pages_the_set() {
     assert_eq!(p3.body["rows"], json!([{ "name": "e", "rank": 50 }]));
 }
 
-/// Soft-delete + restore read-back (soft-delete.md / D58), proven live against MariaDB. A
+/// Soft-delete + restore read-back, proven live against MariaDB. A
 /// soft `delete` rewrites to `deleted_at = now()` (never a real DELETE) and reads the tombstoned
-/// row back in its declared shape ; the row then
+/// row back in its declared shape; the row then
 /// vanishes from a live `list` (the soft-delete predicate is injected). `restore` clears the
 /// tombstone and reads the row back with the live predicate applied — visible again.
 #[test]
@@ -523,7 +522,7 @@ fn soft_delete_and_restore_read_back() {
         json!([{ "name": "Alpha" }, { "name": "Beta" }])
     );
 
-    // Soft delete w1: rewritten to a tombstone, read back in shape .
+    // Soft delete w1: rewritten to a tombstone, read back in shape.
     let del = call(
         &c,
         &router,
@@ -557,7 +556,7 @@ fn soft_delete_and_restore_read_back() {
     );
 }
 
-// ---------- live-DB hardening (Track A4 / D65) ------------------------------
+// ---------- live-DB hardening ------------------------------
 
 /// Bring up a live MariaDB and build a router with the given [`PoolConfig`] — the seam for
 /// the hardening tests, which each vary one knob (statement timeout, pool size, checkout
@@ -569,7 +568,7 @@ fn hardening(pool: PoolConfig) -> Option<(ShardRouter, MariaDbContainer)> {
     Some((router, container))
 }
 
-/// A `max_statement_time` aborts a query that runs too long, live : the server cancels
+/// A `max_statement_time` aborts a query that runs too long, live: the server cancels
 /// `SELECT SLEEP(5)` at the 500ms ceiling and the driver surfaces a `DbError` promptly, rather
 /// than the connection hanging for the full sleep.
 #[test]
@@ -595,7 +594,7 @@ fn statement_timeout_aborts_a_long_query() {
     );
 }
 
-/// A saturated pool fails fast as pool-exhausted , live: with a pool of one, a held
+/// A saturated pool fails fast as pool-exhausted, live: with a pool of one, a held
 /// connection means the next checkout waits at most `checkout_timeout` then returns a
 /// [`DbErrorKind::PoolExhausted`] `DbError` (the wire's 503) — never an unbounded hang.
 #[test]
@@ -625,8 +624,8 @@ fn pool_exhaustion_fails_fast() {
     );
 }
 
-/// Two concurrent transactions that lock the same two rows in opposite order deadlock, live
-/// : InnoDB aborts exactly one side with error 1213 the driver classifies as
+/// Two concurrent transactions that lock the same two rows in opposite order deadlock, live:
+/// InnoDB aborts exactly one side with error 1213 the driver classifies as
 /// [`DbErrorKind::Deadlock`] (so the mutation path would retry it), and the other commits. The
 /// barrier guarantees both hold their first lock before either reaches for the second, so the
 /// deadlock is deterministic.

@@ -1,11 +1,10 @@
-//! Hand-written recursive-descent parser. Mirrors `spec/grammar.ebnf`; each
-//! `parse_*` corresponds to a production. Hand-written (not generated) for
-//! error-message quality (principle: reviewer confirms design by reading).
+//! Hand-written recursive-descent parser; each `parse_*` corresponds to a grammar
+//! production. Hand-written (not generated) for error-message quality.
 //!
-//! Separators (`,` `;` and newlines) are insignificant between items
-//! (grammar.ebnf line 15-17): the block loops skip them and never require them.
-//! Keywords are matched positionally by identifier text — see `lexer.rs` — so a
-//! legacy field named `order:` parses where a field is expected.
+//! Separators (`,` `;` and newlines) are insignificant between items: the block
+//! loops skip them and never require them. Keywords are matched positionally by
+//! identifier text — see `lexer.rs` — so a legacy field named `order:` parses
+//! where a field is expected.
 
 use based_ast::*;
 use based_diagnostics::Diagnostic;
@@ -217,7 +216,7 @@ impl<'a> Parser<'a> {
         let mut scopes = Vec::new();
         while self.at(Tok::At) {
             // `@scope Name[, Name]*` is a distinct decorator form (bare names, no
-            // predicate — the predicate lives in the `scope` decl, D46). Every other
+            // predicate — the predicate lives in the `scope` decl). Every other
             // decorator takes the generic parenthesized-args form.
             if self.ident_at(1) == Some("scope") {
                 scopes.push(self.scope_deco()?);
@@ -249,9 +248,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `@scope Name[, Name]*` — one scope alternative on a model (auth.md / D46/D47).
-    /// Bare names (no parenthesized predicate); commas within one decorator are an
-    /// AND-conjunction, repeated decorators are OR-alternatives.
+    /// `@scope Name[, Name]*` — one scope alternative on a model. Bare names (no
+    /// parenthesized predicate); commas within one decorator are an AND-conjunction,
+    /// repeated decorators are OR-alternatives.
     fn scope_deco(&mut self) -> PResult<ScopeRef> {
         let at = self.expect(Tok::At, "`@`")?;
         if !self.eat_kw("scope") {
@@ -275,9 +274,9 @@ impl<'a> Parser<'a> {
 
     // ---------- scope declarations ----------------------------------------
 
-    /// `scope Name (col: Type = $ctx.field, …)` — a named row-visibility contract
-    /// (auth.md Handle 2 / D46). Each term declares a scope column, its type (the
-    /// one place the `$ctx` field's type is written), and the `$ctx.field` it binds.
+    /// `scope Name (col: Type = $ctx.field, …)` — a named row-visibility contract.
+    /// Each term declares a scope column, its type (the one place the `$ctx` field's
+    /// type is written), and the `$ctx.field` it binds.
     fn scope_decl(&mut self) -> PResult<ScopeDecl> {
         let start = self.here().start;
         self.eat_kw("scope");
@@ -482,7 +481,7 @@ impl<'a> Parser<'a> {
         let mut end = ty.span.end;
 
         loop {
-            // `@was("old_col")` — the field's previous physical column name (migrations.md).
+            // `@was("old_col")` — the field's previous physical column name.
             if self.at(Tok::At) && self.ident_at(1) == Some("was") {
                 self.bump(); // @
                 self.bump(); // was
@@ -784,11 +783,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// The per-callable scope acknowledgement (auth.md Handle 2 / D46): exactly one of
-    /// `scoped Name[, Name]*` (accept the standing scope) or `unscoped("reason")` (opt
-    /// out). Sits after the return type on a query, after any `guard` on a mutation.
-    /// Both `None` is legal at the parse level; sema enforces the required-declaration
-    /// rule (`E0182`) where the target is actually scoped.
+    /// The per-callable scope acknowledgement: exactly one of `scoped Name[, Name]*`
+    /// (accept the standing scope) or `unscoped("reason")` (opt out). Sits after the
+    /// return type on a query, after any `guard` on a mutation. Both `None` is legal at
+    /// the parse level; sema enforces the required-declaration rule where the target is
+    /// actually scoped.
     fn scope_ack(&mut self) -> PResult<(Option<Scoped>, Option<Unscoped>)> {
         if self.at_kw("scoped") {
             Ok((Some(self.scoped_clause()?), None))
@@ -797,8 +796,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `scoped Name[, Name]*` — accept the standing scope(s) injected on the target
-    /// (auth.md / D46). Bare names, comma-separated (mirrors `guard name`).
+    /// `scoped Name[, Name]*` — accept the standing scope(s) injected on the target.
+    /// Bare names, comma-separated (mirrors `guard name`).
     fn scoped_clause(&mut self) -> PResult<Scoped> {
         let start = self.bump().unwrap().start; // `scoped`
         let mut names = vec![self.upper_ident("scope name")?];
@@ -816,9 +815,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `unscoped("reason")` — the per-callable `@scope` opt-out (auth.md / D32). Sits
-    /// after the return type on a query, after any `guard` on a mutation. The reason
-    /// string is mandatory (principle 6 — an escape hatch is never silent).
+    /// `unscoped("reason")` — the per-callable `@scope` opt-out. Sits after the return
+    /// type on a query, after any `guard` on a mutation. The reason string is mandatory
+    /// (an escape hatch is never silent).
     fn unscoped_clause(&mut self) -> PResult<Option<Unscoped>> {
         if !self.at_kw("unscoped") {
             return Ok(None);
@@ -1273,8 +1272,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `^.field` — a tx back-reference (mutations.md). One field segment: the
-    /// reference is to a just-created row's column (`^.id` for FK wiring).
+    /// `^.field` — a tx back-reference. One field segment: the reference is to a
+    /// just-created row's column (`^.id` for FK wiring).
     fn back_ref(&mut self) -> PResult<BackRef> {
         let caret = self.expect(Tok::Caret, "`^`")?;
         self.expect(Tok::Dot, "`.` after `^`")?;
@@ -1399,7 +1398,6 @@ impl<'a> Parser<'a> {
             end: body.end,
         };
         let inner = self.text(body);
-        // strip the surrounding backticks
         let inner = &inner[1..inner.len().saturating_sub(1)];
         Ok(RawSql {
             parts: parse_raw_parts(inner, span),
@@ -1463,7 +1461,7 @@ fn unquote(s: &str) -> String {
 
 /// Split a raw-SQL body into literal text and interpolation parts.
 /// `${name.path}` binds a parameter; `{ident}` is an engine-provided value
-/// (`{table}`, `{id}`). Everything else is literal text (raw.md).
+/// (`{table}`, `{id}`). Everything else is literal text.
 fn parse_raw_parts(inner: &str, span: Span) -> Vec<RawPart> {
     let bytes = inner.as_bytes();
     let mut parts = Vec::new();

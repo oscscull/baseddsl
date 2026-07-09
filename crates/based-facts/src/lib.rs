@@ -1,10 +1,10 @@
-//! based-facts — the engine-derived facts an editor should *show* (principle 8).
+//! based-facts — the engine-derived facts an editor should *show*.
 //!
 //! "Show, don't write, for derived facts." A fact the compiler can derive — an
 //! inverse relation's paired forward edge, a join-key index the engine will
-//! create — must never be forced into source. Instead it is surfaced in the
-//! editor. This crate computes those facts as span-anchored [`Fact`] values; the
-//! LSP (or `based facts`) renders them as inlay hints / hover text.
+//! create — must never be forced into source. Instead it is surfaced in the editor.
+//! This crate computes those facts as span-anchored [`Fact`] values; the LSP (or
+//! `based facts`) renders them as inlay hints / hover text.
 //!
 //! The computation is pure over the already-checked schema (plus the AST, only to
 //! tell an *inferred* pairing from one the author wrote explicitly), so it is
@@ -19,21 +19,20 @@ pub enum FactKind {
     /// An inverse relation edge whose paired forward field the engine inferred:
     /// the author wrote `posts: Post[]`, not `posts: Post[] (Post.author)`.
     InferredInverse,
-    /// A join-key index the engine will create even though no `@index` declares it
-    /// (indexing.md, D15). Shown so the write cost is visible without living in
-    /// source.
+    /// A join-key index the engine will create even though no `@index` declares it.
+    /// Shown so the write cost is visible without living in source.
     InferredIndex,
     /// The `$ctx` fields a callable requires — the request context the generated
     /// client sends. Each field's type is fixed by the scope decl or the column it
     /// binds to; a field used only in a hand-written `where` is typed by that use.
     CtxRequirement,
     /// A query's resolved shape — verb (`get`/`list`), target model, cardinality,
-    /// pagination — inferred from the return shape + cardinality (queries.md). None
-    /// of it is written in the signature.
+    /// pagination — inferred from the return shape + cardinality. None of it is
+    /// written in the signature.
     ResolvedQuery,
-    /// A named scope contract (auth.md Handle 2): its filter terms, the models it
-    /// governs, and how callables opt in. Surfaced on the `scope` decl and on every
-    /// `@scope`/`scoped` reference so hovering either explains the contract.
+    /// A named scope contract: its filter terms, the models it governs, and how
+    /// callables opt in. Surfaced on the `scope` decl and on every `@scope`/`scoped`
+    /// reference so hovering either explains the contract.
     Scope,
 }
 
@@ -123,8 +122,8 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
         }
     }
 
-    // Per-query facts: the resolved shape (queries.md inferences) and the `$ctx`
-    // requirement bag — neither is written in the signature.
+    // Per-query facts: the resolved shape and the `$ctx` requirement bag — neither
+    // is written in the signature.
     for q in &schema.queries {
         out.push(resolved_query_fact(q));
         if let Some(fact) = ctx_fact(q.span, &q.ctx_requires, "query") {
@@ -269,7 +268,7 @@ fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
 }
 
 /// A `$ctx` field's inferred type, rendered like the sema conformance summary: a
-/// primitive verbatim, a relation as `-> Model` (the caller supplies its key, D1).
+/// primitive verbatim, a relation as `-> Model`.
 fn ctx_ty(ty: &CtxField) -> String {
     match ty {
         CtxField::Scalar(p) => prim(*p).to_string(),
@@ -293,7 +292,7 @@ fn prim(p: Primitive) -> &'static str {
 }
 
 /// The resolved shape of a query: verb + target + cardinality + pagination, none of
-/// which appears in the signature (queries.md infers them from the return shape).
+/// which appears in the signature.
 fn resolved_query_fact(q: &RQuery) -> Fact {
     let verb = match q.verb {
         Verb::Get => "get",
@@ -411,9 +410,9 @@ mod tests {
         assert!(d.contains("scoped Tenant"), "{d}");
     }
 
-    /// Regression guard (user directive): no editor-facing hover/inlay string may leak an
-    /// internal decision-record ref (`D<n>`), a principle ref (`P<n>`/"principle"), or a
-    /// spec-doc filename. The stable diagnostic codes (`E01xx`/`W01xx`) live elsewhere.
+    /// Regression guard: no editor-facing hover/inlay string may leak an internal
+    /// decision-record ref (`D<n>`), a principle ref (`P<n>`/"principle"), or a spec-doc
+    /// filename. The stable diagnostic codes (`E01xx`/`W01xx`) live elsewhere.
     #[test]
     fn no_editor_string_leaks_a_decision_or_principle_ref() {
         let (schema, decls) = build(SCOPED);

@@ -1,27 +1,26 @@
 //! The SQLite [`Db`] + [`Backend`] (feature `sqlite`).
 //!
-//! SQLite is the **infra-free** backend: an in-memory (or file) database that needs no
-//! live server, so it unlocks real end-to-end integration tests against a genuine engine
-//! — the whole `plan → run → shape` path exercised over an actual `Db`, not a `MockDb`
-//! (see `tests/sqlite_integration.rs`). It is also the lowest-friction second dialect to
-//! land: SQLite binds positional `?` exactly like MariaDB (D21 — no dialect-aware scanner
-//! change, unlike Postgres's `$n`), and it accepts the DML the runtime executes
-//! (backtick-quoted identifiers, `= TRUE`, `IS NULL`, `LIMIT`, multi-table joins) as-is.
+//! SQLite is the infra-free backend: an in-memory (or file) database that needs no live
+//! server, so it unlocks real end-to-end integration tests against a genuine engine — the
+//! whole `plan → run → shape` path exercised over an actual `Db`, not a `MockDb` (see
+//! `tests/sqlite_integration.rs`). It binds positional `?` exactly like MariaDB (no
+//! dialect-aware scanner change, unlike Postgres's `$n`), and accepts the DML the runtime
+//! executes (backtick-quoted identifiers, `= TRUE`, `IS NULL`, `LIMIT`, multi-table joins)
+//! as-is.
 //!
 //! Two pieces, mirroring the MariaDB driver ([`crate::driver`]):
-//! - [`SqliteDb`] — a [`Db`] over one shared connection. Every method locks the
-//!   connection (SQLite serializes writes anyway) and maps [`SqlValue`] binds to
-//!   `rusqlite` params and result columns back to JSON.
-//! - [`SqliteBackend`] — the [`Backend`]. A single-file/in-memory database has no shards,
-//!   so it ignores the shard key and hands every checkout the *same* connection (an
-//!   in-memory DB is per-connection, so sharing one is what lets separate requests see
-//!   each other's writes — exactly the integration-test need). `ping` runs `SELECT 1`.
+//! - [`SqliteDb`] — a [`Db`] over one shared connection. Every method locks the connection
+//!   (SQLite serializes writes anyway) and maps [`SqlValue`] binds to `rusqlite` params and
+//!   result columns back to JSON.
+//! - [`SqliteBackend`] — the [`Backend`]. A single-file/in-memory database has no shards, so
+//!   it ignores the shard key and hands every checkout the same connection (an in-memory DB
+//!   is per-connection, so sharing one is what lets separate requests see each other's
+//!   writes — exactly the integration-test need). `ping` runs `SELECT 1`.
 //!
-//! It reuses the `rusqlite` crate (bundled SQLite, no system dependency — principle 7).
 //! Concurrency: the shared connection is behind a `Mutex`, so checkouts serialize on it.
 //! That is correct for SQLite (a file DB serializes writers regardless) and keeps an
 //! in-memory DB coherent across the worker pool; a throughput-hungry deployment would use
-//! MariaDB , not many SQLite connections.
+//! MariaDB, not many SQLite connections.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,9 +32,9 @@ use crate::run::{Backend, Db, DbError, DbErrorKind, Row};
 use crate::value::SqlValue;
 
 /// How long a locked SQLite database waits for the lock to clear before returning
-/// `SQLITE_BUSY` . SQLite serializes writers, so under a concurrent writer (another
-/// process on a file DB) a checkout would otherwise fail instantly; the busy timeout lets it
-/// wait a bounded moment, and a genuine timeout then surfaces as a retryable deadlock.
+/// `SQLITE_BUSY`. SQLite serializes writers, so under a concurrent writer (another process
+/// on a file DB) a checkout would otherwise fail instantly; the busy timeout lets it wait a
+/// bounded moment, and a genuine timeout then surfaces as a retryable deadlock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One shared SQLite connection behind a `Mutex`. Cloning a [`SqliteDb`] (via the
@@ -47,7 +46,7 @@ pub struct SqliteDb {
 
 impl SqliteDb {
     /// Wrap an already-open connection as a shareable [`Db`]. Sets a bounded `busy_timeout`
-    ///  so a momentarily-locked database waits rather than failing a writer instantly.
+    /// so a momentarily-locked database waits rather than failing a writer instantly.
     pub fn new(conn: Connection) -> SqliteDb {
         // Best effort: a driver that rejects the pragma still works, just without the wait.
         let _ = conn.busy_timeout(BUSY_TIMEOUT);
@@ -69,9 +68,9 @@ fn to_params(params: &[SqlValue]) -> Vec<SqlV> {
     params.iter().map(to_sqlite).collect()
 }
 
-/// A bound [`SqlValue`] → `rusqlite`'s owned value. Families line up with `SqlValue`'s
-/// : a `bool` binds as SQLite's integer `0/1`; `json` is sent as its serialized text
-/// (SQLite has no JSON type — it stores JSON as `TEXT`, which is how the wire reads it back).
+/// A bound [`SqlValue`] → `rusqlite`'s owned value. A `bool` binds as SQLite's integer
+/// `0/1`; `json` is sent as its serialized text (SQLite has no JSON type — it stores JSON as
+/// `TEXT`, which is how the wire reads it back).
 fn to_sqlite(v: &SqlValue) -> SqlV {
     match v {
         SqlValue::Null => SqlV::Null,
@@ -84,7 +83,7 @@ fn to_sqlite(v: &SqlValue) -> SqlV {
 }
 
 /// A returned column value → JSON (the shape the wire response is built from). Text/uuid/
-/// json/timestamp all ride the wire as strings , so `Text` maps straight through; a
+/// json/timestamp all ride the wire as strings, so `Text` maps straight through; a
 /// genuinely binary `BLOB` falls back to lowercase hex (never a panic, matching the
 /// MariaDB driver's `from_mysql`).
 fn from_sqlite(v: ValueRef<'_>) -> serde_json::Value {
@@ -224,7 +223,7 @@ impl Backend for SqliteBackend {
 
 /// Map a `rusqlite` error to the runtime's [`DbError`] (→ the wire's retryable `503`). A
 /// `SQLITE_BUSY`/`SQLITE_LOCKED` (a writer lost the lock race after the busy timeout) is a
-/// deadlock-class failure the mutation path may retry ; everything else is opaque.
+/// deadlock-class failure the mutation path may retry; everything else is opaque.
 fn dberr(e: rusqlite::Error) -> DbError {
     let kind = match &e {
         rusqlite::Error::SqliteFailure(f, _)
@@ -334,7 +333,7 @@ mod tests {
 
     #[test]
     fn busy_lock_is_classified_as_a_retryable_deadlock() {
-        // A real SQLite `SQLITE_BUSY` maps to the deadlock kind  so the mutation path
+        // A real SQLite `SQLITE_BUSY` maps to the deadlock kind so the mutation path
         // retries it. Two connections to one file DB: A holds a write lock, B (busy_timeout
         // 0, so it fails immediately rather than waiting) hits BUSY on its own write lock.
         let path = std::env::temp_dir().join(format!("based_busy_{}.db", std::process::id()));

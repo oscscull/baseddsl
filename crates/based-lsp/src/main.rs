@@ -1,15 +1,14 @@
 //! based-lsp — the editor server for the `based` DSL.
 //!
-//! Its job is principle 8: *show, don't write* the facts the engine derives. On
-//! every edit it recompiles the project (the same discover -> parse -> check front
-//! end the CLI runs) and surfaces:
+//! On every edit it recompiles the project (the same discover -> parse -> check
+//! front end the CLI runs) and surfaces the facts the engine derives, shown but
+//! never written into source:
 //!   * **diagnostics** — every parse/sema error + lint, inline;
-//!   * **inlay hints** — the inferred inverse pairings and join-key indexes, shown
-//!     next to the declarations they belong to but never written into source;
-//!   * **hover** — the fuller "why" behind each derived fact.
+//!   * **inlay hints** — the inferred inverse pairings and join-key indexes;
+//!   * **hover** — the "why" behind each derived fact.
 //!
-//! The derivation itself lives in `based-facts` (pure, golden-tested); this crate
-//! is the transport that maps those facts onto the LSP wire.
+//! The derivation itself lives in `based-facts`; this crate maps those facts onto
+//! the LSP wire.
 
 mod compile;
 

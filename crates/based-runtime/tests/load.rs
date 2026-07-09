@@ -51,7 +51,7 @@ fn plans_the_commerce_place_order_mutation() {
     let c = commerce();
     // `place_order` creates an Order; the engine generates its id, and the response
     // identifies that row (return model = Order). Order is `@scope`d, so `org` comes
-    // from `$ctx` (auto-set on create, D32) — never a body arg.
+    // from `$ctx` (auto-set on create) — never a body arg.
     let mut ids = SeqIdGen::default();
     let r = Request::new(
         "place_order",

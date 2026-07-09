@@ -1,4 +1,4 @@
-//! End-to-end integration against a **real** engine (SQLite), no mock .
+//! End-to-end integration against a **real** engine (SQLite), no mock.
 //!
 //! Every other runtime test drives the plan → run → shape path against a `MockDb` that
 //! returns canned rows — so it proves the *binding* is right but never that the emitted
@@ -12,7 +12,7 @@
 //! It needs no infra (bundled in-memory SQLite), so it runs in CI like any unit test.
 //!
 //! SQLite accepts the runtime's DML as-is (backtick identifiers, `= TRUE`, `IS NULL`,
-//! joins, `LIMIT`, positional `?`). As of D28 the **DDL** is also generated for SQLite —
+//! joins, `LIMIT`, positional `?`). The **DDL** is also generated for SQLite —
 //! the tables here are created from `based gen sql`'s SQLite output (`sql::ddl` with
 //! `Dialect::Sqlite`) run against the loaded schema, so the whole `based gen sql` artifact
 //! (DDL *and* DML) is now proven to execute, not just the query text.
@@ -42,7 +42,7 @@ fn commerce() -> Compiled {
 }
 
 /// Seed an in-memory SQLite database: create every commerce table from the *generated*
-/// SQLite DDL (`based gen sql` with `Dialect::Sqlite`, D28), then insert a couple of rows.
+/// SQLite DDL (`based gen sql` with `Dialect::Sqlite`), then insert a couple of rows.
 /// Running the real DDL — not a hand-shaped copy — means this test now exercises the whole
 /// `based gen sql` artifact end to end: the DDL creates the schema the DML then reads/writes.
 fn seeded_backend(c: &Compiled) -> SqliteBackend {
@@ -100,7 +100,7 @@ fn get_query_runs_against_real_sqlite() {
         "POST",
         "/q/order_by_id",
         json!({ "id": "order-1" }),
-        // Order is `@scope`d : even a keyed `get` is org-scoped, so `$ctx.org` is
+        // Order is `@scope`d: even a keyed `get` is org-scoped, so `$ctx.org` is
         // required. order-1 belongs to org-1, so it's visible to this caller.
         json!({ "org": "org-1" }),
     );
@@ -164,7 +164,7 @@ fn ctx_scoped_list_query_binds_context() {
 #[test]
 fn mutation_writes_then_reselects_declared_shape() {
     // `place_order` creates an Order (engine-generated id) and reads it back in its
-    // declared OrderCard shape , all under one transaction — the full write path
+    // declared OrderCard shape, all under one transaction — the full write path
     // against a real engine: INSERT executes, the re-select joins and projects.
     let c = commerce();
     let backend = seeded_backend(&c);
@@ -173,7 +173,7 @@ fn mutation_writes_then_reselects_declared_shape() {
         &backend,
         "POST",
         "/m/place_order",
-        // `org` is `@scope`-managed on create : supplied via `$ctx`, auto-set on the
+        // `org` is `@scope`-managed on create: supplied via `$ctx`, auto-set on the
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
         json!({ "buyer": "user-1", "total": 99 }),
         json!({ "org": "org-1" }),
@@ -222,15 +222,15 @@ fn bad_arg_is_a_400_before_sql() {
 
 #[test]
 fn backend_ping_succeeds_on_a_live_db() {
-    // The readiness seam  works against a real engine: `SELECT 1` round-trips.
+    // The readiness seam works against a real engine: `SELECT 1` round-trips.
     let c = commerce();
     assert!(seeded_backend(&c).ping().is_ok());
 }
 
-/// An `update` mutation reads its row back in the **full declared shape** , not a bare
+/// An `update` mutation reads its row back in the **full declared shape**, not a bare
 /// `{ id }`, keyed off the write's own `where` and run inside the same transaction
 /// (read-your-writes) — proven against a real engine. The shape includes a nested to-one
-/// sub-object (`placed_by { name }`, D55), so the re-select exercises a relation join too.
+/// sub-object (`placed_by { name }`), so the re-select exercises a relation join too.
 #[test]
 fn update_mutation_reselects_full_declared_shape_end_to_end() {
     let c = compile_sqlite(
@@ -307,10 +307,10 @@ fn compile_sqlite(src: &str) -> Compiled {
 
 #[test]
 fn joined_scope_hides_cross_scope_row_end_to_end() {
-    // D34, proven against a real engine: a query on the *unscoped* `Ticket` reaches the
+    // Proven against a real engine: a query on the *unscoped* `Ticket` reaches the
     // org-*scoped* `Contact` through `raised_by`. Codegen injects `Contact`'s `@scope`
     // into the join `ON` (`contact.org_id = :ctx_org`), so a contact belonging to another
-    // org is invisible across the join. This is the exact cross-scope leak D32 left open.
+    // org is invisible across the join.
     let c = compile_sqlite(
         r#"
         Org { name: text }
@@ -364,7 +364,7 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
     assert_eq!(in_scope.body, json!({ "subject": "help", "who": "Zoe" }));
 }
 
-/// A to-one nested shape sub-object (`placed_by { name, email }`, L1) returns a nested
+/// A to-one nested shape sub-object (`placed_by { name, email }`) returns a nested
 /// JSON object end-to-end: the codegen-prefixed columns (`placed_by.name`, …) come back
 /// from the live SELECT and the runtime reassembles them into a sub-object — proven
 /// against a real engine, not compile-verified. Self-contained (no commerce schema) so
@@ -443,7 +443,7 @@ fn nested_to_one_query_returns_nested_json() {
     );
 }
 
-/// Keyset-cursor pagination (L2), proven against a real engine: paging a `page (2)`
+/// Keyset-cursor pagination, proven against a real engine: paging a `page (2)`
 /// keyset query walks the whole set exactly once — each page returns the next window and
 /// an opaque cursor, the final short page returns a `null` cursor, and the cursor works
 /// even though the sort basis (`rank`, `id`) is not projected (the runtime strips the
@@ -511,7 +511,7 @@ fn keyset_pagination_walks_the_set_end_to_end() {
     assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
 }
 
-/// A to-**many** nested shape array (`items { … }`, L1) returns a JSON array of
+/// A to-**many** nested shape array (`items { … }`) returns a JSON array of
 /// sub-objects end-to-end: codegen aggregates the child rows into an `items[]` JSON-array
 /// column (correlated subquery + SQLite `json_group_array`), the live SELECT returns it as
 /// a string, and the runtime parses it into a real JSON array — proven against a real
@@ -580,7 +580,7 @@ fn nested_to_many_query_returns_json_array() {
     );
 }
 
-/// The flagship **self-referential** to-many (`User.invited_users`, L1): a User joined to
+/// The flagship **self-referential** to-many (`User.invited_users`): a User joined to
 /// itself under a distinct subquery alias. Proven end-to-end against a real engine — the
 /// correlated subquery's `s<n>_user` alias never collides with the outer `user` row, so a
 /// user's invitees nest correctly.

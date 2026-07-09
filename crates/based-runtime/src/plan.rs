@@ -5,11 +5,10 @@
 //! requirement bag) and the lowered SQL, and produces an executable [`QueryPlan`]:
 //! positional statements + the [`Envelope`] the rows are shaped into.
 //!
-//! Binding uses the fact that codegen's placeholder *names* are unambiguous given
-//! the schema: a declared param renders `:<param>`, a context field `:ctx_<field>`
-//! , offset pagination `:offset`. So the runtime assembles one value
-//! environment from the validated inputs and lets [`crate::scan::to_positional`]
-//! pull from it in SQL order.
+//! Binding uses the fact that codegen's placeholder names are unambiguous given the
+//! schema: a declared param renders `:<param>`, a context field `:ctx_<field>`, offset
+//! pagination `:offset`. So the runtime assembles one value environment from the
+//! validated inputs and lets [`crate::scan::to_positional`] pull from it in SQL order.
 
 use based_ast::{BaseType, Decl, DefaultVal, Literal, Mutation, Param, Query, Verb};
 use based_sema::{CtxField, CtxReq};
@@ -25,11 +24,11 @@ pub struct Request {
     pub callable: String,
     pub args: serde_json::Map<String, serde_json::Value>,
     pub ctx: serde_json::Map<String, serde_json::Value>,
-    /// An optional idempotency key for a **mutation retry** : the caller attaches a
-    /// stable key so the engine runs the write body at most once per key. Request
-    /// metadata, supplied out of band (the `Idempotency-Key` header), never the JSON body
-    /// — the same trusted-edge discipline as `$ctx` (auth.md/D7), and never a schema
-    /// field. `None` → run every time (the default). Ignored by queries.
+    /// An optional idempotency key for a mutation retry: the caller attaches a stable key
+    /// so the engine runs the write body at most once per key. Request metadata, supplied
+    /// out of band (the `Idempotency-Key` header), never the JSON body — the same
+    /// trusted-edge discipline as `$ctx`, and never a schema field. `None` → run every time
+    /// (the default). Ignored by queries.
     pub idempotency_key: Option<String>,
 }
 
@@ -50,19 +49,19 @@ impl Request {
         }
     }
 
-    /// Attach a mutation idempotency key . A blank/whitespace-only key is treated as
-    /// absent (a header set to `""` is not a real key), so an empty header never claims a
-    /// store slot.
+    /// Attach a mutation idempotency key. A blank/whitespace-only key is treated as absent
+    /// (a header set to `""` is not a real key), so an empty header never claims a store
+    /// slot.
     pub fn with_idempotency_key(mut self, key: Option<String>) -> Self {
         self.idempotency_key = key.filter(|k| !k.trim().is_empty());
         self
     }
 
-    /// A stable hash of this request's **payload** — its args and `$ctx` — for the
-    /// idempotency store . A genuine retry of the same request produces the same
-    /// fingerprint (so the stored response replays); a caller who reuses one key for a
-    /// *different* request produces a different one, which the store rejects rather than
-    /// silently answering with the first request's result.
+    /// A stable hash of this request's payload — its args and `$ctx` — for the idempotency
+    /// store. A genuine retry of the same request produces the same fingerprint (so the
+    /// stored response replays); a caller who reuses one key for a different request
+    /// produces a different one, which the store rejects rather than silently answering
+    /// with the first request's result.
     ///
     /// Only the payload is fingerprinted, not the callable or the key — the store already
     /// scopes an entry by `(callable, key)`, so the fingerprint's job is purely to detect a
@@ -74,7 +73,7 @@ impl Request {
         // FNV-1a over the canonical JSON of (args, ctx). A field-count prefix separates the
         // two maps so that moving a field from args to ctx changes the hash (no ambiguous
         // concatenation). FNV is stable across releases (unlike `DefaultHasher`), which a
-        // durable multi-instance store relies on .
+        // durable multi-instance store relies on.
         let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis.
         for part in [&self.args, &self.ctx] {
             let s = serde_json::Value::Object(part.clone()).to_string();
@@ -82,7 +81,7 @@ impl Request {
                 h ^= *b as u64;
                 h = h.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime.
             }
-            // A separator byte between the two maps (see above).
+            // A separator byte between the two maps.
             h ^= 0xff;
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -90,7 +89,7 @@ impl Request {
     }
 }
 
-/// How the executed rows become the response body (queries.md / pagination.md).
+/// How the executed rows become the response body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Envelope {
     /// `get` — at most one row → `Option<T>` (JSON object or `null`).
@@ -116,9 +115,9 @@ pub struct QueryPlan {
     pub main: Stmt,
     pub count: Option<Stmt>,
     pub envelope: Envelope,
-    /// Keyset descriptor for a cursor-paginated `list` (pagination.md), else `None`.
-    /// The run stage reads the last row's hidden `__keyset_<i>` columns to mint the
-    /// next cursor and strips them from the response.
+    /// Keyset descriptor for a cursor-paginated `list`, else `None`. The run stage reads
+    /// the last row's hidden `__keyset_<i>` columns to mint the next cursor and strips them
+    /// from the response.
     pub keyset: Option<KeysetPlan>,
 }
 
@@ -132,7 +131,7 @@ pub struct KeysetPlan {
 }
 
 /// A planned mutation: the write statements in execution order (all bound
-/// positionally), run under one engine-owned transaction (principle 7).
+/// positionally), run under one engine-owned transaction.
 #[derive(Debug, Clone)]
 pub struct MutationPlan {
     pub name: String,
@@ -143,10 +142,10 @@ pub struct MutationPlan {
     pub result_id: Option<String>,
     /// The declared-shape re-select: reads the written row back in the mutation's return
     /// shape so the write response matches the client's decoded output type. Keyed either
-    /// on the created row's id (`:result_id` = [`result_id`](Self::result_id)) or on
-    /// an update/soft-delete/restore's own `where` (its params already bound). `None`
-    /// only when the row does not survive the write (a real DELETE), where the response
-    /// falls back to `{}`.
+    /// on the created row's id (`:result_id` = [`result_id`](Self::result_id)) or on an
+    /// update/soft-delete/restore's own `where` (its params already bound). `None` only
+    /// when the row does not survive the write (a real DELETE), where the response falls
+    /// back to `{}`.
     pub ret_select: Option<Stmt>,
 }
 
@@ -176,8 +175,8 @@ pub enum PlanError {
     /// The SQL referenced a `:name` the runtime could not resolve — an internal
     /// invariant break (codegen emitted a placeholder the planner did not bind).
     UnboundPlaceholder(String),
-    /// A keyset `cursor` arg was present but malformed/tampered/of the wrong arity
-    /// (cursor.md validation). The caller sent a bad cursor — a boundary error.
+    /// A keyset `cursor` arg was present but malformed/tampered/of the wrong arity. The
+    /// caller sent a bad cursor — a boundary error.
     BadCursor(String),
 }
 
@@ -262,8 +261,8 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     if offset_paginated(ast) {
         env.insert("offset".to_string(), bind_offset(req)?);
     }
-    // Keyset pagination (pagination.md): decode the opaque `cursor` arg into the
-    // sort-key values codegen's `:keyset_<i>` placeholders compare against, and flip
+    // Keyset pagination: decode the opaque `cursor` arg into the sort-key values
+    // codegen's `:keyset_<i>` placeholders compare against, and flip
     // `:keyset_active`. Absent cursor = the first page: `:keyset_active = 0` short-
     // circuits the comparison to a no-op, and the `:keyset_<i>` bind to NULL (never
     // consulted). `low.keyset` is the codegen-authoritative key count.
@@ -275,7 +274,7 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     let main = env.bind(&low.sql)?;
     let count = low.count_sql.as_deref().map(|s| env.bind(s)).transpose()?;
 
-    // 3. The response shape follows the query's inferred cardinality (queries.md).
+    // 3. The response shape follows the query's inferred cardinality.
     let envelope = match rq.verb {
         Verb::Get => Envelope::One,
         Verb::List if rq.paginated => Envelope::Page {
@@ -331,8 +330,8 @@ pub fn plan_mutation(
         env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
     }
 
-    // 2. Generate the engine `id` for each create . Record the id of the first
-    //    create matching the return model — the row the response identifies.
+    // 2. Generate the engine `id` for each create. Record the id of the first create
+    //    matching the return model — the row the response identifies.
     let mut result_id = None;
     for w in &low.stmts {
         if let Some(bind) = &w.gen_id {
@@ -353,7 +352,7 @@ pub fn plan_mutation(
 
     // 4. The declared-shape re-select: bind it whenever codegen emitted one (codegen and
     //    this planner apply the same survives-the-write rule, so they agree). A create-keyed
-    //    re-select  needs `:result_id` = this create's engine id; a where-keyed one
+    //    re-select needs `:result_id` = this create's engine id; a where-keyed one
     //    (update/soft-delete/restore) reuses the write's own params/`$ctx`, already in
     //    `env`. Seeding `:result_id` only when a create produced one is harmless for the
     //    where-keyed form — `to_positional` binds only the placeholders each statement carries.
@@ -379,7 +378,7 @@ pub fn plan_mutation(
 
 /// Named bind values gathered from the validated request; `bind` pulls from it in
 /// SQL placeholder order. Carries the target `dialect` so the positional rewrite emits
-/// the right placeholder form (`?` vs `$n`, D21/D29).
+/// the right placeholder form (`?` vs `$n`).
 struct Env {
     dialect: based_codegen::Dialect,
     values: std::collections::HashMap<String, SqlValue>,
@@ -429,13 +428,13 @@ fn bind_param(p: &Param, req: &Request) -> Result<SqlValue, PlanError> {
 
 /// The coercion family + nullability of a param. A model-typed or untyped param
 /// keeps things loose (a relation key is a uuid string; an untyped param is
-/// shape-coerced) — strict per-column typing of untyped params is a later slice.
+/// shape-coerced); untyped params are not strictly per-column typed.
 fn param_family(p: &Param) -> (Family, bool) {
     match &p.ty {
         Some(t) => {
             let family = match &t.base {
                 BaseType::Primitive(prim) => Family::of(*prim),
-                // A relation param carries the target's key : a uuid string.
+                // A relation param carries the target's key: a uuid string.
                 BaseType::Model(_) => Family::Text,
             };
             (family, t.optional || p.default.is_some())
@@ -450,7 +449,7 @@ fn param_family(p: &Param) -> (Family, bool) {
 fn bind_ctx(c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
     let family = match &c.ty {
         CtxField::Scalar(prim) => Family::of(*prim),
-        // A relation-typed context field carries the model's key .
+        // A relation-typed context field carries the model's key.
         CtxField::Relation(_) => Family::Text,
     };
     match req.ctx.get(&c.field) {
@@ -464,7 +463,7 @@ fn bind_ctx(c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
 }
 
 /// Bind the `:offset` of an offset page. The client sends `offset`; absence means
-/// the first page (offset 0), never an error (pagination.md — the default is safe).
+/// the first page (offset 0), never an error (the default is safe).
 fn bind_offset(req: &Request) -> Result<SqlValue, PlanError> {
     match req.args.get("offset") {
         Some(v) => coerce(v, Family::Int, false).map_err(|e| bad_arg("offset", e)),
@@ -571,7 +570,7 @@ mod tests {
 
     /// The fingerprint is stable for the same payload, differs when args or `$ctx` change,
     /// and is invariant to the idempotency key (the store scopes by key already — the
-    /// fingerprint's only job is to detect a payload change under a reused key, D25).
+    /// fingerprint's only job is to detect a payload change under a reused key).
     #[test]
     fn fingerprint_tracks_the_payload_not_the_key() {
         let base = Request::new("m", json!({ "a": 1, "b": "x" }), json!({ "org": "o-1" }));

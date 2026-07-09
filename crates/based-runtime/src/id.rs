@@ -1,10 +1,9 @@
-//! Engine id generation .
+//! Engine id generation.
 //!
 //! A `create` binds its `id` to an engine-generated value (`:id` / `:id_<step>`);
 //! the runtime fills it from an [`IdGen`]. The trait is the seam: production uses the
 //! uuid generator ([`UuidGen`], behind the `serve` feature), while tests use the
-//! deterministic [`SeqIdGen`] so a planned INSERT's bound id is predictable — the
-//! write path's twin of the read path's `MockDb`.
+//! deterministic [`SeqIdGen`] so a planned INSERT's bound id is predictable.
 
 /// Produces fresh ids for engine-generated `id` columns. Called once per `create`
 /// (and once more is never needed — a `^.id` back-reference *reuses* the value the
@@ -14,8 +13,7 @@ pub trait IdGen {
 }
 
 /// A deterministic generator for tests: `<prefix>-0`, `<prefix>-1`, … in call order.
-/// Not for production (ids must be unpredictable + globally unique) — the uuid
-/// generator lands with the driver slice.
+/// Not for production (ids must be unpredictable + globally unique).
 pub struct SeqIdGen {
     prefix: String,
     n: u64,
@@ -47,10 +45,10 @@ impl IdGen for SeqIdGen {
 }
 
 /// The production generator: a fresh random v4 uuid per `create`. Unpredictable and
-/// globally unique  — no coordination with the database, so a `create`'s id is
-/// known *before* the INSERT, which is what lets a `^.id` back-reference bind the same
-/// value the INSERT used. One is built per request in `based serve` (id state is
-/// per-request, never shared across threads).
+/// globally unique — no coordination with the database, so a `create`'s id is known
+/// before the INSERT, which is what lets a `^.id` back-reference bind the same value the
+/// INSERT used. One is built per request in `based serve` (id state is per-request, never
+/// shared across threads).
 #[cfg(feature = "serve")]
 #[derive(Default)]
 pub struct UuidGen;

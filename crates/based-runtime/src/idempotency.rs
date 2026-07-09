@@ -1,60 +1,51 @@
-//! Write-retry idempotency  — dedupe a retried `create`/mutation.
+//! Write-retry idempotency — dedupe a retried `create`/mutation.
 //!
-//! App-side id-gen  means the engine mints a *fresh* `id` for every `create`, so a
-//! client that retries a mutation after a `503`/timeout — not knowing whether the first
-//! attempt committed — would **double-insert** (D20 flagged this as the gap to close
-//! before write retries are safe at scale). An *idempotency key* closes it: the caller
-//! attaches a stable key to a mutation, and the engine runs the write body **at most
-//! once** per key — a retry replays the first attempt's stored response instead of
-//! writing again.
+//! The engine mints a fresh `id` for every `create`, so a client that retries a mutation
+//! after a `503`/timeout — not knowing whether the first attempt committed — would
+//! double-insert. An idempotency key closes it: the caller attaches a stable key to a
+//! mutation, and the engine runs the write body at most once per key — a retry replays
+//! the first attempt's stored response instead of writing again.
 //!
 //! ## Scope
-//! - **Mutations only.** A query is naturally idempotent (no writes), so it never
-//!   touches the store — only [`crate::run::run_mutation`] does.
-//! - **Opt-in.** No key → the current behaviour (run every time). The key is *request
-//!   metadata*, supplied out of band by the wire edge (`Idempotency-Key` header), never
-//!   the JSON body — the same trusted-edge discipline as `$ctx` (auth.md/D7). A schema
-//!   never *reads* the key: it is engine infrastructure, not application data, so it is
-//!   deliberately **not** a `$ctx.<field>`.
-//! - **Keyed by `(callable, key)`.** The key is scoped to the callable it accompanies, so
-//!   the *same* key reused across two different mutations does not collide (a client that
-//!   reuses one request id for a batch stays correct).
+//! - Mutations only. A query is naturally idempotent (no writes), so it never touches the
+//!   store — only [`crate::run::run_mutation`] does.
+//! - Opt-in. No key → run every time. The key is request metadata, supplied out of band
+//!   by the wire edge (`Idempotency-Key` header), never the JSON body. A schema never
+//!   reads the key: it is engine infrastructure, not application data.
+//! - Keyed by `(callable, key)`. The key is scoped to the callable it accompanies, so the
+//!   same key reused across two different mutations does not collide.
 //!
-//! ## Semantics (the Stripe/standard model)
+//! ## Semantics
 //! On a mutation carrying a key, [`run_mutation`] consults the store via
-//! [`IdempotencyStore::begin`], which also carries a **request fingerprint** (a stable
-//! hash of the request's args + `$ctx`, [`Request::fingerprint`](crate::Request::fingerprint)):
-//! - **Fresh** → mark the key in-flight (recording the fingerprint), run the write body,
-//!   then [`record`] the response (or [`abandon`] on failure so a later retry may try again).
-//! - **Done** → a prior attempt with the **same fingerprint** already committed; **replay**
-//!   its stored response with no writes (the retry is a no-op, exactly-once achieved).
-//! - **InFlight** → a concurrent attempt with the same key + fingerprint is still running;
-//!   reject with a retryable `409` rather than run a second write (the double-submit case).
-//! - **Mismatch** → the key was seen before but with a **different** fingerprint: the caller
-//!   reused one key for two *different* requests. Replaying the first would silently return
-//!   the wrong request's result, so this is rejected (a non-retryable `422`) rather than run
-//!   or replay — the key alone is not authoritative when the payload disagrees (principle 1:
-//!   the dangerous case is loud, not silent). This is the safety upgrade over "key alone
-//!   wins" (the earlier Stripe default).
+//! [`IdempotencyStore::begin`], which also carries a request fingerprint (a stable hash of
+//! the request's args + `$ctx`, [`Request::fingerprint`](crate::Request::fingerprint)):
+//! - Fresh → mark the key in-flight (recording the fingerprint), run the write body, then
+//!   [`record`] the response (or [`abandon`] on failure so a later retry may try again).
+//! - Done → a prior attempt with the same fingerprint already committed; replay its stored
+//!   response with no writes (exactly-once).
+//! - InFlight → a concurrent attempt with the same key + fingerprint is still running;
+//!   reject with a retryable `409` rather than run a second write.
+//! - Mismatch → the key was seen before but with a different fingerprint: the caller
+//!   reused one key for two different requests. Replaying the first would silently return
+//!   the wrong request's result, so this is rejected (a non-retryable `422`) rather than
+//!   run or replayed.
 //!
 //! ## The store is a seam
-//! [`IdempotencyStore`] is a trait — the [`Db`](crate::run::Db)/[`IdGen`](crate::id::IdGen)
-//! twin for this concern. [`MemStore`] is an in-process implementation (correct for a
-//! single instance, and the whole request→response path is testable against it with no
-//! infra). A production, multi-instance deployment backs the store with a shared store
-//! (the database itself, or a cache) so a retry that lands on a *different* app instance
-//! still dedupes. [`MemStore`] is the single-instance implementation of the seam; a
-//! shared/durable store (the database or a cache) implements the same trait.
+//! [`IdempotencyStore`] is a trait. [`MemStore`] is an in-process implementation (correct
+//! for a single instance, and the whole request→response path is testable against it with
+//! no infra). A multi-instance deployment backs the store with a shared/durable store (the
+//! database itself, or a cache) so a retry that lands on a different app instance still
+//! dedupes, behind the same trait.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// A stable hash of a request's args + `$ctx` — the payload a keyed mutation carries.
 ///
-/// Two attempts that are genuine retries of the *same* request produce the same
-/// fingerprint; a caller that accidentally reuses one key for two *different* requests
+/// Two attempts that are genuine retries of the same request produce the same
+/// fingerprint; a caller that accidentally reuses one key for two different requests
 /// produces different ones, which the store rejects rather than silently replaying the
-/// first . Built by [`Request::fingerprint`](crate::Request::fingerprint); opaque and
+/// first. Built by [`Request::fingerprint`](crate::Request::fingerprint); opaque and
 /// compared only for equality (the exact hash is never surfaced).
 pub type Fingerprint = u64;
 
@@ -120,11 +111,11 @@ enum Entry {
 
 /// An in-process [`IdempotencyStore`]: a `Mutex`-guarded map keyed by `(callable, key)`.
 ///
-/// Correct for a **single** app instance (one process dedupes its own retries). It is
-/// `Send + Sync`, so the shared HTTP worker pool  uses one behind an `Arc`. A
-/// multi-instance deployment wants a *shared* store (so a retry on another instance also
-/// dedupes) behind the same trait; the seam is identical. Keys accumulate (no eviction);
-/// a production store adds a TTL. For local/embedded use and tests this is complete.
+/// Correct for a single app instance (one process dedupes its own retries). It is
+/// `Send + Sync`, so the shared HTTP worker pool uses one behind an `Arc`. A
+/// multi-instance deployment wants a shared store (so a retry on another instance also
+/// dedupes) behind the same trait. Keys accumulate (no eviction); a production store adds
+/// a TTL. For local/embedded use and tests this is complete.
 #[derive(Default)]
 pub struct MemStore {
     entries: Mutex<HashMap<(String, String), Entry>>,
@@ -175,10 +166,9 @@ impl IdempotencyStore for MemStore {
 
 /// A no-op [`IdempotencyStore`] — every `begin` is [`KeyState::Fresh`] and nothing is
 /// retained. This is the "idempotency off" store: dispatch paths that don't opt in (and
-/// the tests that don't exercise dedupe) pass it so there is **one** dispatch code path
-/// (principle 4), not a with/without-store fork. A [`crate::plan::Request`] with no key
-/// also short-circuits the store entirely, so `NoStore` is only ever consulted for a
-/// keyless request in practice.
+/// the tests that don't exercise dedupe) pass it so there is one dispatch code path, not a
+/// with/without-store fork. A [`crate::plan::Request`] with no key also short-circuits the
+/// store entirely, so `NoStore` is only ever consulted for a keyless request in practice.
 #[derive(Default)]
 pub struct NoStore;
 

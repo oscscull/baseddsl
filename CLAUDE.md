@@ -4,6 +4,10 @@ DB-first DSL + engine. Rust. MySQL/MariaDB first; dialect = compile target.
 Audience = LLMs + human reviewers. Optimize tokens-to-comprehend, not keystrokes.
 When terse vs readable conflict: readable wins.
 
+Source comments: only where a reader can't infer *what* the code does from the code itself —
+most code needs none; a few key entry points get a short doc block. No cross-refs to
+D#/M#/PLAN/DoD/decisions in source. No WIP/rationale/narration — that lives in spec/decisions/PLAN.
+
 `spec/principles.md` is always-loaded tiebreakers, in order. Read before any decision.
 
 Source: one extension `.bsl`; uniform grammar (any decl in any file). Layout is the user's

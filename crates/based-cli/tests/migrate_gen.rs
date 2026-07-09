@@ -1,5 +1,5 @@
 //! `based migrate gen` end-to-end: scaffold a tiny project in a temp dir, run the
-//! compiled binary, and assert the migration files it writes (E2). Offline — no DB.
+//! compiled binary, and assert the migration files it writes. Offline — no DB.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -1,11 +1,11 @@
-//! Docker-backed ephemeral MariaDB harness for real-DB integration tests .
+//! Docker-backed ephemeral MariaDB harness for real-DB integration tests.
 //!
 //! This brings up a throwaway MariaDB server in a container, waits for it to accept
 //! connections, and tears it down when the test ends — so a live integration suite can run
 //! the *verbatim* `based gen sql` output against a genuine server instead of a `MockDb`.
 //! It shells out to the `docker` CLI directly (OrbStack provides the daemon locally); a
-//! thin guard rather than a heavy testcontainers dependency, matching principle 7's "reuse
-//! the hardened external tool" without pulling an async runtime into a sync codebase.
+//! thin guard rather than a heavy testcontainers dependency — reuse the hardened external
+//! tool, without pulling an async runtime into a sync codebase.
 //!
 //! **No daemon ⇒ skip, never fail.** [`MariaDbContainer::start`] returns `None` when the
 //! Docker daemon is unreachable (`docker info` fails) or the image/run/readiness steps do
@@ -14,7 +14,7 @@
 //! real-DB proof runs *when infra is present* and is simply absent otherwise (it never
 //! turns a missing daemon into a red build).
 //!
-//! **CI-provided server ⇒ use it, don't spin one .** When `TEST_MARIADB_URL` is set,
+//! **CI-provided server ⇒ use it, don't spin one.** When `TEST_MARIADB_URL` is set,
 //! [`MariaDbContainer::start`] connects to *that* server (a CI service container, a shared
 //! dev DB, …) instead of launching its own container — after the same readiness-wait, so the
 //! suite never races a still-booting server. `Drop` then leaves the external server alone.

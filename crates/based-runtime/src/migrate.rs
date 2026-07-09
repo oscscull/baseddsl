@@ -1,31 +1,31 @@
-//! Migration apply + the `_based_migrations` ledger (Track E4, `spec/syntax/migrations.md`).
+//! Migration apply + the `_based_migrations` ledger.
 //!
 //! The offline half of migrations lives in [`based_codegen::migrate`] (snapshot, diff,
-//! per-dialect SQL render, content hash). This is the **live** half: it carries a real
+//! per-dialect SQL render, content hash). This is the live half: it carries a real
 //! database from one migration state to the next, driven through the same [`Db`] seam the
 //! request path uses (so `based migrate apply` and `based serve` share one driver stack).
 //!
 //! ## Execution model — snapshot-authoritative
 //! A migration's executable steps are re-derived as `diff(snapshot[N-1], snapshot[N])` from
-//! the stored `schema.snap`s — the same authoritative model `based migrate render` uses
-//! (migrations.md), so the SQL applied is exactly the SQL a reviewer read, with no separate
-//! `up.mig` text parser to drift. The `up.mig` file is the human-readable review artifact and
-//! the **tamper anchor**: its [`content_hash`](based_codegen::migrate::content_hash) is
-//! recorded in the ledger, and an edit to an *already-applied* migration is a hard error
-//! (never a silent re-apply — migrations.md).
+//! the stored `schema.snap`s — the same authoritative model `based migrate render` uses,
+//! so the SQL applied is exactly the SQL a reviewer read, with no separate `up.mig` text
+//! parser to drift. The `up.mig` file is the human-readable review artifact and the tamper
+//! anchor: its [`content_hash`](based_codegen::migrate::content_hash) is recorded in the
+//! ledger, and an edit to an already-applied migration is a hard error (never a silent
+//! re-apply).
 //!
 //! ## The ledger
 //! [`ensure_ledger`] creates the engine-owned `_based_migrations` table (id + content-hash +
-//! applied_at) on first use; [`apply`] inserts one row per applied migration **inside that
-//! migration's own transaction**, so a crash mid-apply leaves no ledger row and a re-`apply`
-//! retries cleanly (principle 7 — the engine owns the ledger + the tx boundary). Destructive
-//! steps refuse to apply without an explicit `--allow-destructive` ack (principle 1).
+//! applied_at) on first use; [`apply`] inserts one row per applied migration inside that
+//! migration's own transaction, so a crash mid-apply leaves no ledger row and a re-`apply`
+//! retries cleanly. Destructive steps refuse to apply without an explicit
+//! `--allow-destructive` ack.
 //!
 //! ## Rollback
-//! Roll-forward is the default; there is no auto-generated down. An OPTIONAL author-written
-//! `down.mig` (raw per-dialect SQL — the honest form for a hand-written reverse, D42) is
-//! honored by [`Direction::Down`] / [`Direction::To`], each run inside a transaction that also
-//! deletes the ledger row. A migration with no `down.mig` is roll-forward only ([`MigrateError::NoDown`]).
+//! Roll-forward is the default; there is no auto-generated down. An optional author-written
+//! `down.mig` (raw per-dialect SQL) is honored by [`Direction::Down`] / [`Direction::To`],
+//! each run inside a transaction that also deletes the ledger row. A migration with no
+//! `down.mig` is roll-forward only ([`MigrateError::NoDown`]).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -36,8 +36,8 @@ use based_codegen::Dialect;
 use crate::run::{Db, DbError, Row};
 use crate::value::SqlValue;
 
-/// The engine-owned ledger table (migrations.md). Underscore-prefixed so it never collides
-/// with a user model's table (models are `snake_case(ModelName)`, D3 — no leading underscore).
+/// The engine-owned ledger table. Underscore-prefixed so it never collides with a user
+/// model's table (models are `snake_case(ModelName)` — no leading underscore).
 const LEDGER: &str = "_based_migrations";
 
 /// A migration loaded from `migrations/NNNN_slug/`, ready to apply against a live database.
@@ -49,7 +49,7 @@ pub struct PlannedMigration {
     pub id: String,
     /// The executable up statements for the target dialect (snapshot-authoritative).
     pub up_sql: Vec<String>,
-    /// The `up.mig` content hash — the ledger tamper guard (migrations.md).
+    /// The `up.mig` content hash — the ledger tamper guard.
     pub up_hash: String,
     /// Any up step is destructive (a drop / narrowing / new not-null-without-default /
     /// new unique) → apply requires `--allow-destructive`.
@@ -81,7 +81,7 @@ pub enum Direction {
 /// Options for [`apply`].
 #[derive(Debug, Clone)]
 pub struct ApplyOpts {
-    /// Vouch for destructive steps at apply time (migrations.md's `--allow-destructive`).
+    /// Vouch for destructive steps at apply time (`--allow-destructive`).
     pub allow_destructive: bool,
     pub direction: Direction,
 }
@@ -165,7 +165,7 @@ impl std::error::Error for MigrateError {}
 /// given dialect. Each migration's steps are re-derived as `diff(prev snapshot, this
 /// snapshot)` and rendered to executable SQL; the `up.mig` bytes are hashed for the ledger;
 /// a `down.mig` (raw SQL) is split into statements if present. The numbers must be a
-/// gap-free `1..N` sequence (migrations.md — zero-padded, sequential).
+/// gap-free `1..N` sequence (zero-padded, sequential).
 pub fn load_migrations(
     root: &Path,
     dialect: Dialect,
@@ -194,7 +194,7 @@ pub fn load_migrations(
         let up_text = read_file(&path.join("up.mig"))?;
         // `raw(<dialect>)` escape steps can't be re-derived from the snapshots (opaque
         // SQL) — recover them from the authored `up.mig` and layer them after the
-        // structural steps for the matching target (migrations.md).
+        // structural steps for the matching target.
         let raw_steps = migrate::parse_raw_steps(&up_text);
         up_sql.extend(
             migrate::sql_statements(&raw_steps, dialect)
@@ -256,7 +256,7 @@ fn read_file(path: &Path) -> Result<String, MigrateError> {
 }
 
 /// Split a raw SQL script into individual statements on `;`, dropping `--`/`#` comment lines
-/// and blank fragments. A `down.mig` is hand-written raw SQL , terminated by `;`.
+/// and blank fragments. A `down.mig` is hand-written raw SQL, terminated by `;`.
 fn split_sql(script: &str) -> Vec<String> {
     script
         .split(';')
@@ -322,7 +322,7 @@ pub fn applied(db: &mut dyn Db, dialect: Dialect) -> Result<Vec<LedgerRow>, DbEr
         .collect())
 }
 
-/// A row field read as a string (text/uuid/timestamp all ride the wire as JSON strings, D1).
+/// A row field read as a string (text/uuid/timestamp all ride the wire as JSON strings).
 fn str_field(r: &Row, key: &str) -> String {
     match r.get(key) {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -333,7 +333,7 @@ fn str_field(r: &Row, key: &str) -> String {
 
 fn placeholder(dialect: Dialect, n: usize) -> String {
     match dialect {
-        // Postgres binds `$1, $2, …`; MariaDB/SQLite bind `?` .
+        // Postgres binds `$1, $2, …`; MariaDB/SQLite bind `?`.
         Dialect::Postgres => format!("${n}"),
         Dialect::MariaDb | Dialect::Sqlite => "?".to_string(),
     }
@@ -364,8 +364,8 @@ fn delete_ledger_sql(dialect: Dialect) -> String {
 
 /// Apply (or roll back) migrations against a live database, reconciling the `_based_migrations`
 /// ledger to the requested [`Direction`]. Each migration runs in its own transaction with its
-/// ledger row (principle 7). Enforces the tamper guard (an edited applied migration is a hard
-/// error), the destructive-ack gate, and the contiguous-prefix ledger invariant.
+/// ledger row. Enforces the tamper guard (an edited applied migration is a hard error), the
+/// destructive-ack gate, and the contiguous-prefix ledger invariant.
 ///
 /// The `migrations` slice is the full ordered set from [`load_migrations`]; already-applied
 /// ones are skipped (roll-forward) or reversed (rollback), so `apply` is safe to re-run.
@@ -380,7 +380,7 @@ pub fn apply(
     let applied_ids: BTreeSet<&str> = ledger.iter().map(|r| r.id.as_str()).collect();
 
     // Tamper + existence guard: every applied migration must still be on disk with the same
-    // up.mig hash it was applied with (migrations.md — applied history is immutable).
+    // up.mig hash it was applied with (applied history is immutable).
     for row in &ledger {
         match migrations.iter().find(|m| m.id == row.id) {
             Some(m) if m.up_hash != row.content_hash => {
@@ -458,7 +458,7 @@ pub fn apply(
         .collect();
     forward.sort_by_key(|m| m.number);
     for m in forward {
-        // Gate destructive steps before touching the database (principle 1).
+        // Gate destructive steps before touching the database.
         if m.destructive && !opts.allow_destructive {
             return Err(MigrateError::Destructive { id: m.id.clone() });
         }
@@ -484,9 +484,9 @@ enum LedgerOp<'a> {
 }
 
 /// Run a migration's statements + its ledger write under one engine-owned transaction. If any
-/// statement fails, roll back and surface the error — a migration is all-or-nothing (principle
-/// 7). (On MySQL/MariaDB, DDL implicitly commits, so the tx is best-effort there; the ledger
-/// row is still written in the same connection turn, and a re-apply skips completed migrations.)
+/// statement fails, roll back and surface the error — a migration is all-or-nothing. (On
+/// MySQL/MariaDB, DDL implicitly commits, so the tx is best-effort there; the ledger row is
+/// still written in the same connection turn, and a re-apply skips completed migrations.)
 fn run_in_tx(
     db: &mut dyn Db,
     stmts: &[String],

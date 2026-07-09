@@ -1,16 +1,16 @@
 //! Lexer for `.bsl`. Thin wrapper over a `logos` token set.
 //!
-//! Casing is load-bearing (decisions.md D7), so lower- and upper-camel
-//! identifiers are distinct token kinds — the parser never re-inspects the first
-//! byte. Keywords are NOT lexed as dedicated tokens: they ride in as
-//! `LowerIdent` and the parser recognizes them positionally. This is what lets a
-//! legacy-named field like `order:` (a D8 reserved word) parse where a field is
-//! expected, while `order (...)` still reads as a clause where a clause is
-//! expected — the token is the same, only the position differs.
+//! Casing is load-bearing, so lower- and upper-camel identifiers are distinct
+//! token kinds — the parser never re-inspects the first byte. Keywords are NOT
+//! lexed as dedicated tokens: they ride in as `LowerIdent` and the parser
+//! recognizes them positionally. This is what lets a legacy-named field like
+//! `order:` (a reserved word) parse where a field is expected, while `order (...)`
+//! still reads as a clause where a clause is expected — the token is the same,
+//! only the position differs.
 //!
-//! Whitespace, newlines and `#` comments are skipped: per grammar.ebnf they
-//! separate tokens but never carry meaning (principle 3). Item separators
-//! (`,` `;`) survive as tokens and are treated as optional by the parser.
+//! Whitespace, newlines and `#` comments are skipped: they separate tokens but
+//! never carry meaning. Item separators (`,` `;`) survive as tokens and are
+//! treated as optional by the parser.
 
 use logos::Logos;
 
@@ -19,7 +19,7 @@ use logos::Logos;
 #[logos(skip r"[ \t\r\n\f]+")] // whitespace: insignificant
 #[logos(skip r"#[^\n]*")] // line comment
 pub enum Tok {
-    // --- identifiers (casing distinguishes model refs from columns, D7) ---
+    // --- identifiers (casing distinguishes model refs from columns) ---
     #[regex(r"[a-z_][a-zA-Z0-9_]*")]
     LowerIdent,
     #[regex(r"[A-Z][a-zA-Z0-9]*")]
@@ -33,8 +33,8 @@ pub enum Tok {
     #[regex(r#""([^"\\]|\\.)*""#)]
     Str,
     /// A whole backtick-delimited raw-SQL body, backticks included. Interpolation
-    /// parts are split out later (raw.md). Grammar forbids a literal backtick
-    /// inside, so a single `[^`]*` run is exact.
+    /// parts are split out later. Grammar forbids a literal backtick inside, so a
+    /// single `[^`]*` run is exact.
     #[regex(r"`[^`]*`")]
     RawSql,
 
@@ -69,7 +69,7 @@ pub enum Tok {
     Arrow,
     #[token("?")]
     Question,
-    /// `^` — tx back-reference marker (`^.field`, mutations.md).
+    /// `^` — tx back-reference marker (`^.field`).
     #[token("^")]
     Caret,
 

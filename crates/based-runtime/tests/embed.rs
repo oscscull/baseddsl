@@ -3,7 +3,7 @@
 //!
 //! This is the end-to-end proof of the in-process door. `mod client` below is the
 //! *verbatim* output of `based gen client` for `SCHEMA`, generated **with the embedded
-//! bridge** (`ClientOptions::embedded`, D62) — committed so the test exercises the real
+//! bridge** (`ClientOptions::embedded`) — committed so the test exercises the real
 //! generated surface, not a hand-written stand-in. The payoff: an embedder writes **zero**
 //! bridge code. The `Transport` impl over `Engine` is now *emitted* by codegen (the
 //! `Embedded` transport + the `embedded(&engine)` constructor at the bottom of the
@@ -12,7 +12,7 @@
 //!
 //! The visible payoff: `client.order_by_id(...)` returns a typed `Option<OrderCard>`
 //! decoded from the engine's shaped JSON — the same typed call an HTTP client would make,
-//! minus the loopback socket + HTTP framing (D20: the win is dropping the socket, not the
+//! minus the loopback socket + HTTP framing (the win is dropping the socket, not the
 //! JSON).
 
 use based_ast::FileId;
@@ -453,8 +453,8 @@ fn typed_list_round_trips_in_process() {
     assert_eq!(rows[1].status, "open");
 }
 
-/// `$ctx` is a **typed** argument on the generated method : `my_org_orders` takes a
-/// `MyOrgOrdersCtx { org }`, supplied straight in — no header dance (auth.md/D7) and no
+/// `$ctx` is a **typed** argument on the generated method: `my_org_orders` takes a
+/// `MyOrgOrdersCtx { org }`, supplied straight in — no header dance and no
 /// untyped side-channel bag. With the required context the `$ctx`-scoped query runs; an
 /// empty context (the embedded bridge maps `&()` → `{}`) makes the engine's boundary `400`
 /// surface as the client's `ClientError` (the same non-200 an HTTP client sees).
@@ -487,11 +487,10 @@ fn ctx_supplied_in_process_and_required() {
     );
 }
 
-/// The write path runs in-process and returns the created row in its **declared shape**
-/// : after the INSERT the engine re-selects the created `Order` as an `OrderCard`,
+/// The write path runs in-process and returns the created row in its **declared shape**:
+/// after the INSERT the engine re-selects the created `Order` as an `OrderCard`,
 /// still inside the transaction, and *that* is the `200` body — so the typed
-/// `place_order` method decodes clean into an `OrderCard`, exactly like a `get`. This
-/// closes the gap the earlier `{ id }` response left.
+/// `place_order` method decodes clean into an `OrderCard`, exactly like a `get`.
 #[test]
 fn mutation_response_is_the_created_rows_declared_shape() {
     // Two writes below (raw + typed), each answered by a post-write re-select of the

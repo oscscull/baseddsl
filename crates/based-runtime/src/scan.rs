@@ -1,22 +1,19 @@
 //! Named → positional placeholder translation.
 //!
-//! Codegen emits legible `:name` placeholders ; the driver binds positional
-//! placeholders. The runtime is the layer that translates — a driver concern, kept
-//! here so the generated SQL stays readable. The **positional spelling is
-//! dialect-specific** : MySQL/MariaDB and SQLite bind an
-//! anonymous `?`, Postgres binds ordinal `$1, $2, …`. So the scan takes the
-//! [`Dialect`] and emits the right form — the rest of the rewrite is identical.
+//! Codegen emits legible `:name` placeholders; the driver binds positional placeholders.
+//! The runtime is the layer that translates, kept here so the generated SQL stays
+//! readable. The positional spelling is dialect-specific: MySQL/MariaDB and SQLite bind an
+//! anonymous `?`, Postgres binds ordinal `$1, $2, …`. So the scan takes the [`Dialect`] and
+//! emits the right form — the rest of the rewrite is identical.
 //!
-//! The scan is **quote-aware**: a `:name` inside a `'...'` / `"..."` / `` `...` ``
-//! literal is text, not a placeholder (a user can write `where (status = "a:b")`, and
-//! a raw block can contain a time literal like `'12:30:00'`). A `::` — which on
-//! Postgres is the cast operator, e.g. `x::text` — is skipped whole so the second `:`
-//! never starts a spurious placeholder.
+//! The scan is quote-aware: a `:name` inside a `'...'` / `"..."` / `` `...` `` literal is
+//! text, not a placeholder (a user can write `where (status = "a:b")`, and a raw block can
+//! contain a time literal like `'12:30:00'`). A `::` — Postgres's cast operator, e.g.
+//! `x::text` — is skipped whole so the second `:` never starts a spurious placeholder.
 //!
-//! The occurrence *order* comes from the SQL; the *value* for each name is resolved
-//! by the caller (`plan`), which knows every arg / `$ctx` / pagination value. So the
-//! runtime never maintains a parallel bind manifest — the SQL is the one source of
-//! the bind surface (principle 4).
+//! The occurrence order comes from the SQL; the value for each name is resolved by the
+//! caller (`plan`). So the runtime never maintains a parallel bind manifest — the SQL is
+//! the one source of the bind surface.
 
 use based_codegen::Dialect;
 
@@ -115,7 +112,7 @@ mod tests {
 
     #[test]
     fn postgres_binds_ordinal_dollar_n() {
-        // Postgres uses `$1, $2, …` in bind order — the one dialect coupling .
+        // Postgres uses `$1, $2, …` in bind order — the one dialect coupling.
         let (sql, ps) = go_pg("WHERE a = :org AND b > :since AND c = :org");
         assert_eq!(sql, "WHERE a = $1 AND b > $2 AND c = $3");
         assert_eq!(ps, vec!["org", "since", "org"]);
