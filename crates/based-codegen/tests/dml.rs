@@ -265,7 +265,7 @@ fn unscoped_query_omits_the_scope_predicate() {
         query all_orders(org) -> OrderCard[] unscoped("admin: cross-org listing");
         "#);
     assert!(!ddl.contains(":ctx_org"), "scope must not inject:\n{ddl}");
-    // the param `org` still filters (Handle 1), and soft-delete still guards.
+    // the param `org` still filters, and soft-delete still guards.
     assert!(ddl.contains("`order`.`org_id` = :org"), "\n{ddl}");
     assert!(ddl.contains("`order`.`deleted_at` IS NULL"), "\n{ddl}");
 }

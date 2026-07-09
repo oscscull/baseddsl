@@ -194,7 +194,7 @@ fn init_render_produces_one_create_table_per_model_per_dialect() {
     }
 
     // The MariaDB render carries the same column types `based gen sql` emits (one type
-    // map, P4): e.g. `int` -> BIGINT, `text` -> VARCHAR(255).
+    // map): e.g. `int` -> BIGINT, `text` -> VARCHAR(255).
     let maria = migrate::render_sql(&steps, Dialect::MariaDb);
     assert!(maria.contains("BIGINT"), "\n{maria}");
     assert!(maria.contains("VARCHAR(255)"), "\n{maria}");
