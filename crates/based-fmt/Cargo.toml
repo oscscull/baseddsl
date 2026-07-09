@@ -1,0 +1,11 @@
+[package]
+name = "based-fmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+based-ast = { workspace = true }
+based-parser = { workspace = true }
+based-diagnostics = { workspace = true }

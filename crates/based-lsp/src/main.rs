@@ -173,6 +173,8 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // `⌘T` — project-wide symbol search across every open project.
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Whole-document formatting, delegated to the canonical `based fmt`.
+                document_formatting_provider: Some(OneOf::Left(true)),
                 // Fold declaration bodies; expand/shrink selection through the AST.
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
@@ -398,6 +400,29 @@ impl LanguageServer for Backend {
             }
         }
         Ok(Some(out))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let st = self.state.lock().unwrap();
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        // `None` = unparseable (leave untouched) or already canonical (no edit).
+        let Some(formatted) = snapshot.format_document(fid) else {
+            return Ok(Some(Vec::new()));
+        };
+        // One edit replacing the whole document with its canonical form.
+        let end = snapshot.lines[fid].position(snapshot.sources[fid].1.len());
+        Ok(Some(vec![TextEdit {
+            range: Range::new(Position::new(0, 0), end),
+            new_text: formatted,
+        }]))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {

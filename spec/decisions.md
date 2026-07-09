@@ -68,7 +68,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   filter go-to-def), D53 (rename + prepareRename), D54 (workspace symbols ⌘T), D67 (offline
   migration-drift diagnostic W0108 + spent-`@was` W0107), D68 (folding + selection ranges — Track
   C4 feature-parity complete), D77 (editor gravy names symbols: trimmed scope/`$ctx` hovers +
-  dropped duplicate `$ctx` inlay)
+  dropped duplicate `$ctx` inlay), D78 (`based fmt` canonical formatter + `formatting` LSP directive —
+  one printer shared by CLI and editor)
+- **Formatter / tooling** — D78 (`based-fmt` canonical `.bsl` printer: AST pretty-print + verbatim
+  comment reattachment; deterministic/idempotent; `based fmt [--check]` + LSP `formatting`)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger), D67 (`@was` renames + offline drift diagnostic
   + `raw(dialect)` up step — Track E5, DoD #5 fully met)
@@ -2754,3 +2757,48 @@ phrasing. Facts tests updated to the concise strings.
 
 **Verification.** `cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace
 --all-features` all clean.
+
+## D78 — `based fmt` canonical formatter + `formatting` LSP directive
+
+**Context (H2).** The one baseline editor feature C4/D68 deliberately left out: a canonical `.bsl`
+formatter, and the editor's `formatting` handler that delegates to it. The worked examples
+(`spec/examples/commerce`, the three `examples/*/schema`) are the de-facto style; a formatter must
+converge to exactly that, so re-formatting them is a no-op.
+
+**Decision.** A new front-end crate `based-fmt` with one entry point,
+`format_source(&str) -> Result<String, Vec<Diagnostic>>`: parse to AST, then pretty-print. It is a
+**pure function of the AST** (so it is canonical, not layout-preserving) except for comments, which the
+lexer discards — the printer recovers them from the source text and re-emits each in its slot. Every
+`.bsl` comment is a full column-0 line (before a declaration, or between a model's decorators), never
+inside a body, which makes reattachment a line-range lookup rather than trivia-threading. The layout
+rules were reverse-engineered from the examples and verified as a byte-exact no-op across all committed
+schemas:
+- **Field alignment.** A model body aligns the type column (`name:` left-padded to the longest field
+  name); fields carrying an inverse ref get a *second* aligned column for the `(Model.field)` (the
+  `User.invited_users`/`placed_orders` case). Modifiers get a single space (not aligned).
+- **Shapes** print inline (`shape R from Org { id, name, slug }`) when that one-line form fits within a
+  width budget, else one field per line with the rename `=` aligned. (Field *count* can't decide it —
+  a 3-field `OrgRow` is inline while a 3-field `ProductCard` is multi-line; only width separates them.)
+- **Query blocks** use clause count: ≤1 clause stays inline (`{ list Order; }`), 2 expands the block with
+  the statement on one line, ≥3 breaks a clause per line. Mutations always expand, one write per line.
+- **Predicates** print with minimal parentheses (precedence-aware), so redundant author parens are dropped
+  while meaning-bearing ones stay.
+- `asc` (the default sort dir) and redundant single-column `@index(x)` parens normalize away — all
+  AST-preserving, so the output reparses to the same declarations.
+
+Deterministic + idempotent (`format(format(x)) == format(x)`) and structure-preserving
+(`parse(format(x))` equals `parse(x)` modulo spans); an unparseable file is not formattable (`Err`).
+
+**CLI.** `based fmt [--check]` reuses manifest/glob discovery (`discover_project`); writes each changed
+file in place, or with `--check` writes nothing and exits nonzero if any file differs. A file that
+doesn't parse renders its diagnostics rustc-style and fails the run. Errors flow through the structured
+`CliError` (usage 2 / failure 1), not `anyhow`.
+
+**LSP.** The server advertises `document_formatting_provider` and implements `textDocument/formatting`
+by returning one full-document `TextEdit`, delegating to a thin `Snapshot::format_document` wrapper over
+the same `based_fmt::format_source` — one printer, no editor/CLI divergence.
+
+**Verification.** `based-fmt` tests assert the no-op over every committed schema, idempotency +
+reparse over the conformance corpus, and per-construct exact output (alignment, shape/query modes, tx,
+predicate precedence, decorator-interleaved comments); an LSP test covers the no-op-then-reformat path.
+`cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace --all-features` all clean.

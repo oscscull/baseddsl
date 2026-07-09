@@ -118,7 +118,7 @@ this one stands. This is the gap set the remaining Track C4 iterations close.
 | Selection ranges (`selectionRange`) | **have** | expand/shrink selection through the AST: token → field → enclosing declaration → file (D68) |
 | Code actions (`codeAction`) | **out of scope** | lint quick-fixes: `W0103` anchors on the query (often a different file than the model needing the `@index`) and carries no target-model span, so a correct fix needs new lint→diagnostic plumbing — not cheap; revisit with `based fmt` (D68) |
 | Semantic tokens (`semanticTokens`) | **N/A** | coloring is done via TextMate; a semantic-token re-do is out of scope |
-| Formatting (`formatting`) | **deferred** | no `based fmt` exists yet — out of scope for C4 |
+| Formatting (`formatting`) | **have** | whole-document formatting, delegating to the canonical `based fmt` (D78) |
 | Signature help (`signatureHelp`) | **deferred** | exotic for a declarative DSL — out of scope for C4 |
 | Call hierarchy (`callHierarchy`) | **deferred** | no call graph in a schema DSL — out of scope for C4 |
 | Debugging (DAP) | **N/A** | nothing to execute/step in a schema — not applicable |

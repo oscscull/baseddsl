@@ -15,6 +15,7 @@ based-codegen.workspace = true
 based-diagnostics.workspace = true
 based-manifest.workspace = true
 based-parser.workspace = true
+based-fmt.workspace = true
 based-sema.workspace = true
 based-facts.workspace = true
 tower-lsp = "0.20"

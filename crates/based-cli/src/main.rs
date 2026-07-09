@@ -32,6 +32,15 @@ enum Command {
         #[arg(default_value = ".")]
         root: PathBuf,
     },
+    /// Format the project's `.bsl` files in the canonical layout.
+    Fmt {
+        /// Project root (holds based.toml). Defaults to the current directory.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Don't write; exit nonzero if any file is not already formatted.
+        #[arg(long)]
+        check: bool,
+    },
     /// Generate target artifacts from the checked schema.
     Gen {
         #[command(subcommand)]
@@ -199,6 +208,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Check { root } => cmd_check(&root),
+        Command::Fmt { root, check } => cmd_fmt(&root, check),
         Command::Gen { target } => match target {
             GenTarget::Sql { root, out } => cmd_gen_sql(&root, out.as_deref()),
             GenTarget::Client {
@@ -244,6 +254,59 @@ fn cmd_check(root: &Path) -> Result<(), CliError> {
         println!("ok with warnings: {warnings} warning(s) across {n} model(s)");
     } else {
         println!("ok: {n} model(s) checked clean");
+    }
+    Ok(())
+}
+
+/// `based fmt [--check]`: rewrite every discovered `.bsl` file in the canonical layout.
+/// Without `--check` it writes each changed file in place; with `--check` it writes
+/// nothing and exits nonzero if any file is not already formatted. A file that doesn't
+/// parse can't be formatted — its diagnostics are framed rustc-style and the run fails.
+fn cmd_fmt(root: &Path, check: bool) -> Result<(), CliError> {
+    let project = discover_project(root)?;
+
+    let mut changed = 0usize;
+    let mut unparsed = 0usize;
+    for f in &project.files {
+        let src = std::fs::read_to_string(&f.path).map_err(|e| io_at("reading", &f.path, e))?;
+        match based_fmt::format_source(&src) {
+            Ok(formatted) => {
+                if formatted == src {
+                    continue;
+                }
+                changed += 1;
+                if check {
+                    eprintln!("would reformat {}", f.path.display());
+                } else {
+                    std::fs::write(&f.path, &formatted)
+                        .map_err(|e| io_at("writing", &f.path, e))?;
+                    eprintln!("formatted {}", f.path.display());
+                }
+            }
+            Err(diags) => {
+                unparsed += 1;
+                render::render(&diags, &[(f.path.clone(), src)]);
+            }
+        }
+    }
+
+    if unparsed > 0 {
+        return Err(CliError::summary(
+            false,
+            format!("fmt failed: {unparsed} file(s) with parse errors (see above)"),
+        ));
+    }
+    if check && changed > 0 {
+        return Err(CliError::summary(
+            false,
+            format!("{changed} file(s) not formatted — run `based fmt`"),
+        ));
+    }
+    let n = project.files.len();
+    if changed == 0 {
+        println!("ok: {n} file(s) already formatted");
+    } else {
+        println!("reformatted {changed} of {n} file(s)");
     }
     Ok(())
 }

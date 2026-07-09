@@ -5,6 +5,7 @@ members = [
     "crates/based-diagnostics",
     "crates/based-manifest",
     "crates/based-parser",
+    "crates/based-fmt",
     "crates/based-sema",
     "crates/based-codegen",
     "crates/based-facts",
@@ -30,6 +31,7 @@ based-ast = { path = "crates/based-ast" }
 based-diagnostics = { path = "crates/based-diagnostics" }
 based-manifest = { path = "crates/based-manifest" }
 based-parser = { path = "crates/based-parser" }
+based-fmt = { path = "crates/based-fmt" }
 based-sema = { path = "crates/based-sema" }
 based-codegen = { path = "crates/based-codegen" }
 based-facts = { path = "crates/based-facts" }

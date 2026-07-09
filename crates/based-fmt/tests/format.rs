@@ -1,0 +1,170 @@
+//! Formatter conformance: the canonical worked examples are stable under `based fmt`
+//! (a no-op), formatting is idempotent + reparses, and each construct renders in its
+//! canonical shape.
+
+use based_ast::FileId;
+use based_fmt::format_source;
+use std::fs;
+use std::path::PathBuf;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn read(rel: &str) -> String {
+    fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+}
+
+/// The committed worked examples define the canonical style: formatting them must
+/// change nothing, or the formatter and the style have diverged.
+#[test]
+fn canonical_examples_are_a_noop() {
+    let files = [
+        "spec/examples/commerce/order/model.bsl",
+        "spec/examples/commerce/order/queries.bsl",
+        "spec/examples/commerce/user/model.bsl",
+        "spec/examples/commerce/org/model.bsl",
+        "spec/examples/commerce/product/model.bsl",
+        "spec/examples/commerce/product/queries.bsl",
+        "spec/examples/commerce/order_item/model.bsl",
+        "spec/examples/commerce/membership/model.bsl",
+        "examples/sqlite-quickstart/schema/order.bsl",
+        "examples/sqlite-quickstart/schema/org.bsl",
+        "examples/sqlite-quickstart/schema/queries.bsl",
+        "examples/sqlite-quickstart/schema/user.bsl",
+        "examples/mariadb-quickstart/schema/order.bsl",
+        "examples/mariadb-quickstart/schema/org.bsl",
+        "examples/mariadb-quickstart/schema/queries.bsl",
+        "examples/mariadb-quickstart/schema/user.bsl",
+        "examples/postgres-quickstart/schema/order.bsl",
+        "examples/postgres-quickstart/schema/org.bsl",
+        "examples/postgres-quickstart/schema/queries.bsl",
+        "examples/postgres-quickstart/schema/user.bsl",
+    ];
+    for f in files {
+        let src = read(f);
+        let out = format_source(&src).unwrap();
+        assert_eq!(out, src, "formatting churned {f}");
+    }
+}
+
+/// Formatting is idempotent and its output always reparses (structure-preserving).
+#[test]
+fn idempotent_and_reparses() {
+    let mut inputs: Vec<String> = Vec::new();
+    for dir in ["tests/conformance-sema", "tests/conformance"] {
+        for entry in fs::read_dir(repo_root().join(dir)).unwrap() {
+            let path = entry.unwrap().path().join("input.bsl");
+            if path.exists() {
+                inputs.push(fs::read_to_string(path).unwrap());
+            }
+        }
+    }
+    for src in inputs {
+        // Skip the deliberately-unparseable fixtures — an unparseable file is not formattable.
+        let Ok(out) = format_source(&src) else {
+            continue;
+        };
+        assert!(
+            based_parser::parse_file(&out, FileId(0)).is_ok(),
+            "formatted output did not reparse:\n{out}"
+        );
+        let twice = format_source(&out).unwrap();
+        assert_eq!(out, twice, "formatting was not idempotent");
+    }
+}
+
+fn fmt(src: &str) -> String {
+    format_source(src).unwrap()
+}
+
+#[test]
+fn field_type_column_aligns() {
+    let got = fmt("Order {\n deleted_at: timestamp?\n fulfilled_by: User?\n total: int\n}");
+    assert_eq!(
+        got,
+        "Order {\n  deleted_at:   timestamp?\n  fulfilled_by: User?\n  total:        int\n}\n"
+    );
+}
+
+#[test]
+fn inverse_ref_column_aligns() {
+    let got = fmt("User {\n invited_users: User[] (User.invited_by)\n placed_orders: Order[] (Order.placed_by)\n}");
+    assert_eq!(
+        got,
+        "User {\n  invited_users: User[]  (User.invited_by)\n  placed_orders: Order[] (Order.placed_by)\n}\n"
+    );
+}
+
+#[test]
+fn index_forms() {
+    let got = fmt("W {\n a: int\n @index a\n @index(a, b)\n @index(a) unique\n}");
+    assert_eq!(
+        got,
+        "W {\n  a: int\n  @index a\n  @index(a, b)\n  @index a unique\n}\n"
+    );
+}
+
+#[test]
+fn shape_inline_below_threshold_else_multiline() {
+    // Short shapes stay on one line.
+    assert_eq!(
+        fmt("shape OrgRow from Org { id, name, slug }"),
+        "shape OrgRow from Org { id, name, slug }\n"
+    );
+    // A wider shape breaks a field per line, aligning rename `=`.
+    assert_eq!(
+        fmt("shape OrderCard from Order { status, total, buyer = placed_by.name, org = org.name }"),
+        "shape OrderCard from Order {\n  status\n  total\n  buyer = placed_by.name\n  org   = org.name\n}\n"
+    );
+}
+
+#[test]
+fn query_block_inline_and_expanded_by_clause_count() {
+    // 0 clauses: inline block.
+    assert_eq!(
+        fmt("query my() -> Card[] scoped Tenant { list Order; }"),
+        "query my() -> Card[] scoped Tenant { list Order; }\n"
+    );
+    // 1 clause: still inline.
+    assert_eq!(
+        fmt("query my() -> Card[] { list Order where (org = $ctx.org); }"),
+        "query my() -> Card[] { list Order where (org = $ctx.org); }\n"
+    );
+    // 2 clauses: expanded block, statement on one line.
+    assert_eq!(
+        fmt("query my() -> Card[] { list Order order (placed_at desc) page (2); }"),
+        "query my() -> Card[] {\n  list Order order (placed_at desc) page (2);\n}\n"
+    );
+    // 3 clauses: a clause per line.
+    assert_eq!(
+        fmt("query p(org: Id) -> Card[] { list Product where (org = $org and active) order (created_at desc) page (20); }"),
+        "query p(org: Id) -> Card[] {\n  list Product\n    where (org = $org and active)\n    order (created_at desc)\n    page (20);\n}\n"
+    );
+}
+
+#[test]
+fn mutation_body_and_tx() {
+    let got = fmt(
+        "mutation m(e: text, c: text) -> R { tx { create User { email = $e } create Addr { user = ^.id, city = $c } } }",
+    );
+    assert_eq!(
+        got,
+        "mutation m(e: text, c: text) -> R {\n  tx {\n    create User { email = $e };\n    create Addr { user = ^.id, city = $c };\n  }\n}\n"
+    );
+}
+
+#[test]
+fn predicate_precedence_parenthesizes_minimally() {
+    // `or` under `and` needs parens; the redundant set around an `and` under `or` is dropped.
+    let got = fmt("filter f = (a or b) and c;");
+    assert_eq!(got, "filter f = (a or b) and c;\n");
+    let got = fmt("filter g = a or (b and c);");
+    assert_eq!(got, "filter g = a or b and c;\n");
+}
+
+#[test]
+fn comments_preserved_including_between_decorators() {
+    let src = "# header\n@soft_delete(deleted_at)\n# between decorators\n@scope Tenant\nOrder {\n  deleted_at: timestamp?\n}\n";
+    assert_eq!(fmt(src), src);
+}
