@@ -453,6 +453,34 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   built surface — codegen SQL edge cases, runtime binding/nesting, scope/soft-delete predicate
   composition — driven against a live DB, not just unit tests. Scope each sweep to one subsystem; file
   what it finds as its own item. Open-ended by nature; run when the higher-value H-items are quiet.
+- **H9. `@scope` not injected on a nest-only scoped child (correctness/security, from H6, 2026-07-09).**
+  A scoped model reached **only** through a nested shape sub-object — `field { … }` (to-one/to-many) or
+  `field -> Shape` (D79) — is **not** confined by its `@scope`, though soft-delete **is**. So a nested
+  array/object can return rows the caller's `$ctx` should exclude (a cross-scope read leak). Contradicts
+  shapes.md ("child … `@scope` stay governed by the nest context"), D57, and the `json_array_subquery`
+  docstring. *Not* an unbound-bind/crash: both sides skip nests **identically**, so they stay aligned —
+  the confinement is just silently absent. **Root cause (stale D34 invariant):** codegen's scope predicate
+  is gated by `scope_inject`, keyed by model (`Select::scope_terms_for`, `dml.rs`); `scope_inject` is built
+  from sema's `touched_query`/`touched_mutation`, whose `walk_shape_join` (`based-sema/src/scope.rs`) only
+  descends `ShapeField::Rename{Path}` (an `out = path` reach) and **skips `Nest`/`NestRef`** — mirrored by
+  `ctx::collect_joined_scope`'s `walk_shape_scope`. Correct when D34 landed (nests were deferred → no join);
+  stale since D55/D57/D79 made nests emit real joins (to-one, via the `scope_join_pred` chokepoint) and
+  correlated subqueries (to-many, `json_array_subquery` `WHERE`) that *have* scope-injection call sites but
+  are handed an empty term list. A child that is *also* reached via a `where`/order/reach path is already in
+  `scope_inject`, so the nest inherits the predicate — hence inconsistent behaviour depending on unrelated
+  clauses. **Fix:** extend both walks (`walk_shape_join` + `walk_shape_scope`) to recurse into `Nest` and
+  `NestRef`, switching to the nested child model context (for `NestRef`, resolve the referenced shape's body
+  + `from` via `cx.shape_bodies`/`shapes`; reuse D79's cycle guard), so a nest-reached scoped child lands in
+  both `scope_inject` (codegen emits the predicate) and `ctx_requires` (its `:ctx_<field>` is bound). Keep the
+  two walks byte-for-byte parallel (the alignment is load-bearing). **Behaviour change to expect:** nest-reached
+  scoped models now count as *touched*, so a callable nesting into a scoped model must satisfy that model's
+  `@scope` alternative or it newly errors `E0185` (this is *correct* — it currently under-reports scope
+  crossings — but re-check commerce + `examples/**` goldens; some may need a widened `scoped …` set or
+  `unscoped`). **Verify:** a cross-tenant nested-read live integration test mirroring D34's `Ticket → Contact`
+  — a to-one **and** a to-many nest into a child `@scope`d on a *divergent* axis returns only in-scope children
+  (out-of-scope → excluded from the array / NULL for the to-one), against a live engine, not compile-only; plus
+  codegen unit tests asserting the predicate appears in the join `ON` / subquery `WHERE` for a nest-*only*
+  child. (Cross-ref H6 — surfaced by the design question, not yet swept further.)
 - **H8. ✅ done. embed.rs generated-client mirror de-staled + regen-gated (user-raised 2026-07-09).**
   `crates/based-runtime/tests/embed.rs` inlined a hand-copied `mod client` claiming to be verbatim
   `based gen client --embedded` output "verified by the regen gate" — but no gate existed, and it had
