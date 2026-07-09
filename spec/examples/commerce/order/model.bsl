@@ -32,3 +32,12 @@ shape OrderCard from Order {
   buyer = placed_by.name
   org   = org.name
 }
+
+# `placed_by -> UserRef` nests the buyer as the *named* `UserRef` projection
+# (user/model.bsl) — the same rows an inline `placed_by { name, email }` nest fetches,
+# but every query returning it shares the one nominal `UserRef` type.
+shape OrderDetail from Order {
+  status
+  total
+  placed_by -> UserRef
+}

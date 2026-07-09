@@ -454,6 +454,59 @@ fn nested_to_one_recurses_and_reaches_inside_nest() {
 }
 
 #[test]
+fn nest_ref_lowers_identically_to_inline_nest() {
+    // A named-shape nest (`placed_by -> UserRef`) is a pure body expansion: the
+    // emitted SELECT is byte-identical to the same fields nested inline — for a
+    // to-one edge and for a to-many edge (correlated JSON subquery) alike.
+    let common = r#"
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text, email: text }
+        @soft_delete(deleted_at)
+        @sort(placed_at desc)
+        Order { deleted_at: timestamp?, placed_by: User, total: int, placed_at: timestamp,
+                items: OrderItem[] }
+        OrderItem { order: Order, sku: text, qty: int }
+    "#;
+    let inline = gen(&format!(
+        r#"{common}
+        shape OrderDetail from Order {{ total, placed_by {{ name, email }}, items {{ sku, qty }} }}
+        query order_detail(id) -> OrderDetail;
+        "#
+    ));
+    let named = gen(&format!(
+        r#"{common}
+        shape UserRef from User {{ name, email }}
+        shape ItemRow from OrderItem {{ sku, qty }}
+        shape OrderDetail from Order {{ total, placed_by -> UserRef, items -> ItemRow }}
+        query order_detail(id) -> OrderDetail;
+        "#
+    ));
+    let section = |s: &str| query_section(s, "order_detail").to_string();
+    assert_eq!(section(&inline), section(&named), "\n{named}");
+}
+
+#[test]
+fn nest_ref_recurses_through_named_shapes() {
+    // A referenced shape may itself reference: `placed_by -> UserRef` where UserRef
+    // nests `org -> OrgRef` chains the joins and prefixes like inline nesting.
+    let ddl = gen(r#"
+        Org { name: text }
+        @sort(id asc)
+        User { org: Org, name: text }
+        @sort(id asc)
+        Order { placed_by: User, total: int }
+        shape OrgRef from Org { name }
+        shape UserRef from User { name, org -> OrgRef }
+        shape OrderDetail from Order { total, placed_by -> UserRef }
+        query order_detail(id) -> OrderDetail;
+        "#);
+    assert!(
+        ddl.contains("`j_placed_by_org`.`name` AS `placed_by.org.name`"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
 fn nested_to_many_aggregates_into_a_json_array_column() {
     // A to-many nest (`items { … }`, an inverse collection) lowers to a correlated
     // subquery aggregating the child rows into a JSON-array column aliased `items[]`

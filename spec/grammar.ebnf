@@ -107,9 +107,15 @@ op_name     = 'restore' | 'delete' | 'read' ;
 shape       = 'shape' shape_name 'from' model_ref shape_body ;
 shape_name  = upper_ident | 'full' ;   (* `shape full` is the conventional view*)
 shape_body  = '{' { shape_field sep } [ shape_field ] '}' ;
+(* A nest is spelled inline (`field { … }`) or as a reference to a top-level shape *)
+(* decl by name (`field -> UserRow`, D79) — `->` reads "connects to", as in a       *)
+(* relation decl and a param binding. The referenced shape's `from` model must     *)
+(* equal the relation's target; the reference is a pure body expansion (`full` is  *)
+(* per-model, so it is never referenced this way).                                 *)
 shape_field = bare_field                       (* local, same-name             *)
             | out_name '=' shape_value          (* reach-and-rename / raw value *)
-            | bare_field shape_body ;           (* nest a relation into subobj  *)
+            | bare_field shape_body             (* nest a relation into subobj  *)
+            | bare_field '->' upper_ident ;     (* nest via a named shape (D79) *)
 bare_field  = lower_ident ;
 out_name    = lower_ident ;
 shape_value = path | raw_sql ;                 (* dotted traversal OR raw value*)

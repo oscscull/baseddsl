@@ -39,7 +39,10 @@ pub mod code {
                                          // shapes
     pub const SHAPE_BARE_RELATION: &str = "E0130"; // bare relation must nest or `=`
     pub const SHAPE_NEST_SCALAR: &str = "E0131"; // nested a non-relation
-                                                 // queries / mutations
+    pub const SHAPE_REF_UNKNOWN: &str = "E0132"; // `field -> Name` names no shape
+    pub const SHAPE_REF_MODEL: &str = "E0133"; // referenced shape's model ≠ relation target
+    pub const SHAPE_REF_CYCLE: &str = "E0134"; // a shape transitively nests itself by reference
+                                               // queries / mutations
     pub const UNKNOWN_RETURN: &str = "E0140";
     pub const RETURN_MODEL_MISMATCH: &str = "E0141";
     pub const FULL_NEEDS_MODEL: &str = "E0142";

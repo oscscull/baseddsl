@@ -415,7 +415,14 @@ mod rust {
         if name != "full" {
             if let Some(shape) = find_shape(decls, name) {
                 let model = schema.model(&shape.from.node);
-                return build_struct(schema, name.to_string(), &shape.body, model);
+                return build_struct(
+                    schema,
+                    decls,
+                    name.to_string(),
+                    &shape.body,
+                    model,
+                    &mut vec![name.to_string()],
+                );
             }
         }
         // `full` or a bare model: every stored column of the resolved model.
@@ -440,12 +447,17 @@ mod rust {
     /// `Json`; a to-one nest (`buyer { … }`) becomes a nested struct named
     /// `<Parent><Field>` and the field takes that type (`Option<…>` when the relation
     /// is optional). A to-many nest (`items { … }`) becomes a nested struct wrapped in
-    /// `Vec<…>`.
+    /// `Vec<…>`. A `field -> Shape` nest references the named shape's own struct
+    /// instead of minting a per-parent one, so every site shares one nominal type;
+    /// `stack` holds the shape names mid-expansion (a cycle guard — sema rejects
+    /// reference cycles, this keeps the emitter terminating regardless).
     fn build_struct(
         schema: &CheckedSchema,
+        decls: &[Decl],
         name: String,
         body: &[ShapeField],
         model: Option<&RModel>,
+        stack: &mut Vec<String>,
     ) -> OutStruct {
         let mut fields = Vec::new();
         let mut nested = Vec::new();
@@ -465,7 +477,14 @@ mod rust {
                 ShapeField::Nest { field, body } => {
                     if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
                         let sub_name = format!("{name}{}", pascal(&field.node));
-                        let sub = build_struct(schema, sub_name.clone(), body, Some(target));
+                        let sub = build_struct(
+                            schema,
+                            decls,
+                            sub_name.clone(),
+                            body,
+                            Some(target),
+                            stack,
+                        );
                         let ty = if optional {
                             format!("Option<{sub_name}>")
                         } else {
@@ -476,9 +495,46 @@ mod rust {
                     } else if let Some(target) = to_many_relation(schema, model, &field.node) {
                         // A to-many nest is a JSON array of the element struct: `Vec<Sub>`.
                         let sub_name = format!("{name}{}", pascal(&field.node));
-                        let sub = build_struct(schema, sub_name.clone(), body, Some(target));
+                        let sub = build_struct(
+                            schema,
+                            decls,
+                            sub_name.clone(),
+                            body,
+                            Some(target),
+                            stack,
+                        );
                         fields.push((field.node.clone(), format!("Vec<{sub_name}>")));
                         nested.push(sub);
+                    }
+                }
+                ShapeField::NestRef { field, shape } => {
+                    let Some(decl) = find_shape(decls, &shape.node) else {
+                        continue;
+                    };
+                    if !stack.contains(&shape.node) {
+                        // Build the referenced shape's own struct (emitted once,
+                        // deduped by name across every referencing site).
+                        stack.push(shape.node.clone());
+                        let sub = build_struct(
+                            schema,
+                            decls,
+                            shape.node.clone(),
+                            &decl.body,
+                            schema.model(&decl.from.node),
+                            stack,
+                        );
+                        stack.pop();
+                        nested.push(sub);
+                    }
+                    if let Some((_, optional)) = to_one_relation(schema, model, &field.node) {
+                        let ty = if optional {
+                            format!("Option<{}>", shape.node)
+                        } else {
+                            shape.node.clone()
+                        };
+                        fields.push((field.node.clone(), ty));
+                    } else if to_many_relation(schema, model, &field.node).is_some() {
+                        fields.push((field.node.clone(), format!("Vec<{}>", shape.node)));
                     }
                 }
             }

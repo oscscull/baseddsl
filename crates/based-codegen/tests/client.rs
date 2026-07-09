@@ -353,6 +353,58 @@ fn nested_to_many_shape_emits_vec_of_nested_struct() {
 }
 
 #[test]
+fn nest_ref_field_takes_the_named_shape_type() {
+    // A named-shape nest (`placed_by -> UserRef`) references the shape's own struct —
+    // one nominal type shared by every site — instead of minting `<Parent><Field>`.
+    // Optional relations wrap it in `Option<…>`; to-many in `Vec<…>`.
+    let out = gen(r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, fulfilled_by: User?, total: int, items: OrderItem[] }
+        @sort(id asc)
+        OrderItem { order: Order, sku: text }
+        shape UserRef from User { name, email }
+        shape ItemRow from OrderItem { sku }
+        shape OrderDetail from Order {
+          total
+          placed_by -> UserRef
+          fulfilled_by -> UserRef
+          items -> ItemRow
+        }
+        query order_detail(id) -> OrderDetail;
+        "#);
+    assert!(out.contains("pub placed_by: UserRef,"), "\n{out}");
+    assert!(
+        out.contains("pub fulfilled_by: Option<UserRef>,"),
+        "\n{out}"
+    );
+    assert!(out.contains("pub items: Vec<ItemRow>,"), "\n{out}");
+    // The named shape's struct is emitted exactly once, no per-parent struct.
+    assert_eq!(out.matches("pub struct UserRef {").count(), 1, "\n{out}");
+    assert_eq!(out.matches("pub struct ItemRow {").count(), 1, "\n{out}");
+    assert!(!out.contains("OrderDetailPlacedBy"), "\n{out}");
+}
+
+#[test]
+fn nest_ref_shape_shared_with_a_direct_return_is_one_struct() {
+    // A shape both returned by a query and referenced from a nest emits one struct.
+    let out = gen(r#"
+        User { name: text }
+        @sort(id asc)
+        Order { placed_by: User, total: int }
+        shape UserRef from User { name }
+        shape OrderDetail from Order { total, placed_by -> UserRef }
+        query order_detail(id) -> OrderDetail;
+        query user_ref(id) -> UserRef;
+        "#);
+    assert_eq!(out.matches("pub struct UserRef {").count(), 1, "\n{out}");
+    assert!(
+        out.contains("pub fn user_ref(&self, input: UserRefInput, ctx: ()) -> Result<Option<UserRef>, ClientError>"),
+        "\n{out}"
+    );
+}
+
+#[test]
 fn embedded_bridge_is_gated_on_the_option() {
     let src = r#"
         @soft_delete(deleted_at)

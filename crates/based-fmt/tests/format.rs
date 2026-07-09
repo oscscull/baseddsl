@@ -120,6 +120,19 @@ fn shape_inline_below_threshold_else_multiline() {
 }
 
 #[test]
+fn shape_nest_ref_formats_canonically() {
+    // A named-shape nest prints `field -> Shape`, inline or one per line by width.
+    assert_eq!(
+        fmt("shape D from Order { total, buyer   ->   UserRef }"),
+        "shape D from Order { total, buyer -> UserRef }\n"
+    );
+    assert_eq!(
+        fmt("shape OrderDetail from Order { status, total, placed_by -> UserRef }"),
+        "shape OrderDetail from Order {\n  status\n  total\n  placed_by -> UserRef\n}\n"
+    );
+}
+
+#[test]
 fn query_block_inline_and_expanded_by_clause_count() {
     // 0 clauses: inline block.
     assert_eq!(

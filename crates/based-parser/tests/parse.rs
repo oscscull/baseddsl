@@ -302,6 +302,35 @@ fn shape_bare_rename_and_nest() {
 }
 
 #[test]
+fn shape_nest_by_named_reference() {
+    let sf = parse_ok(
+        r#"
+        shape OrderDetail from Order {
+          status
+          placed_by -> UserRef
+        }
+        "#,
+    );
+    let shape = match &sf.decls[0] {
+        Decl::Shape(s) => s,
+        other => panic!("expected shape, got {other:?}"),
+    };
+    match &shape.body[1] {
+        ShapeField::NestRef { field, shape } => {
+            assert_eq!(field.node, "placed_by");
+            assert_eq!(shape.node, "UserRef");
+        }
+        other => panic!("expected nest ref, got {other:?}"),
+    }
+}
+
+#[test]
+fn shape_nest_reference_requires_uppercamel_name() {
+    // `-> full` (or any lower ident) is not a shape-reference target.
+    assert!(parse_file("shape D from Order { placed_by -> full }", FileId(0)).is_err());
+}
+
+#[test]
 fn mutation_with_create_and_param_refs() {
     let sf = parse_ok(
         r#"

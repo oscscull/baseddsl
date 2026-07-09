@@ -1,0 +1,27 @@
+DIAGNOSTICS
+  E0132: `-> Missing` names no declared shape
+  E0133: shape `OrgRef` projects `Org`, but `placed_by` relates to `User`
+  E0134: shape reference cycle: `LoopA` -> `LoopB` -> `LoopA`
+  E0134: shape reference cycle: `LoopB` -> `LoopA` -> `LoopB`
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model User  table=user
+  id: Id
+  name: text
+  email: text
+  org: -> Org  fk=org_id
+  placed_orders: <- Order via placed_by
+model Order  table=order
+  id: Id
+  placed_by: -> User  fk=placed_by_id
+  total: int
+shape UserRef from User
+shape OrgRef from Org
+shape OrderDetail from Order
+shape BadUnknown from Order
+shape BadModel from Order
+shape LoopA from Order
+shape LoopB from User
+query order_detail  target=Order verb=get  shape=OrderDetail

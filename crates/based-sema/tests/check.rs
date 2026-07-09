@@ -279,6 +279,100 @@ fn shape_nest_and_reach_ok() {
     );
 }
 
+#[test]
+fn shape_nest_ref_ok_to_one_and_to_many() {
+    // A named-shape nest works on a forward (to-one) and an inverse (to-many)
+    // relation, and a referenced shape may itself nest (inline or by name).
+    assert_clean(
+        r#"
+        User { name: text, org: Org, placed_orders: Order[] (Order.placed_by) }
+        Org { name: text, slug: text }
+        Order { placed_by: User, total: int }
+        shape OrgRef from Org { name, slug }
+        shape UserRef from User { name, org -> OrgRef }
+        shape OrderDetail from Order {
+          total
+          placed_by -> UserRef
+        }
+        shape UserOrders from User {
+          name
+          placed_orders -> OrderRow
+        }
+        shape OrderRow from Order { total }
+        query detail(id) -> OrderDetail;
+        "#,
+    );
+}
+
+#[test]
+fn shape_nest_ref_unknown_shape() {
+    let (_, d) = analyze(
+        r#"
+        User { name: text }
+        Order { placed_by: User }
+        shape D from Order { placed_by -> Missing }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0132"]);
+}
+
+#[test]
+fn shape_nest_ref_model_mismatch() {
+    // `OrgRef` projects `Org`, but `placed_by` relates to `User` — never silent.
+    let (_, d) = analyze(
+        r#"
+        User { name: text }
+        Org { name: text }
+        Order { placed_by: User }
+        shape OrgRef from Org { name }
+        shape D from Order { placed_by -> OrgRef }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0133"]);
+}
+
+#[test]
+fn shape_nest_ref_on_scalar_rejected() {
+    let (_, d) = analyze(
+        r#"
+        User { name: text }
+        shape N from User { name }
+        shape D from User { name -> N }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0131"]);
+}
+
+#[test]
+fn shape_nest_ref_cycle_rejected() {
+    // `UserRef` -> `OrderRow` -> `UserRef` would expand forever; each decl reports
+    // the reference that closes the cycle from its own root.
+    let (_, d) = analyze(
+        r#"
+        User { name: text, placed_orders: Order[] (Order.placed_by) }
+        Order { placed_by: User }
+        shape UserRef from User { placed_orders -> OrderRow }
+        shape OrderRow from Order { placed_by -> UserRef }
+        "#,
+    );
+    assert!(
+        errors(&d).contains(&"E0134"),
+        "expected a cycle error, got: {:?}",
+        codes(&d)
+    );
+}
+
+#[test]
+fn shape_nest_ref_self_cycle_rejected() {
+    let (_, d) = analyze(
+        r#"
+        User { name: text, invited_by: User? }
+        shape UserTree from User { name, invited_by -> UserTree }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0134"]);
+}
+
 // ---------- queries / mutations -------------------------------------------
 
 #[test]

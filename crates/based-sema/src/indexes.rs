@@ -554,8 +554,20 @@ fn lint_useless(ast: &Model, mi: usize, usage: &Usage, cx: &Cx, sink: &mut Sink)
 
 /// Relation reaches in a shape body join at query time, so they create the same
 /// join demand a predicate reach does. Nested sub-objects recurse into the target
-/// model; the nest edge itself is a traversal.
+/// model; the nest edge itself is a traversal. A `field -> Shape` reference expands
+/// the named shape's body in place (guarded against reference cycles, which sema
+/// rejects but this pass must still terminate on).
 fn shape_demand(body: &[ShapeField], mi: usize, cx: &Cx, usage: &mut [Usage]) {
+    shape_demand_in(body, mi, cx, usage, &mut Vec::new());
+}
+
+fn shape_demand_in(
+    body: &[ShapeField],
+    mi: usize,
+    cx: &Cx,
+    usage: &mut [Usage],
+    stack: &mut Vec<String>,
+) {
     for f in body {
         match f {
             ShapeField::Bare(_) => {}
@@ -574,7 +586,27 @@ fn shape_demand(body: &[ShapeField], mi: usize, cx: &Cx, usage: &mut [Usage]) {
                         }
                     }
                     if let Some(ti) = kind.target().and_then(|t| cx.find(t)) {
-                        shape_demand(body, ti, cx, usage);
+                        shape_demand_in(body, ti, cx, usage, stack);
+                    }
+                }
+            }
+            ShapeField::NestRef { field, shape } => {
+                if stack.iter().any(|s| s == &shape.node) {
+                    continue;
+                }
+                if let Some(kind) = cx.model(mi).member(&field.node).map(|m| m.kind.clone()) {
+                    if let MemberKind::Inverse { target, via } = &kind {
+                        if let Some(ti) = cx.find(target) {
+                            usage[ti].join(via);
+                        }
+                    }
+                    if let (Some(ti), Some(body)) = (
+                        kind.target().and_then(|t| cx.find(t)),
+                        cx.shape_bodies.get(&shape.node).copied(),
+                    ) {
+                        stack.push(shape.node.clone());
+                        shape_demand_in(body, ti, cx, usage, stack);
+                        stack.pop();
                     }
                 }
             }

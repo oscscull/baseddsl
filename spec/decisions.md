@@ -28,7 +28,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
-  D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing)
+  D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing),
+  D79 (named nested projection: `field -> Shape` references a shape decl — same SQL as inline,
+  one nominal client/OpenAPI type; E0132/E0133/E0134)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client), D62
@@ -37,7 +39,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   phantom `Id<entity::M>` newtypes, transparent wire, `from_raw` escape, no blanket `From<String>`),
   D71 (production-grade errors: structured `ClientError` + `std::error::Error`/`Display` on runtime errors),
   D73 (typed `Cursor` newtype in the paginated surface: single opaque `#[serde(transparent)]` type,
-  `from_raw` escape, no blanket `From<String>`)
+  `from_raw` escape, no blanket `From<String>`), D79 (a `field -> Shape` nest emits the named shape's
+  struct/schema instead of a per-parent anonymous type)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
@@ -2802,3 +2805,51 @@ the same `based_fmt::format_source` — one printer, no editor/CLI divergence.
 reparse over the conformance corpus, and per-construct exact output (alignment, shape/query modes, tx,
 predicate precedence, decorator-interleaved comments); an LSP test covers the no-op-then-reformat path.
 `cargo test --workspace --all-features` + `fmt --check` + `clippy --workspace --all-features` all clean.
+
+## D79 — named nested projection: a nest may reference a shape by name (Track L4)
+
+**The gap.** A to-one/to-many nest spelled its fields inline (`placed_by { name, email }`) and the
+client codegen minted an **anonymous per-parent type** (`OrderCardPlacedBy`). Two shapes nesting the
+same columns of the same model got two distinct, unshareable types — a typed frontend component or a
+`db→props` mapper could not be written once against "a User projection" and reused across query sites.
+With a second consumer the projection's field set is a genuinely shared fact, so principle 4 (declare
+once, reference by name) applies — which it did *not* for a single-consumer inline nest (author-DRY
+alone was a weak case).
+
+**Decision: option (a) — the nest references a top-level `shape … from Model` decl by name.**
+`placed_by -> UserRef` expands the named shape's body in place; `->` reads "connects to", consistent
+with relation decls and param-binding. Option (b) — *naming an inline nest* (`placed_by as UserRef
+{ … }`) — is rejected for now: two sites share a type only by referencing one definition, which
+collapses back to (a); (b) remains possible later sugar. Residual cost of (a): one shape forced to
+serve two consumers with different needs overfetches for the leaner — the fix is to split into two
+cheap shapes. Docs say plainly: **reference for a shared type; inline when you mean to trim**
+(shapes.md).
+
+**Pinned semantics.**
+- The referenced shape's `from` model MUST equal the relation's target model — `E0133`, never a silent
+  mismatch (principle 2). An unknown shape name is `E0132`. `full` is per-model and cannot be
+  referenced (the reference position takes an UpperCamel shape name; `full` doesn't parse there).
+- The reference is a **pure column-list expansion**: it lowers to exactly the same SQL / `nest_row`
+  path as an inline nest (D55 to-one prefixed aliases / D57 to-many correlated JSON subquery). It
+  carries **no independent `@scope`/soft-delete identity** — child scope + live-predicate stay
+  governed by the nest context exactly as an inline nest's.
+- Recurses and composes with inline nesting to any depth. A shape that transitively nests itself by
+  reference is `E0134` (reported at the reference that closes the cycle), mirroring the D14 in-progress-
+  stack approach; the codegen/index/emitter walkers carry the same stack so they terminate even on an
+  unchecked schema.
+
+**Landed across:** grammar (`shape_field` gains `bare_field '->' upper_ident`) + parser
+(`ShapeField::NestRef`); sema (resolve + `E0132`/`E0133`/`E0134`, index-inference demand rides the
+expansion; the `$ctx`/scope walkers skip a nest ref exactly as they skip an inline nest); SQL codegen
+(`Select` expands the referenced body in place — emitted SQL is byte-identical to the inline nest,
+unit-proven); **client emit — the payoff** (`placed_by: UserRef` / `Vec<UserRef>` referencing the named
+shape's own generated struct, emitted exactly once and shared with any callable returning it directly);
+OpenAPI (`$ref: #/components/schemas/UserRef`, the referenced schema registered once); `based fmt`
+(`placed_by -> UserRef`, canonical in both inline and block shape layouts); LSP (the referenced name
+rides the type-reference index: go-to-def, hover, find-references, rename). Worked example:
+`spec/examples/commerce` `UserRef`/`OrderDetail`/`order_detail`.
+
+**Verified live** (SQLite in-memory, the D55/D57 pattern): a `get`/`list` whose shape nests
+`placed_by -> UserRef` returns the nested object; a to-many named ref returns the nested array with a
+soft-deleted child excluded. Plus parser/sema (positive + all three negative codes) /codegen-SQL
+(identical-to-inline) /client/openapi/fmt unit tests and a sema conformance case.

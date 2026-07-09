@@ -387,7 +387,7 @@ pub(crate) fn project_return<'a>(
 /// lands under a `parent.child` alias the runtime reassembles into a sub-object.
 fn project_body<'a>(
     sel: &mut Select<'a>,
-    fields: &[ShapeField],
+    fields: &'a [ShapeField],
     model: &'a RModel,
     alias: &str,
     prefix: &str,
@@ -426,26 +426,53 @@ fn project_body<'a>(
             // child rows into a single JSON-array column (`field[]`) via a correlated
             // subquery, parsed back into an array by the runtime.
             ShapeField::Nest { field, body } => {
-                if let Some((child_alias, child_prefix, child_model)) =
-                    sel.enter_to_one(&field.node, alias, prefix, model)
-                {
-                    let nested_out = format!("{out_prefix}{}{NEST_SEP}", field.node);
-                    project_body(
-                        sel,
-                        body,
-                        child_model,
-                        &child_alias,
-                        &child_prefix,
-                        &nested_out,
-                        cols,
-                    );
-                } else if let Some((child_model, via_fk)) = sel.to_many_edge(&field.node, model) {
-                    let arr = sel.json_array_subquery(body, child_model, &via_fk, alias);
-                    let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
-                    cols.push(format!("{arr} AS {}", sel.q(&out)));
-                }
+                project_nest(sel, field, body, model, alias, prefix, out_prefix, cols);
+            }
+            // `field -> Shape`: same lowering as an inline nest, the body coming from
+            // the named shape's decl. Sema rejects reference cycles; the stack guard
+            // keeps this terminating on an unchecked schema.
+            ShapeField::NestRef { field, shape } => {
+                let Some(body) = sel.enter_shape_ref(&shape.node) else {
+                    continue;
+                };
+                project_nest(sel, field, body, model, alias, prefix, out_prefix, cols);
+                sel.exit_shape_ref();
             }
         }
+    }
+}
+
+/// Lower one relation nest (`field { body }`, or a `field -> Shape` expansion): a
+/// to-one edge projects the child's columns under a `field.`-prefixed alias; a
+/// to-many edge aggregates the child rows into a JSON-array column (`field[]`).
+#[allow(clippy::too_many_arguments)]
+fn project_nest<'a>(
+    sel: &mut Select<'a>,
+    field: &Ident,
+    body: &'a [ShapeField],
+    model: &'a RModel,
+    alias: &str,
+    prefix: &str,
+    out_prefix: &str,
+    cols: &mut Vec<String>,
+) {
+    if let Some((child_alias, child_prefix, child_model)) =
+        sel.enter_to_one(&field.node, alias, prefix, model)
+    {
+        let nested_out = format!("{out_prefix}{}{NEST_SEP}", field.node);
+        project_body(
+            sel,
+            body,
+            child_model,
+            &child_alias,
+            &child_prefix,
+            &nested_out,
+            cols,
+        );
+    } else if let Some((child_model, via_fk)) = sel.to_many_edge(&field.node, model) {
+        let arr = sel.json_array_subquery(body, child_model, &via_fk, alias);
+        let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
+        cols.push(format!("{arr} AS {}", sel.q(&out)));
     }
 }
 
@@ -591,6 +618,12 @@ pub(crate) struct Select<'a> {
     /// Filters currently mid-expansion; guards a self-referential filter from looping
     /// (sema permits recursion, so we must terminate on our own, like sema does).
     filter_stack: Vec<&'a str>,
+    /// Named shapes by name (`full` excluded — it is per-model and never referenced by
+    /// name), so a `field -> Shape` nest can expand the referenced body in place.
+    shapes: HashMap<&'a str, &'a Shape>,
+    /// Shape references currently mid-expansion; sema rejects reference cycles
+    /// (`E0134`), so this only keeps codegen terminating on an unchecked schema.
+    shape_stack: Vec<&'a str>,
     /// The immediately preceding `create` in an enclosing `tx`, so a `^.field`
     /// back-reference can bind to it. `None` outside a `tx`.
     back: Option<BackCtx<'a>>,
@@ -639,6 +672,13 @@ impl<'a> Select<'a> {
                 _ => None,
             })
             .collect();
+        let shapes = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Shape(s) if s.name.node != "full" => Some((s.name.node.as_str(), s)),
+                _ => None,
+            })
+            .collect();
         Select {
             schema,
             dialect,
@@ -647,11 +687,29 @@ impl<'a> Select<'a> {
             seen: HashMap::new(),
             filters,
             filter_stack: Vec::new(),
+            shapes,
+            shape_stack: Vec::new(),
             back: None,
             inject_scope: true,
             scope_inject: &[],
             sub_counter: 0,
         }
+    }
+
+    /// Enter a `field -> Shape` expansion: the referenced shape's body, or `None` for
+    /// an unknown name or a reference already mid-expansion (a cycle sema rejects).
+    /// Every `Some` must be paired with an [`exit_shape_ref`](Self::exit_shape_ref).
+    fn enter_shape_ref(&mut self, name: &str) -> Option<&'a [ShapeField]> {
+        if self.shape_stack.contains(&name) {
+            return None;
+        }
+        let shape = self.shapes.get(name).copied()?;
+        self.shape_stack.push(shape.name.node.as_str());
+        Some(&shape.body)
+    }
+
+    fn exit_shape_ref(&mut self) {
+        self.shape_stack.pop();
     }
 
     /// Quote one identifier for the target dialect (`` `x` `` / `"x"`).
@@ -806,7 +864,7 @@ impl<'a> Select<'a> {
     /// soft-delete tombstone + `@scope` exactly as a join would.
     fn json_array_subquery(
         &mut self,
-        body: &[ShapeField],
+        body: &'a [ShapeField],
         child: &'a RModel,
         via_fk: &str,
         outer_alias: &str,
@@ -824,6 +882,10 @@ impl<'a> Select<'a> {
             seen: HashMap::new(),
             filters: self.filters.clone(),
             filter_stack: Vec::new(),
+            shapes: self.shapes.clone(),
+            // Shape refs mid-expansion carry across the subquery boundary, so a
+            // reference cycle spanning a to-many nest still terminates.
+            shape_stack: self.shape_stack.clone(),
             back: None,
             inject_scope: self.inject_scope,
             scope_inject: self.scope_inject,
@@ -862,7 +924,7 @@ impl<'a> Select<'a> {
     /// materialize their joins into this (sub-)`Select`'s join scope.
     fn json_object_expr(
         &mut self,
-        body: &[ShapeField],
+        body: &'a [ShapeField],
         model: &'a RModel,
         alias: &str,
         prefix: &str,
@@ -888,22 +950,39 @@ impl<'a> Select<'a> {
                     }
                 },
                 ShapeField::Nest { field, body } => {
-                    if let Some((child_alias, child_prefix, child_model)) =
-                        self.enter_to_one(&field.node, alias, prefix, model)
-                    {
-                        let nested =
-                            self.json_object_expr(body, child_model, &child_alias, &child_prefix);
-                        pairs.push(format!("'{}', {}", field.node, nested));
-                    } else if let Some((child_model, via_fk)) =
-                        self.to_many_edge(&field.node, model)
-                    {
-                        let arr = self.json_array_subquery(body, child_model, &via_fk, alias);
-                        pairs.push(format!("'{}', {}", field.node, arr));
+                    self.json_nest_pair(field, body, model, alias, prefix, &mut pairs);
+                }
+                ShapeField::NestRef { field, shape } => {
+                    if let Some(body) = self.enter_shape_ref(&shape.node) {
+                        self.json_nest_pair(field, body, model, alias, prefix, &mut pairs);
+                        self.exit_shape_ref();
                     }
                 }
             }
         }
         format!("{}({})", self.dialect.json_object_fn(), pairs.join(", "))
+    }
+
+    /// One relation nest inside a JSON element body: a to-one edge becomes a nested
+    /// JSON object, a to-many edge a nested correlated-subquery array.
+    fn json_nest_pair(
+        &mut self,
+        field: &Ident,
+        body: &'a [ShapeField],
+        model: &'a RModel,
+        alias: &str,
+        prefix: &str,
+        pairs: &mut Vec<String>,
+    ) {
+        if let Some((child_alias, child_prefix, child_model)) =
+            self.enter_to_one(&field.node, alias, prefix, model)
+        {
+            let nested = self.json_object_expr(body, child_model, &child_alias, &child_prefix);
+            pairs.push(format!("'{}', {}", field.node, nested));
+        } else if let Some((child_model, via_fk)) = self.to_many_edge(&field.node, model) {
+            let arr = self.json_array_subquery(body, child_model, &via_fk, alias);
+            pairs.push(format!("'{}', {}", field.node, arr));
+        }
     }
 
     /// Resolve a dotted path starting from `start_model` (aliased `start_alias`, at join

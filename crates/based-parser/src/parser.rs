@@ -738,6 +738,10 @@ impl<'a> Parser<'a> {
             self.expect(Tok::RBrace, "`}`")?;
             return Ok(ShapeField::Nest { field: name, body });
         }
+        if self.eat(Tok::Arrow) {
+            let shape = self.upper_ident("shape name")?;
+            return Ok(ShapeField::NestRef { field: name, shape });
+        }
         Ok(ShapeField::Bare(name))
     }
 

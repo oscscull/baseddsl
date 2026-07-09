@@ -236,6 +236,9 @@ pub enum ShapeField {
     Rename { out: Ident, value: ShapeValue },
     /// `field { ... }` — expand a relation into a sub-object
     Nest { field: Ident, body: Vec<ShapeField> },
+    /// `field -> ShapeName` — expand a relation into a sub-object projected by a
+    /// named shape (whose `from` model must equal the relation's target)
+    NestRef { field: Ident, shape: Ident },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -68,9 +68,8 @@ feature-parity fill-in closes. **Every roadmap item is now complete** — the la
 source-hygiene pass (**F1/D69**), swept every `crates/**/*.rs` and confirmed the source reads as finished
 (only a few residual narration bits tightened; prior incremental hygiene had kept it clean). **The project
 was fully done per the Definition of Done** — every DoD item met, no open features, no open hygiene.
-**Post-completion, one new language feature is now queued at the top of the roadmap: Track L4 — named nested
-projection (shape-in-nest)**, which extends L1's inline nesting so a to-one/to-many nest can reference a
-named shape by name for consumer-side type identity; it is the next item the build loop should pick.
+Post-completion, **Track L4 — named nested projection (shape-in-nest) — is now done (D79)**: a nest may
+reference a named shape (`placed_by -> UserRef`) for consumer-side type identity.
 Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
@@ -130,42 +129,15 @@ live coverage can't be proven until L builds them). **D** closes it all out (its
 Order *within* a track is top-down. Done items are one-liners with their D#; open items carry full
 resume context. Delivery detail: `PLAN-archive.md`.
 
-**Track L4 — named nested projection in shapes (NEXT — top priority; new post-completion language feature).**
-A to-one/to-many nest currently spells its fields inline (`placed_by { name, email }`) and the codegen mints
-an **anonymous per-parent type** (`OrderCardPlacedBy` in the emitted client). Two shapes that nest the same
-columns of the same model get two distinct, unshareable types — so a frontend component (or a `db→props`
-mapper) can't be written once against "a User projection" and reused across query sites. That is a structural
-cost of minimization-by-default, present from day one, not a wait-for-demand nicety. Fix: let a nest
-**reference a named shape** whose root model equals the relation target — `placed_by -> UserRow` — so the
-projection has one **nominal** identity every fetch site and every mapper can name.
-  - **Why this over inline (the real justification, not author-DRY):** consumer-side type identity. When the
-    consumer is a typed component, the minimal fetch *is* the component's prop type, so minimization and
-    predictability coincide rather than conflict. When a `db→props` mapper sits between them, the mapper wants
-    a stable, parent-independent input type so **one** `to_props(UserRow)` serves every site — anonymous
-    per-parent structs force N identical mappers. With a second consumer (query + mapper) the projection's
-    field set becomes a genuinely shared fact → principle 4 (declare once, reference by name) now applies; it
-    did *not* for a single-consumer inline nest, which is why author-DRY alone was a weak case.
-  - **Pinned semantics:** the referenced shape's root model MUST equal the relation's target model (else a
-    compile error — no silent mismatch, principle 2); the reference is a **pure column-list expansion** that
-    lowers to exactly the same SQL / `nest_row` path as an inline nest (D55 to-one / D57 to-many), carrying
-    **no independent `@scope`/soft-delete identity** (child scope + live-predicate stay governed by the nest
-    context as today). Recurses and composes with inline nesting to any depth.
-  - **Open design fork (resolve at design time):** (a) reference a top-level `shape … from User` decl
-    (`placed_by -> UserRow`) — gives cross-site sharing, the actual need, but commits the nest to that shape's
-    full field set (no per-site trim); vs (b) *name an inline nest* (`placed_by as UserRef { name, email }`) —
-    keeps per-site trimming + a stable generated name, but two sites share a type only by referencing one
-    definition, which collapses back to (a). **Recommendation: (a)**; (b) is possible later sugar. Residual
-    cost of (a): one shape forced to serve two consumers with different needs overfetches for the leaner — the
-    fix is **split into two cheap shapes** (healthy proliferation, not fragment rot). Docs should say plainly
-    "reference for a shared type; inline when you mean to trim" — the minimization↔predictability tradeoff is
-    real but bounded (derived/computed props always need a mapper regardless, principle 5).
-  - **Touchpoints:** grammar (`shape_field` gains a `bare_field '->' shape_name` form) + `spec/grammar.ebnf`;
-    `spec/syntax/shapes.md` + a new `decisions.md` entry; parser; sema (resolve the ref, enforce target-model
-    match, then reuse the existing relation-nest resolution so everything downstream is unchanged); codegen SQL
-    (unchanged — same nest lowering); **client emit** (emit `placed_by: UserRow` referencing the existing
-    generated shape type instead of a fresh `<Parent><Field>` struct — the actual payoff); **OpenAPI** (`$ref`
-    the named schema instead of an inline object); `based fmt`; LSP go-to-def on the referenced shape name.
-    Tests across parser/sema/codegen/client/openapi + a conformance pair + one example-project use.
+**Track L4 — named nested projection in shapes. ✅ COMPLETE (D79).** A nest may reference a top-level
+shape by name — `placed_by -> UserRef` — giving the projection one nominal identity every fetch site and
+`db→props` mapper can name (the client emits `placed_by: UserRef`/`Vec<UserRef>` instead of a per-parent
+anonymous struct; OpenAPI `$ref`s the named schema). The reference is a pure column-list expansion:
+byte-identical SQL to the inline nest, child scope/soft-delete governed by the nest context; the
+referenced shape's `from` must equal the relation target (`E0133`; unknown shape `E0132`, reference
+cycle `E0134`). Verified live on SQLite (to-one + to-many). Worked into `spec/examples/commerce`
+(`UserRef`/`OrderDetail`). The (a)-vs-(b) design fork (reference a decl vs name an inline nest) resolved
+to (a); (b) stays possible later sugar — detail in D79.
 
 **Track L — language feature-completeness (TOP PRIORITY, critical path, DoD-spanning). ✅ COMPLETE
 (L1 D55/D57, L2 D56, L3 D58).** The read/write *core* is built and proven live — get/list,
@@ -568,6 +540,9 @@ holds `&mut`.
   custom-join forwards are exempt.
 - `create`/`update` assign type agreement (`E0153`): assigned value's family must match the target
   column — the write-side twin of `=` operand typing; `^` back-refs typed by the field they read.
+- Named-shape nest references (shapes.md, D79): `field -> Shape` requires a declared shape (`E0132`)
+  whose `from` equals the relation target (`E0133`); a shape transitively nesting itself by reference
+  is `E0134` (cycle-guarded like D14 filter expansion).
 - Implicit `id: Id` (D2); a model that declares its own `id` keeps it.
 - Decorators: `@soft_delete` (covered-subset type check → `SoftMode`), `@created`/`@updated`
   (timestamp role), `@sort` (paths), `@table` (name override), `@was` (rename directive, below),

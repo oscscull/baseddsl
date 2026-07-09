@@ -95,6 +95,10 @@ struct OutSchema {
     /// A pure update/delete has no declared-shape row to project, so it emits no
     /// object schema — its `200` is the shared `MutationResult`. `true` skips it.
     is_result_fallback: bool,
+    /// Named shapes this schema's body references via `field -> Shape` (recursively),
+    /// each a full schema of its own — registered in `components.schemas` so the
+    /// property `$ref`s resolve, deduped by name across callables.
+    nested: Vec<OutSchema>,
 }
 
 // ---------- document assembly ----------------------------------------------
@@ -116,14 +120,7 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
 
     let mut seen: Vec<String> = Vec::new();
     for c in &callables {
-        if c.out_schema.is_result_fallback || seen.contains(&c.out_schema.name) {
-            continue;
-        }
-        seen.push(c.out_schema.name.clone());
-        schemas.insert(
-            c.out_schema.name.clone(),
-            object_schema(&c.out_schema.fields),
-        );
+        register_out_schema(&c.out_schema, &mut schemas, &mut seen);
     }
     for c in &callables {
         schemas.insert(input_name(c.name), input_schema(schema, c));
@@ -146,6 +143,19 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
             "schemas": Value::Object(schemas),
         }
     })
+}
+
+/// Register an output object schema plus every named shape it references (its
+/// `nested`), deduped by name — a shape shared by two callables (or referenced from
+/// two nests) is one `components.schemas` entry.
+fn register_out_schema(os: &OutSchema, schemas: &mut Map<String, Value>, seen: &mut Vec<String>) {
+    if !os.is_result_fallback && !seen.contains(&os.name) {
+        seen.push(os.name.clone());
+        schemas.insert(os.name.clone(), object_schema(&os.fields));
+    }
+    for n in &os.nested {
+        register_out_schema(n, schemas, seen);
+    }
 }
 
 /// One `paths` entry: a single `post` operation posting the input, returning the
@@ -342,16 +352,27 @@ fn out_schema(
             name: "MutationResult".to_string(),
             fields: Vec::new(),
             is_result_fallback: true,
+            nested: Vec::new(),
         };
     }
     let name = ret.ty.node.as_str();
     if name != "full" {
         if let Some(shape) = find_shape(decls, name) {
             let model = schema.model(&shape.from.node);
+            let mut nested = Vec::new();
+            let fields = shape_fields(
+                schema,
+                decls,
+                &shape.body,
+                model,
+                &mut nested,
+                &mut vec![name.to_string()],
+            );
             return OutSchema {
                 name: name.to_string(),
-                fields: shape_fields(schema, &shape.body, model),
+                fields,
                 is_result_fallback: false,
+                nested,
             };
         }
     }
@@ -360,11 +381,13 @@ fn out_schema(
             name: m.name.clone(),
             fields: model_fields(m),
             is_result_fallback: false,
+            nested: Vec::new(),
         },
         None => OutSchema {
             name: pascal(name),
             fields: Vec::new(),
             is_result_fallback: false,
+            nested: Vec::new(),
         },
     }
 }
@@ -373,11 +396,18 @@ fn out_schema(
 /// maps to the open-object `Json`; a to-**one** nest (`buyer { … }`) becomes an inline
 /// nested object schema (recursively projected), required unless the relation is
 /// optional. A to-**many** nest (`items { … }`) becomes an `array` of that object
-/// schema (always present — an empty array when there are no children).
+/// schema (always present — an empty array when there are no children). A `field ->
+/// Shape` nest `$ref`s the named shape's schema instead of inlining an object; the
+/// referenced schema itself lands in `out` (registered once in `components.schemas`).
+/// `stack` holds the shape names mid-expansion — the cycle guard (sema rejects
+/// reference cycles; this keeps the emitter terminating regardless).
 fn shape_fields(
     schema: &CheckedSchema,
+    decls: &[Decl],
     body: &[ShapeField],
     model: Option<&RModel>,
+    out: &mut Vec<OutSchema>,
+    stack: &mut Vec<String>,
 ) -> Vec<(String, Value, bool)> {
     let mut fields = Vec::new();
     for f in body {
@@ -396,13 +426,43 @@ fn shape_fields(
             },
             ShapeField::Nest { field, body } => {
                 if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
-                    let nested = shape_fields(schema, body, Some(target));
+                    let nested = shape_fields(schema, decls, body, Some(target), out, stack);
                     fields.push((field.node.clone(), object_schema(&nested), !optional));
                 } else if let Some(target) = to_many_relation(schema, model, &field.node) {
                     // A to-many nest is an array of the element object schema; always
                     // present (empty array when there are no children), so `required`.
-                    let nested = shape_fields(schema, body, Some(target));
+                    let nested = shape_fields(schema, decls, body, Some(target), out, stack);
                     let arr = json!({ "type": "array", "items": object_schema(&nested) });
+                    fields.push((field.node.clone(), arr, true));
+                }
+            }
+            ShapeField::NestRef { field, shape } => {
+                let Some(decl) = find_shape(decls, &shape.node) else {
+                    continue;
+                };
+                if !stack.contains(&shape.node) {
+                    stack.push(shape.node.clone());
+                    let mut nested = Vec::new();
+                    let sfields = shape_fields(
+                        schema,
+                        decls,
+                        &decl.body,
+                        schema.model(&decl.from.node),
+                        &mut nested,
+                        stack,
+                    );
+                    stack.pop();
+                    out.push(OutSchema {
+                        name: shape.node.clone(),
+                        fields: sfields,
+                        is_result_fallback: false,
+                        nested,
+                    });
+                }
+                if let Some((_, optional)) = to_one_relation(schema, model, &field.node) {
+                    fields.push((field.node.clone(), schema_ref(&shape.node), !optional));
+                } else if to_many_relation(schema, model, &field.node).is_some() {
+                    let arr = json!({ "type": "array", "items": schema_ref(&shape.node) });
                     fields.push((field.node.clone(), arr, true));
                 }
             }

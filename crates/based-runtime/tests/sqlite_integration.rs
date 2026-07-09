@@ -638,3 +638,121 @@ fn nested_self_referential_to_many_returns_json_array() {
     );
     assert_eq!(leaf.body, json!({ "name": "Bob", "invited_users": [] }));
 }
+
+/// A **named-shape** nest (`placed_by -> UserRef`, `items -> ItemRow`) returns the same
+/// nested JSON an inline nest does, end-to-end against a real engine: the reference is a
+/// pure body expansion (same SQL, same `nest_row`/array reassembly), the payoff being the
+/// shared nominal type on the client. Covers to-one and to-many refs in one shape, with a
+/// soft-deleted child excluded exactly as the nest context dictates.
+#[test]
+fn named_shape_nest_returns_nested_json() {
+    let c = compile_sqlite(
+        r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, total: int, items: OrderItem[] }
+        @sort(id asc)
+        @soft_delete(deleted_at)
+        OrderItem { order: Order, sku: text, qty: int, deleted_at: timestamp? }
+        shape UserRef from User { name, email }
+        shape ItemRow from OrderItem { sku, qty }
+        shape OrderDetail from Order {
+          total
+          placed_by -> UserRef
+          items -> ItemRow
+        }
+        query order_detail(id) -> OrderDetail;
+        query order_details() -> OrderDetail[];
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `user` (`id`, `name`, `email`) VALUES ('u1', 'Ada', 'a@x.com');
+            INSERT INTO `order` (`id`, `placed_by_id`, `total`) VALUES
+                ('o1', 'u1', 500), ('o2', 'u1', 0);
+            INSERT INTO `order_item` (`id`, `order_id`, `sku`, `qty`) VALUES
+                ('i1', 'o1', 'ABC', 2);
+            -- a soft-deleted item must be excluded, exactly as with an inline nest.
+            INSERT INTO `order_item` (`id`, `order_id`, `sku`, `qty`, `deleted_at`)
+                VALUES ('i2', 'o1', 'GONE', 9, '2020-01-01 00:00:00');
+            "#,
+        )
+        .expect("seed");
+
+    // `get`: buyer nests as the named `UserRef` projection, items as `ItemRow` elements.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/order_detail",
+        json!({ "id": "o1" }),
+        json!({}),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({
+            "total": 500,
+            "placed_by": { "name": "Ada", "email": "a@x.com" },
+            "items": [{ "sku": "ABC", "qty": 2 }]
+        })
+    );
+
+    // `list`: every row reassembles; a childless order yields `[]`.
+    let listed = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/order_details",
+        json!({}),
+        json!({}),
+    );
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(
+        listed.body,
+        json!([
+            {
+                "total": 500,
+                "placed_by": { "name": "Ada", "email": "a@x.com" },
+                "items": [{ "sku": "ABC", "qty": 2 }]
+            },
+            {
+                "total": 0,
+                "placed_by": { "name": "Ada", "email": "a@x.com" },
+                "items": []
+            }
+        ])
+    );
+}
+
+/// The commerce example's `order_detail` (its `OrderDetail` nests `placed_by ->
+/// UserRef`) runs live: the worked example's named-shape reference is executable,
+/// not just documentation.
+#[test]
+fn commerce_order_detail_nests_named_user_ref() {
+    let c = commerce();
+    let backend = seeded_backend(&c);
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/order_detail",
+        json!({ "id": "order-1" }),
+        json!({ "org": "org-1" }),
+    );
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({
+            "status": "paid",
+            "total": 500,
+            "placed_by": { "name": "Ada", "email": "a@x.com" }
+        })
+    );
+}

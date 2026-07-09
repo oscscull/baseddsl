@@ -4,6 +4,10 @@
 query order_by_id(id) -> OrderCard scoped Tenant;
 query orders_by_buyer(user -> placed_by) -> OrderCard[] scoped Tenant;
 
+# Returns `OrderDetail` (model.bsl), whose buyer nests by named-shape reference — the
+# generated client types `placed_by` as the shared `UserRef`, not a per-query struct.
+query order_detail(id) -> OrderDetail scoped Tenant;
+
 # The Tenant scope already filters to the caller's org, so a plain `list` *is* "my org's
 # orders" — the scope predicate + the `@sort(placed_at desc)` do all the work.
 query my_org_orders() -> OrderCard[] scoped Tenant { list Order; }

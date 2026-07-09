@@ -13,7 +13,7 @@
 //! fallback.
 
 use based_ast::{
-    Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Modifier, Model, Mutation,
+    Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Model, Modifier, Mutation,
     NamedFilter, Param, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart, RawSql,
     ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value, WriteStmt,
 };
@@ -471,7 +471,12 @@ impl Snapshot {
     /// the snapshot's column — a rename chain must keep the original), and the physical
     /// name is a **live** column/table in the project's latest captured snapshot (an
     /// uncaptured column needs no rename step). `None` outside those conditions.
-    fn was_edit_for_rename(&self, target: Span, old: &str, new_name: &str) -> Option<(Url, TextEdit)> {
+    fn was_edit_for_rename(
+        &self,
+        target: Span,
+        old: &str,
+        new_name: &str,
+    ) -> Option<(Url, TextEdit)> {
         if old == new_name {
             return None;
         }
@@ -751,6 +756,11 @@ impl Snapshot {
                     if let Some(target) = self.relation_target(from, &field.node) {
                         self.shape_paths(target, body, out);
                     }
+                }
+                // `field -> Shape`: the field is a relation reference; the shape name
+                // is a type reference (collect_type_refs), not a field path.
+                ShapeField::NestRef { field, .. } => {
+                    out.push((from, std::slice::from_ref(field)));
                 }
             }
         }
@@ -1284,7 +1294,10 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
                     }
                 }
             }
-            Decl::Shape(s) => out.push(&s.from),
+            Decl::Shape(s) => {
+                out.push(&s.from);
+                collect_shape_body_refs(&s.body, &mut out);
+            }
             Decl::Scope(s) => {
                 for t in &s.terms {
                     collect_type_expr(&t.ty, &mut out);
@@ -1320,6 +1333,19 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
         }
     }
     out
+}
+
+/// The `field -> Shape` references in a shape body (recursing through inline nests) —
+/// each names a shape decl, so it rides the type-reference index (go-to-def,
+/// find-references, rename).
+fn collect_shape_body_refs<'a>(body: &'a [ShapeField], out: &mut Vec<&'a Ident>) {
+    for f in body {
+        match f {
+            ShapeField::Nest { body, .. } => collect_shape_body_refs(body, out),
+            ShapeField::NestRef { shape, .. } => out.push(shape),
+            ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
+        }
+    }
 }
 
 /// Every scope-name reference identifier across the AST, with its span — the sites a name
@@ -2251,6 +2277,35 @@ mod tests {
         assert_eq!(snap.definition_at(user_fid, ws_off), None);
     }
 
+    /// A `field -> Shape` nest reference resolves to the referenced shape decl's
+    /// name span (cross-file), and the decl's references include the nest site.
+    #[test]
+    fn goto_definition_resolves_shape_nest_reference() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
+        let snap = compile_manifest(&root, &HashMap::new());
+        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+
+        // Cursor mid-`UserRef` in `placed_by -> UserRef` (order/model.bsl). The last
+        // occurrence is the shape field (earlier ones sit in comments).
+        let ofid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
+        let src = &snap.sources[ofid].1;
+        let off = (src.rfind("-> UserRef").unwrap() + 4) as u32;
+        let def = snap
+            .definition_at(ofid, off)
+            .expect("shape reference resolves");
+        let (def_path, def_src) = &snap.sources[def.file.0 as usize];
+        assert!(def_path.ends_with("user/model.bsl"), "{def_path:?}");
+        assert_eq!(&def_src[def.start as usize..def.end as usize], "UserRef");
+
+        // Find-references from the decl lists the nest reference site.
+        let ufid = def.file.0 as usize;
+        let refs = snap.references_at(ufid, def.start, false);
+        assert!(
+            refs.iter().any(|s| s.file.0 as usize == ofid),
+            "nest reference listed: {refs:?}"
+        );
+    }
+
     /// Go-to-definition from a `@scope Name` (model) or `scoped Name` (callable)
     /// reference resolves to the `scope Name (…)` decl's name span — the both-sides
     /// scope contract is navigable from either reference.
@@ -3122,7 +3177,10 @@ mod tests {
         let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
         // Both `$ctx.org` become `$ctx.tenant`; the scope column `org:` and the model
         // field `org: Org` (and the `where` LHS `org`) keep their name.
-        assert!(out.contains("scope Tenant (org: Org = $ctx.tenant)"), "{out}");
+        assert!(
+            out.contains("scope Tenant (org: Org = $ctx.tenant)"),
+            "{out}"
+        );
         assert!(out.contains("where (org = $ctx.tenant)"), "{out}");
         assert!(out.contains("Widget { org: Org"), "{out}");
     }
@@ -3164,7 +3222,10 @@ mod tests {
     fn rename_field_inserts_was_for_live_column() {
         let ws = TempWorkspace::new("rename_was");
         ws.write("based.toml", "");
-        ws.write("schema.bsl", "Product {\n  name: text\n  barcode: text?\n}\n");
+        ws.write(
+            "schema.bsl",
+            "Product {\n  name: text\n  barcode: text?\n}\n",
+        );
         ws.write(
             "migrations/0001_init/schema.snap",
             "snapshot v1 dialect=neutral\n\ntable product\n  \
@@ -3270,7 +3331,10 @@ mod tests {
             &snap.rename_edits(fid, off, "code").unwrap()[&file_uri(&snap, fid)],
         );
         assert!(out.contains("code: text? @was(\"upc\")"), "{out}");
-        assert!(!out.contains("@was(\"barcode\")"), "chain keeps orig: {out}");
+        assert!(
+            !out.contains("@was(\"barcode\")"),
+            "chain keeps orig: {out}"
+        );
     }
 
     /// Renaming a model mapped to a live table inserts a leading `@was("old_table")`
@@ -3298,7 +3362,10 @@ mod tests {
             "leading @was decorator + renamed model: {out}"
         );
         let reparsed = based_parser::parse_file(&out, FileId(0)).expect("applied source parses");
-        assert!(reparsed.decls.iter().any(|d| matches!(d, Decl::Model(m) if m.name.node == "Item")));
+        assert!(reparsed
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Model(m) if m.name.node == "Item")));
     }
 
     /// The URI of file `fid` in a snapshot — a test convenience for indexing rename edits.

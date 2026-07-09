@@ -321,6 +321,52 @@ fn nested_to_one_shape_emits_inline_object_schema() {
 }
 
 #[test]
+fn nest_ref_emits_schema_ref_to_the_named_shape() {
+    // A named-shape nest (`placed_by -> UserRef`) `$ref`s the shape's own component
+    // schema instead of inlining an object; the referenced schema is registered once
+    // even when no callable returns it directly. To-many refs are arrays of the `$ref`.
+    let doc = gen(r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order { placed_by: User, fulfilled_by: User?, total: int, items: OrderItem[] }
+        @sort(id asc)
+        OrderItem { order: Order, sku: text }
+        shape UserRef from User { name, email }
+        shape ItemRow from OrderItem { sku }
+        shape OrderDetail from Order {
+          total
+          placed_by -> UserRef
+          fulfilled_by -> UserRef
+          items -> ItemRow
+        }
+        query order_detail(id) -> OrderDetail;
+        "#);
+    let props = &doc["components"]["schemas"]["OrderDetail"]["properties"];
+    assert_eq!(props["placed_by"]["$ref"], "#/components/schemas/UserRef");
+    assert_eq!(
+        props["fulfilled_by"]["$ref"],
+        "#/components/schemas/UserRef"
+    );
+    assert_eq!(props["items"]["type"], "array");
+    assert_eq!(
+        props["items"]["items"]["$ref"],
+        "#/components/schemas/ItemRow"
+    );
+    // the referenced schemas exist as components with their projected properties.
+    let user_ref = &doc["components"]["schemas"]["UserRef"];
+    assert_eq!(user_ref["properties"]["name"]["type"], "string");
+    let item_row = &doc["components"]["schemas"]["ItemRow"];
+    assert_eq!(item_row["properties"]["sku"]["type"], "string");
+    // required: the non-optional relation is, the optional one is not, the array is.
+    let required = doc["components"]["schemas"]["OrderDetail"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(required.iter().any(|v| v == "placed_by"));
+    assert!(!required.iter().any(|v| v == "fulfilled_by"));
+    assert!(required.iter().any(|v| v == "items"));
+}
+
+#[test]
 fn nested_to_many_shape_emits_array_of_object_schema() {
     // A to-many `items { … }` nest becomes an `array` property whose items are the
     // element object schema; always present (empty array when childless) → required.

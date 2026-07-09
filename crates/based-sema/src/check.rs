@@ -20,7 +20,8 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
         );
         return None;
     };
-    check_shape_body(&s.body, mi, cx, sink);
+    let mut stack = vec![s.name.node.clone()];
+    check_shape_body(&s.body, mi, cx, &mut stack, sink);
     Some(RShape {
         name: s.name.node.clone(),
         from: s.from.node.clone(),
@@ -28,7 +29,16 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
     })
 }
 
-fn check_shape_body(fields: &[ShapeField], mi: usize, cx: &Cx, sink: &mut Sink) {
+/// `stack` is the chain of named shapes currently being expanded (the declaring
+/// shape at the bottom), so a `field -> Shape` reference that closes back onto it
+/// is an `E0134` error instead of infinite recursion.
+fn check_shape_body(
+    fields: &[ShapeField],
+    mi: usize,
+    cx: &Cx,
+    stack: &mut Vec<String>,
+    sink: &mut Sink,
+) {
     for f in fields {
         match f {
             ShapeField::Bare(id) => match cx.model(mi).member(&id.node).map(|m| &m.kind) {
@@ -54,7 +64,7 @@ fn check_shape_body(fields: &[ShapeField], mi: usize, cx: &Cx, sink: &mut Sink) 
                 match cx.model(mi).member(&field.node).map(|m| &m.kind) {
                     Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
                         if let Some(ti) = cx.find(target) {
-                            check_shape_body(body, ti, cx, sink);
+                            check_shape_body(body, ti, cx, stack, sink);
                         }
                     }
                     Some(MemberKind::Scalar { .. }) => sink.error(
@@ -65,6 +75,74 @@ fn check_shape_body(fields: &[ShapeField], mi: usize, cx: &Cx, sink: &mut Sink) 
                     None => unknown_field(cx, mi, field, sink),
                 }
             }
+            // `field -> Shape`: nest a relation, projected by a named shape. The
+            // reference is a pure body expansion, so the referenced shape's own decl
+            // check covers its fields; here we resolve the relation, require the
+            // shape's model to equal the relation target, and guard against cycles.
+            ShapeField::NestRef { field, shape } => {
+                match cx.model(mi).member(&field.node).map(|m| &m.kind) {
+                    Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
+                        match cx.shapes.get(&shape.node) {
+                            Some(from) if from != target => sink.error(
+                                code::SHAPE_REF_MODEL,
+                                shape.span,
+                                format!(
+                                    "shape `{}` projects `{from}`, but `{}` relates to `{target}`",
+                                    shape.node, field.node
+                                ),
+                            ),
+                            Some(_) => check_ref_cycle(&shape.node, shape.span, cx, stack, sink),
+                            None => sink.error(
+                                code::SHAPE_REF_UNKNOWN,
+                                shape.span,
+                                format!("`-> {}` names no declared shape", shape.node),
+                            ),
+                        }
+                    }
+                    Some(MemberKind::Scalar { .. }) => sink.error(
+                        code::SHAPE_NEST_SCALAR,
+                        field.span,
+                        format!("`{}` is a column, not a relation, so it can't be nested", field.node),
+                    ),
+                    None => unknown_field(cx, mi, field, sink),
+                }
+            }
+        }
+    }
+}
+
+/// Follow a `-> Shape` reference for cycle detection only: a shape that transitively
+/// nests itself by reference would expand forever, so it is an error (`E0134`),
+/// reported at the reference that closes the cycle.
+fn check_ref_cycle(shape: &str, at: Span, cx: &Cx, stack: &mut Vec<String>, sink: &mut Sink) {
+    if stack.iter().any(|s| s == shape) {
+        sink.error(
+            code::SHAPE_REF_CYCLE,
+            at,
+            format!(
+                "shape reference cycle: `{}` -> `{shape}`",
+                stack.join("` -> `")
+            ),
+        );
+        return;
+    }
+    stack.push(shape.to_string());
+    if let Some(body) = cx.shape_bodies.get(shape) {
+        walk_body_refs(body, cx, stack, sink);
+    }
+    stack.pop();
+}
+
+/// Walk a shape body's nest structure, following each `-> Shape` reference (the
+/// referenced fields themselves are checked at their own decl).
+fn walk_body_refs(fields: &[ShapeField], cx: &Cx, stack: &mut Vec<String>, sink: &mut Sink) {
+    for f in fields {
+        match f {
+            ShapeField::Nest { body, .. } => walk_body_refs(body, cx, stack, sink),
+            ShapeField::NestRef { shape, .. } => {
+                check_ref_cycle(&shape.node, shape.span, cx, stack, sink)
+            }
+            ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }
     }
 }

@@ -494,6 +494,7 @@ fn shape_field_inline(f: &ShapeField) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        ShapeField::NestRef { field, shape } => format!("{} -> {}", field.node, shape.node),
     }
 }
 
@@ -511,6 +512,7 @@ fn shape_field_block(f: &ShapeField, rename_w: usize) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        ShapeField::NestRef { field, shape } => format!("{} -> {}", field.node, shape.node),
     }
 }
 
