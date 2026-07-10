@@ -70,6 +70,8 @@ source-hygiene pass (**F1/D69**), swept every `crates/**/*.rs` and confirmed the
 was fully done per the Definition of Done** — every DoD item met, no open features, no open hygiene.
 Post-completion, **Track L4 — named nested projection (shape-in-nest) — is now done (D79)**: a nest may
 reference a named shape (`placed_by -> UserRef`) for consumer-side type identity.
+**2026-07-10 strategic pivot: Track N — async-native core → streaming → flagship axum example — is now
+TOP PRIORITY (owner decision, design-partner driven); Track T resumes after N1.**
 Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
@@ -338,10 +340,75 @@ path — worked when it won't preempt A/B/D/E).**
     architecture docs (their deferred items already sit in the Deferred list). Comment-only; gate green
     (`test --workspace --all-features` + `fmt --check` + `clippy`). The standing rule is in Conventions.
 
-## Track T — core DB feature parity (owner-approved 2026-07-09)
+## Track N — async-native pivot (owner decision 2026-07-10; TOP PRIORITY)
+
+**Strategic context.** The first real adoption target (the owner's workplace, the project's proving
+ground) reviewed the pitch: the syntax landed well, **native async was repeatedly named the core
+required feature**, streaming reads are wanted immediately, and they need the engine to plug into an
+app's *existing* async connection pool (a `spawn_blocking` facade was judged a hassle by their backend
+owner). The Rust web-backend market is effectively all tokio — axum and every runner-up run on it — so
+async-native is the market, not a variant. Decision: recolor the execution core to native async, no
+sync facade. The pure front end (parse → sema → codegen → plan/SQL lowering) stays sync and
+runtime-free; coloring touches execution only. **All Track N work lands on a single long-lived branch
+(`async-native`), merged to `main` only at demonstrated confidence** — full gate + all three live
+suites + the examples green on the async core (owner, 2026-07-10). Worked in order.
+
+- **N0. ✅ done (D84). Async architecture design — the elegance mitigation, settled before recolor
+  code.** Every guarantee the sync design gave by construction is restated as an invariant with a
+  named enforcement (type system > test > review). Owner-settled: **sqlx is the driver layer**
+  (principle 7 — reuse hardened tx-drop/codec/pool/streaming machinery, delete our own driver stacks;
+  executor/pool layer only — `Db`/`Backend` stay our traits, sqlx never appears in the trait surface);
+  transactions become a consuming **typestate** (`begin(self) → Tx`, `commit(self)`;
+  drop-without-commit = rollback-or-discard, an open-tx connection is never pooled — cancel-safety by
+  construction, not vigilance); **`fetch` returns a row stream, always** (one-shot = collect at
+  dispatch; N2 adds a wire surface, not a second execution path); the **coloring boundary is
+  CI-enforced** (front-end crates provably tokio/sqlx-free via a `cargo tree` check); retry ×
+  cancellation composes via per-attempt `Tx` (no double-write window; idempotency keys unchanged).
+  Full design, trait sketch, invariant table, de-risk spike scope: **D84**.
+- **N1. Native async execution core (the biggest cost; implements D84).**
+  - **First step — the D84 de-risk spike:** our lowered SQL through sqlx against the live suites,
+    proving per-dialect codec fidelity (uuid, timestamps, json, and D83's exact-decimal contract —
+    sqlx's `rust_decimal` decode replaces our `pg_numeric`; confirm the wire string stays exact) and
+    MariaDB-via-MySql-driver compatibility, before the bulk recolor.
+  - Traits: the D84 shapes — `DbRead` (stream `fetch` + `execute`) / `Db` (`begin` → `Tx`) / `Tx`
+    (`commit`, drop-guard) / async `Backend` (`async_trait`-style boxing accepted);
+    `dispatch`/`run_query`/`run_mutation`/`migrate apply` recolor mechanically on top.
+  - Drivers: all three hand-rolled stacks (`mysql`, sync `postgres` + r2d2, rusqlite wiring) retire
+    for sqlx per-database executors/pools — MariaDB via the MySql driver, SQLite via sqlx's async
+    SQLite driver. Statement timeouts move to the pool connect hook (`after_connect`), preserving D65.
+  - **Cancel-safety acceptance gate (I2):** drop a mutation future at every await point; assert
+    rollback/discard, never a pooled open-tx connection. The D65 deadlock-retry loop survives as a
+    per-attempt fresh `Tx`; the D65 crossed-lock + pool-exhaustion live tests re-run green.
+  - **BYO-pool seam (design-partner requirement, concrete):** a `Backend` constructor over a caller's
+    existing `sqlx::Pool` (the partner runs wrapped `sqlx_core` pools), sharing the codec path with
+    our own backends; proven with a sqlx-pool-backed impl in a test or example.
+  - Edge + embed: `based serve` listener tiny_http → axum (dogfoods the target stack; keeps `/healthz`
+    + `/readyz` + graceful drain). The `RefCell` single-connection `Engine` retires in favor of a
+    `Send + Sync` checkout-per-call handle (safe to `Arc` into axum state). The generated client emits
+    async methods (`Transport::call` → async).
+  - Binaries own their runtime: the CLI wraps at `main` (`#[tokio::main]`/`block_on`); the LSP is
+    already tower-lsp/tokio. Execution tests → `#[tokio::test]`; MockDb stays.
+  - Gate unchanged: full workspace suite + fmt + clippy + all three live-DB suites green.
+- **N2. Streaming reads (claims N1's payoff immediately).** Driver-level row streams (`mysql_async` /
+  `tokio-postgres` native; SQLite via the blocking bridge) surfaced through a streaming read path → an
+  axum streaming body on the wire (NDJSON or chunked JSON array) and a `Stream`-returning
+  generated-client method. Spec-first: how a query opts in (or a size threshold), and what nesting
+  means per streamed row (to-many sub-arrays still materialize per-row). Keyset pagination stays the
+  random-access answer; streaming is the export/large-scan answer.
+- **N3. Flagship axum example + syntax appeal pass (the re-pitch artifact).** A nontrivial
+  `examples/axum-…` service — multiple routes, auth-derived `$ctx`, scoped multi-tenancy, a streaming
+  endpoint, migrations, the typed async client end-to-end — that reads like the app a workplace backend
+  dev would actually write, at quickstart-DX polish (no plumbing). Paired with a deliberate **syntax
+  appeal pass** over every surface the example shows (the `.bsl` files first, then README + client call
+  sites): the syntax is what landed in the pitch — polish it for first-look impact, not just
+  correctness. The example *is* the pitch.
+
+## Track T — core DB feature parity (owner-approved 2026-07-09; PAUSED behind Track N)
 
 A confirmed 6-item queue closing the gap to a general DB-first DSL (commerce is only a *named*
-example, not the domain). Worked in order; each iteration marks its item + D#. Tier-2 follow-ons below.
+example, not the domain). **Paused at T3 behind Track N — N1 recolors the execution paths T3–T6 build
+on (recolor first, then resume T3 on the async core).** Worked in order; each iteration marks its
+item + D#. Tier-2 follow-ons below.
 
 - **T1. ✅ done (D82). Enum type — string + numeric kinds.** `enum Name { … }` first-class scalar; a field
   typed by an enum name is a stored column (not a relation), referenced in value position by variant **name**

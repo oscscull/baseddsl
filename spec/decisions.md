@@ -56,14 +56,17 @@ relevant entries instead of scanning. A decision may appear under more than one 
   matching on `ClientError::kind()`/`code()`)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
-  bounded pools, single-shard scale-out), D22 (in-process `embed` door), D25 (write-retry
-  idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency key fingerprint),
-  D65 (live-DB hardening: statement timeouts, bounded deadlock-retry, pool-exhaustion→fast-503)
+  bounded pools, single-shard scale-out — execution model superseded by D84), D22 (in-process `embed`
+  door), D25 (write-retry idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency
+  key fingerprint), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
+  pool-exhaustion→fast-503), D84 (async-native execution architecture: sqlx driver layer, typestate
+  tx, stream-first reads, enforced coloring boundary — Track N0 design)
 - **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
 - **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
   scanner), D38 (Postgres driver + live suite), D61 (Postgres binary-format result decode: uuid/
   timestamptz/date/jsonb columns → canonical strings), D65 (per-dialect statement-timeout + deadlock/
-  pool-exhaustion classification via `DbErrorKind`)
+  pool-exhaustion classification via `DbErrorKind`), D84 (drivers unify on sqlx as the executor/pool
+  layer — the hand-rolled `mysql`/`postgres`+r2d2/rusqlite driver stacks retire in N1)
 - **Testing / integration harness** — D35 (Docker-backed real-DB harness + MariaDB live suite), D59
   (live pagination + soft-delete/restore coverage on MariaDB/Postgres; Postgres numeric text-bind fix),
   D64 (`TEST_*_URL` env override: live suites connect to a provided server instead of self-spinning),
@@ -3145,3 +3148,103 @@ default; client `rust_decimal::Decimal`/`f64`; openapi decimal-string/float-numb
 binary decoder unit test — `9.99`/`0.10`/`12345678.90`/negative/zero); and **live** SQLite (create `"19.99"`
 → exact string in the shape + a `0.10` trailing zero preserved + an ordered `>= 10.00` filter) plus the full
 live MariaDB + Postgres suites green (`total` round-trips as `"500.00"`/`"99.00"`). Spec: `spec/syntax/models.md`.
+
+## D84 — async-native execution architecture (Track N0 — design, settled before recolor code)
+
+**Context.** Track N (PLAN.md) recolors the execution core to native async: the design partner needs
+native async, streaming reads, and to plug the engine into their existing (wrapped) `sqlx_core` pools;
+the Rust web-backend market is uniformly tokio. This entry is the N0 gate — the architecture settled on
+paper so N1 implements a design instead of discovering one. The engine's sync virtues are
+guarantees-by-construction (pure core, tx integrity trivially safe, backpressure by shape); each is
+restated below as an invariant with a named enforcement (type system > test > review). The front end
+(parse → fmt → sema → codegen → plan lowering) stays sync, pure, runtime-free; coloring touches
+execution (`based-runtime` + binaries) only. Supersedes D20's execution model (sync + bounded worker
+threads); D20's *sizing* insight — concurrency is bounded by the connection pool — still stands.
+
+**1. sqlx is the driver layer (owner-settled 2026-07-10; principle 7 decides it).** The hand-rolled
+driver stacks (`mysql`, sync `postgres` + r2d2, rusqlite wiring) retire. tx-drop semantics, per-DB
+value codecs, pool health, and row streaming are hardened externals to reuse, not rebuild — deleting
+our own driver code is a benefit, not a cost. MariaDB rides sqlx's MySql driver; SQLite rides sqlx's
+own async SQLite driver (the blocking bridge we'd otherwise hand-roll). Scope guard: sqlx is an
+**executor/pool layer only** — our SQL arrives already lowered with positional binds (`query_with`
+over concrete per-DB types); no sqlx macros, no query builder, no `Any` driver. **`Db`/`Backend`
+remain our traits**: sqlx types appear only inside driver impls and the BYO-pool constructors, never
+in the trait surface. BYO-pool: a `Backend` constructor over a caller's existing `sqlx::Pool` (per-DB;
+this is the design partner's concrete embed), sharing the codec path with our own backends.
+
+**2. Transactions are a typestate, not methods.** `begin/commit/rollback` as `&mut self` methods leak
+an open tx when a cancelled caller drops the future mid-body. Replaced by consuming ownership —
+`Db::begin(self: Box<Self>) → Box<dyn Tx>`, `Tx::commit(self: Box<Self>)`; **drop without commit =
+rollback-or-discard, and an open-tx connection is never returned to the pool**. A write can only
+survive via `commit`, and `commit` consumes the tx, so cancellation at any await point cannot
+double-write or leak — the invariant is unrepresentable, not policed. (sqlx's own `Transaction` has
+exactly these drop semantics; our guards delegate.) Async `Drop` can't await: the fallback is
+close-don't-pool, accepting connection churn on cancellation as the safe cost.
+
+**3. One read path: `fetch` returns a row stream, always.** The one-shot wire response is a `collect()`
+at the dispatch layer; N2's streaming wire surface consumes the same stream. Shipping `fetch → Vec` in
+N1 and adding `fetch_stream` in N2 would fork the execution path permanently — designed out here.
+Per-row shaping already fits (`nest_row` is per-row; keyset cursor mints off the last row seen).
+
+**Trait sketch** (dyn-compatible; `async_trait`-style boxing accepted — a per-call boxed future is
+noise against a network round-trip):
+
+```rust
+pub trait DbRead: Send {                    // shared by a connection and a tx
+    fn fetch(&mut self, sql: &str, params: &[SqlValue]) -> RowStream<'_>;
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError>;
+}
+pub trait Db: DbRead {
+    async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError>;
+}
+pub trait Tx: DbRead {
+    async fn commit(self: Box<Self>) -> Result<(), DbError>;
+    // dropped without commit ⇒ rollback-or-discard; never pooled with an open tx
+}
+pub trait Backend: Send + Sync {
+    async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError>;
+    async fn ping(&self) -> Result<(), DbError>;
+}
+```
+
+**4. Coloring boundary enforced structurally, not by convention.** Only `based-runtime` and the
+binaries (`based-cli`, `based-lsp`) may depend on tokio/sqlx/futures. A CI check walks `cargo tree`
+for each front-end crate (`based-ast/parser/fmt/sema/codegen/facts/diagnostics/manifest`) and fails on
+any async-runtime dependency. Front-end tests stay runtime-free; execution tests use `#[tokio::test]`.
+
+**5. Retry × cancellation composition.** D65's bounded deadlock-retry survives: each attempt is one
+fresh typestate `Tx`, so cancellation *between* attempts is trivially clean and *mid*-attempt is
+covered by the drop guard — there is no double-write window because no attempt's writes survive
+without its `commit`. Idempotency keys remain the cross-request retry answer, unchanged. Statement
+timeouts stay server-side, applied via the pool's connect hook (sqlx `after_connect`), preserving D65
+semantics. No engine-side deadline initially: callers compose `tokio::time::timeout` (safe by
+decision 2); a config deadline is future work if an embedder asks.
+
+**Engine + edges.** The `RefCell` single-connection `Engine` retires for a `Send + Sync`
+checkout-per-call handle (`Compiled` + `Arc<dyn Backend>` + idempotency store; safe to `Arc` into
+axum state) — the D22 embed door keeps its shape, one color change. `based serve`'s listener moves
+tiny_http → axum (dogfoods the target stack; keeps `/healthz`/`/readyz`/drain, D26). The generated
+client emits `async fn` methods (`Transport::call` → async); the CLI wraps at `main`
+(`#[tokio::main]`); `MockDb` implements the async traits over its fixtures.
+
+**Invariants (the elegance contract; each names its enforcement).**
+- I1 — a connection re-entering the pool carries no open tx → **type system** (decision 2).
+- I2 — cancellation can never double-write → **type system** (commit consumes) + the N1 acceptance
+  test: drop a mutation future at every await point, assert rollback/discard.
+- I3 — the front end is async-free → **CI dependency check** (decision 4).
+- I4 — one read execution path → **code shape** (decision 3: no non-stream fetch exists).
+- I5 — overload fails fast (bounded checkout wait → retryable 503, never a hang) → sqlx pool
+  `acquire_timeout` mapped to `DbErrorKind::PoolExhausted` + the D65 live test re-run.
+- I6 — D65 deadlock-retry semantics preserved → per-attempt `Tx` + the D65 crossed-lock live test.
+
+**De-risk spike (in N1, before the bulk recolor).** A day-sized probe running our lowered SQL through
+sqlx against the live suites, proving value-codec fidelity per dialect — uuid, timestamps, json, and
+especially D83's exact-decimal contract: sqlx decodes Postgres `numeric` via its `rust_decimal`
+feature (our hand-rolled `pg_numeric` decoder retires), so the spike must confirm the wire string
+stays exact and decide whether `rust_decimal` entering based-runtime via sqlx amends D83's
+"stays out of the runtime" note (likely yes — one line, exactness preserved). MariaDB-via-MySql-driver
+compatibility is validated by the same run.
+
+**Branch discipline (owner, 2026-07-10).** All Track N work lands on a single long-lived branch
+(`async-native`) — including this design — merged back to `main` only at demonstrated confidence:
+full gate + all three live suites + the examples green on the async core.
