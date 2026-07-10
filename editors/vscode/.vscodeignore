@@ -1,6 +1,9 @@
+# Do NOT add `node_modules/**` here: vscode-languageclient is a runtime dependency
+# (extension.js require()s it at activation). vsce bundles the production dependency
+# tree and prunes devDependencies on its own; excluding node_modules ships a broken
+# .vsix that throws MODULE_NOT_FOUND on activate.
 .vscode/**
 src/**
-node_modules/**
 tsconfig.json
 .gitignore
 .vscodeignore
