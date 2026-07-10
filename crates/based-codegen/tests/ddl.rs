@@ -67,6 +67,46 @@ fn type_mapping_and_nullability() {
 }
 
 #[test]
+fn decimal_and_float_map_per_dialect() {
+    let src = r#"
+        Ledger {
+          price: decimal(12, 2)
+          bare:  decimal
+          score: float
+        }
+        "#;
+    let maria = gen(src);
+    assert!(
+        maria.contains("`price` DECIMAL(12, 2) NOT NULL"),
+        "\n{maria}"
+    );
+    assert!(
+        maria.contains("`bare` DECIMAL(38, 9) NOT NULL"),
+        "\n{maria}"
+    );
+    assert!(maria.contains("`score` DOUBLE NOT NULL"), "\n{maria}");
+
+    let sqlite = gen_sqlite(src);
+    // SQLite stores a decimal as TEXT (exact string round-trip, not lossy NUMERIC affinity).
+    assert!(sqlite.contains("`price` TEXT NOT NULL"), "\n{sqlite}");
+    assert!(sqlite.contains("`score` REAL NOT NULL"), "\n{sqlite}");
+
+    let pg = gen_pg(src);
+    assert!(pg.contains("\"price\" NUMERIC(12, 2) NOT NULL"), "\n{pg}");
+    assert!(pg.contains("\"score\" DOUBLE PRECISION NOT NULL"), "\n{pg}");
+}
+
+#[test]
+fn decimal_default_is_byte_exact() {
+    // The trailing zero survives (a float round-trip would drop it).
+    let ddl = gen("Order { total: decimal(12, 2) (default 0.10) }");
+    assert!(
+        ddl.contains("`total` DECIMAL(12, 2) NOT NULL DEFAULT 0.10"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
 fn defaults_render_as_sql() {
     let ddl = gen(r#"
         Order {

@@ -524,7 +524,7 @@ fn prim_family(ty: Primitive) -> u8 {
         | Primitive::Id
         | Primitive::Timestamp
         | Primitive::Date => 0, // textual (string-writable + orderable, D1)
-        Primitive::Int => 1, // numeric
+        Primitive::Int | Primitive::Float | Primitive::Decimal { .. } => 1, // numeric
         Primitive::Bool => 2,
         Primitive::Json => 3,
     }
@@ -540,5 +540,7 @@ fn prim_name(p: Primitive) -> &'static str {
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "id",
+        Primitive::Float => "float",
+        Primitive::Decimal { .. } => "decimal",
     }
 }

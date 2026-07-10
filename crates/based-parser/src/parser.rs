@@ -675,8 +675,36 @@ impl<'a> Parser<'a> {
         Ok((mods, end))
     }
 
+    /// The optional `(p, s)` after `decimal`. Bare `decimal` (no parens) defaults to
+    /// `(38, 9)`. `bare_end` is the end of the `decimal` keyword (the span end when there
+    /// are no parens). Range validity (`1 ≤ s ≤ p ≤ 38`) is a sema check, not a parse one.
+    fn decimal_args(&mut self, bare_end: u32) -> PResult<(u32, u32, u32)> {
+        if !self.at(Tok::LParen) {
+            return Ok((38, 9, bare_end));
+        }
+        self.bump();
+        let precision = self.uint_arg("decimal precision")?;
+        self.expect(Tok::Comma, "`,`")?;
+        let scale = self.uint_arg("decimal scale")?;
+        let end = self.expect(Tok::RParen, "`)`")?.end;
+        Ok((precision, scale, end))
+    }
+
+    /// A non-negative integer literal argument (a decimal `p`/`s`), clamped into `u32`.
+    fn uint_arg(&mut self, what: &str) -> PResult<u32> {
+        let l = self.expect(Tok::Int, what)?;
+        let n = self.text(l).parse::<i64>().unwrap_or(-1);
+        if n < 0 {
+            self.err(format!("{what} must be a non-negative integer"));
+            return Err(());
+        }
+        Ok(n.min(u32::MAX as i64) as u32)
+    }
+
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let l = self.peek().ok_or_else(|| self.err_unit("a type"))?;
+        // Most primitives end at the type keyword; `decimal(p, s)` extends past it.
+        let mut base_end = l.end;
         let (base, start) = match l.tok {
             Tok::UpperIdent => {
                 self.bump();
@@ -692,6 +720,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Tok::LowerIdent => {
+                self.bump();
                 let prim = match self.text(l) {
                     "text" => Primitive::Text,
                     "int" => Primitive::Int,
@@ -700,12 +729,17 @@ impl<'a> Parser<'a> {
                     "date" => Primitive::Date,
                     "json" => Primitive::Json,
                     "uuid" => Primitive::Uuid,
+                    "float" => Primitive::Float,
+                    "decimal" => {
+                        let (precision, scale, end) = self.decimal_args(l.end)?;
+                        base_end = end;
+                        Primitive::Decimal { precision, scale }
+                    }
                     _ => {
                         self.err("unknown type (expected a primitive or a model reference)");
                         return Err(());
                     }
                 };
-                self.bump();
                 (BaseType::Primitive(prim), l.start)
             }
             _ => {
@@ -716,7 +750,7 @@ impl<'a> Parser<'a> {
 
         let mut optional = false;
         let mut many = false;
-        let mut end = l.end;
+        let mut end = base_end;
         loop {
             if self.at(Tok::Question) {
                 optional = true;
@@ -1424,7 +1458,9 @@ impl<'a> Parser<'a> {
                 })?;
                 Literal::Int(n)
             }
-            Tok::Float => Literal::Float(self.text(l).parse::<f64>().unwrap_or(0.0)),
+            // A fractional literal is kept as its exact source text (see `Literal::Decimal`)
+            // so a `decimal` default / value never rounds through an `f64`.
+            Tok::Float => Literal::Decimal(self.text(l).to_string()),
             Tok::Str => Literal::Str(unquote(self.text(l))),
             Tok::LowerIdent => match self.text(l) {
                 "true" => Literal::Bool(true),

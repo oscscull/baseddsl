@@ -694,6 +694,9 @@ fn primitive_schema(p: Primitive) -> Value {
         Primitive::Date => json!({ "type": "string", "format": "date" }),
         Primitive::Json => json_schema(),
         Primitive::Uuid | Primitive::Id => uuid_schema(),
+        Primitive::Float => json!({ "type": "number", "format": "double" }),
+        // A decimal is a string on the wire (lossless), never a JSON float.
+        Primitive::Decimal { .. } => json!({ "type": "string", "format": "decimal" }),
     }
 }
 
@@ -763,6 +766,8 @@ fn primitive_name(p: Primitive) -> &'static str {
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "Id",
+        Primitive::Float => "float",
+        Primitive::Decimal { .. } => "decimal",
     }
 }
 

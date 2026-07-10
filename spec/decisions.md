@@ -14,7 +14,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Types & schema fundamentals** — D1 (`Id`/PK), D2 (implicit `id` + timestamps), D3 (table/column
   naming), D6 (one extension, uniform grammar), D7 (identifier casing), D8 (contextual keywords),
   D9 (free layout), D82 (enum type: string + numeric kinds, explicit values, column + CHECK,
-  name-resolution disambiguation, variant navigation)
+  name-resolution disambiguation, variant navigation), D83 (decimal + float: exact `decimal(p,s)`
+  string-on-wire via `rust_decimal`/`serde-str`, `float` = f64, numeric family, `Literal::Decimal`
+  exact-text defaults, SQLite TEXT storage, Postgres binary-numeric decode, E0159)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
@@ -3081,3 +3083,65 @@ the ~120 `MemberKind` match sites untouched. A new *numeric primitive* (`decimal
 for `Primitive` + the `sql_type` map + the `prim_family` operand bucket, and unlike enum it *does* need
 runtime decode arms (`SqlValue`) — the int enum flows through the existing `Int` arm, so the plan/scan/value
 paths were still not touched. Budget for those.
+
+## D83 — decimal + float scalar types (Track T2)
+
+Second Track T item. Adds two numeric primitives: exact `decimal(p, s)` (money) and 64-bit `float`.
+
+**Syntax + AST.** `decimal(p, s)` — precision `p`, scale `s` (`total: decimal(12, 2)`); bare `decimal` =
+`decimal(38, 9)`. `float` is one type (double precision; no `double` alias yet — noted as future sugar).
+Both are new `Primitive` variants: `Primitive::Float` and `Primitive::Decimal { precision: u32, scale: u32 }`
+(kept `Copy` — u32 fields). The parser reads the optional `(INT, INT)` after `decimal` (`decimal_args`);
+range validity is a *sema* check, not a parse one.
+
+**Exact defaults / literals — no f64 round-trip.** `default 9.99` on a decimal previously parsed to
+`Literal::Float(f64)`, which is lossy (`0.10` → `0.1`). Replaced `Literal::Float(f64)` with
+`Literal::Decimal(String)`: the parser carries a fractional literal's **exact source text**, so a decimal
+default/value is byte-exact through DDL, the neutral snapshot, and the runtime. A `float` literal uses the
+same node (its text parses to a number where a float context needs one). `based fmt` re-emits it verbatim.
+
+**Operand typing.** `int`, `float`, `decimal` all fold into the **numeric** family (`prim_family` in
+`resolve.rs`, mirrored in `ctx.rs`/`scope.rs`): a numeric literal binds to any of them, and they inter-compare
+with `= != < > <= >= in` (ordered ops allowed — they're numeric).
+
+**Per-dialect DDL (one `Dialect` type-map seam).** `decimal` → `DECIMAL(p,s)` (MariaDB) / `NUMERIC(p,s)`
+(Postgres) / **`TEXT`** (SQLite); `float` → `DOUBLE` / `DOUBLE PRECISION` / `REAL`. `sql_type` now returns
+`String` (decimal is parameterized). **SQLite deliberately uses `TEXT`, not the owner-suggested `NUMERIC`:**
+NUMERIC affinity converts `'9.99'`→REAL (lossy — `'0.10'`→`0.1`) and returns a number, breaking both
+exactness and the JSON-string wire form; `TEXT` stores + returns the exact string. The cost is that SQLite
+decimal comparison is *lexicographic* (documented in models.md + `sql.rs`); production dialects use a true
+numeric type. Bind-time values fit in equal-integer-digit ranges so ordered filters still read correctly.
+
+**Wire + client.** A decimal is a **JSON string** (`"9.99"`), lossless, never a JSON f64; a float is a JSON
+number. The client emits `rust_decimal::Decimal` (by full path — a schema with no decimal never mentions the
+crate, so the dep is needed only when used) and `f64`. `rust_decimal`'s **`serde-str`** feature makes
+`Decimal` (de)serialize as a string globally (no per-field `#[serde(with=…)]`) — added to the generated
+client's Cargo.toml (the three `examples/*/Cargo.toml`). OpenAPI: decimal `{type: string, format: decimal}`,
+float `{type: number, format: double}`.
+
+**Runtime carries a decimal as its wire string end-to-end — `rust_decimal` stays OUT of based-runtime.**
+`Family::of(Decimal)` = `Text` (binds as a string, no new `SqlValue` variant); `float` = `Float`. MariaDB
+returns `DECIMAL` as bytes → the exact string already. Postgres returns `numeric` in **binary** (a packed
+base-10000 digit array, not its text), so a new `pg_numeric` decoder (mirroring the D61 uuid/timestamp/jsonb
+binary decoders) reconstructs the exact decimal string — no float. SQLite `TEXT` round-trips the string
+directly. So only the *decode* seam changed; the client is the sole place a decimal becomes a `Decimal`.
+
+**Migrations.** The neutral snapshot encodes `decimal(p,s)` and `float` (`neutral_type`), parsed back by
+`parse_decimal` in the renderer, so a precision/scale change or an int↔decimal change is a diffable
+`alter column` and a from-scratch `0001_init` emits the right type.
+
+**Diagnostics:** one new code **`E0159`** — a `decimal(p, s)` out of range (`1 ≤ s ≤ p ≤ 38`) *or* a decimal
+column's `default` that isn't a decimal literal (an integer or fractional literal).
+
+**Used in the example (honest money).** Commerce `Order.total` `int` → `decimal(12, 2)` (+ the `place_order`
+param); commerce snapshot re-blessed; the three quickstarts' `total` converted, their `src/client.rs`
+regenerated (importing `rust_decimal`), `0001_init` migration + Cargo.toml updated, and each **re-run green
+live** (SQLite `cargo run`; MariaDB `mariadb:11.4` + Postgres `postgres:16` via Docker `migrate apply` →
+`cargo run`). `based check` + `based fmt --check` clean on commerce + all three quickstarts.
+
+**Verified:** sema (decimal/float resolve; bad precision/scale E0159; numeric-literal↔decimal/float bind;
+exact-text default; ordered compare on decimal); codegen (DDL per dialect all three; byte-exact decimal
+default; client `rust_decimal::Decimal`/`f64`; openapi decimal-string/float-number); runtime (`pg_numeric`
+binary decoder unit test — `9.99`/`0.10`/`12345678.90`/negative/zero); and **live** SQLite (create `"19.99"`
+→ exact string in the shape + a `0.10` trailing zero preserved + an ordered `>= 10.00` filter) plus the full
+live MariaDB + Postgres suites green (`total` round-trips as `"500.00"`/`"99.00"`). Spec: `spec/syntax/models.md`.

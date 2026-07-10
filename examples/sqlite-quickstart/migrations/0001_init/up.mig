@@ -5,7 +5,7 @@ create table order {
   column placed_at timestamp not_null default=now()
   column placed_by_id uuid not_null fk=User
   column status text not_null default="pending"
-  column total int not_null
+  column total decimal(12,2) not_null
   index idx_order_org_id_status (org_id, status)
   index idx_order_placed_at (placed_at)
 }

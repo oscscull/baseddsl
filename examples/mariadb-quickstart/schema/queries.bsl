@@ -16,7 +16,7 @@ query recent_orders() -> OrderCard[] scoped Tenant {
 
 # `org` is Tenant-scope-managed on create — the engine sets it from `$ctx`, never a
 # param, so an order can't be placed into another tenant's scope.
-mutation place_order(buyer: Id, total: int) -> OrderCard scoped Tenant {
+mutation place_order(buyer: Id, total: decimal(12, 2)) -> OrderCard scoped Tenant {
   create Order { placed_by = $buyer, total = $total };
 }
 

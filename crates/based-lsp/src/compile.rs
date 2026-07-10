@@ -1948,7 +1948,7 @@ fn line_start(src: &str, off: u32) -> usize {
 /// A `TypeExpr` as source writes it: base spelling + `?` (optional) + `[]` (many).
 fn type_str(ty: &TypeExpr) -> String {
     let mut s = match &ty.base {
-        BaseType::Primitive(p) => primitive_str(*p).to_string(),
+        BaseType::Primitive(p) => primitive_str(*p),
         BaseType::Model(id) => id.node.clone(),
     };
     if ty.optional {
@@ -1961,16 +1961,18 @@ fn type_str(ty: &TypeExpr) -> String {
 }
 
 /// Primitive → its DSL spelling (`Id` keeps its casing, the rest lowercase).
-fn primitive_str(p: Primitive) -> &'static str {
+fn primitive_str(p: Primitive) -> String {
     match p {
-        Primitive::Text => "text",
-        Primitive::Int => "int",
-        Primitive::Bool => "bool",
-        Primitive::Timestamp => "timestamp",
-        Primitive::Date => "date",
-        Primitive::Json => "json",
-        Primitive::Uuid => "uuid",
-        Primitive::Id => "Id",
+        Primitive::Text => "text".into(),
+        Primitive::Int => "int".into(),
+        Primitive::Bool => "bool".into(),
+        Primitive::Timestamp => "timestamp".into(),
+        Primitive::Date => "date".into(),
+        Primitive::Json => "json".into(),
+        Primitive::Uuid => "uuid".into(),
+        Primitive::Id => "Id".into(),
+        Primitive::Float => "float".into(),
+        Primitive::Decimal { precision, scale } => format!("decimal({precision}, {scale})"),
     }
 }
 
@@ -3142,13 +3144,13 @@ mod tests {
             cur = node.parent.as_deref();
         }
 
-        // Innermost is the token; a field level carries `total` + its `int` type; a
+        // Innermost is the token; a field level carries `total` + its `decimal` type; a
         // model level spans the whole `Order` body; the outermost is the whole file.
         assert_eq!(texts.first().unwrap(), "total");
         assert!(
             texts
                 .iter()
-                .any(|t| t.starts_with("total") && t.contains("int")),
+                .any(|t| t.starts_with("total") && t.contains("decimal")),
             "a field-level range: {texts:?}"
         );
         assert!(

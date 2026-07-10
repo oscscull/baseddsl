@@ -513,7 +513,9 @@ fn default_value(dv: &DefaultVal) -> SqlValue {
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => SqlValue::Text(s.clone()),
         DefaultVal::Lit(Literal::Int(i)) => SqlValue::Int(*i),
-        DefaultVal::Lit(Literal::Float(f)) => SqlValue::Float(*f),
+        // A fractional literal is carried as exact text (a decimal binds as a string); a
+        // float default's text parses back to a number.
+        DefaultVal::Lit(Literal::Decimal(s)) => SqlValue::Text(s.clone()),
         DefaultVal::Lit(Literal::Bool(b)) => SqlValue::Bool(*b),
         DefaultVal::Lit(Literal::Null) => SqlValue::Null,
         DefaultVal::Func(_) => SqlValue::Null,

@@ -14,7 +14,7 @@ Order {
   org:        Org
   placed_by:  User
   status:     text (default "pending")
-  total:      int
+  total:      decimal(12, 2)
   placed_at:  timestamp (default now())
   @index(org, status)
   @index placed_at

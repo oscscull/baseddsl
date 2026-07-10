@@ -93,12 +93,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let placed = api.place_order(
         client::PlaceOrderInput {
             buyer: ada.clone(),
-            total: 100,
+            total: money(100),
         },
         acme_ctx(),
     )?;
     assert_eq!(placed.status, "pending", "status defaults on create");
-    assert_eq!(placed.total, 100);
+    assert_eq!(placed.total, money(100));
     // The nested to-one sub-object (`placed_by { name, email }`) comes back as a real
     // object, joined + projected in the same transaction as the write.
     assert_eq!(placed.placed_by.name, "Ada");
@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 2. read one back by id ---
     let got = get(&api, &acme, &placed.id)?.expect("the order exists");
     assert_eq!(got.id, placed.id);
-    assert_eq!(got.total, 100);
+    assert_eq!(got.total, money(100));
 
     // --- 3. list/filter: the Tenant scope makes a plain `list` "my org's orders" ---
     let mine = api.my_orders(
@@ -232,6 +232,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A whole-dollar amount as a money `Decimal` (scale 2, e.g. `100` -> `100.00`). The
+/// generated client types `total` as `rust_decimal::Decimal` and carries it as an exact
+/// string on the wire.
+fn money(dollars: i64) -> rust_decimal::Decimal {
+    rust_decimal::Decimal::new(dollars * 100, 2)
+}
+
 /// Place an order for `buyer` at `total`, acting as `org`; return its id.
 fn place(
     api: &client::Client<client::Embedded>,
@@ -243,7 +250,7 @@ fn place(
         .place_order(
             client::PlaceOrderInput {
                 buyer: buyer.clone(),
-                total,
+                total: money(total),
             },
             client::PlaceOrderCtx { org: org.clone() },
         )?

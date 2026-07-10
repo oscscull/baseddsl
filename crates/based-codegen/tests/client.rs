@@ -588,3 +588,14 @@ fn int_enum_emits_explicit_discriminants_and_a_manual_serde_impl() {
     // The projected field takes the enum type.
     assert!(out.contains("pub priority: Priority,"), "\n{out}");
 }
+
+#[test]
+fn decimal_field_emits_rust_decimal_and_float_emits_f64() {
+    let out = gen(r#"
+        Ledger { price: decimal(12, 2), score: float }
+        shape LedgerRow from Ledger { price, score }
+        query ledger() -> LedgerRow[];
+        "#);
+    assert!(out.contains("pub price: rust_decimal::Decimal,"), "\n{out}");
+    assert!(out.contains("pub score: f64,"), "\n{out}");
+}

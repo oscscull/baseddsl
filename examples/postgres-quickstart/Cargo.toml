@@ -16,5 +16,8 @@ based-runtime = { path = "../../crates/based-runtime", features = ["postgres", "
 # The generated client derives serde; the embedded bridge serializes the typed input.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The generated client types money as `rust_decimal::Decimal`; the `serde-str` feature
+# (de)serializes it as a JSON string, so the exact value rides the wire losslessly.
+rust_decimal = { version = "1", features = ["serde-str"] }
 # Load `DATABASE_URL` from `.env` (the conventional 12-factor crate) — no hard-coded URL.
 dotenvy = "0.15"

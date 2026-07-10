@@ -125,7 +125,7 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
                 let en = enum_name.as_deref().and_then(|n| schema.enum_(n));
                 lines.push(column_line(
                     column,
-                    sql_type(*ty, *many, dialect),
+                    &sql_type(*ty, *many, dialect),
                     *optional,
                     default.as_ref(),
                     en,
@@ -140,7 +140,7 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
             } => {
                 // FK column type mirrors the target's primary-key type (default uuid).
                 let ty = fk_type(schema, target, dialect);
-                lines.push(column_line(fk_col, ty, *optional, None, None, dialect));
+                lines.push(column_line(fk_col, &ty, *optional, None, None, dialect));
             }
             MemberKind::Inverse { .. } => {}
         }
@@ -334,35 +334,43 @@ fn constraint_name(prefix: &str, table: &str, columns: &[String]) -> String {
 /// dialect's JSON type (`JSON` on MariaDB, `TEXT` on SQLite, which has no JSON type).
 /// `pub(crate)` so the migration renderer (`migrate`) maps neutral snapshot types
 /// through the *same* table — one dialect type map, never a second that can drift.
-pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static str {
+pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
     match dialect {
         Dialect::MariaDb => {
             if many {
-                return "JSON";
+                return "JSON".into();
             }
             match ty {
-                Primitive::Text => "VARCHAR(255)",
-                Primitive::Int => "BIGINT",
-                Primitive::Bool => "BOOLEAN",
-                Primitive::Timestamp => "DATETIME",
-                Primitive::Date => "DATE",
-                Primitive::Json => "JSON",
-                Primitive::Uuid | Primitive::Id => "UUID",
+                Primitive::Text => "VARCHAR(255)".into(),
+                Primitive::Int => "BIGINT".into(),
+                Primitive::Bool => "BOOLEAN".into(),
+                Primitive::Timestamp => "DATETIME".into(),
+                Primitive::Date => "DATE".into(),
+                Primitive::Json => "JSON".into(),
+                Primitive::Uuid | Primitive::Id => "UUID".into(),
+                Primitive::Float => "DOUBLE".into(),
+                Primitive::Decimal { precision, scale } => format!("DECIMAL({precision}, {scale})"),
             }
         }
         // SQLite has a tiny type set (its dynamic typing means these are affinities,
         // not constraints). The mapping mirrors the runtime `SqliteDb` value mapping:
-        // bool ⇒ integer 0/1, json/uuid/timestamp/date ⇒ text.
+        // bool ⇒ integer 0/1, json/uuid/timestamp/date ⇒ text. `decimal` takes TEXT
+        // affinity (not SQLite's lossy NUMERIC): it is stored + returned as its exact
+        // string, so no digit is lost and the wire form stays a JSON string as it is on
+        // MariaDB/Postgres. (Comparison is therefore lexicographic on SQLite — a fixed
+        // affinity limitation; production dialects use a true numeric DECIMAL.)
         Dialect::Sqlite => {
             if many {
-                return "TEXT";
+                return "TEXT".into();
             }
             match ty {
-                Primitive::Text => "TEXT",
-                Primitive::Int | Primitive::Bool => "INTEGER",
-                Primitive::Timestamp | Primitive::Date => "TEXT",
-                Primitive::Json => "TEXT",
-                Primitive::Uuid | Primitive::Id => "TEXT",
+                Primitive::Text => "TEXT".into(),
+                Primitive::Int | Primitive::Bool => "INTEGER".into(),
+                Primitive::Timestamp | Primitive::Date => "TEXT".into(),
+                Primitive::Json => "TEXT".into(),
+                Primitive::Uuid | Primitive::Id => "TEXT".into(),
+                Primitive::Float => "REAL".into(),
+                Primitive::Decimal { .. } => "TEXT".into(),
             }
         }
         // Postgres has a rich, standards-track type set: real `BOOLEAN`, native `UUID`,
@@ -370,16 +378,18 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static 
         // matching the DML `has` -> `@>` lowering). `text` is unbounded (no VARCHAR cap).
         Dialect::Postgres => {
             if many {
-                return "JSONB";
+                return "JSONB".into();
             }
             match ty {
-                Primitive::Text => "TEXT",
-                Primitive::Int => "BIGINT",
-                Primitive::Bool => "BOOLEAN",
-                Primitive::Timestamp => "TIMESTAMPTZ",
-                Primitive::Date => "DATE",
-                Primitive::Json => "JSONB",
-                Primitive::Uuid | Primitive::Id => "UUID",
+                Primitive::Text => "TEXT".into(),
+                Primitive::Int => "BIGINT".into(),
+                Primitive::Bool => "BOOLEAN".into(),
+                Primitive::Timestamp => "TIMESTAMPTZ".into(),
+                Primitive::Date => "DATE".into(),
+                Primitive::Json => "JSONB".into(),
+                Primitive::Uuid | Primitive::Id => "UUID".into(),
+                Primitive::Float => "DOUBLE PRECISION".into(),
+                Primitive::Decimal { precision, scale } => format!("NUMERIC({precision}, {scale})"),
             }
         }
     }
@@ -388,7 +398,7 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> &'static 
 /// The SQL type of a relation's FK column — the target model's primary-key type.
 /// Defaults to the dialect's id type (from the implicit `id`) when the target or
 /// its key is missing, which sema would already have flagged.
-fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> &'static str {
+fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> String {
     match schema
         .model(target)
         .and_then(|m| m.member("id"))
@@ -406,7 +416,7 @@ fn render_default(dv: &DefaultVal, en: Option<&based_sema::REnum>, dialect: Dial
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => format!("'{}'", s.replace('\'', "''")),
         DefaultVal::Lit(Literal::Int(i)) => i.to_string(),
-        DefaultVal::Lit(Literal::Float(f)) => f.to_string(),
+        DefaultVal::Lit(Literal::Decimal(s)) => s.clone(),
         DefaultVal::Lit(Literal::Bool(b)) => dialect.bool_lit(*b).to_string(),
         DefaultVal::Lit(Literal::Null) => "NULL".to_string(),
         // `now()` is the only value-position function (ir::KNOWN_FUNCS).

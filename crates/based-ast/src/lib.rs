@@ -192,6 +192,16 @@ pub enum Primitive {
     Json,
     Uuid,
     Id,
+    /// 64-bit binary floating point (`float`). Wire JSON number, client `f64`.
+    Float,
+    /// Fixed-precision base-10 numeric (`decimal(p, s)` — precision `p`, scale `s`; bare
+    /// `decimal` defaults to `(38, 9)`). Carried lossless as a string end-to-end (wire
+    /// JSON string, client `rust_decimal::Decimal`), never through an `f64`. `precision`
+    /// and `scale` are compile-time literals (sema validates `1 ≤ s ≤ p ≤ 38`).
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
 }
 
 /// Opt-in inverse: `(Model.field)` points at the forward edge it pairs with.
@@ -532,7 +542,11 @@ pub struct FuncCall {
 pub enum Literal {
     Str(String),
     Int(i64),
-    Float(f64),
+    /// A fractional numeric literal, carried as its exact source text (`"9.99"`) rather
+    /// than an `f64` — so a `decimal` default / value is byte-exact (no float rounding,
+    /// no dropped trailing zero). A `float` uses it too; the text parses to `f64` when a
+    /// float context needs a number.
+    Decimal(String),
     Bool(bool),
     Null,
 }

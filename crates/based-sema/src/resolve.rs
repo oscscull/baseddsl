@@ -140,7 +140,7 @@ fn prim_family(ty: Primitive) -> Family {
         | Primitive::Id
         | Primitive::Timestamp
         | Primitive::Date => Family::Textual,
-        Primitive::Int => Family::Numeric,
+        Primitive::Int | Primitive::Float | Primitive::Decimal { .. } => Family::Numeric,
         Primitive::Bool => Family::Bool,
         Primitive::Json => Family::Json,
     }
@@ -171,13 +171,15 @@ fn prim_name(p: Primitive) -> &'static str {
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "id",
+        Primitive::Float => "float",
+        Primitive::Decimal { .. } => "decimal",
     }
 }
 
 fn lit_family(l: &Literal) -> Option<Family> {
     match l {
         Literal::Str(_) => Some(Family::Textual),
-        Literal::Int(_) | Literal::Float(_) => Some(Family::Numeric),
+        Literal::Int(_) | Literal::Decimal(_) => Some(Family::Numeric),
         Literal::Bool(_) => Some(Family::Bool),
         Literal::Null => None, // null is compatible with any operand
     }

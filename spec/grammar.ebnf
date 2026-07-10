@@ -64,7 +64,10 @@ field_name  = lower_ident ;
 type_expr   = base_type { type_qualifier } ;
 base_type   = primitive | model_ref ;
 primitive   = 'text' | 'int' | 'bool' | 'timestamp' | 'date'
-            | 'json' | 'uuid' | 'Id' ;
+            | 'json' | 'uuid' | 'Id' | 'float' | decimal ;
+(* Fixed base-10 numeric. Bare `decimal` = `decimal(38, 9)`; args are compile-time  *)
+(* INT literals, sema validates `1 <= scale <= precision <= 38` (E0159). models.md.  *)
+decimal     = 'decimal' [ '(' INT ',' INT ')' ] ;
 model_ref   = upper_ident ;            (* relation; resolves to a model (D7)   *)
 type_qualifier = '?'                   (* nullable / optional                  *)
             | '[]' ;                   (* to-many                              *)
@@ -268,6 +271,8 @@ func_call   = func_name '(' [ value { ',' value } ] ')' ;
 func_name   = 'now' | ident ;           (* closed set enforced in sema, not here*)
 
 literal     = STRING | INT | FLOAT | 'true' | 'false' | 'null' ;
+(* A FLOAT literal is carried as its exact source text (AST `Literal::Decimal`), so a  *)
+(* `decimal` default / value is byte-exact — never rounded through an f64.             *)
 
 (* ---------- Raw SQL escape hatch (raw.md) --------------------------------- *)
 (* Backtick `sql` form. `${param}` interpolates as a bound parameter only.     *)

@@ -188,6 +188,9 @@ pub(crate) fn from_pg(row: &PgRow, idx: usize) -> serde_json::Value {
         }
         Type::DATE => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_date(&b.0)),
         Type::JSONB => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_jsonb(&b.0)),
+        // `numeric`/`decimal` carries a packed base-10000 digit array, not its text — so a
+        // decimal returns as its exact string (a JSON string, the wire form), losing no digit.
+        Type::NUMERIC => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_numeric(&b.0)),
         // Everything else — text/varchar, `json`, etc. — has a binary form that *is* its
         // UTF-8 text, so read it straight as a String (a `FromSql` accepting any OID).
         _ => match row.try_get::<_, Option<PgText>>(idx) {
@@ -269,6 +272,77 @@ fn pg_jsonb(b: &[u8]) -> serde_json::Value {
             Err(_) => serde_json::Value::String(hex(b)),
         },
     }
+}
+
+/// A binary `numeric`/`decimal` → its canonical decimal string. The wire layout is four
+/// `int16` header fields (digit count, weight, sign, display scale) then that many base-10000
+/// digits. Reconstructed exactly (no float), so the value round-trips to the same string the
+/// column stores. `NaN` renders `"NaN"`; a malformed buffer falls back to hex.
+fn pg_numeric(b: &[u8]) -> serde_json::Value {
+    use serde_json::Value as J;
+    if b.len() < 8 {
+        return J::String(hex(b));
+    }
+    let rd = |o: usize| i16::from_be_bytes([b[o], b[o + 1]]);
+    let ndigits = rd(0);
+    let weight = rd(2) as i32;
+    let sign = rd(4) as u16;
+    let dscale = rd(6).max(0) as usize;
+    if sign == 0xC000 {
+        return J::String("NaN".to_string());
+    }
+    if ndigits < 0 || b.len() < 8 + ndigits as usize * 2 {
+        return J::String(hex(b));
+    }
+    let ndigits = ndigits as usize;
+
+    // Concatenate the base-10000 groups into one decimal-digit run (each group is 4 digits,
+    // the most significant group keeps its natural width). The decimal point then sits
+    // `4 * (ndigits - 1 - weight)` digits from the right of that run.
+    let mut run = String::with_capacity(ndigits * 4);
+    for i in 0..ndigits {
+        run.push_str(&format!("{:04}", rd(8 + i * 2)));
+    }
+    let point_from_right = 4 * (ndigits as i32 - 1 - weight);
+
+    let (int_part, mut frac_part) = if point_from_right <= 0 {
+        let mut whole = run;
+        whole.push_str(&"0".repeat((-point_from_right) as usize));
+        (whole, String::new())
+    } else {
+        let pfr = point_from_right as usize;
+        let padded = if run.len() < pfr {
+            format!("{}{}", "0".repeat(pfr - run.len()), run)
+        } else {
+            run
+        };
+        let split = padded.len() - pfr;
+        (padded[..split].to_string(), padded[split..].to_string())
+    };
+
+    let int_trimmed = int_part.trim_start_matches('0');
+    let int_final = if int_trimmed.is_empty() {
+        "0"
+    } else {
+        int_trimmed
+    };
+    if frac_part.len() < dscale {
+        frac_part.push_str(&"0".repeat(dscale - frac_part.len()));
+    } else if frac_part.len() > dscale {
+        frac_part.truncate(dscale);
+    }
+
+    let is_zero = int_final == "0" && frac_part.chars().all(|c| c == '0');
+    let mut out = String::new();
+    if sign == 0x4000 && !is_zero {
+        out.push('-');
+    }
+    out.push_str(int_final);
+    if dscale > 0 {
+        out.push('.');
+        out.push_str(&frac_part);
+    }
+    J::String(out)
 }
 
 fn read_i64(b: &[u8]) -> Option<i64> {
@@ -616,6 +690,35 @@ mod tests {
     #[test]
     fn hex_of_binary_bytes() {
         assert_eq!(hex(&[0xff, 0x01]), "ff01");
+    }
+
+    #[test]
+    fn binary_numeric_decodes_to_exact_string() {
+        // Build a Postgres binary numeric: header (ndigits, weight, sign, dscale) then the
+        // base-10000 digit groups, all i16 big-endian.
+        fn enc(ndigits: i16, weight: i16, sign: u16, dscale: i16, digits: &[i16]) -> Vec<u8> {
+            let mut b = Vec::new();
+            for v in [ndigits, weight, sign as i16, dscale] {
+                b.extend_from_slice(&v.to_be_bytes());
+            }
+            for d in digits {
+                b.extend_from_slice(&d.to_be_bytes());
+            }
+            b
+        }
+        // 9.99 — one integer group (9) + one fractional group (9900), scale 2.
+        assert_eq!(pg_numeric(&enc(2, 0, 0, 2, &[9, 9900])), json!("9.99"));
+        // 0.10 — the trailing zero is preserved (a float read would drop it).
+        assert_eq!(pg_numeric(&enc(1, -1, 0, 2, &[1000])), json!("0.10"));
+        // 12345678.90 — two integer groups + one fractional group.
+        assert_eq!(
+            pg_numeric(&enc(3, 1, 0, 2, &[1234, 5678, 9000])),
+            json!("12345678.90")
+        );
+        // Negative, scale 1.
+        assert_eq!(pg_numeric(&enc(2, 0, 0x4000, 1, &[5, 5000])), json!("-5.5"));
+        // Zero with a display scale.
+        assert_eq!(pg_numeric(&enc(0, 0, 0, 2, &[])), json!("0.00"));
     }
 
     /// The binary decoders round-trip a Postgres binary field into its canonical string —

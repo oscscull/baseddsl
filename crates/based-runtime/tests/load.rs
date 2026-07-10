@@ -55,7 +55,7 @@ fn plans_the_commerce_place_order_mutation() {
     let mut ids = SeqIdGen::default();
     let r = Request::new(
         "place_order",
-        json!({ "buyer": "user-1", "total": 99 }),
+        json!({ "buyer": "user-1", "total": "99.00" }),
         json!({ "org": "org-1" }),
     );
     let plan = plan_mutation(&c, &r, &mut ids).unwrap();

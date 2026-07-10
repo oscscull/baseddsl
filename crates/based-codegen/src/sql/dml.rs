@@ -1504,7 +1504,7 @@ pub(crate) fn render_lit(dialect: Dialect, l: &Literal) -> String {
     match l {
         Literal::Str(s) => format!("'{}'", s.replace('\'', "''")),
         Literal::Int(i) => i.to_string(),
-        Literal::Float(f) => f.to_string(),
+        Literal::Decimal(s) => s.clone(),
         Literal::Bool(b) => dialect.bool_lit(*b).to_string(),
         Literal::Null => "NULL".to_string(),
     }

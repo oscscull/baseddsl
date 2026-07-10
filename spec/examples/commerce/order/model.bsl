@@ -22,7 +22,7 @@ Order {
   placed_by:    User
   fulfilled_by: User?
   status:       Status (default pending)
-  total:        int
+  total:        decimal(12, 2)
   placed_at:    timestamp (default now())
   items:        OrderItem[]
   @index(org, status)

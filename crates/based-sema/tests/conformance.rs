@@ -215,16 +215,18 @@ fn member(name: &str, kind: &MemberKind) -> String {
     }
 }
 
-fn prim(p: Primitive) -> &'static str {
+fn prim(p: Primitive) -> String {
     match p {
-        Primitive::Text => "text",
-        Primitive::Int => "int",
-        Primitive::Bool => "bool",
-        Primitive::Timestamp => "timestamp",
-        Primitive::Date => "date",
-        Primitive::Json => "json",
-        Primitive::Uuid => "uuid",
-        Primitive::Id => "Id",
+        Primitive::Text => "text".into(),
+        Primitive::Int => "int".into(),
+        Primitive::Bool => "bool".into(),
+        Primitive::Timestamp => "timestamp".into(),
+        Primitive::Date => "date".into(),
+        Primitive::Json => "json".into(),
+        Primitive::Uuid => "uuid".into(),
+        Primitive::Id => "Id".into(),
+        Primitive::Float => "float".into(),
+        Primitive::Decimal { precision, scale } => format!("decimal({precision}, {scale})"),
     }
 }
 

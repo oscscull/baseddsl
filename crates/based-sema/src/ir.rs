@@ -62,6 +62,7 @@ pub mod code {
     pub const ENUM_MIXED: &str = "E0156"; // an enum mixes an int-valued variant with a bare/string one (kind is ambiguous)
     pub const ENUM_DUP_VALUE: &str = "E0157"; // two variants of an enum share a wire value (string or int)
     pub const ENUM_ORDERED_OP: &str = "E0158"; // an ordered comparison (< > <= >=) on a string enum column
+    pub const DECIMAL_INVALID: &str = "E0159"; // a `decimal(p,s)` has a bad precision/scale, or a decimal column's default isn't a decimal literal
 
     // $ctx typing : the caller-supplied request context. Its type is not
     // declared — it is inferred per callable from use and checked for coherence.

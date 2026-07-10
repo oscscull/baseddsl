@@ -789,14 +789,8 @@ fn literal(l: &Literal) -> String {
     match l {
         Literal::Str(s) => format!("\"{}\"", esc(s)),
         Literal::Int(n) => n.to_string(),
-        Literal::Float(f) => {
-            let s = f.to_string();
-            if s.contains('.') || s.contains('e') {
-                s
-            } else {
-                format!("{s}.0")
-            }
-        }
+        // Emitted verbatim — the exact source text is preserved (`Literal::Decimal`).
+        Literal::Decimal(s) => s.clone(),
         Literal::Bool(b) => b.to_string(),
         Literal::Null => "null".to_string(),
     }
@@ -813,7 +807,7 @@ fn sort_term(s: &SortTerm) -> String {
 
 fn type_expr(t: &TypeExpr) -> String {
     let mut s = match &t.base {
-        BaseType::Primitive(p) => primitive(*p).to_string(),
+        BaseType::Primitive(p) => primitive(*p),
         BaseType::Model(m) => m.node.clone(),
     };
     if t.optional {
@@ -825,16 +819,18 @@ fn type_expr(t: &TypeExpr) -> String {
     s
 }
 
-fn primitive(p: Primitive) -> &'static str {
+fn primitive(p: Primitive) -> String {
     match p {
-        Primitive::Text => "text",
-        Primitive::Int => "int",
-        Primitive::Bool => "bool",
-        Primitive::Timestamp => "timestamp",
-        Primitive::Date => "date",
-        Primitive::Json => "json",
-        Primitive::Uuid => "uuid",
-        Primitive::Id => "Id",
+        Primitive::Text => "text".into(),
+        Primitive::Int => "int".into(),
+        Primitive::Bool => "bool".into(),
+        Primitive::Timestamp => "timestamp".into(),
+        Primitive::Date => "date".into(),
+        Primitive::Json => "json".into(),
+        Primitive::Uuid => "uuid".into(),
+        Primitive::Id => "Id".into(),
+        Primitive::Float => "float".into(),
+        Primitive::Decimal { precision, scale } => format!("decimal({precision}, {scale})"),
     }
 }
 

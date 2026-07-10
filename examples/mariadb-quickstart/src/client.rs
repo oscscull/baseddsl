@@ -284,7 +284,7 @@ pub struct OrgRow {
 pub struct OrderCard {
     pub id: Id<entity::Order>,
     pub status: String,
-    pub total: i64,
+    pub total: rust_decimal::Decimal,
     pub placed_by: OrderCardPlacedBy,
 }
 
@@ -345,7 +345,7 @@ pub const RECENT_ORDERS_ROUTE: &str = "/q/recent_orders";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderInput {
     pub buyer: Id<entity::User>,
-    pub total: i64,
+    pub total: rust_decimal::Decimal,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderCtx {

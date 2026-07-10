@@ -57,7 +57,7 @@ fn seeded_backend(c: &Compiled) -> SqliteBackend {
             INSERT INTO `org` (`id`, `name`, `slug`) VALUES ('org-1', 'Acme', 'acme');
             INSERT INTO `user` (`id`, `email`, `name`) VALUES ('user-1', 'a@x.com', 'Ada');
             INSERT INTO `order` (`id`, `org_id`, `placed_by_id`, `status`, `total`)
-                VALUES ('order-1', 'org-1', 'user-1', 'paid', 500);
+                VALUES ('order-1', 'org-1', 'user-1', 'paid', '500.00');
             "#,
         )
         .expect("seed fixtures");
@@ -107,7 +107,7 @@ fn get_query_runs_against_real_sqlite() {
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
-        json!({ "status": "paid", "total": 500, "buyer": "Ada", "org": "Acme" })
+        json!({ "status": "paid", "total": "500.00", "buyer": "Ada", "org": "Acme" })
     );
 }
 
@@ -146,7 +146,7 @@ fn ctx_scoped_list_query_binds_context() {
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
-        json!([{ "status": "paid", "total": 500, "buyer": "Ada", "org": "Acme" }])
+        json!([{ "status": "paid", "total": "500.00", "buyer": "Ada", "org": "Acme" }])
     );
 
     // A different org sees none of org-1's rows — the injected scope predicate is real.
@@ -175,14 +175,14 @@ fn mutation_writes_then_reselects_declared_shape() {
         "/m/place_order",
         // `org` is `@scope`-managed on create: supplied via `$ctx`, auto-set on the
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
-        json!({ "buyer": "user-1", "total": 99 }),
+        json!({ "buyer": "user-1", "total": "99.00" }),
         json!({ "org": "org-1" }),
     );
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     // The response is the created row in its declared shape (status defaults to 'pending').
     assert_eq!(
         resp.body,
-        json!({ "status": "pending", "total": 99, "buyer": "Ada", "org": "Acme" })
+        json!({ "status": "pending", "total": "99.00", "buyer": "Ada", "org": "Acme" })
     );
 
     // The write actually committed: the new order is now visible to a read.
@@ -205,7 +205,8 @@ fn mutation_writes_then_reselects_declared_shape() {
 
 #[test]
 fn bad_arg_is_a_400_before_sql() {
-    // A mistyped arg is a boundary error caught before any SQL touches SQLite.
+    // A mistyped arg is a boundary error caught before any SQL touches SQLite. `total` is a
+    // `decimal` — its wire form is a JSON string, so a bare number is the wrong shape.
     let c = commerce();
     let backend = seeded_backend(&c);
     let resp = call(
@@ -213,7 +214,7 @@ fn bad_arg_is_a_400_before_sql() {
         &backend,
         "POST",
         "/m/place_order",
-        json!({ "buyer": "user-1", "total": "not-an-int" }),
+        json!({ "buyer": "user-1", "total": 4200 }),
         json!({ "org": "org-1" }),
     );
     assert_eq!(resp.status, 400, "{:?}", resp.body);
@@ -443,6 +444,64 @@ fn enum_round_trip_string_and_int_end_to_end() {
         "INSERT INTO `ticket` (`id`, `status`, `priority`, `title`) VALUES ('y', 'bogus', 0, 't');",
     );
     assert!(bad_str.is_err(), "string-enum CHECK must reject 'bogus'");
+}
+
+#[test]
+fn decimal_and_float_round_trip_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        Ledger { name: text, price: decimal(12, 2), score: float }
+        shape LedgerRow from Ledger { name, price, score }
+        mutation add_entry(name: text, price: decimal(12, 2), score: float) -> LedgerRow {
+          create Ledger { name = $name, price = $price, score = $score };
+        }
+        query pricey(min: decimal(12, 2) >= price) -> LedgerRow[]
+          unindexed(unsafe) order (name);
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    // A seeded row whose exact decimal (with a trailing zero) must survive the read.
+    backend
+        .execute_batch(
+            "INSERT INTO `ledger` (`id`, `name`, `price`, `score`) VALUES ('seed', 'cheap', '0.10', 0.25);",
+        )
+        .expect("seed");
+
+    // Create: a decimal is sent (and returned) as its exact string, a float as a number.
+    let big = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/add_entry",
+        json!({ "name": "pricey", "price": "19.99", "score": 1.5 }),
+        json!({}),
+    );
+    assert_eq!(big.status, 200, "{:?}", big.body);
+    assert_eq!(
+        big.body,
+        json!({ "name": "pricey", "price": "19.99", "score": 1.5 }),
+        "create re-selects the row with the decimal exact + float as a number"
+    );
+
+    // An ordered comparison (`price >= 10.00`) filters correctly; the seeded `0.10` is
+    // excluded, the created `19.99` kept — and both read back byte-exact.
+    let filtered = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/pricey",
+        json!({ "min": "10.00" }),
+        json!({}),
+    );
+    assert_eq!(filtered.status, 200, "{:?}", filtered.body);
+    assert_eq!(
+        filtered.body,
+        json!([{ "name": "pricey", "price": "19.99", "score": 1.5 }])
+    );
 }
 
 /// Compile an in-line schema for SQLite (skip disk), mirroring `Compiled::load`.
@@ -904,7 +963,7 @@ fn commerce_order_detail_nests_named_user_ref() {
         resp.body,
         json!({
             "status": "paid",
-            "total": 500,
+            "total": "500.00",
             "placed_by": { "name": "Ada", "email": "a@x.com" }
         })
     );

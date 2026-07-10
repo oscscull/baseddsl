@@ -43,9 +43,12 @@ impl Family {
     pub fn of(prim: Primitive) -> Family {
         match prim {
             Primitive::Int => Family::Int,
+            Primitive::Float => Family::Float,
             Primitive::Bool => Family::Bool,
             Primitive::Json => Family::Json,
-            Primitive::Text
+            // A decimal rides the wire (and binds) as its exact string — never an `f64`.
+            Primitive::Decimal { .. }
+            | Primitive::Text
             | Primitive::Timestamp
             | Primitive::Date
             | Primitive::Uuid

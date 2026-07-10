@@ -200,7 +200,48 @@ pub fn validate(
     validate_indexes(ast, mi, models, sink);
     validate_decorators(ast, mi, models, sink);
     validate_was(ast, mi, models, sink);
+    validate_decimals(ast, sink);
     compute_unique(ast, &mut models[mi]);
+}
+
+/// The largest `decimal` precision the engine's type map guarantees across dialects.
+const DECIMAL_MAX_PRECISION: u32 = 38;
+
+/// Check every `decimal(p, s)` field's precision/scale is in range (`1 ≤ s ≤ p ≤ 38`)
+/// and that a decimal column's `default` is a decimal literal (an integer or a fractional
+/// literal), not a string/bool — both `E0159`. Purely local (one model's own fields).
+fn validate_decimals(ast: &Model, sink: &mut Sink) {
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        let BaseType::Primitive(Primitive::Decimal { precision, scale }) = f.ty.base else {
+            continue;
+        };
+        if !(1 <= scale && scale <= precision && precision <= DECIMAL_MAX_PRECISION) {
+            sink.error(
+                code::DECIMAL_INVALID,
+                f.ty.span,
+                format!(
+                    "`decimal({precision}, {scale})` is out of range — need \
+                     1 ≤ scale ≤ precision ≤ {DECIMAL_MAX_PRECISION}"
+                ),
+            );
+        }
+        for m in &f.modifiers {
+            let Modifier::Default(DefaultVal::Lit(lit)) = m else {
+                continue;
+            };
+            if !matches!(lit, Literal::Int(_) | Literal::Decimal(_) | Literal::Null) {
+                sink.error(
+                    code::DECIMAL_INVALID,
+                    f.span,
+                    format!(
+                        "default for decimal column `{}` must be a decimal literal",
+                        f.name.node
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Validate `@was` rename directives. A `@was` names a *previous*

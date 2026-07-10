@@ -388,6 +388,10 @@ fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
         "date" => Primitive::Date,
         "json" => Primitive::Json,
         "uuid" => Primitive::Uuid,
+        "float" => Primitive::Float,
+        // `decimal(p,s)` carries its precision/scale so the renderer emits the exact
+        // `DECIMAL(p,s)`/`NUMERIC(p,s)` — a precision/scale change is a real column-type diff.
+        b if b.starts_with("decimal(") => parse_decimal(b),
         // An enum column is stored as text (`enum(v1,…)`) or an integer
         // (`enum:int(0,…)`); its values ride a CHECK the create-table renderer adds
         // (see `enum_check_values`).
@@ -396,7 +400,27 @@ fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
         // A corrupt/hand-edited snapshot type; parse/verify guards this upstream.
         _ => Primitive::Text,
     };
-    crate::sql::sql_type(prim, many, dialect).to_string()
+    crate::sql::sql_type(prim, many, dialect)
+}
+
+/// Parse a `decimal(p,s)` neutral snapshot type back to its `Primitive`. A malformed
+/// token (a hand-edited snapshot; parse/verify guards this) falls back to the bare default.
+fn parse_decimal(s: &str) -> Primitive {
+    let default = Primitive::Decimal {
+        precision: 38,
+        scale: 9,
+    };
+    let Some(inner) = s.strip_prefix("decimal(").and_then(|x| x.strip_suffix(')')) else {
+        return default;
+    };
+    let mut parts = inner.split(',');
+    match (
+        parts.next().and_then(|p| p.trim().parse::<u32>().ok()),
+        parts.next().and_then(|p| p.trim().parse::<u32>().ok()),
+    ) {
+        (Some(precision), Some(scale)) => Primitive::Decimal { precision, scale },
+        _ => default,
+    }
 }
 
 /// Render a neutral snapshot default (`render_default`'s output — a quoted string,

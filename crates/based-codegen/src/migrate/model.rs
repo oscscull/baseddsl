@@ -376,6 +376,13 @@ fn neutral_type(ty: Primitive, many: bool) -> String {
         Primitive::Date => "date",
         Primitive::Json => "json",
         Primitive::Uuid | Primitive::Id => "uuid",
+        Primitive::Float => "float",
+        // `decimal(p,s)` in the snapshot so a precision/scale change diffs as an
+        // `alter column` (the renderer parses it back through `neutral_sql_type`).
+        Primitive::Decimal { precision, scale } => {
+            let base = format!("decimal({precision},{scale})");
+            return if many { format!("{base}[]") } else { base };
+        }
     };
     if many {
         format!("{base}[]")
@@ -437,7 +444,7 @@ fn render_default(dv: &DefaultVal, en: Option<&based_sema::REnum>) -> String {
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => format!("\"{}\"", s.replace('"', "\\\"")),
         DefaultVal::Lit(Literal::Int(i)) => i.to_string(),
-        DefaultVal::Lit(Literal::Float(f)) => f.to_string(),
+        DefaultVal::Lit(Literal::Decimal(s)) => s.clone(),
         DefaultVal::Lit(Literal::Bool(b)) => b.to_string(),
         DefaultVal::Lit(Literal::Null) => "null".to_string(),
         DefaultVal::Func(f) => format!("{}()", f.name.node),

@@ -92,12 +92,12 @@ fn live() -> Option<(Compiled, PgRouter, PostgresContainer)> {
         .expect("create tables from generated DDL");
     client
         .batch_execute(&format!(
-            // `total` is BIGINT; ids/uuids ride as text literals Postgres coerces into `uuid`;
+            // `total` is NUMERIC(12,2) (returned as its exact string); ids/uuids ride as text literals Postgres coerces into `uuid`;
             // `deleted_at` defaults NULL (live rows).
             "INSERT INTO \"org\" (\"id\", \"name\", \"slug\") VALUES ('{ORG_1}', 'Acme', 'acme');\n\
              INSERT INTO \"user\" (\"id\", \"email\", \"name\") VALUES ('{USER_1}', 'a@x.com', 'Ada');\n\
              INSERT INTO \"order\" (\"id\", \"org_id\", \"placed_by_id\", \"status\", \"total\")\n\
-                 VALUES ('{ORDER_1}', '{ORG_1}', '{USER_1}', 'paid', 500);"
+                 VALUES ('{ORDER_1}', '{ORG_1}', '{USER_1}', 'paid', 500.00);"
         ))
         .expect("seed fixtures");
 
@@ -187,7 +187,7 @@ fn get_query_runs_against_live_postgres() {
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
-        json!({ "status": "paid", "total": 500, "buyer": "Ada", "org": "Acme" })
+        json!({ "status": "paid", "total": "500.00", "buyer": "Ada", "org": "Acme" })
     );
 }
 
@@ -229,7 +229,7 @@ fn ctx_scoped_list_filters_by_org() {
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
-        json!([{ "status": "paid", "total": 500, "buyer": "Ada", "org": "Acme" }])
+        json!([{ "status": "paid", "total": "500.00", "buyer": "Ada", "org": "Acme" }])
     );
 
     let empty = call(
@@ -260,13 +260,13 @@ fn mutation_writes_then_reselects_declared_shape() {
         "/m/place_order",
         // `org` is `@scope`-managed on create: supplied via `$ctx`, auto-set on the
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
-        json!({ "buyer": USER_1, "total": 99 }),
+        json!({ "buyer": USER_1, "total": "99.00" }),
         json!({ "org": ORG_1 }),
     );
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
-        json!({ "status": "pending", "total": 99, "buyer": "Ada", "org": "Acme" })
+        json!({ "status": "pending", "total": "99.00", "buyer": "Ada", "org": "Acme" })
     );
 
     // The write actually committed: the new order is now readable.
@@ -324,7 +324,7 @@ fn idempotency_key_dedupes_a_retried_write() {
         &store,
         "POST",
         "/m/place_order",
-        json!({ "buyer": USER_1, "total": 7 }),
+        json!({ "buyer": USER_1, "total": "7.00" }),
         json!({ "org": ORG_1 }),
         Some("key-abc".to_string()),
     );
@@ -339,7 +339,7 @@ fn idempotency_key_dedupes_a_retried_write() {
         &store,
         "POST",
         "/m/place_order",
-        json!({ "buyer": USER_1, "total": 7 }),
+        json!({ "buyer": USER_1, "total": "7.00" }),
         json!({ "org": ORG_1 }),
         Some("key-abc".to_string()),
     );

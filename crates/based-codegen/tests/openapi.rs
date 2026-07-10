@@ -441,3 +441,18 @@ fn int_enum_field_is_an_integer_schema_with_int_enum_list() {
     assert_eq!(priority["type"], "integer", "\n{doc:#}");
     assert_eq!(priority["enum"], serde_json::json!([0, 1, 2]), "\n{doc:#}");
 }
+
+#[test]
+fn decimal_is_a_string_and_float_a_number() {
+    let doc = gen(r#"
+        Ledger { price: decimal(12, 2), score: float }
+        shape LedgerRow from Ledger { price, score }
+        query ledger() -> LedgerRow[];
+        "#);
+    let row = &doc["components"]["schemas"]["LedgerRow"];
+    // A decimal is a lossless string on the wire, never a JSON float.
+    assert_eq!(row["properties"]["price"]["type"], "string");
+    assert_eq!(row["properties"]["price"]["format"], "decimal");
+    assert_eq!(row["properties"]["score"]["type"], "number");
+    assert_eq!(row["properties"]["score"]["format"], "double");
+}
