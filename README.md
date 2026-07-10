@@ -5,7 +5,7 @@ mutations in one small language (`.bsl`); the compiler generates the SQL, a type
 access layer, and a runnable service. MySQL/MariaDB is the primary target; SQLite
 and Postgres are also supported.
 
-Early and actively built — see [`PLAN.md`](PLAN.md) for status.
+Wip, for progress, see [`PLAN.md`](PLAN.md) for status.
 
 ## Try it
 
