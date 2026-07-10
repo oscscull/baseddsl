@@ -29,11 +29,14 @@ resumes it:
   Completion roadmap), implements it fully, and commits it. A fresh subagent per item is what keeps
   context clean between iterations (the whole point); the coordinator retains only one-line
   summaries, never the work.
-- **Gate before commit.** `cargo test --workspace --all-features`, `cargo fmt --check`, and
-  `cargo clippy --workspace --all-features` must all be clean. Never commit red. **Real-DB slices
-  additionally gate on their live integration tests** — bring the DB up first (Docker, via the
-  installed OrbStack: `docker run` an ephemeral Postgres/MariaDB, or testcontainers). A driver/live
-  slice is not "done" until its real-DB test suite is green against a live server, not compile-verified.
+- **Gate before commit — two tiers, one command each (velocity rule, owner 2026-07-10).** While
+  iterating, run **`make check-fast`** (fmt + clippy + full workspace tests; no DB). Before committing
+  an execution-touching change (runtime/codegen/drivers/examples), run **`make check`** — it starts
+  fresh throwaway DBs itself (Docker via OrbStack) and runs check-fast + both live suites + all three
+  example scenarios; do NOT hand-assemble the cargo/docker sequence across multiple steps. A
+  front-end-only change (parser/sema/fmt/LSP/docs) may commit on `check-fast` alone. Never commit red.
+  A driver/live slice is not "done" until `make check` is green — live against a real server, not
+  compile-verified.
 - **Commit style.** On the current working branch (no push, no PR): first line
   `m6: <desc> (D<n>)`, short body, ending with the trailer
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Update this file
@@ -401,7 +404,10 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
   dev would actually write, at quickstart-DX polish (no plumbing). Paired with a deliberate **syntax
   appeal pass** over every surface the example shows (the `.bsl` files first, then README + client call
   sites): the syntax is what landed in the pitch — polish it for first-look impact, not just
-  correctness. The example *is* the pitch.
+  correctness. The example *is* the pitch. **Coverage policy (owner, 2026-07-10):** the three
+  quickstarts stay largely as they are — async-integrated but minimal — and the axum example is the
+  **total-feature-coverage** vehicle: every language/runtime feature demonstrated somewhere in it, so
+  feature-coverage growth lands in one example instead of three.
 
 ## Track T — core DB feature parity (owner-approved 2026-07-09; PAUSED behind Track N)
 

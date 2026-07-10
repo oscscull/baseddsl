@@ -16,6 +16,13 @@
 #
 # `make ci` runs the infra-free gates (workspace + extension). The DB targets are separate
 # because they need a server; `make ci-live` / `ci-examples` run them once one is up.
+#
+# Two-tier commit gate (one command per tier, so verifying a change never takes several steps):
+#   make check-fast        # iterate: fmt + clippy + full workspace tests. No DB, no examples.
+#   make check             # pre-commit for execution-touching changes: check-fast, then fresh
+#                          # throwaway DBs + both live suites + all three example scenarios.
+# `check` manages its own throwaway DBs (fresh via dev-db-up) and leaves them running for fast
+# re-runs; `make dev-db-down` cleans up. Front-end-only changes may gate on check-fast alone.
 
 CARGO ?= cargo
 NPM   ?= npm
@@ -30,12 +37,27 @@ MARIADB_URL  ?= mysql://root:based_test_pw@127.0.0.1:13306/based_test
 POSTGRES_URL ?= postgres://postgres:based_test_pw@127.0.0.1:15432/based_test
 SQLITE_DB    ?= quickstart.db
 
-.PHONY: ci ci-workspace ci-extension ci-image ci-live ci-live-mariadb ci-live-postgres \
-        ci-examples ci-example-sqlite ci-example-mariadb ci-example-postgres \
+.PHONY: ci check check-fast ci-workspace ci-extension ci-image ci-live ci-live-mariadb \
+        ci-live-postgres ci-examples ci-example-sqlite ci-example-mariadb ci-example-postgres \
         based-cli dev-db-up dev-db-down
 
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
 ci: ci-workspace ci-extension
+
+## Fast iteration gate: format, lint, full workspace tests. No DB, no examples, no extension.
+check-fast: ci-workspace
+
+## Full pre-commit gate: check-fast, then everything DB-backed against fresh throwaway servers
+## (started here; left running for fast re-runs — `make dev-db-down` cleans up). Also refreshes
+## target/debug/based-lsp — the VS Code extension launches it via a PATH symlink pointing there,
+## so a stale binary means the editor silently runs old LSP code.
+check: check-fast dev-db-up
+	$(CARGO) build -p based-lsp
+	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
+	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
+	$(MAKE) ci-live
+	$(MAKE) ci-examples
+	@echo "check: all gates green"
 
 ## Workspace gate: format, lint, and the full test suite (mirrors the commit gate).
 ci-workspace:
