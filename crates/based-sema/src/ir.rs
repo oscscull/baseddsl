@@ -21,6 +21,7 @@ pub mod code {
     pub const DUP_FILTER: &str = "E0103";
     pub const DUP_FIELD: &str = "E0104";
     pub const DUP_SCOPE: &str = "E0105"; // duplicate `scope` decl name
+    pub const DUP_ENUM: &str = "E0106"; // enum name collides with a model/shape/scope/enum
     pub const UNKNOWN_MODEL: &str = "E0110";
     pub const UNKNOWN_FIELD: &str = "E0111";
     pub const TRAVERSE_SCALAR: &str = "E0112"; // dotted past a scalar column
@@ -56,6 +57,11 @@ pub mod code {
     pub const CMP_TYPE: &str = "E0151"; // incompatible operand types in a comparison
     pub const PARAM_TYPE: &str = "E0152"; // param annotation disagrees with its mapped column
     pub const ASSIGN_TYPE: &str = "E0153"; // create/update assigns a value of the wrong type to a column
+    pub const ENUM_VARIANT: &str = "E0154"; // a where/create/update value is not a variant of the column's enum
+    pub const ENUM_DEFAULT: &str = "E0155"; // a field's `default <variant>` is not a member of its enum (or the field isn't an enum)
+    pub const ENUM_MIXED: &str = "E0156"; // an enum mixes an int-valued variant with a bare/string one (kind is ambiguous)
+    pub const ENUM_DUP_VALUE: &str = "E0157"; // two variants of an enum share a wire value (string or int)
+    pub const ENUM_ORDERED_OP: &str = "E0158"; // an ordered comparison (< > <= >=) on a string enum column
 
     // $ctx typing : the caller-supplied request context. Its type is not
     // declared — it is inferred per callable from use and checked for coherence.
@@ -117,6 +123,9 @@ pub struct CheckedSchema {
     pub shapes: Vec<RShape>,
     /// Named scope decls, keyed by name in `scope_index`.
     pub scopes: Vec<RScope>,
+    /// Enum decls, keyed by name in `enum_index`. A field typed by an enum name is a
+    /// scalar column (`MemberKind::Scalar` carrying `enum_name`), never a relation.
+    pub enums: Vec<REnum>,
     pub queries: Vec<RQuery>,
     pub mutations: Vec<RMutation>,
     pub filters: Vec<RFilter>,
@@ -124,6 +133,8 @@ pub struct CheckedSchema {
     pub model_index: HashMap<String, usize>,
     /// scope name -> index into `scopes`.
     pub scope_index: HashMap<String, usize>,
+    /// enum name -> index into `enums`.
+    pub enum_index: HashMap<String, usize>,
 }
 
 impl CheckedSchema {
@@ -132,6 +143,65 @@ impl CheckedSchema {
     }
     pub fn scope(&self, name: &str) -> Option<&RScope> {
         self.scope_index.get(name).map(|&i| &self.scopes[i])
+    }
+    pub fn enum_(&self, name: &str) -> Option<&REnum> {
+        self.enum_index.get(name).map(|&i| &self.enums[i])
+    }
+}
+
+/// A resolved `enum Name { … }` decl: its inferred kind and ordered variant list. The
+/// variants are the closed member set every enum-typed value is checked against (by
+/// name); each carries its wire value (a string or an int).
+#[derive(Debug, Clone)]
+pub struct REnum {
+    pub name: String,
+    pub span: Span,
+    pub kind: EnumKind,
+    pub variants: Vec<REnumVariant>,
+}
+
+/// An enum's kind, inferred from its variant values: `Str` when no variant carries an
+/// int (bare or explicit-string variants — stored as text + CHECK), `Int` when every
+/// variant carries an int (stored as an integer column + CHECK, ordered-comparable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnumKind {
+    Str,
+    Int,
+}
+
+/// One resolved variant: the bare identifier name (the Rust variant / go-to-def target)
+/// and its wire value.
+#[derive(Debug, Clone)]
+pub struct REnumVariant {
+    pub name: String,
+    pub span: Span,
+    pub value: EnumValue,
+}
+
+/// A variant's wire representation: a string (a string enum) or an integer (an int enum).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnumValue {
+    Str(String),
+    Int(i64),
+}
+
+impl REnum {
+    pub fn has_variant(&self, v: &str) -> bool {
+        self.variants.iter().any(|x| x.name == v)
+    }
+    pub fn is_int(&self) -> bool {
+        self.kind == EnumKind::Int
+    }
+    /// The wire value of a variant by name, or `None` if it names no variant.
+    pub fn wire_of(&self, name: &str) -> Option<&EnumValue> {
+        self.variants
+            .iter()
+            .find(|v| v.name == name)
+            .map(|v| &v.value)
+    }
+    /// The variant names, comma-joinable for a diagnostic's "expected one of" list.
+    pub fn variant_names(&self) -> Vec<&str> {
+        self.variants.iter().map(|v| v.name.as_str()).collect()
     }
 }
 
@@ -303,6 +373,11 @@ pub enum MemberKind {
         unique: bool,
         /// `(default …)` value, carried through for DDL column defaults.
         default: Option<DefaultVal>,
+        /// The enum this column is typed by, when its declared type resolved to an
+        /// `enum` decl (`status: Status`). `Some(name)` marks an enum-valued column —
+        /// stored as text (`ty` is `Text`), constrained to the enum's variants, emitted
+        /// as a real enum in the client. `None` for an ordinary primitive column.
+        enum_name: Option<String>,
     },
     /// To-one relation: FK lives on this table (`<field>_id`, or a custom join).
     Forward {

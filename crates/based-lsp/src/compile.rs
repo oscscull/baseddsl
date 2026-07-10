@@ -13,9 +13,10 @@
 //! fallback.
 
 use based_ast::{
-    Assign, BaseType, Clause, Decl, Field, FileId, Ident, Member, Model, Modifier, Mutation,
-    NamedFilter, Param, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart, RawSql,
-    ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value, WriteStmt,
+    Assign, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member, Model, Modifier,
+    Mutation, NamedFilter, Param, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart,
+    RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value, VariantValue,
+    WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -85,6 +86,12 @@ impl Snapshot {
                 return Some(s);
             }
         }
+        // An enum variant in value/default position (`where status = paid`, `default
+        // pending`) → the variant's declaration inside its `enum`. Tried before field
+        // references so a variant is never misread as a same-named column.
+        if let Some(s) = self.variant_ref_at(fid, offset) {
+            return Some(s);
+        }
         // A field-reference path segment (`placed_by`, `placed_by.name`, a `where`/
         // `order`/write-assign column) → the field it names, walked through relations
         // from the statically-known root.
@@ -109,11 +116,12 @@ impl Snapshot {
         self.decl_name_at(fid, offset)
     }
 
-    /// The declaration-name span a model/shape type reference names, if declared here.
+    /// The declaration-name span a model/shape/enum type reference names, if declared here.
     fn type_ref_target(&self, id: &Ident) -> Option<Span> {
         self.decls.iter().find_map(|d| match d {
             Decl::Model(m) if m.name.node == id.node => Some(m.name.span),
             Decl::Shape(s) if s.name.node == id.node => Some(s.name.span),
+            Decl::Enum(e) if e.name.node == id.node => Some(e.name.span),
             _ => None,
         })
     }
@@ -163,6 +171,16 @@ impl Snapshot {
         for id in collect_filter_refs(&self.decls) {
             if self.filter_ref_target(id) == Some(target) {
                 out.push(id.span);
+            }
+        }
+        // Enum variant uses: when the target is a variant declaration, every value/
+        // default-position use of that variant. Enum-local — a same-named variant in a
+        // different enum is keyed by its own enum, so it is left untouched.
+        if let Some((enum_name, variant)) = self.variant_of_decl_span(target) {
+            for (seg, en) in self.variant_use_sites() {
+                if en == enum_name && seg.node == variant {
+                    out.push(seg.span);
+                }
             }
         }
         // Field-reference path segments resolving to the target field.
@@ -571,6 +589,7 @@ impl Snapshot {
                 Decl::Mutation(m) if under(&m.name) => return Some(m.name.span),
                 Decl::Filter(f) if under(&f.name) => return Some(f.name.span),
                 Decl::Scope(s) if under(&s.name) => return Some(s.name.span),
+                Decl::Enum(e) if under(&e.name) => return Some(e.name.span),
                 _ => {}
             }
         }
@@ -642,6 +661,12 @@ impl Snapshot {
         let under = |id: &&Ident| {
             id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
         };
+        // An enum variant (use or declaration) → its enum and value.
+        if let Some(decl) = self.variant_ref_at(fid, offset) {
+            if let Some(h) = self.variant_hover(decl) {
+                return Some(h);
+            }
+        }
         // A field reference (path segment) → the field's signature.
         if let Some(f) = self.field_ref_at(fid, offset) {
             return Some(field_hover(f));
@@ -789,13 +814,249 @@ impl Snapshot {
         })
     }
 
+    // ---- Enum variant navigation ------------------------------------------
+
+    /// The declaration span of the enum variant the cursor sits on — either a variant
+    /// use in value/default position (`where status = paid`, `default pending`) or the
+    /// variant's own declaration inside its `enum` body. `None` off any variant. A use is
+    /// resolved as a variant only when the compared/assigned column (or the field whose
+    /// `default` it is) resolves to an enum type, so a same-named identifier elsewhere is
+    /// never mistaken for one; variants are enum-local, so the returned span identifies
+    /// exactly one enum's variant.
+    fn variant_ref_at(&self, fid: usize, offset: u32) -> Option<Span> {
+        let under = |sp: Span| sp.file.0 as usize == fid && sp.start <= offset && offset < sp.end;
+        // The cursor on a variant declaration resolves to itself.
+        for d in &self.decls {
+            if let Decl::Enum(e) = d {
+                for v in &e.variants {
+                    if under(v.name.span) {
+                        return Some(v.name.span);
+                    }
+                }
+            }
+        }
+        // The cursor on a variant use resolves to its declaration.
+        for (seg, enum_name) in self.variant_use_sites() {
+            if under(seg.span) {
+                return self.variant_decl_span(enum_name, &seg.node);
+            }
+        }
+        None
+    }
+
+    /// Every enum-variant use site in value/default position, paired with the enum it
+    /// belongs to: a `where`/write comparison whose column is enum-typed, a write assign
+    /// to an enum column, and an enum field's `default <variant>`. The `Ident` is the
+    /// variant token (so its span is the use); the `&str` is the owning enum name.
+    fn variant_use_sites(&self) -> Vec<(&Ident, &str)> {
+        let mut out = Vec::new();
+        for d in &self.decls {
+            match d {
+                Decl::Model(m) => {
+                    for mem in &m.members {
+                        let Member::Field(f) = mem else { continue };
+                        let Some(en) = self.field_enum(f) else {
+                            continue;
+                        };
+                        for md in &f.modifiers {
+                            if let Modifier::Default(based_ast::DefaultVal::Variant(v)) = md {
+                                out.push((v, en));
+                            }
+                        }
+                    }
+                }
+                Decl::Query(q) => {
+                    let root = match &q.body {
+                        QueryBody::Block(stmt) => Some(stmt.model.node.as_str()),
+                        QueryBody::Inline(_) => self.query_root(q),
+                        QueryBody::Bare => None,
+                    };
+                    if let Some(root) = root {
+                        match &q.body {
+                            QueryBody::Block(stmt) => {
+                                for c in &stmt.clauses {
+                                    self.clause_variant_sites(c, root, &mut out);
+                                }
+                            }
+                            QueryBody::Inline(cs) => {
+                                for c in cs {
+                                    self.clause_variant_sites(c, root, &mut out);
+                                }
+                            }
+                            QueryBody::Bare => {}
+                        }
+                    }
+                }
+                Decl::Mutation(m) => self.write_variant_sites(&m.body, &mut out),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn clause_variant_sites<'a>(
+        &'a self,
+        c: &'a Clause,
+        root: &str,
+        out: &mut Vec<(&'a Ident, &'a str)>,
+    ) {
+        if let Clause::Where(p) = c {
+            self.pred_variant_sites(p, root, out);
+        }
+    }
+
+    fn pred_variant_sites<'a>(
+        &'a self,
+        p: &'a Predicate,
+        root: &str,
+        out: &mut Vec<(&'a Ident, &'a str)>,
+    ) {
+        match p {
+            Predicate::Or(a, b) | Predicate::And(a, b) => {
+                self.pred_variant_sites(a, root, out);
+                self.pred_variant_sites(b, root, out);
+            }
+            Predicate::Not(inner) => self.pred_variant_sites(inner, root, out),
+            Predicate::Cmp { path, value, .. } => {
+                if let (Some(en), Value::Path(vp)) =
+                    (self.enum_of_path(root, &path.segments), value)
+                {
+                    if vp.segments.len() == 1 {
+                        out.push((&vp.segments[0], en));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn write_variant_sites<'a>(
+        &'a self,
+        body: &'a [WriteStmt],
+        out: &mut Vec<(&'a Ident, &'a str)>,
+    ) {
+        for w in body {
+            match w {
+                WriteStmt::Create { model, assigns } => {
+                    self.assign_variant_sites(model.node.as_str(), assigns, out)
+                }
+                WriteStmt::Update {
+                    model,
+                    where_,
+                    assigns,
+                } => {
+                    self.pred_variant_sites(where_, model.node.as_str(), out);
+                    self.assign_variant_sites(model.node.as_str(), assigns, out);
+                }
+                WriteStmt::Delete { model, where_ }
+                | WriteStmt::Restore { model, where_ }
+                | WriteStmt::HardDelete { model, where_ } => {
+                    self.pred_variant_sites(where_, model.node.as_str(), out)
+                }
+                WriteStmt::Tx(inner) => self.write_variant_sites(inner, out),
+                WriteStmt::Raw(_) => {}
+            }
+        }
+    }
+
+    fn assign_variant_sites<'a>(
+        &'a self,
+        model: &str,
+        assigns: &'a [Assign],
+        out: &mut Vec<(&'a Ident, &'a str)>,
+    ) {
+        for a in assigns {
+            if let (Some(en), Value::Path(vp)) = (
+                self.enum_of_path(model, std::slice::from_ref(&a.col)),
+                &a.value,
+            ) {
+                if vp.segments.len() == 1 {
+                    out.push((&vp.segments[0], en));
+                }
+            }
+        }
+    }
+
+    /// The enum a dotted column path (rooted at `root`) terminates on, or `None` when the
+    /// terminal column is not enum-typed.
+    fn enum_of_path<'a>(&'a self, root: &str, segs: &[Ident]) -> Option<&'a str> {
+        self.field_enum(self.walk_path(root, segs)?)
+    }
+
+    /// The enum name a field is typed by, when its `UpperCamel` type resolves to a
+    /// declared enum (not a model relation).
+    fn field_enum<'a>(&'a self, f: &'a Field) -> Option<&'a str> {
+        if let BaseType::Model(t) = &f.ty.base {
+            if self.is_enum_decl(&t.node) {
+                return Some(t.node.as_str());
+            }
+        }
+        None
+    }
+
+    fn is_enum_decl(&self, name: &str) -> bool {
+        self.decls
+            .iter()
+            .any(|d| matches!(d, Decl::Enum(e) if e.name.node == name))
+    }
+
+    /// The declaration span of variant `variant` in enum `enum_name`, or `None`.
+    fn variant_decl_span(&self, enum_name: &str, variant: &str) -> Option<Span> {
+        self.decls.iter().find_map(|d| match d {
+            Decl::Enum(e) if e.name.node == enum_name => e
+                .variants
+                .iter()
+                .find(|v| v.name.node == variant)
+                .map(|v| v.name.span),
+            _ => None,
+        })
+    }
+
+    /// The `(enum_name, variant_name)` a declaration span identifies, when it is a variant
+    /// declaration. Lets find-references key variant uses to the right enum.
+    fn variant_of_decl_span(&self, target: Span) -> Option<(&str, &str)> {
+        for d in &self.decls {
+            if let Decl::Enum(e) = d {
+                for v in &e.variants {
+                    if v.name.span == target {
+                        return Some((e.name.node.as_str(), v.name.node.as_str()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// A model or shape decl's one-line hover, by name.
     fn decl_hover_by_name(&self, name: &str) -> Option<String> {
         self.decls.iter().find_map(|d| match d {
             Decl::Model(m) if m.name.node == name => Some(model_hover(m)),
             Decl::Shape(s) if s.name.node == name => Some(shape_hover(s)),
+            Decl::Enum(e) if e.name.node == name => Some(enum_hover(e)),
             _ => None,
         })
+    }
+
+    /// An enum variant's hover: `` variant `paid` of `Status` `` (plus its explicit
+    /// value, when written). `decl` is the variant's declaration span.
+    fn variant_hover(&self, decl: Span) -> Option<String> {
+        for d in &self.decls {
+            let Decl::Enum(e) = d else { continue };
+            for v in &e.variants {
+                if v.name.span == decl {
+                    let val = match v.value.as_ref().map(|s| &s.node) {
+                        Some(VariantValue::Str(s)) => format!(" = \"{s}\""),
+                        Some(VariantValue::Int(n)) => format!(" = {n}"),
+                        None => String::new(),
+                    };
+                    return Some(format!(
+                        "```based\nvariant {}{val}\n```\nvariant of enum `{}`",
+                        v.name.node, e.name.node
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// A scope decl's one-line hover (`scope Name (col: Type = $ctx.field, …)`).
@@ -869,6 +1130,21 @@ impl Snapshot {
                         Some(children),
                     ));
                 }
+                // Enum → Enum; its variants → EnumMember children.
+                Decl::Enum(e) if here(e.span) => {
+                    let children = e
+                        .variants
+                        .iter()
+                        .map(|v| symbol(&v.name, SymbolKind::ENUM_MEMBER, v.name.span, idx, None))
+                        .collect();
+                    out.push(symbol(
+                        &e.name,
+                        SymbolKind::ENUM,
+                        e.span,
+                        idx,
+                        Some(children),
+                    ));
+                }
                 Decl::Shape(s) if here(s.span) => {
                     out.push(symbol(&s.name, SymbolKind::INTERFACE, s.span, idx, None))
                 }
@@ -921,6 +1197,12 @@ impl Snapshot {
                 }
                 Decl::Shape(s) => push(&s.name, SymbolKind::INTERFACE, None),
                 Decl::Scope(s) => push(&s.name, SymbolKind::NAMESPACE, None),
+                Decl::Enum(e) => {
+                    push(&e.name, SymbolKind::ENUM, None);
+                    for v in &e.variants {
+                        push(&v.name, SymbolKind::ENUM_MEMBER, Some(&e.name.node));
+                    }
+                }
                 Decl::Query(q) => push(&q.name, SymbolKind::FUNCTION, None),
                 Decl::Mutation(m) => push(&m.name, SymbolKind::METHOD, None),
                 Decl::Filter(f) => push(&f.name, SymbolKind::FUNCTION, None),
@@ -1199,6 +1481,7 @@ fn decl_span(d: &Decl) -> Span {
         Decl::Model(m) => m.span,
         Decl::Shape(s) => s.span,
         Decl::Scope(s) => s.span,
+        Decl::Enum(e) => e.span,
         Decl::Query(q) => q.span,
         Decl::Mutation(m) => m.span,
         Decl::Filter(f) => f.span,
@@ -1330,6 +1613,8 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
                     }
                 }
             }
+            // An enum decl has no outgoing type references (its variants are its own).
+            Decl::Enum(_) => {}
         }
     }
     out
@@ -1725,6 +2010,17 @@ fn model_hover(m: &Model) -> String {
 /// A shape's hover: `shape Name from Model`.
 fn shape_hover(s: &Shape) -> String {
     format!("```based\nshape {} from {}\n```", s.name.node, s.from.node)
+}
+
+/// An enum's hover: `enum Name { a, b, c }` (variant names, a compact closed set).
+fn enum_hover(e: &EnumDecl) -> String {
+    let names = e
+        .variants
+        .iter()
+        .map(|v| v.name.node.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("```based\nenum {} {{ {names} }}\n```", e.name.node)
 }
 
 /// A scope's hover: `scope Name (col: Type = $ctx.field, …)`.
@@ -3366,6 +3662,133 @@ mod tests {
             .decls
             .iter()
             .any(|d| matches!(d, Decl::Model(m) if m.name.node == "Item")));
+    }
+
+    const ENUM_NAV_SCHEMA: &str = "\
+enum Status { pending, paid, shipped }\n\
+enum Grade { pending, top }\n\
+Order { status: Status (default pending)  total: int }\n\
+shape OrderRow from Order { status  total }\n\
+query paid_orders() -> OrderRow[] { list Order where (status = paid) order (total); }\n\
+mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shipped } }\n";
+
+    fn enum_nav_snapshot() -> (Snapshot, usize) {
+        let ws = TempWorkspace::new("enum_nav");
+        ws.write("based.toml", "");
+        ws.write("schema.bsl", ENUM_NAV_SCHEMA);
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        (snap, fid)
+    }
+
+    #[test]
+    fn goto_def_on_a_variant_use_resolves_to_its_declaration() {
+        let (snap, fid) = enum_nav_snapshot();
+        let src = &snap.sources[fid].1;
+        // The declaration span of `paid` in `enum Status`.
+        let decl = src.find("pending, paid, shipped").unwrap() + "pending, ".len();
+
+        // `where (status = paid)` → the `paid` variant declaration.
+        let use_off = (src.find("status = paid").unwrap() + "status = ".len()) as u32;
+        let d = snap
+            .definition_at(fid, use_off)
+            .expect("variant use resolves");
+        assert_eq!(
+            d.start as usize,
+            decl,
+            "{}",
+            &src[d.start as usize..d.end as usize]
+        );
+
+        // `default pending` → the `pending` variant declaration.
+        let pend_decl = src.find("pending, paid").unwrap();
+        let def_off = (src.find("default pending").unwrap() + "default ".len()) as u32;
+        let d = snap
+            .definition_at(fid, def_off)
+            .expect("default variant resolves");
+        assert_eq!(d.start as usize, pend_decl);
+
+        // The write assign `status = shipped` → the `shipped` variant.
+        let ship_decl = src.find("paid, shipped").unwrap() + "paid, ".len();
+        let asg = (src.find("status = shipped").unwrap() + "status = ".len()) as u32;
+        let d = snap
+            .definition_at(fid, asg)
+            .expect("assign variant resolves");
+        assert_eq!(d.start as usize, ship_decl);
+    }
+
+    #[test]
+    fn find_references_on_a_variant_are_enum_local() {
+        let (snap, fid) = enum_nav_snapshot();
+        let src = &snap.sources[fid].1;
+        // Cursor on the `pending` declaration in `enum Status`.
+        let off = (src.find("pending, paid, shipped").unwrap() + 1) as u32;
+        let refs = snap.references_at(fid, off, true);
+        // The `Status.pending` decl + the `default pending` use — NOT `Grade.pending`.
+        let texts: Vec<&str> = refs
+            .iter()
+            .map(|s| &src[s.start as usize..s.end as usize])
+            .collect();
+        assert!(texts.iter().all(|t| *t == "pending"), "{texts:?}");
+        assert_eq!(
+            refs.len(),
+            2,
+            "Status.pending decl + one use only: {texts:?}"
+        );
+        // None of the references is the Grade.pending declaration.
+        let grade_pending = src.find("pending, top").unwrap();
+        assert!(
+            refs.iter().all(|s| s.start as usize != grade_pending),
+            "Grade.pending must be untouched"
+        );
+    }
+
+    #[test]
+    fn rename_variant_rewrites_uses_and_leaves_same_named_variant_in_another_enum() {
+        let (snap, fid) = enum_nav_snapshot();
+        let src = &snap.sources[fid].1;
+        // Rename `Status.pending` (the declaration) to `queued`.
+        let off = (src.find("pending, paid, shipped").unwrap() + 1) as u32;
+        let changes = snap
+            .rename_edits(fid, off, "queued")
+            .expect("variant is renameable");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        // Status's variant + its `default` use become `queued`.
+        assert!(
+            out.contains("enum Status { queued, paid, shipped }"),
+            "{out}"
+        );
+        assert!(out.contains("default queued"), "{out}");
+        // Grade's same-named `pending` variant is untouched.
+        assert!(out.contains("enum Grade { pending, top }"), "{out}");
+    }
+
+    #[test]
+    fn enum_type_ref_goto_def_and_hover_still_work() {
+        let (snap, fid) = enum_nav_snapshot();
+        let src = &snap.sources[fid].1;
+        // `status: Status` type reference → the `enum Status` declaration name.
+        let ty_ref = (src.find("status: Status").unwrap() + "status: ".len()) as u32;
+        let d = snap
+            .definition_at(fid, ty_ref)
+            .expect("enum type ref resolves");
+        let enum_decl = src.find("Status {").unwrap();
+        assert_eq!(d.start as usize, enum_decl);
+        // Hover on the enum type reference names the enum.
+        let h = snap.hover_at(fid, ty_ref).expect("enum hover");
+        assert!(h.contains("enum Status"), "{h}");
+        // Hover on a variant use names its enum.
+        let vh = (src.find("status = paid").unwrap() + "status = ".len()) as u32;
+        let h = snap.hover_at(fid, vh).expect("variant hover");
+        assert!(h.contains("variant of enum `Status`"), "{h}");
     }
 
     /// The URI of file `fid` in a snapshot — a test convenience for indexing rename edits.

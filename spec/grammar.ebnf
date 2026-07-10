@@ -24,7 +24,7 @@
 (* enforced (decisions.md D6/D9).                                               *)
 
 file        = { decl } ;
-decl        = model | shape | scope_decl | query | mutation | named_filter ;
+decl        = model | shape | scope_decl | enum_decl | query | mutation | named_filter ;
 sep         = NEWLINE | ',' ;          (* item separator inside blocks/files   *)
 
 (* ---------- Models -------------------------------------------------------- *)
@@ -78,7 +78,8 @@ modifiers   = '(' modifier { ',' modifier } ')' ;
 modifier    = 'unique'
             | 'default' default_val
             | 'column' STRING ;        (* legacy/reserved column-name override  *)
-default_val = literal | func_call ;
+default_val = literal | func_call
+            | variant ;                (* a bare identifier: an enum default (enums.md) *)
 
 (* Migration rename directive (migrations.md): declares this field's previous     *)
 (* physical column name so the diff emits a clean `rename column` instead of the   *)
@@ -130,6 +131,24 @@ shape_value = path | raw_sql ;                 (* dotted traversal OR raw value*
 scope_decl  = 'scope' scope_name '(' scope_term { ',' scope_term } ')' ;
 scope_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
 scope_term  = column_name ':' type_expr '=' param_ref ;   (* col: Type = $ctx.field *)
+
+(* ---------- Enums (enums.md) ---------------------------------------------- *)
+(* A closed set of lowercase variants and a first-class scalar type. The name shares  *)
+(* the type-name namespace with models/shapes/scopes (dup = E0106). A field typed by   *)
+(* an enum name is a scalar column, not a relation — sema disambiguates by what the     *)
+(* UpperCamel name resolves to. A variant appears in value position as a bare           *)
+(* identifier (an ordinary single-segment path), resolved against the column's enum.    *)
+
+enum_decl   = 'enum' enum_name '{' { variant sep } [ variant ] '}' ;
+enum_name   = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
+(* A variant is a bare name, optionally with an explicit wire value. The name is always  *)
+(* the identifier (client variant, go-to-def, rename); the value is what the wire + DB    *)
+(* store. Kind is inferred in sema: no int value anywhere => a string enum (bare name or   *)
+(* explicit string, name may differ from value); an int value on EVERY variant => an int   *)
+(* enum. Mixing the two, a duplicate value, or an int-alongside-bare/string is a sema error*)
+(* (enums.md). Value position always references a variant by NAME (a bare single-segment   *)
+(* path), never by its raw value.                                                          *)
+variant     = lower_ident [ '=' ( STRING | INT ) ] ;
 
 (* ---------- Queries ------------------------------------------------------- *)
 
@@ -265,7 +284,8 @@ raw_char    = ? any char except '`' and an interp opener ? ;
 (* named `order:` even though `order (...)` is a clause. Legacy keyword-named    *)
 (* columns/tables may also be aliased via (column "...") / @table("...").        *)
 (* Keyword-in-position set additionally includes `scope` (decl head + `@scope`)  *)
-(* and `scoped` (the callable acknowledgement) — D46; both contextual.           *)
+(* and `scoped` (the callable acknowledgement) — D46; both contextual. `enum`     *)
+(* (decl head, enums.md) is likewise contextual.                                  *)
 ident       = lower_ident | upper_ident ;
 lower_ident = lower_alpha { alnum | '_' } ;
 upper_ident = upper_alpha { alnum } ;   (* UpperCamel model references         *)

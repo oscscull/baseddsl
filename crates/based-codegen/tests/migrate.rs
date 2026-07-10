@@ -143,6 +143,44 @@ fn add_nullable_column_plus_index_is_the_worked_example() {
 }
 
 #[test]
+fn enum_kinds_encode_distinctly_in_the_snapshot_and_round_trip() {
+    // A string enum captures its wire values; an int enum a distinct `enum:int(...)`
+    // encoding — so a variant add/remove OR a string↔int kind change is a diffable change.
+    let schema = checked(
+        r#"
+        enum Status { pending, paid = "PAID" }
+        enum Priority { low = 0, high = 1 }
+        Order { status: Status, priority: Priority, total: int }
+        "#,
+    );
+    let text = migrate::snapshot(&schema);
+    assert!(text.contains("enum(pending,PAID)"), "\n{text}");
+    assert!(text.contains("enum:int(0,1)"), "\n{text}");
+    // The snapshot parses back identically (the diff baseline property).
+    let snap = Snapshot::from_schema(&schema);
+    let parsed = Snapshot::parse(&snap.render()).expect("round-trip parse");
+    assert_eq!(snap, parsed, "\n{text}");
+}
+
+#[test]
+fn int_enum_from_scratch_renders_integer_column_and_int_check() {
+    let schema = checked(
+        r#"
+        enum Priority { low = 0, medium = 1, high = 2 }
+        Ticket { priority: Priority (default low), title: text }
+        "#,
+    );
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    let sql = migrate::render_sql(&steps, Dialect::Postgres);
+    // The from-scratch migration matches `based gen sql`: integer column + int CHECK.
+    assert!(
+        sql.contains("\"priority\" BIGINT NOT NULL DEFAULT 0"),
+        "\n{sql}"
+    );
+    assert!(sql.contains("CHECK (\"priority\" IN (0, 1, 2))"), "\n{sql}");
+}
+
+#[test]
 fn dropping_a_model_is_a_marked_drop_table() {
     let base = "
         Org { name: text }

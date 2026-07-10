@@ -379,7 +379,7 @@ fn out_schema(
     match root {
         Some(m) => OutSchema {
             name: m.name.clone(),
-            fields: model_fields(m),
+            fields: model_fields(schema, m),
             is_result_fallback: false,
             nested: Vec::new(),
         },
@@ -512,10 +512,20 @@ fn to_many_relation<'a>(
 
 /// Every stored column of a bare-model return: scalars by their mapped schema, forward
 /// FKs as a `uuid` string under the relation field name. Inverse edges store nothing.
-fn model_fields(model: &RModel) -> Vec<(String, Value, bool)> {
+fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, Value, bool)> {
     let mut fields = Vec::new();
     for mem in &model.members {
         match &mem.kind {
+            MemberKind::Scalar {
+                enum_name: Some(en),
+                optional,
+                many,
+                ..
+            } => fields.push((
+                mem.name.clone(),
+                wrap(enum_schema(schema, en), *many),
+                !*optional,
+            )),
             MemberKind::Scalar {
                 ty, optional, many, ..
             } => fields.push((
@@ -629,6 +639,12 @@ fn reach_schema(schema: &CheckedSchema, model: Option<&RModel>, path: &[&str]) -
         let last = i + 1 == n;
         match cur.member(seg).map(|m| &m.kind) {
             Some(MemberKind::Scalar {
+                enum_name: Some(en),
+                optional,
+                many,
+                ..
+            }) => return (wrap(enum_schema(schema, en), *many), !*optional),
+            Some(MemberKind::Scalar {
                 ty, optional, many, ..
             }) => return (wrap(primitive_schema(*ty), *many), !*optional),
             Some(MemberKind::Forward {
@@ -693,6 +709,41 @@ fn base_schema(b: &BaseType) -> Value {
 /// The `uuid`-string schema (a relation/id FK on the wire).
 fn uuid_schema() -> Value {
     json!({ "type": "string", "format": "uuid" })
+}
+
+/// An enum column's schema, constrained to the enum's wire values: a string enum is
+/// `{ "type": "string", "enum": ["pending", …] }`; an int enum is
+/// `{ "type": "integer", "enum": [0, …] }`. Falls back to an open string if the enum is
+/// somehow unresolved (sema would have flagged it).
+fn enum_schema(schema: &CheckedSchema, name: &str) -> Value {
+    use based_sema::{EnumKind, EnumValue};
+    let Some(e) = schema.enum_(name) else {
+        return json!({ "type": "string" });
+    };
+    match e.kind {
+        EnumKind::Str => {
+            let values: Vec<&str> = e
+                .variants
+                .iter()
+                .map(|v| match &v.value {
+                    EnumValue::Str(s) => s.as_str(),
+                    EnumValue::Int(_) => v.name.as_str(),
+                })
+                .collect();
+            json!({ "type": "string", "enum": values })
+        }
+        EnumKind::Int => {
+            let values: Vec<i64> = e
+                .variants
+                .iter()
+                .map(|v| match &v.value {
+                    EnumValue::Int(n) => *n,
+                    EnumValue::Str(_) => 0,
+                })
+                .collect();
+            json!({ "type": "integer", "enum": values })
+        }
+    }
 }
 
 /// The open-object `json` schema: any JSON value (a `json` column or a `sql`…`` field).

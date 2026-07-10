@@ -161,7 +161,7 @@ impl<'a> Parser<'a> {
                         || l.tok == Tok::UpperIdent
                         || matches!(
                             self.ident_at(0),
-                            Some("shape" | "scope" | "query" | "mutation" | "filter")
+                            Some("shape" | "scope" | "enum" | "query" | "mutation" | "filter")
                         )
                     {
                         break;
@@ -198,6 +198,7 @@ impl<'a> Parser<'a> {
         match self.ident_at(0) {
             Some("shape") => self.shape().map(Decl::Shape),
             Some("scope") => self.scope_decl().map(Decl::Scope),
+            Some("enum") => self.enum_decl().map(Decl::Enum),
             Some("query") => self.query().map(Decl::Query),
             Some("mutation") => self.mutation().map(Decl::Mutation),
             Some("filter") => self.named_filter().map(Decl::Filter),
@@ -320,6 +321,74 @@ impl<'a> Parser<'a> {
             ty,
             ctx,
         })
+    }
+
+    // ---------- enum declarations -----------------------------------------
+
+    /// `enum Name { pending, paid = "PAID", low = 0, … }` — a closed set of variants,
+    /// each a bare identifier with an optional `= STRING | INT` wire value. Items
+    /// separate on `,` or newline, like every other block.
+    fn enum_decl(&mut self) -> PResult<EnumDecl> {
+        let start = self.here().start;
+        self.eat_kw("enum");
+        let name = self.upper_ident("enum name")?;
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut variants = Vec::new();
+        loop {
+            self.skip_seps();
+            if self.at(Tok::RBrace) || self.peek().is_none() {
+                break;
+            }
+            variants.push(self.enum_variant()?);
+        }
+        let close = self.expect(Tok::RBrace, "`}`")?;
+        Ok(EnumDecl {
+            name,
+            variants,
+            span: Span {
+                file: self.file,
+                start,
+                end: close.end,
+            },
+        })
+    }
+
+    /// `IDENT [ '=' ( STRING | INT ) ]` — a variant name with an optional wire value.
+    fn enum_variant(&mut self) -> PResult<EnumVariant> {
+        let name = self.lower_ident("enum variant")?;
+        let value = if self.eat(Tok::Eq) {
+            let l = self
+                .peek()
+                .ok_or_else(|| self.err_unit("a string or integer"))?;
+            let node = match l.tok {
+                Tok::Str => {
+                    self.bump();
+                    VariantValue::Str(unquote(self.text(l)))
+                }
+                Tok::Int => {
+                    self.bump();
+                    let n = self.text(l).parse::<i64>().map_err(|_| {
+                        self.err("integer variant value out of range");
+                    })?;
+                    VariantValue::Int(n)
+                }
+                _ => {
+                    self.err_unit("a string or integer variant value");
+                    return Err(());
+                }
+            };
+            Some(Spanned {
+                node,
+                span: Span {
+                    file: self.file,
+                    start: l.start,
+                    end: l.end,
+                },
+            })
+        } else {
+            None
+        };
+        Ok(EnumVariant { name, value })
     }
 
     fn decorator(&mut self) -> PResult<Decorator> {
@@ -1336,6 +1405,12 @@ impl<'a> Parser<'a> {
         if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::LParen) {
             // func default e.g. now()
             return Ok(DefaultVal::Func(self.func_call()?));
+        }
+        // A bare identifier that isn't a `true`/`false`/`null` literal is an enum
+        // variant default (`default pending`); sema checks it against the column's enum.
+        if self.at(Tok::LowerIdent) && !matches!(self.ident_at(0), Some("true" | "false" | "null"))
+        {
+            return Ok(DefaultVal::Variant(self.lower_ident("default variant")?));
         }
         Ok(DefaultVal::Lit(self.literal()?))
     }

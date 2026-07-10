@@ -182,10 +182,11 @@ fn member(name: &str, kind: &MemberKind) -> String {
             column,
             unique,
             default,
+            enum_name,
         } => {
             let mut s = format!(
                 "{name}: {}{}{}",
-                prim(*ty),
+                enum_name.clone().unwrap_or_else(|| prim(*ty).to_string()),
                 if *optional { "?" } else { "" },
                 if *many { "[]" } else { "" },
             );
@@ -277,5 +278,6 @@ fn default_val(d: &DefaultVal) -> String {
     match d {
         DefaultVal::Lit(_) => "lit".to_string(),
         DefaultVal::Func(f) => format!("{}()", f.name.node),
+        DefaultVal::Variant(v) => format!("variant:{}", v.node),
     }
 }

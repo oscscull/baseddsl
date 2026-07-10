@@ -468,3 +468,106 @@ fn pg_indexes_are_separate_create_index_statements() {
         "\n{ddl}"
     );
 }
+
+// ---------- enums ----------------------------------------------------------
+
+const ENUM_SCHEMA: &str = r#"
+enum Status { pending, paid, shipped, cancelled }
+Order { status: Status (default pending), total: int }
+"#;
+
+#[test]
+fn enum_column_mariadb_is_text_with_check_and_default() {
+    let ddl = gen(ENUM_SCHEMA);
+    assert!(
+        ddl.contains("`status` VARCHAR(255) NOT NULL DEFAULT 'pending'"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CONSTRAINT `ck_order_status` CHECK (`status` IN ('pending', 'paid', 'shipped', 'cancelled'))"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn enum_column_sqlite_is_text_with_check() {
+    let ddl = gen_sqlite(ENUM_SCHEMA);
+    assert!(
+        ddl.contains("`status` TEXT NOT NULL DEFAULT 'pending'"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CONSTRAINT `ck_order_status` CHECK (`status` IN ('pending', 'paid', 'shipped', 'cancelled'))"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn enum_column_postgres_is_text_with_check() {
+    let ddl = gen_pg(ENUM_SCHEMA);
+    assert!(
+        ddl.contains("\"status\" TEXT NOT NULL DEFAULT 'pending'"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CONSTRAINT \"ck_order_status\" CHECK (\"status\" IN ('pending', 'paid', 'shipped', 'cancelled'))"),
+        "\n{ddl}"
+    );
+}
+
+const STRING_ENUM_NAME_NE_VALUE: &str = r#"
+enum Status { pending, paid = "PAID" }
+Order { status: Status (default paid), total: int }
+"#;
+
+#[test]
+fn string_enum_check_and_default_use_the_wire_value_not_the_name() {
+    let ddl = gen_sqlite(STRING_ENUM_NAME_NE_VALUE);
+    // The CHECK and DEFAULT carry the wire value `PAID`, not the variant name `paid`.
+    assert!(
+        ddl.contains("`status` TEXT NOT NULL DEFAULT 'PAID'"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CHECK (`status` IN ('pending', 'PAID'))"),
+        "\n{ddl}"
+    );
+}
+
+const INT_ENUM_SCHEMA: &str = r#"
+enum Priority { low = 0, medium = 1, high = 2 }
+Ticket { priority: Priority (default low), title: text }
+"#;
+
+#[test]
+fn int_enum_column_mariadb_is_integer_with_int_check() {
+    let ddl = gen(INT_ENUM_SCHEMA);
+    assert!(
+        ddl.contains("`priority` BIGINT NOT NULL DEFAULT 0"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CONSTRAINT `ck_ticket_priority` CHECK (`priority` IN (0, 1, 2))"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn int_enum_column_sqlite_is_integer_with_int_check() {
+    let ddl = gen_sqlite(INT_ENUM_SCHEMA);
+    assert!(
+        ddl.contains("`priority` INTEGER NOT NULL DEFAULT 0"),
+        "\n{ddl}"
+    );
+    assert!(ddl.contains("CHECK (`priority` IN (0, 1, 2))"), "\n{ddl}");
+}
+
+#[test]
+fn int_enum_column_postgres_is_integer_with_int_check() {
+    let ddl = gen_pg(INT_ENUM_SCHEMA);
+    assert!(
+        ddl.contains("\"priority\" BIGINT NOT NULL DEFAULT 0"),
+        "\n{ddl}"
+    );
+    assert!(ddl.contains("CHECK (\"priority\" IN (0, 1, 2))"), "\n{ddl}");
+}

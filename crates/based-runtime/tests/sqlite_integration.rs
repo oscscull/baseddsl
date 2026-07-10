@@ -376,6 +376,75 @@ fn nest_reached_scoped_child_is_confined_cross_tenant() {
     );
 }
 
+/// End-to-end enum round-trip against a live engine: a string enum with a name≠value
+/// variant (`paid = "PAID"`) and an int enum (`Priority`). A create assigns both by name;
+/// the response shape carries their *wire* values (`"PAID"`, `2`); a filter on the string
+/// enum and an *ordered* filter on the int enum each return the row; and the DB CHECK
+/// rejects an out-of-range value directly inserted — proving the constraint is live.
+#[test]
+fn enum_round_trip_string_and_int_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        enum Status { pending, paid = "PAID", shipped }
+        enum Priority { low = 0, medium = 1, high = 2 }
+        Ticket { status: Status (default pending), priority: Priority, title: text }
+        shape TicketRow from Ticket { status, priority, title }
+        mutation open_ticket(title: text) -> TicketRow {
+          create Ticket { title = $title, priority = high, status = paid };
+        }
+        query urgent() -> TicketRow[] { list Ticket where (priority >= medium) order (title); }
+        query by_paid() -> TicketRow[] { list Ticket where (status = paid) order (title); }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+
+    // Create: `status = paid` and `priority = high` are assigned by name; the response
+    // carries their wire values ("PAID" for the renamed string variant, 2 for the int).
+    let created = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/open_ticket",
+        json!({ "title": "server down" }),
+        json!({}),
+    );
+    assert_eq!(created.status, 200, "{:?}", created.body);
+    assert_eq!(
+        created.body,
+        json!({ "status": "PAID", "priority": 2, "title": "server down" }),
+        "the shaped value carries the enum wire representation"
+    );
+
+    // Ordered filter on the int enum (`priority >= medium`) returns the row live.
+    let urgent = call(&c, &backend, "POST", "/q/urgent", json!({}), json!({}));
+    assert_eq!(urgent.status, 200, "{:?}", urgent.body);
+    assert_eq!(
+        urgent.body,
+        json!([{ "status": "PAID", "priority": 2, "title": "server down" }])
+    );
+
+    // Filter on the string enum by name (`status = paid` → 'PAID') returns the row.
+    let paid = call(&c, &backend, "POST", "/q/by_paid", json!({}), json!({}));
+    assert_eq!(
+        paid.body,
+        json!([{ "status": "PAID", "priority": 2, "title": "server down" }])
+    );
+
+    // The DB CHECK rejects an out-of-range value inserted directly (defense in depth).
+    let bad_int = backend.execute_batch(
+        "INSERT INTO `ticket` (`id`, `status`, `priority`, `title`) VALUES ('x', 'PAID', 99, 't');",
+    );
+    assert!(bad_int.is_err(), "int-enum CHECK must reject 99");
+    let bad_str = backend.execute_batch(
+        "INSERT INTO `ticket` (`id`, `status`, `priority`, `title`) VALUES ('y', 'bogus', 0, 't');",
+    );
+    assert!(bad_str.is_err(), "string-enum CHECK must reject 'bogus'");
+}
+
 /// Compile an in-line schema for SQLite (skip disk), mirroring `Compiled::load`.
 fn compile_sqlite(src: &str) -> Compiled {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
@@ -838,5 +907,54 @@ fn commerce_order_detail_nests_named_user_ref() {
             "total": 500,
             "placed_by": { "name": "Ada", "email": "a@x.com" }
         })
+    );
+}
+
+#[test]
+fn enum_variant_filter_and_check_constraint_end_to_end() {
+    // A self-contained enum schema: a `where status = <variant>` filter (lowered to a
+    // string literal) executed live, plus proof the DB CHECK rejects a non-variant value.
+    let c = compile_sqlite(
+        r#"
+        enum Status { pending, paid, shipped }
+        Item {
+          status: Status (default pending)
+          name:   text
+        }
+        shape ItemRow from Item { status, name }
+        query paid_items() -> ItemRow[] { list Item where (status = paid) order (name); }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend.execute_batch(&ddl).expect("generated DDL executes");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `item` (`id`, `status`, `name`) VALUES ('i1', 'paid', 'A');
+            INSERT INTO `item` (`id`, `status`, `name`) VALUES ('i2', 'pending', 'B');
+            INSERT INTO `item` (`id`, `status`, `name`) VALUES ('i3', 'paid', 'C');
+            "#,
+        )
+        .expect("seed enum rows");
+
+    // The variant filter runs live and returns only the two `paid` rows, with the enum
+    // value round-tripping as its wire string.
+    let resp = call(&c, &backend, "POST", "/q/paid_items", json!({}), json!({}));
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!([
+            { "status": "paid", "name": "A" },
+            { "status": "paid", "name": "C" }
+        ])
+    );
+
+    // The generated CHECK constraint rejects a value outside the enum's variants.
+    let bad = backend
+        .execute_batch("INSERT INTO `item` (`id`, `status`, `name`) VALUES ('x', 'bogus', 'X');");
+    assert!(
+        bad.is_err(),
+        "DB should reject a non-variant enum value via the CHECK constraint"
     );
 }

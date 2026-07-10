@@ -25,6 +25,7 @@ Repo layout:
 Spec file map:
 - `spec/principles.md` — design rules. Always in context.
 - `spec/syntax/models.md` — models, fields, decorators, types
+- `spec/syntax/enums.md` — enum type (string + numeric kinds, explicit variant values, column + CHECK representation)
 - `spec/syntax/relations.md` — relations, inverses, joins
 - `spec/syntax/soft-delete.md` — soft-delete decorator + ops
 - `spec/syntax/queries.md` — query signatures, get/list, filters

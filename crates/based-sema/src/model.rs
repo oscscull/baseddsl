@@ -12,8 +12,10 @@ use crate::ir::*;
 use crate::resolve;
 
 /// Build an unvalidated `RModel` from one AST model: implicit `id`, columns, and
-/// relations classified forward vs. inverse. No cross-model checks yet.
-pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
+/// relations classified forward vs. inverse. No cross-model checks yet. `enums` maps each
+/// declared enum name to its kind, so an UpperCamel field type resolving to an enum is a
+/// scalar column (text for a string enum, integer for an int enum) rather than a relation.
+pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -> RModel {
     let mut members: Vec<RMember> = Vec::new();
     let mut seen: HashMap<String, Span> = HashMap::new();
 
@@ -40,7 +42,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
         members.push(RMember {
             name: f.name.node.clone(),
             span: f.name.span,
-            kind: classify(f),
+            kind: classify(f, enums),
             was: f.was.as_ref().map(|w| w.node.clone()),
         });
     }
@@ -59,6 +61,7 @@ pub fn skeleton(m: &Model, sink: &mut Sink) -> RModel {
                     column: "id".to_string(),
                     unique: false, // PK, expressed as PRIMARY KEY not a UNIQUE constraint
                     default: None, // engine-generated on insert , no SQL default
+                    enum_name: None,
                 },
                 was: None,
             },
@@ -110,19 +113,43 @@ fn table_name(m: &Model) -> String {
 }
 
 /// Classify a field as a scalar column, a forward relation (FK here), or an
-/// inverse edge (`[]`, or an explicit `(Model.field)` pairing).
-fn classify(f: &Field) -> MemberKind {
+/// inverse edge (`[]`, or an explicit `(Model.field)` pairing). An UpperCamel type
+/// that names a declared `enum` is a scalar column (carrying `enum_name`), not a
+/// relation — sema disambiguates by what the name resolves to. The stored type follows
+/// the enum's kind: text for a string enum, integer for an int enum.
+fn classify(f: &Field, enums: &HashMap<String, EnumKind>) -> MemberKind {
+    let default = || {
+        f.modifiers.iter().find_map(|m| match m {
+            Modifier::Default(dv) => Some(dv.clone()),
+            _ => None,
+        })
+    };
+    let unique = f.modifiers.iter().any(|m| matches!(m, Modifier::Unique));
+    let column = || column_override(f).unwrap_or_else(|| f.name.node.clone());
     match &f.ty.base {
         BaseType::Primitive(p) => MemberKind::Scalar {
             ty: *p,
             optional: f.ty.optional,
             many: f.ty.many,
-            column: column_override(f).unwrap_or_else(|| f.name.node.clone()),
-            unique: f.modifiers.iter().any(|m| matches!(m, Modifier::Unique)),
-            default: f.modifiers.iter().find_map(|m| match m {
-                Modifier::Default(dv) => Some(dv.clone()),
-                _ => None,
-            }),
+            column: column(),
+            unique,
+            default: default(),
+            enum_name: None,
+        },
+        BaseType::Model(target) if enums.contains_key(&target.node) => MemberKind::Scalar {
+            // An enum column stores its variant's wire value: text for a string enum,
+            // integer for an int enum. `enum_name` marks it for the DB CHECK constraint,
+            // the client's real enum, and variant membership checks.
+            ty: match enums[&target.node] {
+                EnumKind::Int => Primitive::Int,
+                EnumKind::Str => Primitive::Text,
+            },
+            optional: f.ty.optional,
+            many: f.ty.many,
+            column: column(),
+            unique,
+            default: default(),
+            enum_name: Some(target.node.clone()),
         },
         BaseType::Model(target) => {
             // A to-many model edge, or one carrying an explicit inverse ref, is a

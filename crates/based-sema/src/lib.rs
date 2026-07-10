@@ -18,6 +18,7 @@
 
 mod check;
 mod ctx;
+mod enums;
 mod indexes;
 mod ir;
 mod model;
@@ -39,6 +40,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let mut models = Vec::new();
     let mut shapes = Vec::new();
     let mut scope_decls = Vec::new();
+    let mut enum_decls = Vec::new();
     let mut queries = Vec::new();
     let mut mutations = Vec::new();
     let mut filters = Vec::new();
@@ -47,6 +49,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             Decl::Model(m) => models.push(m),
             Decl::Shape(s) => shapes.push(s),
             Decl::Scope(s) => scope_decls.push(s),
+            Decl::Enum(e) => enum_decls.push(e),
             Decl::Query(q) => queries.push(q),
             Decl::Mutation(m) => mutations.push(m),
             Decl::Filter(f) => filters.push(f),
@@ -116,10 +119,22 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         }
     }
 
+    // Enum decls share the type-name namespace with models/shapes/scopes; resolve them
+    // now (before skeletons) so a field typed by an enum name classifies as a scalar
+    // column, not a relation.
+    let mut taken: HashSet<String> = index.keys().cloned().collect();
+    taken.extend(shape_from.keys().cloned());
+    taken.extend(scope_decls.iter().map(|s| s.name.node.clone()));
+    let (renums, enum_index) = enums::resolve_decls(&enum_decls, &taken, &mut sink);
+    // Enum name -> its inferred kind, so a field's classification picks the storage type
+    // (an int enum is an integer column; a string enum is text).
+    let enum_kinds: HashMap<String, EnumKind> =
+        renums.iter().map(|e| (e.name.clone(), e.kind)).collect();
+
     // 2. Skeletons, then 3. validate (needs &mut models + the name index).
     let mut rmodels: Vec<RModel> = models
         .iter()
-        .map(|m| model::skeleton(m, &mut sink))
+        .map(|m| model::skeleton(m, &enum_kinds, &mut sink))
         .collect();
     for (mi, ast) in models.iter().enumerate() {
         model::validate(ast, mi, &mut rmodels, &index, &mut sink);
@@ -141,11 +156,15 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             shape_bodies: &shape_bodies,
             scopes: &rscopes,
             scope_index: &scope_index,
+            enums: &renums,
+            enum_index: &enum_index,
         };
 
         for ast in &models {
             model::resolve_exprs(ast, &cx, &mut sink);
         }
+        // Enum-typed field defaults (a `default <variant>` must name a member).
+        enums::check_field_defaults(&cx, &mut sink);
         let rshapes: Vec<RShape> = shapes
             .iter()
             .filter_map(|s| check::check_shape(s, &cx, &mut sink))
@@ -183,11 +202,13 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         models: rmodels,
         shapes: rshapes,
         scopes: rscopes,
+        enums: renums,
         queries: rqueries,
         mutations: rmutations,
         filters: rfilters,
         model_index: index,
         scope_index,
+        enum_index,
     };
     (schema, sink.diags)
 }

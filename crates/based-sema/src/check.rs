@@ -633,6 +633,19 @@ fn check_assign(
         unknown_field(cx, mi, &a.col, sink);
         return;
     };
+    // Assigning an enum column takes a bare variant (`status = paid`), not a column
+    // path — check membership (E0154) instead of resolving it as a field.
+    if let MemberKind::Scalar {
+        enum_name: Some(en_name),
+        ..
+    } = &member.kind
+    {
+        if let Some(en) = cx.enum_(en_name) {
+            if resolve::check_enum_operand(&a.value, en, params, sink) {
+                return;
+            }
+        }
+    }
     // A `^.field` back-reference resolves against the preceding create's model, not
     // the model being assigned; delegate the rest of the value to the shared checker.
     if let Value::Back(b) = &a.value {

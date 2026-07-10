@@ -6,6 +6,10 @@
 # place the scope column's — and thus `$ctx.org`'s — type is written.
 scope Tenant (org: Org = $ctx.org)
 
+# An `enum` is a closed set of lowercase variants and a first-class scalar type: a field
+# typed `Status` is a text column constrained to these values (a DB CHECK), not a relation.
+enum Status { pending, paid, shipped, cancelled }
+
 @soft_delete(deleted_at)
 @sort(placed_at desc)
 # Every read + write on Order is filtered to the caller's org, and a `create` auto-sets
@@ -17,7 +21,7 @@ Order {
   org:          Org
   placed_by:    User
   fulfilled_by: User?
-  status:       text (default "pending")
+  status:       Status (default pending)
   total:        int
   placed_at:    timestamp (default now())
   items:        OrderItem[]

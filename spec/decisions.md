@@ -13,7 +13,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 
 - **Types & schema fundamentals** — D1 (`Id`/PK), D2 (implicit `id` + timestamps), D3 (table/column
   naming), D6 (one extension, uniform grammar), D7 (identifier casing), D8 (contextual keywords),
-  D9 (free layout)
+  D9 (free layout), D82 (enum type: string + numeric kinds, explicit values, column + CHECK,
+  name-resolution disambiguation, variant navigation)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
@@ -2968,3 +2969,115 @@ to-many `items { sku }` into children scoped on a *divergent* `Region` axis retu
 children — the out-of-region line item is absent from the array, the out-of-region contact reads back
 NULL on an *optional* relation, never leaking its name). No commerce/`examples/**` fallout: their only
 scoped model (`Order`/`Tenant`) nests into the unscoped `User`, so they still check clean.
+
+## D82 — enum type: string + numeric kinds, explicit values, column + CHECK, variant navigation (Track T1)
+
+First of the owner-approved **Track T — core DB feature parity** queue (enum → decimal/float → atomic
+update exprs → aggregations/group-by/having → m2m/upsert → referential actions). Adds `enum` as a
+first-class scalar type in two kinds — string and numeric — inferred from the variant values.
+
+**Declaration + variant grammar.** `enum Name { pending, paid = "PAID", … }` — a top-level decl,
+UpperCamel name, lowercase snake variants (comma/newline-separated). A variant is
+`IDENT [ "=" ( STRING | INT ) ]`: its **name** is always the identifier (it yields the client's Rust
+variant, go-to-def, and rename); its value, when written, is the wire/DB representation. The name shares the
+**type-name namespace** with models/shapes/scopes (`E0106`). Parsed to `Decl::Enum(EnumDecl { name,
+variants: Vec<EnumVariant { name, value: Option<Spanned<VariantValue>> }> })`; resolved to
+`REnum { name, kind, variants: Vec<REnumVariant { name, value: EnumValue }> }` in `CheckedSchema.enums`
+(+ `enum_index`). `enum` is a contextual keyword (decl head only).
+
+**Kind inference.** A **string enum** has no int-valued variant — each variant is bare (`pending` → wire
+`"pending"`) or explicit-string (`paid = "PAID"`, name ≠ value); mixing bare + explicit-string is fine.
+An **int enum** has an int value on *every* variant (`low = 0, medium = 1, high = 2`) — no bare or string
+variant allowed. Mixing an int variant with a bare/string one is `E0156` (ambiguous kind); two variants
+sharing a wire value (two strings, or two ints) is `E0157` (ambiguous stored value); two variants sharing
+a *name* is `E0104` (repeated member).
+
+**Field usage + name-resolution disambiguation.** `status: Status` is an UpperCamel type reference. Sema
+disambiguates by what the name resolves to: an *enum* classifies as a **scalar column** (`MemberKind::Scalar`
++ a `enum_name: Option<String>` marker; `ty = Text` for a string enum, `ty = Int` for an int enum, so the
+DDL/migrate/client/openapi mapping follows naturally from the stored type), a *model* stays a relation/FK.
+`model::classify` takes `HashMap<String, EnumKind>` so an enum-typed field never becomes a relation, and the
+storage type follows the kind. Optional (`Status?`) + `default <variant>` supported.
+
+**Values as bare identifiers (no new `Value` node).** A variant in `where`/`create`/`update`
+(`where status = paid`, `create { status: paid }`) is an ordinary single-segment `Path` in the AST — always
+referenced by **name**, never by raw value — the cleaner of the two options (vs. a dedicated
+`Value::Variant`), since it needs no grammar/AST change. Sema resolves it *as a variant* only when the
+compared/assigned column is enum-typed (`resolve::terminal_enum` + `check_enum_operand`): a non-member
+(incl. a variant from another enum) is `E0154`; a `$param` still name-checks; anything else falls through
+to the ordinary operand check. Codegen (`dml`/`mutations`) renders a variant against an enum column as its
+**wire value** — a quoted string (`= 'PAID'`) for a string enum, a bare integer (`>= 1`) for an int enum —
+so the runtime needs no enum awareness. **Ops by kind:** a string enum allows `= != in`; an int enum
+additionally allows the ordered `< > <= >=` (numeric). An ordered op on a string enum is `E0158`. A field
+`default <variant>` is `DefaultVal::Variant(Ident)` (kept distinct from a string so `based fmt` re-emits
+`default pending`, not `default "pending"`); membership + non-enum-column misuse are `E0155`; the DDL/snapshot
+default render as the variant's wire value.
+
+**DB representation — column + named CHECK, both kinds, all three dialects.** A string enum stores text
+(`VARCHAR(255)` MariaDB, `TEXT` SQLite/Postgres); an int enum stores the dialect's integer type
+(`BIGINT`/`INTEGER`). Both carry `CONSTRAINT ck_<table>_<col> CHECK (col IN (…))` listing the **wire values**
+(a renamed variant checks `'PAID'`, not `'paid'`; an int enum checks `(0, 1, 2)`). Chosen over DB-native
+enums (MariaDB inline `ENUM`, Postgres `CREATE TYPE … AS ENUM`) for **migration simplicity**: a native enum
+makes a variant add a non-transactional `ALTER TYPE ADD VALUE` / `MODIFY COLUMN`, can't remove a value, and
+adds a second type map that can drift from `based gen sql`; SQLite has no native enum at all. One
+representation through the existing `Dialect` type-map seam. Membership is enforced twice — the DSL layer
+(E0154/E0155/E0158) at compile time and the CHECK at run time (defense in depth).
+
+**Migrations.** The neutral snapshot records `enum(v1,v2,…)` for a string enum (its wire values) and
+`enum:int(0,1,…)` for an int enum — distinct single `schema.snap` tokens, so a variant add/remove OR a
+string↔int kind change is a **diffable** column type change; `neutral_sql_type` maps them to text/int
+through `sql::sql_type`, and `create_table_statements` re-emits the CHECK so a from-scratch migration matches
+`based gen sql`. Rendering an in-place variant change back to a per-dialect DROP/ADD-CONSTRAINT is deferred
+(the minimum bar — diffs, never crashes — is met).
+
+**Client + OpenAPI.** `based gen client` emits a real Rust `enum`: a **string enum** is serde-renamed to
+the wire strings (`#[serde(rename = "PAID")] Paid`); an **int enum** carries explicit discriminants
+(`enum Priority { Low = 0, … }`) + a hand-rolled `Serialize`/`Deserialize` that (de)serializes as the
+integer — **no new dependency** (no `serde_repr`): `serialize_i64` on the discriminant, and a match on the
+incoming `i64` back to a variant with an unknown value becoming a `serde::de::Error`. An enum-typed
+field/output takes the enum type instead of `String`. `based gen openapi` emits `{type: string, enum:[…]}`
+for a string enum, `{type: integer, enum:[…]}` for an int enum. A non-variant value the DB returns surfaces
+as a client *decode* error, never a panic (existing typed-decode discipline).
+
+**Editor navigation (variant nav — the "code following" gap).** Enum **type** references already rode the
+type-ref index (go-to-def/find-refs/rename via `type_ref_target` incl. `Decl::Enum`); this adds **variant**
+navigation in `based-lsp/src/compile.rs`, mirroring the D51/D52/D53 field patterns. Go-to-def on a variant
+in value/default position (`where status = paid`, `default pending`, a write assign) resolves the LHS
+column (through the AST field walk) to its enum, then matches the variant name to its declaration span (tried
+*before* field resolution so a variant is never misread as a same-named column). Find-references + rename are
+**enum-local** — variant uses are keyed by `(enum_name, variant_name)`, so a same-named variant in a
+*different* enum is untouched (mirrors params being callable-local). Hover on a variant shows its enum
+(+ value if explicit); hover on an enum type reference shows the enum decl; document/workspace symbols carry
+the enum + its `EnumMember` variants.
+
+**Runtime.** No change to the value paths — an enum column is text or integer end to end; the wire value is
+the variant string/number, decoded by serde into the Rust enum on the client side.
+
+**Diagnostics:** `E0104` (dup variant name), `E0106` (enum name collides with a model/shape/scope/enum),
+`E0154` (non-member / wrong-enum variant in a value position), `E0155` (bad `default <variant>`, incl. a bare
+default on a non-enum column), **`E0156`** (mixed int + bare/string variants), **`E0157`** (duplicate wire
+value), **`E0158`** (ordered op on a string enum).
+
+**Used in the example:** commerce `Order.status` stays the string enum `Status { pending, paid, shipped,
+cancelled }` with `status: Status (default pending)`. Int enums + name≠value are exercised in unit /
+conformance / live tests, not forced into commerce. `based check` clean; the commerce snapshot golden is
+unchanged (a bare string enum → `enum(pending,paid,shipped,cancelled)`).
+
+**Verified:** sema unit tests (string + int resolve; enum field scalar-not-relation with the right storage
+type; mixed E0156; dup-value E0157; dup-name E0104; ordered-op-on-string E0158; unknown-variant E0154;
+bad-default E0155; enum-vs-model E0106); codegen unit tests (DDL text+CHECK *and* integer+CHECK all three
+dialects; string rename incl. name≠value + int discriminants/manual serde in the client; string- and
+int-enum openapi; variant → wire-value SQL literal in `where`/`create`; snapshot kind encoding + round-trip +
+from-scratch int render); LSP unit tests (variant go-to-def in value + default positions, find-references,
+rename with a same-named variant in a second enum left untouched, enum type-ref go-to-def + hover); a parser
+conformance case (string + int + name≠value); and **live** SQLite (create by name → wire values `"PAID"`/`2`
+in the shape, string filter + *ordered* int filter each return the row, the CHECK rejects an out-of-range int
+*and* a bad string) plus the full live MariaDB + Postgres suites green against the enum-carrying commerce DDL.
+Spec: `spec/syntax/enums.md`.
+
+**For the next queue item (decimal/float):** enum reused the `Scalar` variant with a side-channel marker
+(`enum_name`) and set `ty` to the storage primitive (`Text`/`Int`), rather than a new `MemberKind` — keeping
+the ~120 `MemberKind` match sites untouched. A new *numeric primitive* (`decimal`/`float`) is a cleaner fit
+for `Primitive` + the `sql_type` map + the `prim_family` operand bucket, and unlike enum it *does* need
+runtime decode arms (`SqlValue`) — the int enum flows through the existing `Int` arm, so the plan/scan/value
+paths were still not touched. Budget for those.

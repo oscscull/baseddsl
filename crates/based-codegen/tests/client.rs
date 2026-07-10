@@ -526,3 +526,65 @@ fn no_inner_allow_attribute_so_include_accepts_it() {
         "\n{out}"
     );
 }
+
+// ---------- enums ----------------------------------------------------------
+
+#[test]
+fn enum_emits_a_rust_enum_and_types_the_field() {
+    let src = r#"
+        enum Status { pending, paid, shipped }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query orders() -> OrderRow[];
+    "#;
+    let out = gen(src);
+    // A real Rust enum, serde-renamed to the wire strings.
+    assert!(out.contains("pub enum Status {"), "\n{out}");
+    assert!(out.contains("#[serde(rename = \"pending\")]"), "\n{out}");
+    assert!(out.contains("Pending,"), "\n{out}");
+    assert!(out.contains("Shipped,"), "\n{out}");
+    // The projected field takes the enum type, not String.
+    assert!(out.contains("pub status: Status,"), "\n{out}");
+}
+
+#[test]
+fn string_enum_with_explicit_value_renames_to_the_wire_value() {
+    let src = r#"
+        enum Status { pending, paid = "PAID" }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query orders() -> OrderRow[];
+    "#;
+    let out = gen(src);
+    assert!(out.contains("#[serde(rename = \"PAID\")]"), "\n{out}");
+    assert!(out.contains("Paid,"), "\n{out}");
+}
+
+#[test]
+fn int_enum_emits_explicit_discriminants_and_a_manual_serde_impl() {
+    let src = r#"
+        enum Priority { low = 0, medium = 1, high = 2 }
+        Ticket { priority: Priority, title: text }
+        shape TicketRow from Ticket { priority, title }
+        query tickets() -> TicketRow[];
+    "#;
+    let out = gen(src);
+    // A discriminant-carrying enum, no serde derive / serde_repr.
+    assert!(out.contains("pub enum Priority {"), "\n{out}");
+    assert!(out.contains("Low = 0,"), "\n{out}");
+    assert!(out.contains("High = 2,"), "\n{out}");
+    // Hand-rolled (de)serialization as i64, unknown value → error not panic.
+    assert!(
+        out.contains("impl serde::Serialize for Priority"),
+        "\n{out}"
+    );
+    assert!(out.contains("s.serialize_i64(*self as i64)"), "\n{out}");
+    assert!(
+        out.contains("impl<'de> serde::Deserialize<'de> for Priority"),
+        "\n{out}"
+    );
+    assert!(out.contains("serde::de::Error::custom"), "\n{out}");
+    assert!(!out.contains("serde_repr"), "\n{out}");
+    // The projected field takes the enum type.
+    assert!(out.contains("pub priority: Priority,"), "\n{out}");
+}

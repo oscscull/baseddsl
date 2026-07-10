@@ -119,13 +119,16 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
                 many,
                 column,
                 default,
-                ..
+                enum_name,
+                unique: _,
             } => {
+                let en = enum_name.as_deref().and_then(|n| schema.enum_(n));
                 lines.push(column_line(
                     column,
                     sql_type(*ty, *many, dialect),
                     *optional,
                     default.as_ref(),
+                    en,
                     dialect,
                 ));
             }
@@ -137,7 +140,7 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
             } => {
                 // FK column type mirrors the target's primary-key type (default uuid).
                 let ty = fk_type(schema, target, dialect);
-                lines.push(column_line(fk_col, ty, *optional, None, dialect));
+                lines.push(column_line(fk_col, ty, *optional, None, None, dialect));
             }
             MemberKind::Inverse { .. } => {}
         }
@@ -164,6 +167,29 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
                 )),
                 col = dialect.quote(column),
             ));
+        }
+    }
+
+    // Enum columns carry a DB-native CHECK constraint (`col IN ('v1', …)`) — the
+    // dialect-honest form on every target (SQLite has no native enum type; Postgres's
+    // `CREATE TYPE` and MariaDB's inline `ENUM(…)` both make a variant change an awkward
+    // `ALTER TYPE`/`MODIFY`, so a text column + CHECK is the uniform, migration-simple
+    // representation). Membership is also enforced by the DSL layer (E0154).
+    for mem in &model.members {
+        if let MemberKind::Scalar {
+            column,
+            enum_name: Some(en_name),
+            ..
+        } = &mem.kind
+        {
+            if let Some(en) = schema.enum_(en_name) {
+                let values: Vec<String> = en
+                    .variants
+                    .iter()
+                    .map(|v| enum_value_sql(&v.value))
+                    .collect();
+                lines.push(enum_check_clause(dialect, &model.table, column, &values));
+            }
         }
     }
 
@@ -195,12 +221,14 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
     out
 }
 
-/// A single column definition: `` `name` TYPE (NOT NULL|NULL) [DEFAULT x] ``.
+/// A single column definition: `` `name` TYPE (NOT NULL|NULL) [DEFAULT x] ``. `en` is the
+/// column's enum, when enum-typed, so a variant default renders as its wire value.
 fn column_line(
     column: &str,
     ty: &str,
     optional: bool,
     default: Option<&DefaultVal>,
+    en: Option<&based_sema::REnum>,
     dialect: Dialect,
 ) -> String {
     let mut s = format!(
@@ -210,7 +238,7 @@ fn column_line(
     );
     if let Some(dv) = default {
         s.push_str(" DEFAULT ");
-        s.push_str(&render_default(dv, dialect));
+        s.push_str(&render_default(dv, en, dialect));
     }
     s
 }
@@ -260,6 +288,35 @@ fn physical_col(model: &RModel, field: &str) -> String {
         Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
         _ => field.to_string(),
     }
+}
+
+/// A single enum wire value rendered as a SQL literal: a string quoted, an int bare.
+pub(crate) fn enum_value_sql(v: &based_sema::EnumValue) -> String {
+    match v {
+        based_sema::EnumValue::Str(s) => format!("'{}'", s.replace('\'', "''")),
+        based_sema::EnumValue::Int(n) => n.to_string(),
+    }
+}
+
+/// The `CONSTRAINT ck_<table>_<col> CHECK (<col> IN (v1, …))` clause enforcing an enum
+/// column's values (each already rendered as a SQL literal — `'paid'` or `0`). Shared
+/// with the migration renderer so a from-scratch migration matches `based gen sql`.
+pub(crate) fn enum_check_clause(
+    dialect: Dialect,
+    table: &str,
+    column: &str,
+    values: &[String],
+) -> String {
+    let list = values.join(", ");
+    format!(
+        "CONSTRAINT {name} CHECK ({col} IN ({list}))",
+        name = dialect.quote(&constraint_name(
+            "ck",
+            table,
+            std::slice::from_ref(&column.to_string())
+        )),
+        col = dialect.quote(column),
+    )
 }
 
 /// Stable, readable constraint/index name: `<prefix>_<table>_<col1>_<col2>`.
@@ -345,7 +402,7 @@ fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> &'static s
 /// Render a `(default …)` value as a SQL literal / expression, per dialect. Only the
 /// bool literal differs: MariaDB has `TRUE`/`FALSE` keywords; SQLite stores bools as
 /// integers, so a bool default renders `1`/`0`.
-fn render_default(dv: &DefaultVal, dialect: Dialect) -> String {
+fn render_default(dv: &DefaultVal, en: Option<&based_sema::REnum>, dialect: Dialect) -> String {
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => format!("'{}'", s.replace('\'', "''")),
         DefaultVal::Lit(Literal::Int(i)) => i.to_string(),
@@ -354,5 +411,11 @@ fn render_default(dv: &DefaultVal, dialect: Dialect) -> String {
         DefaultVal::Lit(Literal::Null) => "NULL".to_string(),
         // `now()` is the only value-position function (ir::KNOWN_FUNCS).
         DefaultVal::Func(_) => "CURRENT_TIMESTAMP".to_string(),
+        // An enum default (`default pending`) is its variant's wire value: a quoted
+        // string for a string enum, a bare integer for an int enum.
+        DefaultVal::Variant(v) => en
+            .and_then(|e| e.wire_of(&v.node))
+            .map(enum_value_sql)
+            .unwrap_or_else(|| format!("'{}'", v.node.replace('\'', "''"))),
     }
 }

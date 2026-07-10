@@ -31,6 +31,10 @@ pub struct Cx<'a> {
     pub scopes: &'a [RScope],
     /// scope name -> index into `scopes`.
     pub scope_index: &'a HashMap<String, usize>,
+    /// Resolved `enum` decls — for validating variant membership in a value position.
+    pub enums: &'a [REnum],
+    /// enum name -> index into `enums`.
+    pub enum_index: &'a HashMap<String, usize>,
 }
 
 impl<'a> Cx<'a> {
@@ -42,6 +46,68 @@ impl<'a> Cx<'a> {
     }
     pub fn scope(&self, name: &str) -> Option<&RScope> {
         self.scope_index.get(name).map(|&i| &self.scopes[i])
+    }
+    pub fn enum_(&self, name: &str) -> Option<&REnum> {
+        self.enum_index.get(name).map(|&i| &self.enums[i])
+    }
+
+    /// The enum a dotted path terminates on, when the terminal column is enum-typed
+    /// (`where status = …`, `where placed_by.role = …`). `None` when the path is
+    /// unresolvable or lands on a non-enum column/relation. Read-only — materializes no
+    /// join (the caller's `resolve_path` already reported any name error).
+    pub fn terminal_enum(&self, path: &Path, start: usize) -> Option<&REnum> {
+        let mut cur = start;
+        let n = path.segments.len();
+        for (i, seg) in path.segments.iter().enumerate() {
+            let mem = self.model(cur).member(&seg.node)?;
+            let last = i + 1 == n;
+            match &mem.kind {
+                MemberKind::Scalar {
+                    enum_name: Some(name),
+                    ..
+                } if last => return self.enum_(name),
+                MemberKind::Scalar { .. } => return None,
+                MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
+                    if last {
+                        return None;
+                    }
+                    cur = self.find(target)?;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Check a value written against an enum-typed column (`where status = paid`,
+/// `create { status: paid }`). A bare single-segment identifier is a variant — checked
+/// for membership (`E0154`). A `$param` is still name-checked. Returns `true` when it
+/// fully handled the value (so the caller skips the ordinary column-path resolution that
+/// would misread the variant as a field); `false` to fall through (a string literal, a
+/// null, etc., which the ordinary text-family check then covers).
+pub fn check_enum_operand(value: &Value, en: &REnum, params: &[String], sink: &mut Sink) -> bool {
+    match value {
+        Value::Path(p) if p.segments.len() == 1 => {
+            let seg = &p.segments[0];
+            if !en.has_variant(&seg.node) {
+                sink.error(
+                    code::ENUM_VARIANT,
+                    seg.span,
+                    format!(
+                        "`{}` is not a variant of enum `{}` (expected one of: {})",
+                        seg.node,
+                        en.name,
+                        en.variant_names().join(", ")
+                    ),
+                );
+            }
+            true
+        }
+        Value::Param(pr) => {
+            check_param_ref(pr, params, sink);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -442,14 +508,36 @@ fn check_predicate_in(
         }
         Predicate::Not(p) => check_predicate_in(p, model, cx, params, in_filters, sink),
         Predicate::Cmp { path, op, value } => {
+            let mut handled = false;
             if let Some(mi) = model {
                 resolve_path(path, mi, cx, sink);
+                // When the left column is enum-typed, the right operand is a variant
+                // (or a param), not a column — check membership instead of resolving it
+                // as a path (which would misread the variant as an unknown field).
+                if let Some(en) = cx.terminal_enum(path, mi) {
+                    // Ordered comparison is numeric-only: allowed on an int enum,
+                    // rejected on a string enum (its values have no order).
+                    if matches!(op, Op::Gt | Op::Lt | Op::Ge | Op::Le) && !en.is_int() {
+                        sink.error(
+                            code::ENUM_ORDERED_OP,
+                            path.segments.last().map(|s| s.span).unwrap_or(en.span),
+                            format!(
+                                "`{}` is a string enum; ordered comparison is only valid on a \
+                                 numeric enum",
+                                en.name
+                            ),
+                        );
+                    }
+                    handled = check_enum_operand(value, en, params, sink);
+                }
             }
-            check_value(value, model, cx, params, sink);
-            // Operand typing runs after both sides' name errors are reported, and
-            // is silent when either side failed to resolve.
-            if let Some(mi) = model {
-                check_cmp_types(path, *op, value, mi, cx, sink);
+            if !handled {
+                check_value(value, model, cx, params, sink);
+                // Operand typing runs after both sides' name errors are reported, and
+                // is silent when either side failed to resolve.
+                if let Some(mi) = model {
+                    check_cmp_types(path, *op, value, mi, cx, sink);
+                }
             }
         }
         Predicate::Bare(path) => {

@@ -517,6 +517,8 @@ fn default_value(dv: &DefaultVal) -> SqlValue {
         DefaultVal::Lit(Literal::Bool(b)) => SqlValue::Bool(*b),
         DefaultVal::Lit(Literal::Null) => SqlValue::Null,
         DefaultVal::Func(_) => SqlValue::Null,
+        // An enum default is its wire variant string.
+        DefaultVal::Variant(v) => SqlValue::Text(v.node.clone()),
     }
 }
 

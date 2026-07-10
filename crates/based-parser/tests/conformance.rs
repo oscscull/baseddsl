@@ -132,5 +132,18 @@ fn summarize_decl(decl: &Decl) -> String {
         ),
         Decl::Filter(f) => format!("filter {}  params={}", f.name.node, f.params.len()),
         Decl::Scope(s) => format!("scope {}  terms={}", s.name.node, s.terms.len()),
+        Decl::Enum(e) => {
+            let vs = e
+                .variants
+                .iter()
+                .map(|v| match v.value.as_ref().map(|s| &s.node) {
+                    None => v.name.node.clone(),
+                    Some(based_ast::VariantValue::Str(s)) => format!("{}=\"{}\"", v.name.node, s),
+                    Some(based_ast::VariantValue::Int(n)) => format!("{}={}", v.name.node, n),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("enum {}  variants=[{vs}]", e.name.node)
+        }
     }
 }

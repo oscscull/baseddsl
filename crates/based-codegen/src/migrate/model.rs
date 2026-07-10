@@ -172,11 +172,17 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
                 column,
                 unique,
                 default,
+                enum_name,
             } => columns.push(ColumnSnap {
                 name: column.clone(),
-                ty: neutral_type(*ty, *many),
+                // An enum column captures its variants as `enum(v1,v2,…)` so a variant
+                // add/remove is a diffable type change; it maps to text SQL (+ CHECK).
+                ty: enum_neutral_type(schema, enum_name.as_deref())
+                    .unwrap_or_else(|| neutral_type(*ty, *many)),
                 nullable: *optional,
-                default: default.as_ref().map(render_default),
+                default: default.as_ref().map(|dv| {
+                    render_default(dv, enum_name.as_deref().and_then(|n| schema.enum_(n)))
+                }),
                 unique: *unique,
                 fk: None,
             }),
@@ -378,6 +384,40 @@ fn neutral_type(ty: Primitive, many: bool) -> String {
     }
 }
 
+/// An enum column's neutral snapshot type — a single `schema.snap` token capturing its
+/// kind + wire values so a variant add/remove OR a string↔int kind change is a diffable
+/// column type change: `enum(v1,v2,…)` for a string enum (renderer → text + CHECK),
+/// `enum:int(0,1,…)` for an int enum (renderer → integer + CHECK). `None` for a non-enum
+/// column.
+fn enum_neutral_type(schema: &CheckedSchema, enum_name: Option<&str>) -> Option<String> {
+    use based_sema::{EnumKind, EnumValue};
+    let en = schema.enum_(enum_name?)?;
+    Some(match en.kind {
+        EnumKind::Str => {
+            let vals: Vec<&str> = en
+                .variants
+                .iter()
+                .map(|v| match &v.value {
+                    EnumValue::Str(s) => s.as_str(),
+                    EnumValue::Int(_) => v.name.as_str(),
+                })
+                .collect();
+            format!("enum({})", vals.join(","))
+        }
+        EnumKind::Int => {
+            let vals: Vec<String> = en
+                .variants
+                .iter()
+                .map(|v| match &v.value {
+                    EnumValue::Int(n) => n.to_string(),
+                    EnumValue::Str(_) => "0".to_string(),
+                })
+                .collect();
+            format!("enum:int({})", vals.join(","))
+        }
+    })
+}
+
 /// A relation FK's neutral type: the target model's key type (default uuid).
 fn fk_type(schema: &CheckedSchema, target: &str) -> String {
     match schema
@@ -392,7 +432,8 @@ fn fk_type(schema: &CheckedSchema, target: &str) -> String {
 
 /// Render a `(default …)` value as a neutral literal for the snapshot. Dialect-neutral
 /// by construction: `now()` is the neutral `now()`, never `CURRENT_TIMESTAMP`.
-fn render_default(dv: &DefaultVal) -> String {
+fn render_default(dv: &DefaultVal, en: Option<&based_sema::REnum>) -> String {
+    use based_sema::EnumValue;
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => format!("\"{}\"", s.replace('"', "\\\"")),
         DefaultVal::Lit(Literal::Int(i)) => i.to_string(),
@@ -400,6 +441,13 @@ fn render_default(dv: &DefaultVal) -> String {
         DefaultVal::Lit(Literal::Bool(b)) => b.to_string(),
         DefaultVal::Lit(Literal::Null) => "null".to_string(),
         DefaultVal::Func(f) => format!("{}()", f.name.node),
+        // An enum default renders as its wire value — a quoted string for a string enum,
+        // a bare integer for an int enum — matching the DB column default.
+        DefaultVal::Variant(v) => match en.and_then(|e| e.wire_of(&v.node)) {
+            Some(EnumValue::Int(n)) => n.to_string(),
+            Some(EnumValue::Str(s)) => format!("\"{}\"", s.replace('"', "\\\"")),
+            None => format!("\"{}\"", v.node.replace('"', "\\\"")),
+        },
     }
 }
 

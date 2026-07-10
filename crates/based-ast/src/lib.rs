@@ -44,9 +44,42 @@ pub enum Decl {
     Model(Model),
     Shape(Shape),
     Scope(ScopeDecl),
+    Enum(EnumDecl),
     Query(Query),
     Mutation(Mutation),
     Filter(NamedFilter),
+}
+
+// ---------- Enums ----------------------------------------------------------
+
+/// `enum Name { pending, paid = "PAID", … }` — a closed set of named values, a
+/// first-class scalar type. The name (UpperCamel) shares the type-name namespace with
+/// models and shapes; the variants (lowercase snake) are its members. A field typed by
+/// an enum name is a scalar column (not a relation). The kind (string vs numeric) is
+/// inferred in sema from whether any variant carries an int value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    pub name: Ident,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+/// One `variant` of an enum: a bare identifier name, optionally with an explicit wire
+/// value (`paid = "PAID"` or `low = 0`). The name is always the identifier (it yields the
+/// Rust variant, go-to-def, and rename); `value` is the wire representation when written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: Ident,
+    /// The explicit `= STRING | INT` wire value, if written. Absent → a bare string
+    /// variant whose wire value is its own name.
+    pub value: Option<Spanned<VariantValue>>,
+}
+
+/// An explicit enum-variant wire value: a string (`= "PAID"`) or an integer (`= 0`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum VariantValue {
+    Str(String),
+    Int(i64),
 }
 
 // ---------- Scopes ---------------------------------------------------------
@@ -180,6 +213,9 @@ pub enum Modifier {
 pub enum DefaultVal {
     Lit(Literal),
     Func(FuncCall),
+    /// A bare identifier default (`default pending`) — an enum variant. Only valid on
+    /// an `enum`-typed column; sema checks it names a member of that enum.
+    Variant(Ident),
 }
 
 #[derive(Debug, Clone, PartialEq)]

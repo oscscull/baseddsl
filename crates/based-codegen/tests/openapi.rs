@@ -394,3 +394,50 @@ fn nested_to_many_shape_emits_array_of_object_schema() {
         .unwrap();
     assert!(required.iter().any(|v| v == "items"));
 }
+
+#[test]
+fn enum_field_is_a_string_schema_with_enum_list() {
+    let doc = gen(r#"
+        enum Status { pending, paid, shipped }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query orders() -> OrderRow[];
+    "#);
+    let status = &doc["components"]["schemas"]["OrderRow"]["properties"]["status"];
+    assert_eq!(status["type"], "string", "\n{doc:#}");
+    assert_eq!(
+        status["enum"],
+        serde_json::json!(["pending", "paid", "shipped"]),
+        "\n{doc:#}"
+    );
+}
+
+#[test]
+fn string_enum_with_explicit_value_lists_the_wire_values() {
+    let doc = gen(r#"
+        enum Status { pending, paid = "PAID" }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query orders() -> OrderRow[];
+    "#);
+    let status = &doc["components"]["schemas"]["OrderRow"]["properties"]["status"];
+    assert_eq!(status["type"], "string", "\n{doc:#}");
+    assert_eq!(
+        status["enum"],
+        serde_json::json!(["pending", "PAID"]),
+        "\n{doc:#}"
+    );
+}
+
+#[test]
+fn int_enum_field_is_an_integer_schema_with_int_enum_list() {
+    let doc = gen(r#"
+        enum Priority { low = 0, medium = 1, high = 2 }
+        Ticket { priority: Priority, title: text }
+        shape TicketRow from Ticket { priority, title }
+        query tickets() -> TicketRow[];
+    "#);
+    let priority = &doc["components"]["schemas"]["TicketRow"]["properties"]["priority"];
+    assert_eq!(priority["type"], "integer", "\n{doc:#}");
+    assert_eq!(priority["enum"], serde_json::json!([0, 1, 2]), "\n{doc:#}");
+}

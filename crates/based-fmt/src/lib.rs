@@ -120,6 +120,7 @@ impl Printer {
             Decl::Model(m) => self.model(m),
             Decl::Shape(s) => self.shape(s),
             Decl::Scope(s) => self.out.push(scope_decl(s)),
+            Decl::Enum(e) => self.out.push(enum_decl(e)),
             Decl::Query(q) => self.query(q),
             Decl::Mutation(m) => self.mutation(m),
             Decl::Filter(f) => self.out.push(named_filter(f)),
@@ -343,6 +344,7 @@ fn decl_span(d: &Decl) -> Span {
         Decl::Model(m) => m.span,
         Decl::Shape(s) => s.span,
         Decl::Scope(s) => s.span,
+        Decl::Enum(e) => e.span,
         Decl::Query(q) => q.span,
         Decl::Mutation(m) => m.span,
         Decl::Filter(f) => f.span,
@@ -380,6 +382,29 @@ fn deco_arg(a: &DecoArg) -> String {
         DecoArg::Ident(i) => i.node.clone(),
         DecoArg::Path(p) => path(p),
         DecoArg::Lit(l) => literal(l),
+    }
+}
+
+/// `enum Name { a, b = "B", c }` — one line, variants comma-joined (a closed value set
+/// reads as a compact list, unlike a model's field-per-line body). An explicit variant
+/// value (`= "PAID"` / `= 0`) is preserved; a bare variant stays bare.
+fn enum_decl(e: &EnumDecl) -> String {
+    format!(
+        "enum {} {{ {} }}",
+        e.name.node,
+        e.variants
+            .iter()
+            .map(enum_variant)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn enum_variant(v: &EnumVariant) -> String {
+    match v.value.as_ref().map(|s| &s.node) {
+        None => v.name.node.clone(),
+        Some(VariantValue::Str(s)) => format!("{} = \"{}\"", v.name.node, esc(s)),
+        Some(VariantValue::Int(n)) => format!("{} = {}", v.name.node, n),
     }
 }
 
@@ -756,6 +781,7 @@ fn default_val(d: &DefaultVal) -> String {
     match d {
         DefaultVal::Lit(l) => literal(l),
         DefaultVal::Func(f) => func_call(f),
+        DefaultVal::Variant(v) => v.node.clone(),
     }
 }
 

@@ -213,6 +213,16 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         }
     }
 
+    // Enum columns carry a CHECK constraint on their variants — the same DB-native form
+    // `based gen sql` emits, so a from-scratch migration matches the generated DDL.
+    for c in &t.columns {
+        if let Some(values) = enum_check_values(&c.ty) {
+            lines.push(crate::sql::enum_check_clause(
+                dialect, &t.name, &c.name, &values,
+            ));
+        }
+    }
+
     // MariaDB inlines indexes as table clauses; SQLite/Postgres trail them as statements.
     if dialect == Dialect::MariaDb {
         for i in &t.indexes {
@@ -378,6 +388,11 @@ fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
         "date" => Primitive::Date,
         "json" => Primitive::Json,
         "uuid" => Primitive::Uuid,
+        // An enum column is stored as text (`enum(v1,…)`) or an integer
+        // (`enum:int(0,…)`); its values ride a CHECK the create-table renderer adds
+        // (see `enum_check_values`).
+        b if b.starts_with("enum:int(") => Primitive::Int,
+        b if b.starts_with("enum(") => Primitive::Text,
         // A corrupt/hand-edited snapshot type; parse/verify guards this upstream.
         _ => Primitive::Text,
     };
@@ -402,6 +417,25 @@ fn render_neutral_default(d: &str, dialect: Dialect) -> String {
         // A numeric literal rides through verbatim.
         _ => d.to_string(),
     }
+}
+
+/// The CHECK value list of a neutral enum type, each already a SQL literal — `'pending'`
+/// for a string enum (`enum(v1,…)`), a bare `0` for an int enum (`enum:int(0,…)`) — or
+/// `None` for a non-enum column type. Inverse of `model::enum_neutral_type`.
+fn enum_check_values(neutral: &str) -> Option<Vec<String>> {
+    if let Some(inner) = neutral
+        .strip_prefix("enum:int(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        return Some(inner.split(',').map(|s| s.trim().to_string()).collect());
+    }
+    let inner = neutral.strip_prefix("enum(")?.strip_suffix(')')?;
+    Some(
+        inner
+            .split(',')
+            .map(|s| format!("'{}'", s.trim().replace('\'', "''")))
+            .collect(),
+    )
 }
 
 /// Quote a physical column list for the dialect, comma-joined.

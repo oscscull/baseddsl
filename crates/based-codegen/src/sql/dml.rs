@@ -53,7 +53,9 @@
 use std::collections::HashMap;
 
 use based_ast::*;
-use based_sema::{CheckedSchema, MemberKind, RModel, RQuery, ScopeInject, SoftDelete, SoftMode};
+use based_sema::{
+    CheckedSchema, EnumValue, MemberKind, REnum, RModel, RQuery, ScopeInject, SoftDelete, SoftMode,
+};
 
 use crate::Dialect;
 
@@ -1157,7 +1159,11 @@ impl<'a> Select<'a> {
             Predicate::Cmp { path, op, value } => {
                 let (alias, col) = self.resolve(path, model);
                 let lhs = self.qcol(&alias, &col);
-                let rhs = self.value(value, model);
+                // An enum column compares against a bare variant, which lowers to its
+                // wire string literal (not a column reference).
+                let rhs = self
+                    .enum_variant_lit(model, path, value)
+                    .unwrap_or_else(|| self.value(value, model));
                 match op {
                     // Collection ops don't fit plain infix: `in` needs a value list,
                     // `has` is JSON-array containment — MySQL's `value MEMBER OF(arr)`
@@ -1194,6 +1200,59 @@ impl<'a> Select<'a> {
                 "({})",
                 render_raw(self.dialect, raw, &self.root_alias, &model.table)
             ),
+        }
+    }
+
+    /// The enum a dotted path terminates on, when the terminal column is enum-typed
+    /// (read-only, no join materialized). Lets the caller render a variant RHS as its
+    /// wire value.
+    fn terminal_enum(&self, path: &Path, model: &RModel) -> Option<&REnum> {
+        let mut cur = model;
+        let n = path.segments.len();
+        for (i, seg) in path.segments.iter().enumerate() {
+            let mem = cur.member(&seg.node)?;
+            let last = i + 1 == n;
+            match &mem.kind {
+                MemberKind::Scalar {
+                    enum_name: Some(name),
+                    ..
+                } if last => return self.schema.enum_(name),
+                MemberKind::Scalar { .. } => return None,
+                MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
+                    if last {
+                        return None;
+                    }
+                    cur = self.schema.model(target)?;
+                }
+            }
+        }
+        None
+    }
+
+    /// If `path` names an enum column and `value` is a bare single-segment variant,
+    /// its wire value literal (`'paid'` or `2`); else `None` to fall back to value lowering.
+    fn enum_variant_lit(&self, model: &RModel, path: &Path, value: &Value) -> Option<String> {
+        let en = self.terminal_enum(path, model)?;
+        variant_lit(self.dialect, en, value)
+    }
+
+    /// If assigning enum column `col_field` a bare single-segment variant, its wire value
+    /// literal; else `None`.
+    pub(crate) fn enum_assign_lit(
+        &self,
+        model: &RModel,
+        col_field: &str,
+        value: &Value,
+    ) -> Option<String> {
+        match model.member(col_field).map(|m| &m.kind) {
+            Some(MemberKind::Scalar {
+                enum_name: Some(name),
+                ..
+            }) => {
+                let en = self.schema.enum_(name)?;
+                variant_lit(self.dialect, en, value)
+            }
+            _ => None,
         }
     }
 
@@ -1424,6 +1483,20 @@ fn dir(d: SortDir) -> &'static str {
     match d {
         SortDir::Asc => "ASC",
         SortDir::Desc => "DESC",
+    }
+}
+
+/// A bare single-segment variant value rendered as its wire value literal — a quoted
+/// string for a string enum, a bare integer for an int enum — or `None` when `value` is
+/// not a bare identifier (a `$param` binds normally; anything else falls through to
+/// ordinary value lowering) or names no variant of `en`.
+fn variant_lit(dialect: Dialect, en: &REnum, value: &Value) -> Option<String> {
+    match value {
+        Value::Path(vp) if vp.segments.len() == 1 => match en.wire_of(&vp.segments[0].node)? {
+            EnumValue::Str(s) => Some(render_lit(dialect, &Literal::Str(s.clone()))),
+            EnumValue::Int(n) => Some(n.to_string()),
+        },
+        _ => None,
     }
 }
 

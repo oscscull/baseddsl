@@ -637,3 +637,15 @@ fn or_scope_create_auto_sets_only_the_named_alternative() {
     assert!(!out.contains("`author_id`"), "\n{out}");
     assert!(!out.contains(":ctx_user"), "\n{out}");
 }
+
+#[test]
+fn enum_create_assign_lowers_to_a_string_literal() {
+    let src = r#"
+        enum Status { pending, paid }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        mutation place() -> OrderRow { create Order { status = paid, total = 1 } }
+    "#;
+    let sql = gen(src);
+    assert!(sql.contains("'paid'"), "\n{sql}");
+}
