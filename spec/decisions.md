@@ -3123,6 +3123,8 @@ client's Cargo.toml (the three `examples/*/Cargo.toml`). OpenAPI: decimal `{type
 float `{type: number, format: double}`.
 
 **Runtime carries a decimal as its wire string end-to-end — `rust_decimal` stays OUT of based-runtime.**
+*(Amended by the D84 spike: under sqlx the runtime gains `bigdecimal` — bind-side + MariaDB decode,
+exactness preserved; `rust_decimal` proved silently lossy past ~28 digits and stays out.)*
 `Family::of(Decimal)` = `Text` (binds as a string, no new `SqlValue` variant); `float` = `Float`. MariaDB
 returns `DECIMAL` as bytes → the exact string already. Postgres returns `numeric` in **binary** (a packed
 base-10000 digit array, not its text), so a new `pg_numeric` decoder (mirroring the D61 uuid/timestamp/jsonb
@@ -3248,3 +3250,59 @@ compatibility is validated by the same run.
 **Branch discipline (owner, 2026-07-10).** All Track N work lands on a single long-lived branch
 (`async-native`) — including this design — merged back to `main` only at demonstrated confidence:
 full gate + all three live suites + the examples green on the async core.
+
+**Spike findings (N1, 2026-07-10).** The spike (`based-runtime/tests/sqlx_spike.rs`; sqlx 0.9 as a
+dev-dependency, used strictly as executor — `query` + per-value binds; gated `docker-tests`, in the
+live gate as `make ci-live-sqlx`) ran every `SqlValue` family through the exact codegen column types
+on all three dialects. Per-dialect verdicts:
+
+- **MariaDB via sqlx's MySql driver: works, three codec notes.** Connection + DDL (native
+  `UUID`/`DATETIME`/`DECIMAL`/`JSON` + enum `CHECK`) + the string/i64/f64 binds all behave as with
+  the `mysql` crate. (1) Native `UUID` and `JSON` result columns arrive wire-flagged with the binary
+  charset — sqlx types them BINARY/BLOB and refuses a `String` decode; the codec reads raw bytes →
+  UTF-8 (the value is already the canonical text). (2) `DECIMAL` is text on the wire but sqlx only
+  surfaces it via a decimal type; `BigDecimal::to_plain_string()` re-renders the exact wire string
+  (`Display` E-notates small values: `1E-30`). (3) sqlx sets `CLIENT_FOUND_ROWS`: `rows_affected` on
+  a same-value UPDATE reports *matched* (1) where the `mysql` crate reports *changed* (0) — the
+  Postgres semantics; nothing in the engine branches on the count today. Last-insert-id is unused
+  (ids are app-generated).
+- **Postgres: the bind strategy must change; numeric decode keeps our decoder.** sqlx transmits
+  every parameter in **binary format** under a client-declared OID, so the current driver's bind
+  trick (send wire text, let the server coerce like a literal) dies twice over: a `String` bind is a
+  hard `42804` against a uuid/timestamptz/jsonb/numeric column, and an `unknown`-OID (705) text bind
+  is rejected `22P03` (the server resolves the parameter to the column's type, then expects that
+  type's *binary* form). **N1 binds native types** (`uuid::Uuid`/chrono/`serde_json::Value`/
+  `BigDecimal`), which needs the bind site to know the value's primitive: `SqlValue` grows typed
+  text-riding variants (uuid/timestamp/date/decimal — still carrying the wire string; parsing
+  happens only inside the Postgres driver impl). The planner has the primitive at every typed bind
+  site (the `Family::of(prim)` calls); the keyset cursor re-bind must carry the sort columns'
+  primitives too (the plan has them); a raw-SQL *untyped* param stays a text bind — a raw query
+  comparing one against a typed column writes the cast in its own SQL (escape hatch, explicit).
+  Everything else round-trips exact: uuid canonical string, timestamptz to the microsecond, date,
+  jsonb (value-exact; the text form is jsonb-normalized), bool/int/float/NULLs, and the `$n = 0`
+  keyset-guard shape takes an i64 bind (sqlx declares int8 — no width inference to fail).
+- **Decimal (the headline): neither sqlx decimal feature's *decode* yields the wire string on
+  Postgres; the hand-rolled `pg_numeric` decoder survives the recolor.** `rust_decimal` is
+  disqualified outright: at `decimal(38, 9)` it decodes without error and **silently drops** the
+  fractional digits beyond its 96-bit (~28-digit) capacity, on the Postgres binary wire and the
+  MariaDB text wire alike. `bigdecimal` decodes value-exact at all 38 digits but takes its scale
+  from the wire's base-10000 digit groups, not the column's display scale (`0.10` → `"0.1000"`).
+  The raw wire bytes, however, pass through sqlx untouched (`try_get_raw().as_bytes()`: header +
+  digits + display scale verified byte-exact), so N1 keeps `pg_numeric` decoding them to the exact
+  string. The mandated feature is **`bigdecimal`**, for the bind side (value-exact; the column's
+  typmod rescales storage) and the MariaDB decode (`to_plain_string`). SQLite `TEXT` round-trips the
+  string by construction. (Bounds check: `decimal(38, 38)` — max precision *and* max scale — is
+  accepted and exact on all three dialects; MariaDB has allowed scale past MySQL's 30-cap since
+  10.2, so D83's `s ≤ 38` bound is dialect-safe.)
+- **SQLite via sqlx's async driver: works.** File DB, every family exact (text-riding strings
+  verbatim, timestamp micros intact, bool as 0/1). Build notes: `libsqlite3-sys` is a cargo `links`
+  singleton, and sqlx ≥ 0.9 specifies it as a version *range* (`>=0.30.1, <0.38`) precisely so it
+  can share rusqlite 0.37's copy — sqlx 0.8 would force a rusqlite downgrade, so 0.9 is the floor
+  (it also raises the build toolchain to rustc ≥ 1.94; crate `rust-version` is unaffected).
+
+No finding invalidates the architecture above; the one trait-adjacent amendment is `SqlValue`
+gaining typed text-riding variants so the Postgres driver can bind native types. (Running the full
+gate also surfaced a `make check` sequencing bug, fixed in passing: the live suites reset per test
+at *start* and leave their last schema + migration ledger on the shared throwaway DB, while each
+example scenario expects an empty database — `check` now re-freshes the servers between the two
+phases, the isolation CI already gets from one service container per job.)

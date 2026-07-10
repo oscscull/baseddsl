@@ -75,3 +75,19 @@ based-parser.workspace = true
 # The embed example (`tests/embed.rs`) hosts a committed generated client, which
 # derives serde — the same dependency any consumer of `based gen client` pulls in.
 serde.workspace = true
+# The async executor/pool layer, dev-only: `tests/sqlx_spike.rs` proves the lowered
+# SQL's values round-trip through sqlx with codec fidelity on all three dialects.
+# Both decimal features on so the spike can compare their exactness head to head.
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "runtime-tokio",
+    "mysql",
+    "postgres",
+    "sqlite",
+    "uuid",
+    "chrono",
+    "json",
+    "rust_decimal",
+    "bigdecimal",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+chrono = "0.4"

@@ -38,8 +38,8 @@ POSTGRES_URL ?= postgres://postgres:based_test_pw@127.0.0.1:15432/based_test
 SQLITE_DB    ?= quickstart.db
 
 .PHONY: ci check check-fast ci-workspace ci-extension ci-image ci-live ci-live-mariadb \
-        ci-live-postgres ci-examples ci-example-sqlite ci-example-mariadb ci-example-postgres \
-        based-cli dev-db-up dev-db-down
+        ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite ci-example-mariadb \
+        ci-example-postgres based-cli dev-db-up dev-db-down
 
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
 ci: ci-workspace ci-extension
@@ -51,11 +51,18 @@ check-fast: ci-workspace
 ## (started here; left running for fast re-runs — `make dev-db-down` cleans up). Also refreshes
 ## target/debug/based-lsp — the VS Code extension launches it via a PATH symlink pointing there,
 ## so a stale binary means the editor silently runs old LSP code.
+## The servers are re-freshed between the live suites and the example scenarios: the live
+## suites reset per test *at start* and leave their last schema/ledger behind, while each
+## example expects an empty database — the same isolation CI gets from one service
+## container per job (.github/workflows/ci.yml).
 check: check-fast dev-db-up
 	$(CARGO) build -p based-lsp
 	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
 	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
 	$(MAKE) ci-live
+	$(MAKE) dev-db-up
+	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
+	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
 	$(MAKE) ci-examples
 	@echo "check: all gates green"
 
@@ -81,7 +88,7 @@ based-cli:
 	$(CARGO) build -p based-cli
 
 ## All live-DB proof (both dialects). Assumes both servers are up (see dev-db-up).
-ci-live: ci-live-mariadb ci-live-postgres
+ci-live: ci-live-mariadb ci-live-postgres ci-live-sqlx
 
 ## Live MariaDB: the integration suite + `based migrate apply` (E4), both against a PROVIDED
 ## server. `TEST_MARIADB_URL` makes the harness connect there instead of spinning a container
@@ -94,6 +101,13 @@ ci-live-mariadb:
 ci-live-postgres:
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test postgres_integration -- --test-threads=1 --nocapture
+
+## The sqlx codec-fidelity spike: the lowered SQL's values round-trip through sqlx on all
+## three dialects (MariaDB via its MySql driver, Postgres, SQLite on a temp file).
+ci-live-sqlx:
+	TEST_MARIADB_URL="$(MARIADB_URL)" TEST_POSTGRES_URL="$(POSTGRES_URL)" \
+	  $(CARGO) test -p based-runtime --features docker-tests \
+	  --test sqlx_spike -- --test-threads=1 --nocapture
 
 ## The three example scenarios: `based migrate apply` then `cargo run`, each end-to-end green.
 ## Each expects an empty DB (a fresh CI service container / throwaway); the SQLite one resets

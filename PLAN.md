@@ -369,10 +369,13 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
   cancellation composes via per-attempt `Tx` (no double-write window; idempotency keys unchanged).
   Full design, trait sketch, invariant table, de-risk spike scope: **D84**.
 - **N1. Native async execution core (the biggest cost; implements D84).**
-  - **First step — the D84 de-risk spike:** our lowered SQL through sqlx against the live suites,
-    proving per-dialect codec fidelity (uuid, timestamps, json, and D83's exact-decimal contract —
-    sqlx's `rust_decimal` decode replaces our `pg_numeric`; confirm the wire string stays exact) and
-    MariaDB-via-MySql-driver compatibility, before the bulk recolor.
+  - ✅ **First step — the D84 de-risk spike** (`tests/sqlx_spike.rs`; live gate `ci-live-sqlx`):
+    all three dialects codec-faithful through sqlx. Decimal feature = **`bigdecimal`**
+    (`rust_decimal` silently truncates past ~28 digits, disqualified; `pg_numeric` stays, decoding
+    sqlx's byte-exact raw numeric); Postgres binds must be **native-typed** — sqlx's all-binary
+    parameters kill the coerce-wire-text trick, so `SqlValue` grows typed text-riding variants;
+    MariaDB-via-MySql-driver confirmed (binary-charset uuid/json decode + `CLIENT_FOUND_ROWS`
+    affected-rows quirk noted). Full findings: D84 addendum.
   - Traits: the D84 shapes — `DbRead` (stream `fetch` + `execute`) / `Db` (`begin` → `Tx`) / `Tx`
     (`commit`, drop-guard) / async `Backend` (`async_trait`-style boxing accepted);
     `dispatch`/`run_query`/`run_mutation`/`migrate apply` recolor mechanically on top.

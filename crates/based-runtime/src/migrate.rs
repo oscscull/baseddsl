@@ -441,7 +441,7 @@ pub fn apply(
         .iter()
         .filter(|m| applied_ids.contains(m.id.as_str()) && m.number > keep_max)
         .collect();
-    rollback.sort_by(|a, b| b.number.cmp(&a.number));
+    rollback.sort_by_key(|m| std::cmp::Reverse(m.number));
     for m in rollback {
         let down = m
             .down_sql
