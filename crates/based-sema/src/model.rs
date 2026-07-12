@@ -44,6 +44,7 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
             span: f.name.span,
             kind: classify(f, enums),
             was: f.was.as_ref().map(|w| w.node.clone()),
+            sort: f.sort.clone().unwrap_or_default(),
         });
     }
 
@@ -64,6 +65,7 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
                     enum_name: None,
                 },
                 was: None,
+                sort: Vec::new(),
             },
         );
     }

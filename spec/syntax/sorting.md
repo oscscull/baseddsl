@@ -22,6 +22,12 @@ User {
 }
 ```
 
+## To-many nests
+A shape's to-many nest (`items { ... }`) is a traversal, so its array follows the same
+cascade minus the query tier: relation `@sort` > target model `@sort` > unspecified.
+Query `order` never reaches inside a nest — it orders the query's own rows. (Shapes still
+carry no sort; the order is a property of the traversed rows, declared on the data model.)
+
 ## Query override (most specific)
 ```
 query recent(user -> author) -> PostShape[] order (updated_at desc);

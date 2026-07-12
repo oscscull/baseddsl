@@ -491,11 +491,13 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     grammar changes** — the drift it found was worked-example/prose level and is fixed (commerce
     `UserRef` shape-name drift; pagination.md pre-grammar example forms); accepted-as-is list with
     rationale in D86.
-  - **N3a (prereq). Ordered to-many nests.** The ticket detail needs comments in `@sort` order;
-    D57 left JSON-aggregation order unspecified, but all three dialects now have an ordered
-    aggregate form (pg `json_agg(… ORDER BY …)`, MariaDB `JSON_ARRAYAGG(… ORDER BY …)`, SQLite
-    ≥ 3.44 aggregate `ORDER BY`) — honor the sort cascade inside the D57 subquery; own decision
-    entry; removes the documented caveat.
+  - ✅ **N3a (prereq). Ordered to-many nests (D87).** A nest's array now follows the sort
+    cascade for the traversal — relation `@sort` > child model `@sort` > unspecified — as an
+    ORDER BY *inside* the JSON aggregate on all three dialects (one `json_array_agg` seam;
+    subquery shape + single read path unchanged, so streams get it free). Zero new syntax
+    (field `@sort` already parsed + sema-checked; `RMember` now carries it into lowering).
+    Proven by per-dialect codegen assertions + live out-of-order seeds coming back sorted on
+    SQLite (normal gate), MariaDB, and Postgres (both tiers in one response each).
   - **N3b (prereq). Two seams.** (i) `guard` (Handle 3) parses but nothing invokes it — engine
     gains a registered-guard registry (host async fn over ctx+args; deny → 403; declared-but-
     unregistered fails loudly at engine build), invoked by dispatch on both doors. (ii) The typed

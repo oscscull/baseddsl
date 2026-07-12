@@ -120,12 +120,19 @@ impl Dialect {
     /// Aggregate a per-row JSON object `elem` into a JSON array — the value of a to-many
     /// nested shape edge (`items { … }`, L1). Coalesced to `[]` for an empty group, since
     /// MariaDB/Postgres aggregate a NULL over zero rows (SQLite's `json_group_array`
-    /// already yields `[]`, so the coalesce there is a harmless no-op).
-    pub fn json_array_agg(self, elem: &str) -> String {
+    /// already yields `[]`, so the coalesce there is a harmless no-op). `order_by`
+    /// (rendered `col dir, …` sort keys) rides *inside* the aggregate — all three
+    /// dialects support an ordered aggregate (SQLite ≥ 3.44, which the bundled build
+    /// exceeds) — so the array's element order is the child rows' sort order.
+    pub fn json_array_agg(self, elem: &str, order_by: Option<&str>) -> String {
+        let ordered = match order_by {
+            Some(o) => format!("{elem} ORDER BY {o}"),
+            None => elem.to_string(),
+        };
         match self {
-            Dialect::Sqlite => format!("json_group_array({elem})"),
-            Dialect::MariaDb => format!("COALESCE(JSON_ARRAYAGG({elem}), JSON_ARRAY())"),
-            Dialect::Postgres => format!("COALESCE(json_agg({elem}), '[]'::json)"),
+            Dialect::Sqlite => format!("json_group_array({ordered})"),
+            Dialect::MariaDb => format!("COALESCE(JSON_ARRAYAGG({ordered}), JSON_ARRAY())"),
+            Dialect::Postgres => format!("COALESCE(json_agg({ordered}), '[]'::json)"),
         }
     }
 }

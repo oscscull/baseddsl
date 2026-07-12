@@ -935,3 +935,62 @@ async fn stream_mid_pass_db_error_is_the_in_band_error_line_live() {
         assert!(line.get("row").is_some(), "lines: {lines:?}");
     }
 }
+
+/// A to-many nested array rides back in **sort-cascade order** against a live Postgres:
+/// children seeded out of order come back ordered by the child model's `@sort`
+/// (`comments`), and a relation `@sort` on the edge overrides the child model's own
+/// (`pins`). Proves Postgres's `json_agg(… ORDER BY …)` form executes for real.
+#[tokio::test]
+async fn nested_to_many_rows_ride_in_sort_cascade_order() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @sort(id asc)
+        Ticket {
+          id: text
+          subject: text
+          comments: Comment[]
+          pins: Pin[] @sort(rank desc)
+        }
+        @sort(pos asc)
+        Comment { id: text, ticket: Ticket, pos: int, body: text }
+        @sort(rank asc)
+        Pin { id: text, ticket: Ticket, rank: int, label: text }
+        shape TicketDetail from Ticket { subject, comments { body }, pins { label } }
+        query ticket_by_id(id) -> TicketDetail;
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    container
+        .exec_batch(
+            "INSERT INTO ticket (id, subject) VALUES ('t1', 'printer on fire');\n\
+             INSERT INTO comment (id, ticket_id, pos, body) VALUES \
+                ('c3', 't1', 3, 'third'), ('c1', 't1', 1, 'first'), ('c2', 't1', 2, 'second');\n\
+             INSERT INTO pin (id, ticket_id, rank, label) VALUES \
+                ('p1', 't1', 1, 'low'), ('p3', 't1', 3, 'top'), ('p2', 't1', 2, 'mid');",
+        )
+        .await;
+
+    let resp = call(
+        &c,
+        &router,
+        "POST",
+        "/q/ticket_by_id",
+        json!({ "id": "t1" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({
+            "subject": "printer on fire",
+            // child model `@sort(pos asc)` — the model tier of the cascade.
+            "comments": [{ "body": "first" }, { "body": "second" }, { "body": "third" }],
+            // relation `@sort(rank desc)` overrides Pin's model `@sort(rank asc)`.
+            "pins": [{ "label": "top" }, { "label": "mid" }, { "label": "low" }]
+        })
+    );
+}

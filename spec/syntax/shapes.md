@@ -54,4 +54,4 @@ to serve two consumers with different needs, split it into two shapes.
 A model may define `shape full { ... }` for the stereotyped complete view -> `-> full`.
 
 ## Rule
-No filtering inside a shape. Zero `where`. No sort either (sort is a row property — see sorting.md). Keeps shape/filter/sort orthogonal; one shape serves every query. Selects only the columns named (efficient).
+No filtering inside a shape. Zero `where`. No sort either (sort is a row property — see sorting.md): a to-many nest's array order comes from the sort cascade for that traversal (relation `@sort` > target model `@sort`). Keeps shape/filter/sort orthogonal; one shape serves every query. Selects only the columns named (efficient).

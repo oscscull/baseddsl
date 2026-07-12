@@ -47,8 +47,10 @@
 //! joined to `User`) never collides with the outer row. The element body recurses through
 //! [`Select::json_object_expr`] — scalars/reaches become `'key', value` pairs, a to-one
 //! nest a nested JSON object, a to-many nest a nested correlated subquery — so nesting
-//! composes to any depth. Array element order is unspecified (portable JSON aggregation
-//! offers no cross-dialect ordered form); callers treat the array as a set.
+//! composes to any depth. The array's element order follows the sort cascade for the
+//! traversal — the edge's relation `@sort`, else the child model's `@sort` — emitted as
+//! an ORDER BY inside the JSON aggregate (all three dialects support the ordered form);
+//! with neither declared the order stays unspecified.
 
 use std::collections::HashMap;
 
@@ -472,8 +474,8 @@ fn project_nest<'a>(
             &nested_out,
             cols,
         );
-    } else if let Some((child_model, via_fk)) = sel.to_many_edge(&field.node, model) {
-        let arr = sel.json_array_subquery(body, child_model, &via_fk, alias);
+    } else if let Some((child_model, via_fk, edge_sort)) = sel.to_many_edge(&field.node, model) {
+        let arr = sel.json_array_subquery(body, child_model, &via_fk, alias, edge_sort);
         let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
         cols.push(format!("{arr} AS {}", sel.q(&out)));
     }
@@ -874,12 +876,19 @@ impl<'a> Select<'a> {
     }
 
     /// A to-**many** relation edge `field` on `model` (an Inverse whose paired forward FK
-    /// is *not* unique — a genuine collection), as `(child_model, back_fk_column)`. `None`
-    /// for a scalar, a forward relation, or a to-one inverse (those are `enter_to_one`'s).
-    /// The back FK is the column on the child carrying the relation back to `model`
-    /// (`OrderItem.order` → `order_id`), used to correlate the aggregating subquery.
-    pub(crate) fn to_many_edge(&self, field: &str, model: &RModel) -> Option<(&'a RModel, String)> {
-        match &model.member(field)?.kind {
+    /// is *not* unique — a genuine collection), as `(child_model, back_fk_column,
+    /// edge_sort)`. `None` for a scalar, a forward relation, or a to-one inverse (those
+    /// are `enter_to_one`'s). The back FK is the column on the child carrying the
+    /// relation back to `model` (`OrderItem.order` → `order_id`), used to correlate the
+    /// aggregating subquery. `edge_sort` is the edge's own relation `@sort` (empty when
+    /// undeclared) — the traversal tier of the sort cascade ordering the nested array.
+    pub(crate) fn to_many_edge(
+        &self,
+        field: &str,
+        model: &'a RModel,
+    ) -> Option<(&'a RModel, String, &'a [SortTerm])> {
+        let member = model.member(field)?;
+        match &member.kind {
             MemberKind::Inverse { target, via } => {
                 let tmodel = self.schema.model(target)?;
                 if tmodel.is_unique(via) {
@@ -889,7 +898,7 @@ impl<'a> Select<'a> {
                     Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
                     _ => format!("{via}_id"),
                 };
-                Some((tmodel, via_fk))
+                Some((tmodel, via_fk, &member.sort))
             }
             _ => None,
         }
@@ -900,13 +909,17 @@ impl<'a> Select<'a> {
     /// `s<n>_<table>` root alias (distinct from `outer_alias`, so a self-referential edge
     /// works), the element body is projected as a per-dialect JSON object, and the
     /// subquery correlates the child's back FK to `outer_alias.id`, applying the child's
-    /// soft-delete tombstone + `@scope` exactly as a join would.
+    /// soft-delete tombstone + `@scope` exactly as a join would. The array's element
+    /// order follows the sort cascade for the traversal — the edge's relation `@sort`
+    /// (`edge_sort`), else the child model's `@sort` — as an ORDER BY *inside* the
+    /// aggregate; with neither declared the order stays unspecified.
     fn json_array_subquery(
         &mut self,
         body: &'a [ShapeField],
         child: &'a RModel,
         via_fk: &str,
         outer_alias: &str,
+        edge_sort: &[SortTerm],
     ) -> String {
         self.sub_counter += 1;
         let child_alias = format!("s{}_{}", self.sub_counter, child.table);
@@ -931,6 +944,22 @@ impl<'a> Select<'a> {
             sub_counter: self.sub_counter,
         };
         let elem = sub.json_object_expr(body, child, &child_alias, "");
+        // Sort cascade for the traversal: relation `@sort` on the edge beats the child
+        // model's `@sort`. Terms resolve against the child (dotted paths join inside
+        // the subquery's own scope).
+        let sort_terms: &[SortTerm] = if edge_sort.is_empty() {
+            &child.sort
+        } else {
+            edge_sort
+        };
+        let order_keys: Vec<String> = sort_terms
+            .iter()
+            .map(|t| {
+                let (a, col) = sub.resolve_from(&t.path, &child_alias, "", child);
+                format!("{} {}", sub.qcol(&a, &col), dir(t.dir))
+            })
+            .collect();
+        let order = (!order_keys.is_empty()).then(|| order_keys.join(", "));
         self.sub_counter = sub.sub_counter;
 
         let mut wheres = vec![format!(
@@ -947,7 +976,7 @@ impl<'a> Select<'a> {
 
         let mut sql = format!(
             "(SELECT {} FROM {} AS {}",
-            self.dialect.json_array_agg(&elem),
+            self.dialect.json_array_agg(&elem, order.as_deref()),
             self.q(&child.table),
             self.q(&child_alias)
         );
@@ -1018,8 +1047,9 @@ impl<'a> Select<'a> {
         {
             let nested = self.json_object_expr(body, child_model, &child_alias, &child_prefix);
             pairs.push(format!("'{}', {}", field.node, nested));
-        } else if let Some((child_model, via_fk)) = self.to_many_edge(&field.node, model) {
-            let arr = self.json_array_subquery(body, child_model, &via_fk, alias);
+        } else if let Some((child_model, via_fk, edge_sort)) = self.to_many_edge(&field.node, model)
+        {
+            let arr = self.json_array_subquery(body, child_model, &via_fk, alias, edge_sort);
             pairs.push(format!("'{}', {}", field.node, arr));
         }
     }

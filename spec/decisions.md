@@ -36,7 +36,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
   D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing),
   D79 (named nested projection: `field -> Shape` references a shape decl — same SQL as inline,
-  one nominal client/OpenAPI type; E0132/E0133/E0134)
+  one nominal client/OpenAPI type; E0132/E0133/E0134), D87 (ordered to-many nests: relation
+  `@sort` > child model `@sort` as ORDER BY inside the JSON aggregate, all three dialects —
+  supersedes D57's order-unspecified caveat)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres), D85 (streaming is
   the non-paginating full pass; `page` on a stream query is E0201)
@@ -3637,3 +3639,42 @@ spelling.)
 **Slice plan** (one iteration each, PLAN.md N3 is the tracker): N3a ordered nests → N3b guard +
 idempotency-key seams → N3c schema/migrations/client → N3d the axum service + live smoke gate →
 N3e README + final appeal re-audit on the real artifact + CI wiring.
+
+## D87 — ordered to-many nests: the sort cascade reaches inside the JSON aggregate (Track N3a)
+
+Supersedes D57's "array element order is unspecified" caveat, which D86 graduated to a build
+prerequisite (the helpdesk ticket detail needs comments in chronological order). A to-many nest
+(`items { … }`, `comments -> CommentRow`) is a *traversal*, so its array order follows the
+existing sort cascade for the rows reached that way — **relation `@sort` on the edge > the child
+model's `@sort` > unspecified** — with no new syntax: both tiers already parse (field-level
+`@sort` was in the grammar and sema-resolved against the target model; only lowering ignored it).
+Governed by sorting.md ("sort is a property of rows, not projection") + principle 2.
+
+- **Semantics.** The nested array is the child rows as the traversal's cascade orders them. The
+  query tier never reaches inside a nest — a query's `order (…)` orders *its own* rows; shapes
+  still carry no sort (shapes.md rule unchanged). With no sort at either tier the array remains
+  an unordered set exactly as under D57 — omission keeps its one safe meaning, and nothing
+  silently invents an order. No tiebreaker is appended inside a nest (mirrors a non-paginated
+  `list`): ties order per the database, ordered keys deterministically.
+- **Lowering: ORDER BY inside the aggregate, one seam.** `Dialect::json_array_agg` takes the
+  rendered sort keys and places them inside the aggregate call — SQLite
+  `json_group_array(elem ORDER BY …)` (aggregate ORDER BY, SQLite ≥ 3.44; the bundled build is
+  3.50.x), MariaDB `COALESCE(JSON_ARRAYAGG(elem ORDER BY …), JSON_ARRAY())` (10.5+; the live
+  suite runs 11.4), Postgres `COALESCE(json_agg(elem ORDER BY …), '[]'::json)`. The correlated
+  subquery itself is unchanged, so the D57 shape (never multiplies outer rows, composes with
+  pagination) and the D84 single read path hold — `get`/`list`/re-select/`-> stream` all get
+  ordered nests from the one lowering. Sort keys resolve against the child inside the subquery's
+  own join scope (`resolve_from` from the `s<n>_` alias), so a dotted sort path joins inside the
+  subquery, and nested to-many-in-to-many nests each carry their own ORDER BY.
+- **IR.** `RMember` now carries the field's relation `@sort` terms (`sort: Vec<SortTerm>`, empty
+  when undeclared) — sema already checked them against the target model; the checked schema just
+  never exposed them. `to_many_edge` hands the edge's terms to the subquery builder, which falls
+  back to `child.sort`.
+- **Verified.** Codegen: per-dialect ORDER BY-inside-aggregate assertions, the relation-beats-model
+  override, and the no-sort-at-any-tier form staying unordered. Live: children seeded out of
+  sort-key order come back ordered on real SQLite (in the normal gate) and on the live MariaDB +
+  Postgres suites — one test each proving the model tier (`comments` by `@sort(pos asc)`) and the
+  relation-override tier (`pins: Pin[] @sort(rank desc)` beating Pin's own `asc`) in one response.
+- **Deferred.** A per-nest sort override spelling (ordering one *use* of a traversal differently)
+  — the helpdesk design needs only the two declaration tiers; adding a third, projection-side
+  spelling would break "sort is a row property" for no shown need.

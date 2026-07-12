@@ -883,6 +883,70 @@ async fn nested_self_referential_to_many_returns_json_array() {
     assert_eq!(leaf.body, json!({ "name": "Bob", "invited_users": [] }));
 }
 
+/// A to-many nested array rides back in **sort-cascade order**, proven live: children
+/// seeded out of order come back ordered by the child model's `@sort` (`comments`), and
+/// a relation `@sort` on the edge overrides the child model's own (`pins`). The ORDER BY
+/// lives inside the JSON aggregate, so the outer query's shape is untouched.
+#[tokio::test]
+async fn nested_to_many_rows_ride_in_sort_cascade_order() {
+    let c = compile_sqlite(
+        r#"
+        @sort(id asc)
+        Ticket {
+          subject: text
+          comments: Comment[]
+          pins: Pin[] @sort(rank desc)
+        }
+        @sort(pos asc)
+        Comment { ticket: Ticket, pos: int, body: text }
+        @sort(rank asc)
+        Pin { ticket: Ticket, rank: int, label: text }
+        shape TicketDetail from Ticket { subject, comments { body }, pins { label } }
+        query ticket_by_id(id) -> TicketDetail;
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `ticket` (`id`, `subject`) VALUES ('t1', 'printer on fire');
+            -- seeded out of `pos` order: the array order must come from the sort, not insertion.
+            INSERT INTO `comment` (`id`, `ticket_id`, `pos`, `body`) VALUES
+                ('c3', 't1', 3, 'third'), ('c1', 't1', 1, 'first'), ('c2', 't1', 2, 'second');
+            INSERT INTO `pin` (`id`, `ticket_id`, `rank`, `label`) VALUES
+                ('p1', 't1', 1, 'low'), ('p3', 't1', 3, 'top'), ('p2', 't1', 2, 'mid');
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/ticket_by_id",
+        json!({ "id": "t1" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({
+            "subject": "printer on fire",
+            // child model `@sort(pos asc)` — the model tier of the cascade.
+            "comments": [{ "body": "first" }, { "body": "second" }, { "body": "third" }],
+            // relation `@sort(rank desc)` overrides Pin's model `@sort(rank asc)`.
+            "pins": [{ "label": "top" }, { "label": "mid" }, { "label": "low" }]
+        })
+    );
+}
+
 /// A **named-shape** nest (`placed_by -> UserRef`, `items -> ItemRow`) returns the same
 /// nested JSON an inline nest does, end-to-end against a real engine: the reference is a
 /// pure body expansion (same SQL, same `nest_row`/array reassembly), the payoff being the

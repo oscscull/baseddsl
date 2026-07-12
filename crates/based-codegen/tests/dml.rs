@@ -571,9 +571,10 @@ fn nested_to_many_aggregates_into_a_json_array_column() {
         query order_by_id(id) -> OrderCard;
         "#);
     assert!(ddl.contains("`order`.`total` AS `total`"), "\n{ddl}");
-    // MariaDB JSON aggregation, coalesced to an empty array for a childless parent.
+    // MariaDB JSON aggregation, ordered by the child model's `@sort` inside the
+    // aggregate, coalesced to an empty array for a childless parent.
     assert!(
-        ddl.contains("COALESCE(JSON_ARRAYAGG(JSON_OBJECT('quantity', `s1_order_item`.`quantity`)), JSON_ARRAY())"),
+        ddl.contains("COALESCE(JSON_ARRAYAGG(JSON_OBJECT('quantity', `s1_order_item`.`quantity`) ORDER BY `s1_order_item`.`id` ASC), JSON_ARRAY())"),
         "\n{ddl}"
     );
     // correlated subquery over a distinctly-aliased child + the tombstone, aliased `items[]`.
@@ -606,6 +607,66 @@ fn nested_self_referential_to_many_aliases_child_distinctly() {
 }
 
 #[test]
+fn nested_to_many_relation_sort_overrides_child_model_sort() {
+    // The traversal tier of the sort cascade: the edge's relation `@sort` (rank desc)
+    // beats the child model's own `@sort` (id asc) inside the aggregate's ORDER BY.
+    let ddl = gen(r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] @sort(rank desc) }
+        @sort(id asc)
+        OrderItem { order: Order, rank: int, sku: text }
+        shape OrderCard from Order { total, items { sku } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        ddl.contains(
+            "JSON_OBJECT('sku', `s1_order_item`.`sku`) ORDER BY `s1_order_item`.`rank` DESC)"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn nested_to_many_without_any_sort_stays_unordered() {
+    // No relation `@sort`, no child model `@sort` → no ORDER BY inside the aggregate;
+    // the array stays an unordered set (as before).
+    let ddl = gen(r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        OrderItem { order: Order, sku: text }
+        shape OrderCard from Order { total, items { sku } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        ddl.contains(
+            "COALESCE(JSON_ARRAYAGG(JSON_OBJECT('sku', `s1_order_item`.`sku`)), JSON_ARRAY())"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn sqlite_nested_to_many_orders_inside_json_group_array() {
+    // SQLite's aggregate ORDER BY form (≥ 3.44): the sort rides inside
+    // `json_group_array`, same cascade as the other dialects.
+    let sql = gen_for(
+        r#"
+        @sort(id asc)
+        Order { total: int, items: OrderItem[] }
+        @sort(rank desc)
+        OrderItem { order: Order, rank: int, sku: text }
+        shape OrderCard from Order { total, items { sku } }
+        query order_by_id(id) -> OrderCard;
+        "#,
+        Dialect::Sqlite,
+    );
+    assert!(
+        sql.contains("json_group_array(json_object('sku', `s1_order_item`.`sku`) ORDER BY `s1_order_item`.`rank` DESC)"),
+        "\n{sql}"
+    );
+}
+
+#[test]
 fn pg_nested_to_many_uses_json_agg_and_double_quotes() {
     // Postgres uses `json_agg`/`json_build_object` + `'[]'::json` coalesce, double-quoted.
     let sql = gen_pg(
@@ -619,7 +680,7 @@ fn pg_nested_to_many_uses_json_agg_and_double_quotes() {
         "#,
     );
     assert!(
-        sql.contains("COALESCE(json_agg(json_build_object('quantity', \"s1_order_item\".\"quantity\")), '[]'::json)"),
+        sql.contains("COALESCE(json_agg(json_build_object('quantity', \"s1_order_item\".\"quantity\") ORDER BY \"s1_order_item\".\"id\" ASC), '[]'::json)"),
         "\n{sql}"
     );
     assert!(sql.contains("AS \"items[]\""), "\n{sql}");

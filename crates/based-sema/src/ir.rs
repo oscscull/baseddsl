@@ -364,6 +364,10 @@ pub struct RMember {
     /// `rename column` step in the migration diff. `None` for an
     /// un-renamed field. Transient: removed once the rename migration is captured.
     pub was: Option<String>,
+    /// Relation `@sort` — orders the target's rows when reached *via this edge*
+    /// (most visibly, a to-many nest's array). Overrides the target model's own
+    /// `@sort` for that traversal; empty when undeclared (fall back to the model's).
+    pub sort: Vec<SortTerm>,
 }
 
 #[derive(Debug, Clone)]
