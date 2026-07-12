@@ -399,9 +399,17 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     Landing the gate surfaced + fixed two real recolor bugs (D84 implementation notes): the drain
     window (`/readyz` must observably 503 before the axum listener stops accepting) and the keyset
     `id` tiebreaker binding as uuid for a model that declares `id: text`.
-  - **Cancel-safety acceptance gate (I2), remaining:** drop a mutation future at every await point;
-    assert rollback/discard, never a pooled open-tx connection (the typestate + a live SQLite
-    dropped-tx test exist; the systematic every-await-point suite does not yet).
+  - ✅ **Cancel-safety acceptance gate (I2) shipped** (`tests/cancel_safety.rs`; runs in
+    `check-fast`). A gate wrapper numbers every driver-seam op on the mutation path (checkout,
+    begin, each execute, the re-select fetch, commit) and parks the future at each — once just
+    *before* the op, once just *after* it completes; the test drops it there against a live
+    file-backed SQLite (single-connection pool) and asserts: all-or-nothing row state (writes
+    survive only a drop after the completed commit — in full), the pooled connection is in
+    autocommit (explicit `BEGIN IMMEDIATE` probe), and the same pool serves the next mutation
+    green. Await points *inside* one driver call are sqlx's own cancel-safety (delegated,
+    principle 7). The gate caught + fixed a real bug: a cancelled **keyed** mutation stranded its
+    idempotency claim `InFlight` forever (every retry → 409 Conflict); `run_mutation` now holds
+    the claim in an abandon-on-drop guard, disarmed only once the response is recorded (D84 notes).
   - **BYO-pool seam (design-partner requirement, concrete), remaining:** a `Backend` constructor
     over a caller's existing `sqlx::Pool` (per dialect), sharing the codec path with our own
     backends; proven with a sqlx-pool-backed impl in a test or example. The router constructors are

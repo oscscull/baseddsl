@@ -305,18 +305,42 @@ pub async fn run_mutation(
         KeyState::InFlight => Err(RunError::Conflict(key.clone())),
         // Same key, *different* payload: reject — replaying would answer the wrong request.
         KeyState::Mismatch => Err(RunError::KeyReuse(key.clone())),
-        // Fresh: we hold the claim. Run the write, then record its response — or release
-        // the claim on failure so a later retry (same key) may try again.
-        KeyState::Fresh => match apply(backend, shard_key, &plan).await {
-            Ok(response) => {
-                store.record(&req.callable, key, response.clone());
-                Ok(response)
-            }
-            Err(e) => {
-                store.abandon(&req.callable, key);
-                Err(e.into())
-            }
-        },
+        // Fresh: we hold the claim. Run the write, then record its response. The guard
+        // releases the claim on any exit that records nothing — a write failure, or the
+        // caller dropping this future mid-write (cancellation) — so a later retry (same
+        // key) may try again instead of hitting a stranded in-flight claim forever.
+        KeyState::Fresh => {
+            let mut claim = Claim {
+                store,
+                callable: &req.callable,
+                key,
+                armed: true,
+            };
+            let response = apply(backend, shard_key, &plan).await?;
+            claim.armed = false;
+            store.record(&req.callable, key, response.clone());
+            Ok(response)
+        }
+    }
+}
+
+/// An armed idempotency claim: dropped without being disarmed (write failure, or the
+/// mutation future cancelled at an await point), it releases the key so a retry may run.
+/// A drop while the commit itself is in flight has an unknown outcome; releasing there
+/// matches the existing failed-commit semantics — a durable store that resolves the
+/// claim atomically with the transaction is the deferred multi-instance answer.
+struct Claim<'a> {
+    store: &'a dyn IdempotencyStore,
+    callable: &'a str,
+    key: &'a str,
+    armed: bool,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.store.abandon(self.callable, self.key);
+        }
     }
 }
 

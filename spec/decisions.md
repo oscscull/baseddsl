@@ -3341,3 +3341,22 @@ phases, the isolation CI already gets from one service container per job.)
   tiebreaker's primitive from the model's `id` member, falling back to `Primitive::Id` for the
   implicit column. Caught by the live Postgres keyset suites — invisible to the old
   coerce-wire-text driver, which is exactly the bind-typing risk the N1 spike flagged.
+- *The I2 acceptance gate, as built (`tests/cancel_safety.rs`).* "Every await point" is realized
+  at the driver seam: the mutation path's await points are exactly its driver-seam calls
+  (checkout, begin, each execute, the re-select fetch, commit), so a gate wrapper over the live
+  SQLite backend numbers each call and parks the future there — once just before the op, once
+  just after it completes (effect happened, result withheld) — and the test drops it at every
+  such point. Await points *inside* one driver call are sqlx's cancel-safety, reused per
+  principle 7, not re-proven. Invariants asserted per drop on the same single-connection pool:
+  all-or-nothing row state (writes survive only a drop after the completed commit), the recycled
+  connection is in autocommit (an explicit `BEGIN IMMEDIATE` probe — a leaked open tx fails it),
+  and the pool serves the next mutation green. File-backed SQLite on purpose: the invariant
+  permits recycle *or* discard of the cancelled connection, and the data must survive either.
+- *Cancellation must release an idempotency claim (found by the I2 gate).* `run_mutation` only
+  `abandon`ed a claimed key on the write's `Err` path; a caller dropping the future mid-write
+  left the key `InFlight` forever, turning every retry into a 409 Conflict. The claim now lives
+  in an abandon-on-drop guard, disarmed only once the response is recorded — so cancellation at
+  any await point frees the key for the retry. A drop while the commit itself is in flight has
+  an unknown outcome; releasing there matches the existing failed-commit semantics for a
+  non-durable store (the durable store that resolves the claim atomically with the transaction
+  remains the deferred multi-instance item).
