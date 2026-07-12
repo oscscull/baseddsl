@@ -38,7 +38,12 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D79 (named nested projection: `field -> Shape` references a shape decl — same SQL as inline,
   one nominal client/OpenAPI type; E0132/E0133/E0134)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
-  opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres)
+  opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres), D85 (streaming is
+  the non-paginating full pass; `page` on a stream query is E0201)
+- **Streaming reads** — D85 (Track N2 design: `-> stream Shape` signature form, NDJSON wire with a
+  mandatory terminal `done`/`error` line + truncation-is-failure contract, same-named
+  `Stream`-returning client method with two-layer `Result`, drop = cancel, per-row nest
+  materialization; E0200/E0201/E0202)
 - **Client codegen** — D13 (typed Rust client), D30 (typed per-callable `$ctx` in the client), D62
   (emitted in-process embedded bridge `client::embedded(&engine)`, opt-in via `ClientOptions`; inner
   `#![allow]` wart fixed), D63 (`based gen client --embedded` CLI flag), D70 (typed ids: per-entity
@@ -46,7 +51,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D71 (production-grade errors: structured `ClientError` + `std::error::Error`/`Display` on runtime errors),
   D73 (typed `Cursor` newtype in the paginated surface: single opaque `#[serde(transparent)]` type,
   `from_raw` escape, no blanket `From<String>`), D79 (a `field -> Shape` nest emits the named shape's
-  struct/schema instead of a per-parent anonymous type)
+  struct/schema instead of a per-parent anonymous type), D85 (a `-> stream` query's method returns a
+  typed row `Stream`; `Transport` gains a streaming call)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
@@ -3376,3 +3382,87 @@ phases, the isolation CI already gets from one service container per job.)
   (`byo_sqlx_pool_backs_the_engine`: the app's own sqlx queries and the engine's joined
   scoped read + transactional mutation interleave on one pool) plus a SQLite unit twin
   (write-through visibility both directions on a single pinned connection). This closes N1.
+
+## D85 — streaming reads: `-> stream` signature, NDJSON wire, `Stream` client method (Track N2 — design)
+
+**Context.** N1 made the read path stream-first by construction (D84 decision 3: `fetch`
+returns a sqlx-backed row stream on all three dialects; the one-shot response is a
+`collect()` at dispatch). N2 surfaces that stream to the user — the design partner's
+immediately-wanted feature. This entry is the N2 spec gate; the userland contract lives in
+`spec/syntax/streaming.md`, this records the choices and why.
+
+**1. Opt-in is a signature return form: `-> stream Shape`.** Streaming changes the
+client-facing contract — the generated method returns a `Stream`, the wire body is NDJSON —
+and the signature is where the contract lives (queries.md: "the signature is what the
+client surface is generated from"). So it is spelled as the third return-cardinality,
+alongside `-> Shape` / `-> Shape[]`; grammar: `ret_type = 'stream' type_ref | type_ref
+[ '[]' ]`, `stream` contextual (return-type position only). Rejected alternatives:
+- *a decorator* (`@stream`) — decorators mark schema/behavioral roles; this is the return
+  contract itself, and burying a type change in a decorator splits the contract across two
+  places (principle 4).
+- *a size threshold* — a contract that flips on data volume is consequential-by-omission
+  (principle 2) and makes the generated return type undecidable at codegen time.
+- *a caller-side choice* — closed RPC (calling.md): one signature = one method = one wire
+  shape; a per-call flag forks the envelope and the generated types. A query wanted both
+  ways is two declared queries (one source of truth per contract).
+No `[]` after the shape (`stream` already means many — writing both would double-encode
+cardinality, and `stream X[]` simply does not parse). Body verb stays `list` (a stream is
+a list delivered incrementally; the contract/instruction split of queries.md is preserved);
+`get` on a stream signature is **E0200**. `page` on a stream query is **E0201** (a page is
+bounded random access + a re-entry cursor; a stream is one unbounded forward pass — the
+envelopes contradict; keyset remains the UI answer, streaming the export answer). A
+mutation return never streams — **E0202**. Everything else composes unchanged: filters,
+param bindings, named filters, the full sort cascade + nondeterministic-order lint, index
+lint / `unindexed`, shapes (including named-shape nests).
+
+**2. Per-row nesting: materialize within the row.** Each streamed item is exactly one
+element of what the `[]` form's `rows` array would be — the D57 correlated-subquery JSON
+aggregation already delivers a to-many nest as one column *of its row*, so per-row
+materialization is what the SQL does naturally; no new lowering. Consequence, spec'd
+plainly: streaming bounds the number of rows held at once (one), not the width of a row —
+an unbounded to-many child still buffers per row, and the mitigation is a trimmed shape
+(no engine-imposed nest limit; principle 5: the compiler cannot know the caller's memory
+budget, and a silent truncation would be worse than the buffer).
+
+**3. Wire = NDJSON with a mandatory terminal line, not a chunked JSON array.** Same route
+(`POST /q/<name>`), `200` + `Content-Type: application/x-ndjson`, each line a single-key
+envelope: `{"row":{…}}` per row, then exactly one terminal `{"done":{"rows":N}}` (success)
+or `{"error":{code,message}}` (mid-stream failure, same envelope as the non-streaming
+error body — D71's single code registry). The status line is spent once the body starts,
+so the terminal line is the only honest place for a late DB error — and **a body that ends
+without a terminal line is defined as truncation** (client must report a transport error,
+never completion). This is why NDJSON wins: lines parse standalone (any JSON parser,
+`curl | jq`, LLM tooling), and it has an in-band place for the error/success signal — a
+chunked JSON array needs an incremental parser and a truncated array is indistinguishable
+from a mid-stream abort. Envelope-per-line (not bare row objects) because a bare shaped row
+could collide with any sentinel key a shape might legitimately project. Pre-body failures
+(unknown query, bad args, missing/bad `$ctx`, scope rejection) keep real HTTP statuses —
+the server validates and plans before emitting the first byte. `done.rows` doubles as an
+integrity checksum for tooling.
+
+**4. Client surface: same method name, two-layer `Result`.** One signature = one method,
+so no `_stream` suffix (there is no non-stream sibling to collide with). Shape:
+`async fn name(input, ctx) -> Result<RowStream<Shape>, ClientError>` where the stream
+yields `Result<Shape, ClientError>` per item — outer `Err` = the call never started
+(transport / pre-body rejection), per-item `Err` = the in-band `error` line (kind `Api`,
+the server's stable code) or truncation (kind `Transport`); after an `Err` item the stream
+is finished. **Drop = cancel**: dropping the stream abandons the read and releases the
+connection — safe by D84 (reads hold no tx; sqlx owns mid-protocol cleanup). The generated
+`Transport` trait gains a streaming call beside `call` (emitted with the module, so the
+orphan-rule story of D62 is unchanged); the HTTP transport parses NDJSON lines, the
+`Embedded` transport consumes the engine's row stream in-process (same typed items, no
+socket, no NDJSON round-trip). Generated client code is user-side async and may use
+futures/tokio types — the D84 coloring boundary constrains the *compiler* crates, which
+only emit this code as text.
+
+**5. Nothing bypassed, by construction.** A stream query is the same lowered SQL through
+the same single read path (D84 I4) — scope acknowledgement (E0182/E0185) applies to stream
+signatures identically, soft-delete injection is in the SQL itself, `$ctx` validation
+happens before the first row. There is no second execution path to audit.
+
+**Deferred to the implementation slices (tracked in PLAN.md N2):** the runtime streaming
+dispatch surface (a public engine method yielding shaped rows + the axum NDJSON body with
+drain/cancel behavior), the generated client stream method + `Transport` extension +
+embedded bridge, OpenAPI emitter update, parser/sema for `stream` + E0200/E0201/E0202,
+fmt/LSP awareness, and the acceptance gates (mid-stream error line observed live;
+drop-mid-stream releases the connection; truncation → transport error).

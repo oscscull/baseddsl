@@ -37,6 +37,12 @@ A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque curs
 
 The cursor is a typed `Cursor` on the client surface — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
 
+## Streaming envelope
+A `-> stream` query keeps its one route but answers with an NDJSON body, and its client
+method returns a `Stream` of typed rows instead of a `Vec` (the `Transport` trait carries a
+streaming call beside `call`; the embedded transport yields the engine's row stream
+in-process). Wire framing, mid-stream error contract, cancellation: streaming.md.
+
 ## Transport + the embedded bridge (D62)
 The generated `Client<T>` is generic over a `Transport` trait the module *defines itself* (post typed input + typed `$ctx` to a route, decode the reply). Both the trait's `call` and every client method are `async` — a transport awaits its round-trip (an HTTP client's socket, or the in-process engine's execution). A wire/HTTP transport is the caller's; the module carries no HTTP stack.
 

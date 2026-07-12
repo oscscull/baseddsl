@@ -57,6 +57,10 @@ Each clause's argument is bounded by `()`, same as field modifiers. Statement en
 - Body verb `get`/`list` = engine instruction.
 Contract/implementation split, not redundancy.
 
+A third signature form, `-> stream OrderCard`, is the incremental many-contract — rows
+delivered one at a time (exports, large scans). Body verb is still `list`; wire + client
+contract in streaming.md.
+
 ## Scope acknowledgement (`scoped` / `unscoped`)
 If a query's target model is in a scope (`@scope Name`, auth.md Handle 2 / D46), the signature **must**
 say so — `scoped Name` to accept the standing filter, or `unscoped("reason")` to opt out. Writing

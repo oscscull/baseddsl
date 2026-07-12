@@ -424,11 +424,22 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     pool) plus a SQLite unit twin.
   - Gate held throughout: full workspace suite + fmt + clippy + all three live-DB suites green.
 - **N2. Streaming reads (claims N1's payoff immediately).** The driver seam already streams —
-  `fetch` returns a sqlx-backed row stream on all three dialects (D84 decision 3); N2 surfaces it
-  through a streaming read path → an axum streaming body on the wire (NDJSON or chunked JSON
-  array) and a `Stream`-returning generated-client method. Spec-first: how a query opts in (or a size threshold), and what nesting
-  means per streamed row (to-many sub-arrays still materialize per-row). Keyset pagination stays the
-  random-access answer; streaming is the export/large-scan answer.
+  `fetch` returns a sqlx-backed row stream on all three dialects (D84 decision 3); N2 surfaces it.
+  - ✅ **Spec/design slice (D85, `spec/syntax/streaming.md`).** Opt-in is the signature return form
+    `-> stream Shape` (grammar extended; contract lives where the client surface is generated from);
+    wire = NDJSON envelope-per-line with a mandatory terminal `done`/`error` line (no terminal line
+    = truncation = transport error; pre-body failures keep real statuses); client = same-named
+    method returning `Result<RowStream<Shape>, ClientError>` with per-item `Result`, drop = cancel;
+    `page` forbidden (E0201), `get`/mutations can't stream (E0200/E0202), everything else (filters,
+    sorts, shapes, scope, soft-delete, index lint) composes unchanged on the single read path.
+  - Remaining implementation slices:
+    - Parser/sema/fmt for `stream` ret form + E0200/E0201/E0202; LSP surfaces it; conformance goldens.
+    - Runtime streaming dispatch: a public engine surface yielding shaped rows off the existing
+      `fetch` stream + the axum NDJSON body (terminal-line framing, drain/cancel behavior).
+    - Generated client: `Transport` streaming call + HTTP NDJSON parsing + embedded bridge over the
+      engine's row stream; OpenAPI emitter for the NDJSON response.
+    - Acceptance gates: mid-stream DB error observed as the in-band `error` line live; truncation →
+      transport error; drop-mid-stream releases the connection (extends the I2 cancel gate).
 - **N3. Flagship axum example + syntax appeal pass (the re-pitch artifact).** A nontrivial
   `examples/axum-…` service — multiple routes, auth-derived `$ctx`, scoped multi-tenancy, a streaming
   endpoint, migrations, the typed async client end-to-end — that reads like the app a workplace backend

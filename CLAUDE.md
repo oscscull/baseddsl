@@ -33,6 +33,7 @@ Spec file map:
 - `spec/syntax/shapes.md` — return projections
 - `spec/syntax/sorting.md` — default sorts + override cascade
 - `spec/syntax/pagination.md` — keyset/offset
+- `spec/syntax/streaming.md` — `-> stream` queries: NDJSON wire + `Stream` client method
 - `spec/syntax/indexing.md` — index decl + lint
 - `spec/syntax/raw.md` — raw SQL escape hatch
 - `spec/syntax/migrations.md` — migration generation (snapshot diff, neutral steps, `@was`, ledger)

@@ -16,3 +16,8 @@ list User order id page 50 with count                # opt into total
 - Cursor is opaque, engine-derived, validated/signed (no predicate injection). User never assembles keyset mechanics.
 - Total count opt-in (`with count`): second expensive query, meaningless for keyset. Default = page + "more" cursor, no total. Count queries also subject to index lint.
 - Page size counts live rows (soft-delete filter applied before limit).
+
+## Pagination vs streaming
+Pagination is random access (a bounded page + a re-entry cursor); a `-> stream` query is
+the one unbounded forward pass (exports, large scans). They never combine — `page` on a
+stream query is a compile error. See streaming.md.
