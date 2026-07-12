@@ -423,8 +423,10 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     own sqlx queries and the engine's scoped read + transactional mutation interleave on one
     pool) plus a SQLite unit twin.
   - Gate held throughout: full workspace suite + fmt + clippy + all three live-DB suites green.
-- **N2. Streaming reads (claims N1's payoff immediately).** The driver seam already streams —
-  `fetch` returns a sqlx-backed row stream on all three dialects (D84 decision 3); N2 surfaces it.
+- **N2. ✅ COMPLETE. Streaming reads (claims N1's payoff immediately).** The driver seam already
+  streams — `fetch` returns a sqlx-backed row stream on all three dialects (D84 decision 3); N2
+  surfaced it end to end: signature form → sema → runtime dispatch → NDJSON wire → generated
+  client → OpenAPI, with the acceptance gates live. N3 is next.
   - ✅ **Spec/design slice (D85, `spec/syntax/streaming.md`).** Opt-in is the signature return form
     `-> stream Shape` (grammar extended; contract lives where the client surface is generated from);
     wire = NDJSON envelope-per-line with a mandatory terminal `done`/`error` line (no terminal line
@@ -446,11 +448,27 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     non-stream traffic byte-for-byte unchanged. Proven mock + live SQLite (rows in sort order,
     terminal framing over a real socket, mid-stream error line, drop-mid-stream returns the
     single pooled connection healthy).
-  - Remaining implementation slices:
-    - Generated client: `Transport` streaming call + HTTP NDJSON parsing + embedded bridge over the
-      engine's row stream (`Engine::call_stream`); OpenAPI emitter for the NDJSON response.
-    - Acceptance gates: mid-stream DB error observed as the in-band `error` line live; truncation →
-      transport error; drop-mid-stream releases the connection (extends the I2 cancel gate).
+  - ✅ **Generated client + OpenAPI.** A `-> stream` query's method keeps its name and returns
+    `Result<RowStream<Shape>, ClientError>` (`RowStream<O>` = boxed `futures_core` stream of
+    per-item `Result`; drop = cancel); `Transport` gains `call_stream` beside `call`; the module
+    emits `decode_ndjson` — the one framing decoder (line reassembly across chunks, in-band
+    `error` → typed `Err` item, no terminal line = truncation `Err`, `done.rows` checksum
+    enforced) any HTTP transport feeds its byte stream through — and the embedded bridge
+    implements the streaming door over `Engine::call_stream` (typed items, no NDJSON
+    round-trip). All of it emitted **only when the schema declares a stream query**, so a
+    non-streaming schema's module (and dependency set) is byte-identical to before — the three
+    quickstart clients needed no regeneration. OpenAPI: the stream query's `200` is
+    `application/x-ndjson` with the row/done/error one-of line schema; pre-body failures keep
+    the JSON error responses.
+  - ✅ **Acceptance gates.** Live MariaDB + Postgres: the full `based serve` NDJSON body over a
+    live router (rows in sort order + terminal `done` count); live Postgres: a raw-SQL
+    divide-by-zero firing mid-pass arrives as the in-band `error` line after delivered rows.
+    Generated-client-over-real-HTTP suite (`streaming_client.rs`, reqwest transport): typed
+    rows, the in-band error as a typed `Err` item (code `database_error`, 503), pre-body 400 as
+    the outer `Err`, and a real socket cut mid-body → transport `Err`, never completion (plus
+    pure chunk-stream decoder twins). The I2 cancel gate grew the streaming twin: drop a stream
+    mid-pass on the single-connection pool → connection back in autocommit, next mutation green;
+    the embedded typed client proves the same drop-release end to end.
 - **N3. Flagship axum example + syntax appeal pass (the re-pitch artifact).** A nontrivial
   `examples/axum-…` service — multiple routes, auth-derived `$ctx`, scoped multi-tenancy, a streaming
   endpoint, migrations, the typed async client end-to-end — that reads like the app a workplace backend

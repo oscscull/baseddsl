@@ -30,30 +30,9 @@ mod client {
 }
 
 /// The schema `mod client` was generated from — loaded into the engine so routes and
-/// wire shapes line up on both sides.
-const SCHEMA: &str = r#"
-    @soft_delete(deleted_at)
-    Org { deleted_at: timestamp?, name: text }
-
-    @soft_delete(deleted_at)
-    @sort(total desc)
-    Order {
-        deleted_at: timestamp?,
-        org: Org,
-        status: text,
-        total: int,
-        @index(org)
-    }
-    shape OrderCard from Order { status, total }
-
-    query order_by_id(id) -> OrderCard;
-    query orders_in_org(org) -> OrderCard[];
-    query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
-
-    mutation place_order(org: Id, status, total: int) -> OrderCard {
-        create Order { org = $org, status = $status, total = $total };
-    }
-"#;
+/// wire shapes line up on both sides. Shared with `tests/streaming_client.rs` (the
+/// HTTP twin over the same generated client), so the two suites can never drift.
+const SCHEMA: &str = include_str!("support/embedded_client_schema.bsl");
 
 fn compiled() -> Compiled {
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
@@ -244,4 +223,158 @@ async fn mutation_response_is_the_created_rows_declared_shape() {
         .expect("write response decodes into the declared OrderCard ");
     assert_eq!(card.status, "open");
     assert_eq!(card.total, 7);
+}
+
+/// A `-> stream` query on the typed surface: same method name, a `RowStream<OrderCard>`
+/// back, one typed row per item — the engine's shaped rows decoded in-process, no
+/// socket and no NDJSON framing.
+#[tokio::test]
+async fn typed_stream_yields_rows_in_process() {
+    use futures_util::StreamExt;
+
+    let db = MockDb::new(vec![vec![
+        row(json!({ "status": "paid", "total": 9 })),
+        row(json!({ "status": "open", "total": 3 })),
+    ]]);
+    let engine = Engine::new(compiled(), db, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    let mut rows = api
+        .export_orders(
+            client::ExportOrdersInput {
+                org: client::Id::from_raw("org-1"),
+            },
+            (),
+        )
+        .await
+        .expect("the stream starts");
+    let mut cards: Vec<client::OrderCard> = Vec::new();
+    while let Some(card) = rows.next().await {
+        cards.push(card.expect("row decodes"));
+    }
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[0].status, "paid");
+    assert_eq!(cards[0].total, 9);
+    assert_eq!(cards[1].status, "open");
+}
+
+/// A mid-pass database failure is the stream's final item: a typed `Err` carrying the
+/// same stable code the wire's in-band `error` line does; after it the stream is over.
+#[tokio::test]
+async fn typed_stream_surfaces_a_mid_stream_error_item() {
+    use futures_util::StreamExt;
+
+    let db = MockDb::failing_mid_stream(
+        vec![row(json!({ "status": "paid", "total": 9 }))],
+        "connection lost",
+    );
+    let engine = Engine::new(compiled(), db, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    let mut rows = api
+        .export_orders(
+            client::ExportOrdersInput {
+                org: client::Id::from_raw("org-1"),
+            },
+            (),
+        )
+        .await
+        .expect("the stream starts");
+    let first = rows.next().await.expect("has a first row");
+    assert!(first.is_ok());
+    let err = rows
+        .next()
+        .await
+        .expect("the failure arrives as an item")
+        .expect_err("a mid-stream failure is an Err item");
+    assert_eq!(err.code(), "database_error");
+    assert_eq!(err.status(), Some(503));
+    assert!(err.message().contains("connection lost"));
+    assert!(rows.next().await.is_none(), "the stream ends after an Err");
+}
+
+/// A pre-body rejection never starts the stream: the outer `Err` carries the same
+/// status + code the wire would send (here a missing required arg → 400).
+#[tokio::test]
+async fn typed_stream_pre_body_rejection_is_the_outer_err() {
+    let engine = Engine::new(compiled(), MockDb::new(vec![]), SeqIdGen::default());
+    let resp = engine
+        .call_stream("/q/export_orders", json!({}), json!({}))
+        .await
+        .err()
+        .expect("missing arg is rejected before the stream");
+    assert_eq!(resp.status, 400);
+    assert_eq!(resp.body["error"]["code"], "missing_arg");
+}
+
+/// Drop = cancel on the typed surface, proven against a real engine: the backend pool
+/// holds exactly one connection, so the follow-up typed mutation only succeeds if
+/// dropping the `RowStream` mid-pass returned that connection healthy.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn dropping_the_typed_stream_releases_the_connection() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::SqliteBackend;
+    use futures_util::StreamExt;
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES
+                ('o-1', 'org-1', 'open', 10),
+                ('o-2', 'org-1', 'paid', 30);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+    let input = || client::ExportOrdersInput {
+        org: client::Id::from_raw("org-1"),
+    };
+
+    // Take one row, then drop the typed stream mid-pass (the caller cancelled).
+    let mut rows = api.export_orders(input(), ()).await.expect("stream starts");
+    let first = rows
+        .next()
+        .await
+        .expect("has a first row")
+        .expect("decodes");
+    assert_eq!(first.total, 30);
+    drop(rows);
+
+    // The single pooled connection must be back and clean: a typed write runs green.
+    let card = api
+        .place_order(
+            client::PlaceOrderInput {
+                org: client::Id::from_raw("org-1"),
+                status: "new".into(),
+                total: 5,
+            },
+            (),
+        )
+        .await
+        .expect("the pool serves a mutation after the cancelled stream");
+    assert_eq!(card.status, "new");
+
+    // And a fresh full pass sees every row, including the just-written one.
+    let full: Vec<_> = api
+        .export_orders(input(), ())
+        .await
+        .expect("stream starts on the recycled connection")
+        .collect()
+        .await;
+    assert_eq!(full.len(), 3);
+    assert!(full.iter().all(|r| r.is_ok()));
 }

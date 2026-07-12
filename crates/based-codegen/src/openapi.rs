@@ -73,6 +73,9 @@ struct Callable<'a> {
     out_schema: OutSchema,
     /// Whether this is a mutation (drives the summary + `MutationResult` fallback).
     is_mutation: bool,
+    /// A `-> stream` query: the `200` body is `application/x-ndjson` (one
+    /// row/done/error envelope per line), not a JSON document.
+    stream: bool,
     /// How this callable paginates, driving the extra input property:
     /// a keyset page a `cursor` string, an offset page an `offset` integer.
     page: PageInput,
@@ -159,10 +162,28 @@ fn register_out_schema(os: &OutSchema, schemas: &mut Map<String, Value>, seen: &
 }
 
 /// One `paths` entry: a single `post` operation posting the input, returning the
-/// response + the shared error responses, and reading `$ctx` from the header.
+/// response + the shared error responses, and reading `$ctx` from the header. A
+/// `-> stream` query's `200` is `application/x-ndjson` — one envelope object per line
+/// with a mandatory terminal line; its pre-body failures keep the ordinary JSON
+/// error responses.
 fn path_item(schema: &CheckedSchema, c: &Callable) -> Value {
     let kind = if c.is_mutation { "Mutation" } else { "Query" };
     let ctx = &callable_ctx(schema, c);
+    let ok = if c.stream {
+        json!({
+            "description": "An NDJSON stream: one `{\"row\":…}` envelope per line, then exactly one \
+                            terminal line — `{\"done\":{\"rows\":N}}` on success or \
+                            `{\"error\":{code,message}}` on a mid-stream failure. A body that ends \
+                            without a terminal line was truncated and must be treated as a \
+                            transport error.",
+            "content": { "application/x-ndjson": { "schema": c.response.clone() } }
+        })
+    } else {
+        json!({
+            "description": "Success.",
+            "content": { "application/json": { "schema": c.response.clone() } }
+        })
+    };
     json!({
         "post": {
             "operationId": c.name,
@@ -177,10 +198,7 @@ fn path_item(schema: &CheckedSchema, c: &Callable) -> Value {
                 }
             },
             "responses": {
-                "200": {
-                    "description": "Success.",
-                    "content": { "application/json": { "schema": c.response.clone() } }
-                },
+                "200": ok,
                 "400": error_response("Invalid request (bad argument, missing `$ctx`)."),
                 "404": error_response("No such query/mutation."),
                 "503": error_response("Retryable database error."),
@@ -255,6 +273,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     response: query_response(rq, &os),
                     out_schema: os,
                     is_mutation: false,
+                    stream: rq.stream,
                     page: page_input(q),
                 });
             }
@@ -282,6 +301,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     response: mutation_response(m, &os),
                     out_schema: os,
                     is_mutation: true,
+                    stream: false,
                     page: PageInput::None,
                 });
             }
@@ -293,11 +313,14 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
 
 // ---------- responses ------------------------------------------------------
 
-/// A query's `200` schema: paginated -> the `Page` envelope, many -> an array, single
-/// -> the object (a `get` may miss — modelled as a nullable object).
+/// A query's `200` schema: stream -> the per-line NDJSON envelope, paginated -> the
+/// `Page` envelope, many -> an array, single -> the object (a `get` may miss —
+/// modelled as a nullable object).
 fn query_response(rq: &RQuery, os: &OutSchema) -> Value {
     let item = schema_ref(&os.name);
-    if rq.paginated {
+    if rq.stream {
+        ndjson_line_schema(&item)
+    } else if rq.paginated {
         page_schema(&item)
     } else if rq.many {
         json!({ "type": "array", "items": item })
@@ -305,6 +328,38 @@ fn query_response(rq: &RQuery, os: &OutSchema) -> Value {
         // `get`: the row or `null` (keyed lookup may match nothing).
         json!({ "oneOf": [ item, { "type": "null" } ] })
     }
+}
+
+/// A `-> stream` query's per-line schema: every NDJSON line is exactly one of the
+/// three envelopes — `{"row":…}` per row, the terminal `{"done":{"rows":N}}` on
+/// success, or the terminal `{"error":{code,message}}` (the shared error envelope) on
+/// a mid-stream failure. A body without a terminal line was truncated.
+fn ndjson_line_schema(item: &Value) -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["row"],
+                "properties": { "row": item },
+                "description": "One streamed row, in sort order."
+            },
+            {
+                "type": "object",
+                "required": ["done"],
+                "properties": {
+                    "done": {
+                        "type": "object",
+                        "required": ["rows"],
+                        "properties": {
+                            "rows": { "type": "integer", "description": "Total rows streamed — an integrity checksum." }
+                        }
+                    }
+                },
+                "description": "The terminal success line. A body that ends without `done` or `error` was truncated."
+            },
+            schema_ref("Error"),
+        ]
+    })
 }
 
 /// A mutation's `200` schema: the declared shape (create-returning), an array if

@@ -1,7 +1,10 @@
 //! Client codegen: a `CheckedSchema` -> a typed Rust client module (`based gen
 //! client`). Per signature it emits a typed input struct, a typed output type (shape
 //! struct, bare-model struct, or the `Page<T>` pagination envelope), and one wire route
-//! plus a `Client` method that posts the input and decodes the output.
+//! plus a `Client` method that posts the input and decodes the output. A `-> stream`
+//! query's method returns a `RowStream<Shape>` (per-item `Result`, drop = cancel)
+//! through the transport's streaming call; the NDJSON decoder is emitted with the
+//! module so every HTTP transport shares one framing implementation.
 //!
 //! Transport is abstract: `Client<T>` is generic over a `Transport` trait (post JSON to
 //! a route, decode JSON back), which the runtime crate implements. Entity ids map to a
@@ -80,6 +83,9 @@ struct Callable<'a> {
     root: Option<&'a RModel>,
     /// the concrete output type expression, e.g. `Vec<OrderCard>` or `Page<Product>`.
     output: String,
+    /// a `-> stream` query: the method calls the transport's streaming door and
+    /// returns a `RowStream` instead of a collected value.
+    stream: bool,
     /// the output *struct* to emit (name + fields), deduped across callables.
     out_struct: OutStruct,
     /// the `$ctx.<field>`s this callable requires, inferred per callable.
@@ -124,9 +130,21 @@ mod rust {
 
     pub(super) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions) -> String {
         let callables = collect(schema, decls);
+        // The streaming surface (`RowStream`, `decode_ndjson`, `Transport::call_stream`)
+        // is emitted only when a `-> stream` query exists — a schema without one keeps
+        // the module (and the consumer's dependency set) exactly as before.
+        let has_stream = callables.iter().any(|c| c.stream);
 
         let mut out = String::new();
         out.push_str(PREAMBLE);
+        if has_stream {
+            out.push_str(STREAMING);
+        }
+        out.push_str(if has_stream {
+            TRANSPORT_AND_CLIENT_STREAMING
+        } else {
+            TRANSPORT_AND_CLIENT
+        });
 
         // Entity markers — one phantom tag per model, so `Id<entity::User>` and
         // `Id<entity::Org>` are distinct types (the tags are types only, never values).
@@ -187,9 +205,17 @@ mod rust {
 
         // Opt-in in-process bridge over `based_runtime::Engine`: a working client with no
         // hand-written `Transport` impl. Gated so the wire client stays free of a
-        // based-runtime dependency.
+        // based-runtime dependency. With a `-> stream` query in the schema the bridge
+        // also implements the streaming door over `Engine::call_stream`.
         if opts.embedded {
-            out.push_str(EMBEDDED);
+            out.push_str(EMBEDDED_HEAD);
+            if has_stream {
+                out.push_str(EMBEDDED_STREAM_CALL);
+            }
+            out.push_str(EMBEDDED_TAIL);
+            if has_stream {
+                out.push_str(EMBEDDED_ENGINE_ROWS);
+            }
         }
         out
     }
@@ -222,6 +248,7 @@ mod rust {
                         params: &q.params,
                         root,
                         output: query_output(rq, &os.name),
+                        stream: rq.stream,
                         out_struct: os,
                         ctx_requires: &rq.ctx_requires,
                         page: page_input(q),
@@ -252,6 +279,7 @@ mod rust {
                         params: &m.params,
                         root,
                         output,
+                        stream: false,
                         out_struct: os,
                         ctx_requires: &rm.ctx_requires,
                         page: PageInput::None,
@@ -398,10 +426,12 @@ mod rust {
         }
     }
 
-    /// A query's return wrapper: paginated -> `Page<T>`, many -> `Vec<T>`, single
-    /// -> `Option<T>` (a `get` may match nothing).
+    /// A query's return wrapper: stream -> `RowStream<T>`, paginated -> `Page<T>`,
+    /// many -> `Vec<T>`, single -> `Option<T>` (a `get` may match nothing).
     fn query_output(rq: &RQuery, ty: &str) -> String {
-        if rq.paginated {
+        if rq.stream {
+            format!("RowStream<{ty}>")
+        } else if rq.paginated {
             format!("Page<{ty}>")
         } else if rq.many {
             format!("Vec<{ty}>")
@@ -920,12 +950,25 @@ mod rust {
     /// One typed client method: `POST` the input to the route, carry the typed
     /// context, decode the output. A callable with `$ctx` requirements takes a
     /// `<Name>Ctx`; one with none takes `ctx: ()` (the engine reads no context).
+    /// A `-> stream` query keeps the same name but goes through the transport's
+    /// streaming door and hands back the live `RowStream`.
     fn render_method(c: &Callable) -> String {
         let ctx_ty = if c.ctx_requires.is_empty() {
             "()".to_string()
         } else {
             ctx_name(c.name)
         };
+        if c.stream {
+            return format!(
+                "    /// `POST {route}` — a `-> stream` query: the rows arrive as a live typed\n    /// stream; drop it to cancel the pass.\n    pub async fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call_stream({konst}, &input, &ctx).await\n    }}\n",
+                route = c.route,
+                name = field_ident(c.name),
+                input = input_name(c.name),
+                ctx_ty = ctx_ty,
+                output = c.output,
+                konst = route_const(c.name),
+            );
+        }
         format!(
             "    /// `POST {route}`\n    pub async fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input, &ctx).await\n    }}\n",
             route = c.route,
@@ -1254,7 +1297,12 @@ impl std::error::Error for ClientError {
             .map(|e| &**e as &(dyn std::error::Error + 'static))
     }
 }
+"#;
 
+    /// The abstract transport + client for a schema with no `-> stream` query.
+    /// Appended right after [`PREAMBLE`], so the two concatenate into the exact module
+    /// head earlier versions emitted (a non-streaming schema's output is unchanged).
+    const TRANSPORT_AND_CLIENT: &str = r#"
 /// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
 /// of band as request context), and decode the typed output. A callable with no `$ctx`
 /// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
@@ -1275,13 +1323,203 @@ pub struct Client<T> {
 }
 "#;
 
+    /// The abstract transport + client for a schema **with** a `-> stream` query: the
+    /// same `call`, plus the streaming door every stream method goes through.
+    const TRANSPORT_AND_CLIENT_STREAMING: &str = r#"
+/// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
+/// of band as request context), and decode the typed output. A callable with no `$ctx`
+/// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
+/// client's socket, or the in-process engine's execution). Codegen only depends on
+/// this shape.
+#[allow(async_fn_in_trait)]
+pub trait Transport {
+    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned;
+
+    /// Start a `-> stream` query and return its live row stream. An `Err` here means
+    /// the call never started — a transport failure or a pre-body rejection carrying
+    /// its real HTTP status; a failure after the stream begins arrives as the stream's
+    /// final `Err` item. An HTTP transport feeds the NDJSON response body through
+    /// [`decode_ndjson`]; the embedded transport yields the engine's rows in-process.
+    async fn call_stream<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+    ) -> Result<RowStream<O>, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned + Send + 'static;
+}
+
+/// The generated client, generic over a `Transport`.
+pub struct Client<T> {
+    pub transport: T,
+}
+"#;
+
+    /// The streaming surface, emitted only for a schema with a `-> stream` query: the
+    /// `RowStream` return type and the NDJSON decoder any HTTP transport feeds its
+    /// response body through. The decoder owns the framing contract (terminal line
+    /// mandatory, truncation = transport error), so every transport inherits it.
+    /// `futures_core` is referenced by full path — like `rust_decimal`, the consumer
+    /// needs the dependency only when the schema uses the feature.
+    const STREAMING: &str = r#"
+// ---------- streaming ----------
+
+/// A live row stream from a `-> stream` query, in sort order. Each item is one typed
+/// row; an in-band server failure or a truncated body arrives as an `Err` item, and
+/// after an `Err` item the stream is finished. **Drop = cancel**: dropping the stream
+/// abandons the pass and releases its resources (the server gets its database
+/// connection back).
+pub type RowStream<O> =
+    std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<O, ClientError>> + Send>>;
+
+/// Decode an NDJSON response body (any stream of byte chunks) into the typed row
+/// stream, enforcing the framing contract: one `{"row":…}` envelope per line, then
+/// exactly one terminal line — `{"done":{"rows":N}}` on success (`rows` doubles as an
+/// integrity checksum) or `{"error":{code,message}}` for an in-band failure (an `Err`
+/// item carrying the server's stable code). A body that ends **without** a terminal
+/// line was truncated (connection cut, server death) and yields a transport-kind
+/// `Err`, never silent completion. An HTTP `Transport` feeds its response body
+/// through this, so the framing rules live here once.
+pub fn decode_ndjson<O, B, C, E>(body: B) -> RowStream<O>
+where
+    O: serde::de::DeserializeOwned + Send + 'static,
+    B: futures_core::Stream<Item = Result<C, E>> + Send + 'static,
+    C: AsRef<[u8]>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    Box::pin(NdjsonRows {
+        body: Box::pin(body),
+        buf: Vec::new(),
+        rows_seen: 0,
+        body_done: false,
+        finished: false,
+        _row: PhantomData,
+    })
+}
+
+/// The stream behind [`decode_ndjson`]: buffers body chunks, decodes each complete
+/// line as one envelope, and tracks the terminal-line contract.
+struct NdjsonRows<B, O> {
+    body: std::pin::Pin<Box<B>>,
+    buf: Vec<u8>,
+    /// Rows yielded so far, checked against the terminal `done.rows` checksum.
+    rows_seen: u64,
+    /// The body ended (EOF). Reaching it before a terminal line is truncation.
+    body_done: bool,
+    /// A terminal line (or terminal `Err` item) was emitted; the stream is over.
+    finished: bool,
+    _row: PhantomData<fn() -> O>,
+}
+
+impl<B, C, E, O> futures_core::Stream for NdjsonRows<B, O>
+where
+    B: futures_core::Stream<Item = Result<C, E>>,
+    C: AsRef<[u8]>,
+    E: std::error::Error + Send + Sync + 'static,
+    O: serde::de::DeserializeOwned,
+{
+    type Item = Result<O, ClientError>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        loop {
+            // Decode every complete buffered line before touching the transport.
+            while let Some(pos) = this.buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = this.buf.drain(..=pos).collect();
+                let line = &line[..line.len() - 1];
+                if line.iter().all(|b| b.is_ascii_whitespace()) {
+                    continue;
+                }
+                let envelope: serde_json::Value = match serde_json::from_slice(line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        this.finished = true;
+                        return Poll::Ready(Some(Err(ClientError::decode(e))));
+                    }
+                };
+                if let Some(row) = envelope.get("row") {
+                    this.rows_seen += 1;
+                    return Poll::Ready(Some(match serde_json::from_value::<O>(row.clone()) {
+                        Ok(row) => Ok(row),
+                        Err(e) => {
+                            this.finished = true;
+                            Err(ClientError::decode(e))
+                        }
+                    }));
+                }
+                if let Some(done) = envelope.get("done") {
+                    this.finished = true;
+                    // `done.rows` is the integrity checksum: a disagreement means a
+                    // row line was lost in transit — report it, never silent success.
+                    let counted = done.get("rows").and_then(serde_json::Value::as_u64);
+                    if counted != Some(this.rows_seen) {
+                        return Poll::Ready(Some(Err(ClientError::transport(format!(
+                            "stream checksum mismatch: server reports {counted:?} rows, received {}",
+                            this.rows_seen
+                        )))));
+                    }
+                    return Poll::Ready(None);
+                }
+                if let Some(error) = envelope.get("error") {
+                    this.finished = true;
+                    // The 200 status line was spent before the failure; 503 is the
+                    // status the same database failure carries before the body.
+                    let code = error["code"].as_str().unwrap_or("error");
+                    let message = error["message"].as_str().unwrap_or("stream failed");
+                    return Poll::Ready(Some(Err(ClientError::api(503, code, message))));
+                }
+                this.finished = true;
+                return Poll::Ready(Some(Err(ClientError::transport(format!(
+                    "unrecognized stream envelope: {envelope}"
+                )))));
+            }
+            if this.body_done {
+                // EOF without a terminal line (a partial line in the buffer counts):
+                // the body was truncated. Never treat it as completion.
+                this.finished = true;
+                return Poll::Ready(Some(Err(ClientError::transport(
+                    "response body ended without a terminal `done`/`error` line (truncated)"
+                        .to_string(),
+                ))));
+            }
+            match this.body.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => this.buf.extend_from_slice(chunk.as_ref()),
+                Poll::Ready(Some(Err(e))) => {
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(ClientError::transport(e))));
+                }
+                Poll::Ready(None) => this.body_done = true,
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+"#;
+
     /// The opt-in in-process bridge, appended when [`ClientOptions::embedded`] is set. It
     /// references `based_runtime::Engine` *by path* — the consuming crate depends on
     /// based-runtime (based-codegen itself does not; that would be circular). This is the
     /// bridge an embedder would otherwise hand-copy: serialize the typed input and `$ctx`
     /// to JSON (a non-object ctx → `{}`), call `engine.call`, decode a `200` body into
-    /// `O`, map a non-`200` to a `ClientError` from `error.message`.
-    const EMBEDDED: &str = r#"
+    /// `O`, map a non-`200` to a `ClientError` from `error.message`. Split so a schema
+    /// with a `-> stream` query can add the streaming door inside the same `impl`
+    /// (head + [`EMBEDDED_STREAM_CALL`] + tail); head + tail alone is the exact
+    /// non-streaming bridge earlier versions emitted.
+    const EMBEDDED_HEAD: &str = r#"
 // ---------- embedded bridge (based_runtime::Engine) ----------
 
 /// A `Transport` backed by an in-process `based_runtime::Engine` — every callable runs
@@ -1312,7 +1550,50 @@ impl Transport for Embedded<'_> {
             Err(ClientError::api(resp.status, code, message))
         }
     }
-}
+"#;
+
+    /// The embedded transport's streaming door, spliced into the `impl Transport for
+    /// Embedded` block when the schema has a `-> stream` query.
+    const EMBEDDED_STREAM_CALL: &str = r#"
+    /// Start a `-> stream` query in-process: the engine's shaped row stream decoded
+    /// into the typed shape — the same items the HTTP path yields, with no socket and
+    /// no NDJSON round-trip. The stream owns its database connection; dropping it
+    /// cancels the pass and returns the connection to the pool.
+    async fn call_stream<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+    ) -> Result<RowStream<O>, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned + Send + 'static,
+    {
+        let args = serde_json::to_value(input).map_err(ClientError::decode)?;
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map_err(ClientError::decode)?;
+        match self.engine.call_stream(route, args, ctx).await {
+            Ok(rows) => Ok(Box::pin(EngineRows {
+                inner: rows,
+                finished: false,
+                _row: PhantomData,
+            })),
+            // A pre-body rejection: the same status + stable code the wire would send.
+            Err(resp) => {
+                let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+                let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+                Err(ClientError::api(resp.status, code, message))
+            }
+        }
+    }
+"#;
+
+    /// Closes the `impl Transport for Embedded` block and adds the one-call
+    /// constructor. [`EMBEDDED_HEAD`] + this is the whole non-streaming bridge.
+    const EMBEDDED_TAIL: &str = r#"}
 
 /// A ready-to-use client over an in-process `based_runtime::Engine` — no bridge to write.
 /// `$ctx` is a typed per-call argument the app sets, not the caller; a public callable
@@ -1320,6 +1601,55 @@ impl Transport for Embedded<'_> {
 pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
     Client {
         transport: Embedded { engine },
+    }
+}
+"#;
+
+    /// The embedded streaming adapter, appended after the bridge when the schema has a
+    /// `-> stream` query: decodes each engine row into the typed shape and maps a
+    /// mid-pass database failure to the same typed `Err` the wire's in-band `error`
+    /// line produces.
+    const EMBEDDED_ENGINE_ROWS: &str = r#"
+/// The embedded transport's row stream: `based_runtime::ShapedStream` items decoded
+/// into the typed shape. After an `Err` item the stream is finished (the engine's
+/// stream already ends after its error; a decode failure ends this one).
+struct EngineRows<O> {
+    inner: based_runtime::ShapedStream,
+    finished: bool,
+    _row: PhantomData<fn() -> O>,
+}
+
+impl<O: serde::de::DeserializeOwned> futures_core::Stream for EngineRows<O> {
+    type Item = Result<O, ClientError>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(row))) => {
+                Poll::Ready(Some(match serde_json::from_value::<O>(row) {
+                    Ok(row) => Ok(row),
+                    Err(e) => {
+                        this.finished = true;
+                        Err(ClientError::decode(e))
+                    }
+                }))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                this.finished = true;
+                // A mid-pass database failure: the same stable code the wire's in-band
+                // `error` line carries, with the 503 the failure maps to pre-body.
+                Poll::Ready(Some(Err(ClientError::api(503, e.code(), e.message))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 "#;

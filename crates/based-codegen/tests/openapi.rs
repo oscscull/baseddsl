@@ -456,3 +456,39 @@ fn decimal_is_a_string_and_float_a_number() {
     assert_eq!(row["properties"]["score"]["type"], "number");
     assert_eq!(row["properties"]["score"]["format"], "double");
 }
+
+#[test]
+fn stream_query_response_is_ndjson_with_the_envelope_line_schema() {
+    let doc = gen(r#"
+        @sort(total desc)
+        Order { status: text, total: int }
+        shape OrderCard from Order { status, total }
+        query export_orders(status) -> stream OrderCard;
+        "#);
+    let ok = &doc["paths"]["/q/export_orders"]["post"]["responses"]["200"];
+    // The 200 body is NDJSON, never a JSON document.
+    assert!(
+        ok["content"]["application/json"].is_null(),
+        "a stream response must not advertise application/json\n{doc:#}"
+    );
+    let line = &ok["content"]["application/x-ndjson"]["schema"];
+    // Each line is exactly one of the three envelopes: row, terminal done, or the
+    // shared error envelope.
+    let one_of = line["oneOf"].as_array().expect("oneOf envelope");
+    assert_eq!(one_of.len(), 3, "\n{doc:#}");
+    assert_eq!(
+        one_of[0]["properties"]["row"]["$ref"],
+        "#/components/schemas/OrderCard"
+    );
+    assert_eq!(
+        one_of[1]["properties"]["done"]["properties"]["rows"]["type"],
+        "integer"
+    );
+    assert_eq!(one_of[2]["$ref"], "#/components/schemas/Error");
+    // Pre-body failures keep the ordinary JSON error responses.
+    assert_eq!(
+        doc["paths"]["/q/export_orders"]["post"]["responses"]["400"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/Error"
+    );
+}

@@ -527,6 +527,70 @@ fn no_inner_allow_attribute_so_include_accepts_it() {
     );
 }
 
+// ---------- streaming -------------------------------------------------------
+
+const STREAM_SRC: &str = r#"
+    @sort(total desc)
+    Order { status: text, total: int }
+    shape OrderCard from Order { status, total }
+    query export_orders(status) -> stream OrderCard;
+    query order_by_id(id) -> OrderCard;
+"#;
+
+#[test]
+fn stream_query_returns_a_row_stream_through_the_streaming_call() {
+    let out = gen(STREAM_SRC);
+    // Same method name, the stream return type, the transport's streaming door.
+    assert!(
+        out.contains("pub async fn export_orders(&self, input: ExportOrdersInput, ctx: ()) -> Result<RowStream<OrderCard>, ClientError>"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("self.transport.call_stream(EXPORT_ORDERS_ROUTE, &input, &ctx)"),
+        "\n{out}"
+    );
+    // The streaming surface: the stream alias, the trait's streaming call, and the
+    // NDJSON decoder that owns the framing contract for any HTTP transport.
+    assert!(out.contains("pub type RowStream<O>"), "\n{out}");
+    assert!(out.contains("async fn call_stream<I, C, O>"), "\n{out}");
+    assert!(out.contains("pub fn decode_ndjson<O, B, C, E>"), "\n{out}");
+    // A non-stream sibling in the same schema keeps the plain surface.
+    assert!(
+        out.contains("pub async fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn schema_without_stream_emits_no_streaming_surface() {
+    // No `-> stream` query → the module (and its dependency set: no `futures_core`)
+    // is exactly the pre-streaming output.
+    let out = gen(r#"
+        Order { status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(!out.contains("RowStream"), "\n{out}");
+    assert!(!out.contains("call_stream"), "\n{out}");
+    assert!(!out.contains("futures_core"), "\n{out}");
+}
+
+#[test]
+fn embedded_bridge_streams_the_engine_rows() {
+    // With the embedded option on, the bridge also implements the streaming door over
+    // `Engine::call_stream`, decoding the engine's shaped rows in-process.
+    let out = gen_opts(STREAM_SRC, ClientOptions { embedded: true });
+    assert!(
+        out.contains("self.engine.call_stream(route, args, ctx)"),
+        "\n{out}"
+    );
+    assert!(out.contains("struct EngineRows<O>"), "\n{out}");
+    assert!(
+        out.contains("inner: based_runtime::ShapedStream,"),
+        "\n{out}"
+    );
+}
+
 // ---------- enums ----------------------------------------------------------
 
 #[test]

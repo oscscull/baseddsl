@@ -39,9 +39,11 @@ use based_sema::check;
 /// op sequence a mutation produces: checkout, begin, INSERT user, INSERT address,
 /// re-select fetch, commit.
 const SCHEMA: &str = r#"
+    @sort(email asc)
     User { email: text }
     Address { user: User, city: text }
     shape UserCard from User { email }
+    query export_users() -> stream UserCard;
     mutation signup(email: text, city: text) -> UserCard {
         tx {
             create User { email = $email };
@@ -396,4 +398,57 @@ async fn cancellation_releases_an_idempotency_claim_for_retry() {
     .await
     .expect("a retry after a cancelled keyed mutation must run, not conflict");
     assert_eq!(redo, json!({ "email": "a@b.c" }));
+}
+
+#[tokio::test]
+async fn dropping_a_stream_mid_pass_leaves_the_pool_clean() {
+    // The streaming twin of the mutation sweep: drop a `-> stream` query's row stream
+    // after its first row (the caller cancelled mid-pass) and prove the invariants on
+    // the same single-connection pool — the connection comes back, carries no open
+    // transaction, and serves the next mutation as if nothing happened.
+    use futures_util::StreamExt;
+
+    let c = compile();
+    let backend = fresh_backend(&c, "stream-drop").await;
+
+    // Two committed users so the pass has more rows than we consume.
+    let mut seed_ids = SeqIdGen::default();
+    for (email, city) in [("a@b.c", "NYC"), ("b@b.c", "SF")] {
+        let req = Request::new("signup", json!({ "email": email, "city": city }), json!({}));
+        based_runtime::run_mutation(&c, &backend, "", &mut seed_ids, &NoStore, &req)
+            .await
+            .expect("seed mutation");
+    }
+
+    let req = Request::new("export_users", json!({}), json!({}));
+    let db = Backend::checkout(&backend, "").await.expect("checkout");
+    let mut stream = based_runtime::run_query_stream(&c, db, &req).expect("stream starts");
+    let first = stream.next().await.expect("has a first row");
+    assert_eq!(first.expect("row decodes"), json!({ "email": "a@b.c" }));
+    // The cancellation under test: the stream (and the connection it owns) drops here.
+    drop(stream);
+
+    // The pooled connection is back and in autocommit — a leaked open transaction (or
+    // a stranded read) would make this explicit BEGIN fail on the single-connection pool.
+    let mut db = Backend::checkout(&backend, "")
+        .await
+        .expect("pool must hand the connection back after the drop");
+    db.execute("BEGIN IMMEDIATE", &[])
+        .await
+        .expect("pooled connection must be in autocommit after a dropped stream");
+    db.execute("ROLLBACK", &[]).await.expect("close the probe");
+    assert_eq!(count(&mut *db, "user").await, 2, "reads mutate nothing");
+    drop(db);
+
+    // And the same pool serves the next mutation green.
+    let req = Request::new(
+        "signup",
+        json!({ "email": "c@b.c", "city": "LA" }),
+        json!({}),
+    );
+    let redo =
+        based_runtime::run_mutation(&c, &backend, "", &mut SeqIdGen::new("post"), &NoStore, &req)
+            .await
+            .expect("pool must serve after a cancelled stream");
+    assert_eq!(redo, json!({ "email": "c@b.c" }));
 }

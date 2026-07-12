@@ -3466,3 +3466,26 @@ drain/cancel behavior), the generated client stream method + `Transport` extensi
 embedded bridge, OpenAPI emitter update, parser/sema for `stream` + E0200/E0201/E0202,
 fmt/LSP awareness, and the acceptance gates (mid-stream error line observed live;
 drop-mid-stream releases the connection; truncation → transport error).
+
+**N2 implementation notes (2026-07-12; the client slices as built, where they pin what the
+design left open).**
+- *`RowStream` spelling.* Emitted **in the generated module** (not exported from based-runtime —
+  the module stays self-contained, D62's orphan story unchanged):
+  `pub type RowStream<O> = Pin<Box<dyn futures_core::Stream<Item = Result<O, ClientError>> + Send>>`.
+  `futures_core` is referenced by full path, so — like `rust_decimal` — the consumer needs the
+  dependency only when the schema uses the feature.
+- *Streaming surface is conditional.* The `RowStream` alias, `Transport::call_stream`, the
+  NDJSON decoder, and the embedded streaming bridge are emitted only when the schema declares a
+  `-> stream` query; a schema without one produces byte-identical output to the pre-streaming
+  emitter (the quickstart clients needed no regeneration).
+- *One framing decoder, emitted with the module.* `decode_ndjson(body) -> RowStream<O>` takes
+  any stream of byte chunks and owns the whole framing contract — line reassembly across chunk
+  boundaries, in-band `error` → typed `Err` item, EOF without a terminal line → truncation
+  `Err` — so an HTTP transport is a few reqwest-shaped lines and cannot get the contract wrong.
+- *The in-band `error` item carries status 503.* `ClientError::api` wants an HTTP status, the
+  spent `200` would be a lie, and every mid-stream failure is a `DbError` — which maps to 503
+  whenever it happens before the body. Both transports (NDJSON and embedded) emit the same
+  status, so a caller's error handling is transport-invariant.
+- *`done.rows` is enforced, not advisory.* The decoder counts rows and a terminal `done` that
+  disagrees yields a transport-kind `Err` (a lost line inside an intact body would otherwise
+  pass silently — "no terminal line = failure" extended to "wrong count = failure").

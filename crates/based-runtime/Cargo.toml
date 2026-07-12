@@ -81,6 +81,13 @@ async-trait = "0.1"
 serde.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 chrono = "0.4"
+# The streaming-client gate (`tests/streaming_client.rs`) drives the generated client
+# through a real HTTP client whose response body streams — the `stream` feature exposes
+# the chunked byte stream the generated `decode_ndjson` consumes. No TLS: loopback only.
+reqwest = { version = "0.13", default-features = false, features = [
+    "stream",
+    "json",
+] }
 # The codec-fidelity spike (`tests/sqlx_spike.rs`) keeps `rust_decimal` enabled to pin
 # the truncation that disqualified it from the runtime codec (dev-only; the runtime's
 # decimal feature is `bigdecimal`).
