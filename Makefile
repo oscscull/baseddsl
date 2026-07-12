@@ -37,9 +37,14 @@ MARIADB_URL  ?= mysql://root:based_test_pw@127.0.0.1:13306/based_test
 POSTGRES_URL ?= postgres://postgres:based_test_pw@127.0.0.1:15432/based_test
 SQLITE_DB    ?= quickstart.db
 
-.PHONY: ci check check-fast ci-workspace ci-extension ci-image ci-live ci-live-mariadb \
-        ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite ci-example-mariadb \
-        ci-example-postgres based-cli dev-db-up dev-db-down
+.PHONY: ci check check-fast ci-workspace ci-coloring ci-extension ci-image ci-live \
+        ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
+        ci-example-mariadb ci-example-postgres based-cli dev-db-up dev-db-down
+
+# The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
+# facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
+FRONTEND_CRATES := based-ast based-parser based-fmt based-sema based-codegen based-facts \
+                   based-diagnostics based-manifest
 
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
 ci: ci-workspace ci-extension
@@ -66,11 +71,22 @@ check: check-fast dev-db-up
 	$(MAKE) ci-examples
 	@echo "check: all gates green"
 
-## Workspace gate: format, lint, and the full test suite (mirrors the commit gate).
-ci-workspace:
+## Workspace gate: format, lint, the coloring boundary, and the full test suite.
+ci-workspace: ci-coloring
 	$(CARGO) fmt --check
 	$(CARGO) clippy --workspace --all-features -- -D warnings
 	$(CARGO) test --workspace --all-features
+
+## Coloring boundary: every front-end crate's dependency tree must be free of async
+## runtimes and drivers (tokio/sqlx/futures/async-*). Fails loudly on a leak.
+ci-coloring:
+	@for c in $(FRONTEND_CRATES); do \
+	  hits=$$($(CARGO) tree -p $$c -e normal --prefix none --all-features 2>/dev/null \
+	    | grep -E '^(tokio|sqlx|futures|async-std|async-trait|smol|mio|hyper|axum)[ -]' || true); \
+	  if [ -n "$$hits" ]; then \
+	    echo "coloring violation: $$c depends on an async runtime:"; echo "$$hits"; exit 1; \
+	  fi; \
+	done; echo "ci-coloring: front end is async-free"
 
 ## Build + package the VS Code extension (.vsix). `npm ci` is the reproducible install.
 ci-extension:

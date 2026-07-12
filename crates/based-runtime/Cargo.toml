@@ -6,35 +6,35 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-# The concrete MariaDB driver + connection pool. Off by default so the core
-# runtime (planning + dispatch) stays dependency-light and the seam tests need no
-# database; `based serve` turns it on.
-mariadb = ["dep:mysql"]
-# The HTTP listener (`based serve`) — the socket edge over `serve::dispatch`. Pulls
-# in a hardened sync HTTP server + a production uuid id-gen, and requires the concrete
-# driver it routes to. Off by default so the core stays a plain library.
-serve = ["mariadb", "dep:tiny_http", "dep:uuid"]
-# The SQLite driver + backend (`SqliteDb` / `SqliteBackend`). Bundled SQLite (no system
-# dependency), so it needs no live infra — the infra-free `Db`/`Backend` impl that backs
-# real in-memory end-to-end integration tests (D27). Off by default; the core stays lean.
-sqlite = ["dep:rusqlite"]
-# The concrete Postgres driver + bounded-pool `PgRouter` (`PostgresDb` / `PgRouter`), feature
-# `postgres` (A3/D38). The Postgres twin of `mariadb`: runs the *verbatim* Postgres-lowered SQL
-# (`$n`-bound, D29) against a real server via the pure-Rust sync `postgres` crate + `r2d2` bounded
-# pool (principle 7 — reuse, not hand-roll). TLS off (no system OpenSSL dep), mirroring the MariaDB
-# driver's choice. Off by default so the core stays dependency-light.
-postgres = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres", "dep:bytes"]
-# The Docker-backed real-DB integration harness + live suites (D35). Brings up an ephemeral
-# MariaDB container (via the `docker` CLI) for `tests/mariadb_integration.rs` to run the
-# *verbatim* codegen-lowered SQL against a real server. Enables `serve` for the production
-# `UuidGen` (the MariaDB DDL emits native `UUID` columns, which reject the deterministic
-# `id-N` test ids — engine ids must be real v4 uuids, the same generator prod uses). When the
-# Docker daemon is unreachable the harness **skips cleanly** (logs + returns), so
-# `cargo test --all-features` stays green with no daemon — the suite never fails for want of
-# infra, it just doesn't run. Enables both concrete drivers so their live suites
-# (`tests/mariadb_integration.rs`, `tests/postgres_integration.rs`) can each check out a real
-# server; the Postgres suite loads commerce with `Dialect::Postgres` and runs the `$n`-bound SQL.
-docker-tests = ["mariadb", "serve", "postgres"]
+# The concrete MariaDB driver + shard router, over sqlx's MySql driver. Off by default
+# so the core runtime (planning + dispatch) stays dependency-light and the seam tests
+# need no database.
+mariadb = ["dep:sqlx", "sqlx/mysql", "sqlx/chrono", "sqlx/bigdecimal", "dep:chrono"]
+# The concrete Postgres driver + shard router, over sqlx's Postgres driver. Postgres
+# transmits every parameter binary-typed, so this driver parses the typed text-riding
+# `SqlValue` variants into native uuid/chrono/json/decimal binds.
+postgres = [
+    "dep:sqlx",
+    "sqlx/postgres",
+    "sqlx/chrono",
+    "sqlx/bigdecimal",
+    "sqlx/uuid",
+    "sqlx/json",
+    "dep:chrono",
+]
+# The SQLite driver + backend over sqlx's async SQLite driver (bundled engine, no
+# system dependency, no live server) — the infra-free `Db`/`Backend` behind real
+# end-to-end integration tests.
+sqlite = ["dep:sqlx", "sqlx/sqlite"]
+# The HTTP listener (`based serve`) — the axum socket edge over `serve::dispatch` —
+# plus the production uuid id-gen. Off by default so the core stays a plain library.
+serve = ["dep:axum", "dep:uuid", "tokio/net"]
+# The Docker-backed real-DB integration harness + live suites. Brings up ephemeral
+# MariaDB/Postgres containers (via the `docker` CLI) — or connects to provided servers
+# via `TEST_MARIADB_URL`/`TEST_POSTGRES_URL` — to run the *verbatim* codegen-lowered
+# SQL against real servers. No reachable server ⇒ the harness skips cleanly, so
+# `cargo test --all-features` stays green with no daemon.
+docker-tests = ["mariadb", "serve", "postgres", "sqlite"]
 
 [dependencies]
 based-ast.workspace = true
@@ -44,40 +44,43 @@ based-parser.workspace = true
 based-sema.workspace = true
 based-codegen.workspace = true
 serde_json.workspace = true
-# The MariaDB/MySQL driver (pure Rust) + its built-in connection pool — a hardened
-# external component (principle 7), not a hand-rolled driver. TLS/compression off to
-# avoid a system OpenSSL dependency; a deployment that needs TLS re-enables it.
-mysql = { version = "26", optional = true, default-features = false, features = [
-    "minimal",
+# The async trait surface: `Db`/`Tx`/`Backend` are dyn-compatible via boxed futures,
+# and `fetch` returns a boxed row stream.
+async-trait = "0.1"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The runtime's own async needs: the deadlock-retry backoff sleep and the engine's
+# id-gen lock. The listener feature adds `net`; binaries own the actual runtime.
+tokio = { version = "1", features = ["time", "sync"] }
+# The executor/pool layer for all three concrete drivers (principle 7 — reuse hardened
+# tx-drop/codec/pool/streaming machinery). Strictly an executor: `query` + per-value
+# binds over concrete per-DB drivers — no macros, no query builder, no `Any` driver.
+# TLS off, matching the previous drivers' no-system-OpenSSL choice.
+sqlx = { version = "0.9.0", optional = true, default-features = false, features = [
+    "runtime-tokio",
 ] }
-# The HTTP listener: a small, hardened, blocking HTTP/1 server (principle 7 — reuse,
-# not a hand-rolled socket loop). We drive it with our own bounded worker-thread pool.
-tiny_http = { version = "0.12", optional = true }
-# Production id generation (D1): unpredictable, globally unique v4 uuids.
+# Parsing the typed text-riding bind values (timestamp/date) into native driver types
+# inside the MariaDB/Postgres driver impls.
+chrono = { version = "0.4", optional = true, default-features = false, features = [
+    "std",
+] }
+# The axum HTTP listener behind `based serve` (feature `serve`).
+axum = { version = "0.8", optional = true }
+# Production id generation: unpredictable, globally unique v4 uuids.
 uuid = { version = "1", optional = true, features = ["v4"] }
-# The SQLite driver: bundled SQLite compiled from source (no system dependency), a
-# hardened external engine (principle 7). Infra-free, so it backs in-memory integration
-# tests against a real `Db`/`Backend` rather than a `MockDb` (D27).
-rusqlite = { version = "0.37", optional = true, features = ["bundled"] }
-# The Postgres driver (pure Rust, synchronous — no async runtime, matching D20's sync/bounded-
-# pool architecture). A hardened external component (principle 7). TLS off (default features
-# dropped) to avoid a system OpenSSL dependency, exactly as the `mysql` driver above. `r2d2` +
-# `r2d2_postgres` give the bounded connection pool the `ShardRouter` twin (`PgRouter`) needs.
-postgres = { version = "0.19", optional = true, default-features = false }
-r2d2 = { version = "0.8", optional = true }
-r2d2_postgres = { version = "0.18", optional = true }
-# `bytes::BytesMut` is the buffer the `postgres` `ToSql` trait writes into (its own
-# transitive dependency); named directly so the `PgValue` codec can reference it.
-bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 based-parser.workspace = true
+# Test doubles implement the async `Db`/`Tx`/`Backend` traits.
+async-trait = "0.1"
 # The embed example (`tests/embed.rs`) hosts a committed generated client, which
 # derives serde — the same dependency any consumer of `based gen client` pulls in.
 serde.workspace = true
-# The async executor/pool layer, dev-only: `tests/sqlx_spike.rs` proves the lowered
-# SQL's values round-trip through sqlx with codec fidelity on all three dialects.
-# Both decimal features on so the spike can compare their exactness head to head.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+chrono = "0.4"
+# The codec-fidelity spike (`tests/sqlx_spike.rs`) keeps `rust_decimal` enabled to pin
+# the truncation that disqualified it from the runtime codec (dev-only; the runtime's
+# decimal feature is `bigdecimal`).
 sqlx = { version = "0.9.0", default-features = false, features = [
     "runtime-tokio",
     "mysql",
@@ -89,5 +92,3 @@ sqlx = { version = "0.9.0", default-features = false, features = [
     "rust_decimal",
     "bigdecimal",
 ] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-chrono = "0.4"

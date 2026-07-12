@@ -927,7 +927,7 @@ mod rust {
             ctx_name(c.name)
         };
         format!(
-            "    /// `POST {route}`\n    pub fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input, &ctx)\n    }}\n",
+            "    /// `POST {route}`\n    pub async fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input, &ctx).await\n    }}\n",
             route = c.route,
             name = field_ident(c.name),
             input = input_name(c.name),
@@ -1257,13 +1257,15 @@ impl std::error::Error for ClientError {
 
 /// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
 /// of band as request context), and decode the typed output. A callable with no `$ctx`
-/// requirements passes `ctx: &()`. Implemented by the runtime's HTTP client; codegen
-/// only depends on this shape.
+/// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
+/// client's socket, or the in-process engine's execution). Codegen only depends on
+/// this shape.
+#[allow(async_fn_in_trait)]
 pub trait Transport {
-    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
-        I: Serialize,
-        C: Serialize,
+        I: Serialize + Sync,
+        C: Serialize + Sync,
         O: serde::de::DeserializeOwned;
 }
 
@@ -1289,10 +1291,10 @@ pub struct Embedded<'a> {
 }
 
 impl Transport for Embedded<'_> {
-    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
-        I: Serialize,
-        C: Serialize,
+        I: Serialize + Sync,
+        C: Serialize + Sync,
         O: serde::de::DeserializeOwned,
     {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
@@ -1300,7 +1302,7 @@ impl Transport for Embedded<'_> {
         let ctx = serde_json::to_value(ctx)
             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
             .map_err(ClientError::decode)?;
-        let resp = self.engine.call(route, args, ctx);
+        let resp = self.engine.call(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {

@@ -1,40 +1,39 @@
-//! The concrete Postgres driver + shard router (feature `postgres`).
+//! The concrete Postgres driver + shard router (feature `postgres`), over sqlx's
+//! Postgres driver.
 //!
-//! This is the Postgres twin of the MariaDB driver ([`crate::driver`]): the production
-//! [`Db`]/[`Backend`] that runs the verbatim Postgres-lowered SQL against a real server.
-//! Two layers, exactly mirroring the MariaDB structure:
+//! The Postgres twin of the MariaDB driver ([`crate::driver`]): the production
+//! [`Db`]/[`Backend`] that runs the verbatim Postgres-lowered SQL (`$n`-bound) against a
+//! real server. sqlx is strictly the executor/pool layer — `sqlx::query` + per-value
+//! binds, no macros, no query builder. Structure mirrors the MariaDB driver:
+//! [`PostgresDb`] (one pooled connection), a typestate transaction guard, and
+//! [`PgRouter`] (one bounded pool per physical shard, the same stable FNV routing).
 //!
-//! - [`PostgresDb`] — a [`Db`] over one pooled connection. It runs the whole request on
-//!   that single connection (a mutation's `tx` must see its own writes), converting
-//!   [`SqlValue`] binds to Postgres parameters and returned columns back to JSON. It reuses
-//!   the pure-Rust synchronous `postgres` crate (no async runtime).
+//! **The value-mapping subtlety (Postgres-specific).** sqlx transmits every parameter
+//! in *binary* format under a client-declared OID, so a wire-text bind the server
+//! coerces (the old sync driver's trick) is impossible: a `text`-declared string is a
+//! hard type error against a `uuid`/`timestamptz`/`jsonb`/`numeric` column. So this
+//! driver binds **native types**, parsed from the typed [`SqlValue`] variants' wire
+//! strings — uuid, chrono timestamps/dates, `serde_json::Value`, `BigDecimal` (the
+//! mandated decimal bind: value-exact at full precision; the column's typmod rescales
+//! storage). A [`SqlValue::Null`] binds as an *unknown*-typed NULL, which the server
+//! resolves to the target column's type like a bare NULL literal.
 //!
-//! - [`PgRouter`] — the scale-out seam, the [`crate::driver::ShardRouter`] twin. One
-//!   bounded `r2d2` connection pool per physical shard, single-shard dispatch by the same
-//!   stable FNV logical-shard hash (no scatter-gather → a `tx` is one shard, no distributed
-//!   transaction; add capacity without rehashing keys).
-//!
-//! **The value-mapping subtlety (Postgres-specific).** The runtime is dialect-neutral: a
-//! `uuid`/`timestamptz`/`jsonb` value is carried as [`SqlValue::Text`] (a String — on the
-//! wire these are all strings). Postgres, unlike MySQL/SQLite, infers each `$n` parameter's
-//! type from the column it binds against and, in the extended protocol, refuses a
-//! `text`-encoded Rust `String` for an inferred `uuid`/`jsonb` OID. So [`PgValue`] is a
-//! `ToSql` newtype that (a) `accepts` those non-text OIDs and (b) encodes its bytes in text
-//! format ([`Format::Text`]) — the server then applies its normal string-literal coercion
-//! (the same path `'…'::uuid` takes). This keeps the runtime free of per-column Postgres
-//! types while round-tripping every family. The mapping is pure and unit-tested below;
-//! connecting/executing is proven by `tests/postgres_integration.rs` against a live server.
+//! **Results are binary too** — and for `numeric` neither sqlx decimal feature's decode
+//! yields the exact wire string, so the hand-rolled [`pg_numeric`] decoder survives,
+//! fed sqlx's untouched raw bytes. The uuid/timestamp/date/jsonb binary layouts get the
+//! same treatment (pure decoders, unit-tested below), so every value rides back as the
+//! same canonical string a literal would produce.
 
-use std::time::Duration;
+use std::str::FromStr;
 
-use bytes::BytesMut;
-use postgres::error::SqlState;
-use postgres::types::{to_sql_checked, Format, IsNull, ToSql, Type};
-use postgres::{Client, NoTls, Row as PgRow};
-use r2d2::Pool;
-use r2d2_postgres::PostgresConnectionManager;
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::{PgArguments, PgPool, PgPoolOptions, PgRow, Postgres};
+use sqlx::query::Query;
+use sqlx::{Column, Row as SqlxRow, TypeInfo, ValueRef};
 
-use crate::run::{Backend, Db, DbError, DbErrorKind, Row};
+use crate::run::{Backend, Db, DbError, DbErrorKind, DbRead, Row, RowStream, Tx};
 use crate::shard::{fnv1a_64, PoolConfig, ShardId, LOGICAL_SHARDS};
 use crate::value::SqlValue;
 
@@ -42,167 +41,188 @@ use crate::value::SqlValue;
 /// server rolled the transaction back for a concurrency conflict, so the mutation path may
 /// retry it. A `statement_timeout` cancel (`57014`) is not retried — re-running would just
 /// time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
-fn map_pg_err(e: postgres::Error) -> DbError {
-    let kind = match e.code() {
-        Some(c)
-            if *c == SqlState::T_R_DEADLOCK_DETECTED
-                || *c == SqlState::T_R_SERIALIZATION_FAILURE =>
-        {
-            DbErrorKind::Deadlock
-        }
+fn map_pg_err(e: sqlx::Error) -> DbError {
+    let kind = match e.as_database_error().and_then(|d| d.code()) {
+        Some(c) if c == "40P01" || c == "40001" => DbErrorKind::Deadlock,
         _ => DbErrorKind::Other,
     };
     DbError::of(kind, e.to_string())
 }
 
-/// A pooled connection type: the `r2d2` manager over the sync `postgres` client, no TLS
-/// (mirrors the MariaDB driver's TLS-off choice — no system OpenSSL dependency; a
-/// deployment needing in-transit encryption re-enables it).
-type PgManager = PostgresConnectionManager<NoTls>;
-type PgPool = Pool<PgManager>;
-
-// ---------- value conversion (pure, unit-tested) ---------------------------
-
-/// A bound [`SqlValue`] rendered as a Postgres parameter. Numbers/bools bind natively;
-/// every text-riding family (`text`/`uuid`/`timestamp`/`date`/`json`) rides as a String
-/// encoded in **text format**, so Postgres coerces it into the inferred column type (uuid,
-/// timestamptz, jsonb, …) exactly as it would a string literal — the runtime never needs
-/// to know the column's Postgres type.
-#[derive(Debug)]
-pub(crate) enum PgValue {
-    Null,
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    /// A string bound in text format; accepts the string-coercible OIDs (uuid/json/…).
-    Text(String),
-}
-
-impl PgValue {
-    pub(crate) fn from(v: &SqlValue) -> PgValue {
-        match v {
-            SqlValue::Null => PgValue::Null,
-            SqlValue::Int(i) => PgValue::Int(*i),
-            SqlValue::Float(f) => PgValue::Float(*f),
-            SqlValue::Bool(b) => PgValue::Bool(*b),
-            SqlValue::Text(s) => PgValue::Text(s.clone()),
-            // `json` is serialized to its canonical text and coerced into `jsonb`.
-            SqlValue::Json(j) => PgValue::Text(j.to_string()),
-        }
+/// A pool checkout failure: the bounded `acquire_timeout` elapsing is pool exhaustion
+/// (the fast-503 path); anything else (host down, auth) is an opaque operational fault.
+fn map_acquire_err(e: sqlx::Error) -> DbError {
+    match e {
+        sqlx::Error::PoolTimedOut => DbError::of(
+            DbErrorKind::PoolExhausted,
+            format!("connection pool exhausted: {e}"),
+        ),
+        other => DbError::new(format!("checking out a connection: {other}")),
     }
 }
 
-impl ToSql for PgValue {
-    fn to_sql(
+// ---------- binding ----------------------------------------------------------
+
+/// An untyped SQL NULL: declared with the `unknown` OID so the server resolves the
+/// parameter to the target column's type — exactly how a bare `NULL` literal behaves.
+/// (A typed `Option::<T>::None` would declare `T`'s OID and mismatch other columns.)
+struct PgNull;
+
+impl sqlx::Type<Postgres> for PgNull {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(705)) // unknown
+    }
+}
+
+impl sqlx::Encode<'_, Postgres> for PgNull {
+    fn encode_by_ref(
         &self,
-        ty: &Type,
-        out: &mut BytesMut,
-    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        let _ = ty;
-        match self {
-            PgValue::Null => Ok(IsNull::Yes),
-            // `bool` has no width ambiguity → its native binary encoding.
-            PgValue::Bool(b) => b.to_sql(ty, out),
-            // Numbers ride as **text**, like strings, so the server coerces them into the
-            // *inferred* width (int2/int4/int8/numeric/float). A binary i64 would be 8 bytes
-            // into whatever slot Postgres inferred — and an untyped integer literal (e.g. the
-            // keyset guard's `:keyset_active = 0`) infers `int4`, so a binary i64 is rejected
-            // (`22P03: incorrect binary data format`). Text sidesteps the width guess entirely.
-            PgValue::Int(i) => {
-                out.extend_from_slice(i.to_string().as_bytes());
-                Ok(IsNull::No)
-            }
-            PgValue::Float(f) => {
-                out.extend_from_slice(f.to_string().as_bytes());
-                Ok(IsNull::No)
-            }
-            // A text-format string: write the UTF-8 bytes; the server coerces per the
-            // inferred column type (`'…'::uuid` / `::jsonb` / …). See `encode_format`.
-            PgValue::Text(s) => {
-                out.extend_from_slice(s.as_bytes());
-                Ok(IsNull::No)
-            }
-        }
+        _buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        Ok(sqlx::encode::IsNull::Yes)
     }
-
-    fn accepts(_ty: &Type) -> bool {
-        // A single bound value fills any inferred slot: numbers land on int/float/numeric,
-        // bool on bool, a text-format string on uuid/timestamptz/jsonb/text/etc. We accept
-        // broadly and let the *value* variant + text-format coercion do the right thing (the
-        // planner already type-checked the arg against the column family, so a genuine
-        // mismatch is caught before SQL runs).
-        true
-    }
-
-    fn encode_format(&self, _ty: &Type) -> Format {
-        match self {
-            // Strings *and numbers* go in text format so Postgres applies string-literal
-            // coercion into the inferred type (uuid/jsonb for strings; the inferred integer
-            // width for numbers — sidestepping the binary-width mismatch, see `to_sql`).
-            // `bool`/`null` use their native (binary) encoding.
-            PgValue::Text(_) | PgValue::Int(_) | PgValue::Float(_) => Format::Text,
-            PgValue::Bool(_) | PgValue::Null => Format::Binary,
-        }
-    }
-
-    to_sql_checked!();
 }
 
-/// A returned column value → JSON (the shape the wire response is built from), read by the
-/// column's Postgres type. Numbers map to JSON numbers; every string-family type
-/// (text/uuid/timestamptz/date/jsonb) rides back as a JSON string. A genuinely
-/// unknown/binary type falls back to lowercase hex (never a panic), matching the
-/// MariaDB/SQLite drivers' `from_*`.
-///
-/// **rust-postgres returns results in *binary* format** (format code 1 for every column),
-/// not text. For `text`/`varchar`/`json` the binary bytes *are* the UTF-8 text, so a raw
-/// read yields the right string; but `uuid` (16 raw bytes), `timestamptz`/`timestamp` (an
-/// i64 of microseconds since 2000-01-01), `date` (an i32 of days), and `jsonb` (a version
-/// byte + text) all carry a binary layout that is not their canonical string. Those get an
-/// explicit decoder here so they round-trip as the same string a text-format read (or a
-/// literal) would — the value re-binds correctly (e.g. a keyset cursor's timestamp/uuid
-/// basis compares equal on the next page). Decoders are pure + unit-tested below.
-pub(crate) fn from_pg(row: &PgRow, idx: usize) -> serde_json::Value {
-    use serde_json::Value as J;
-    let col = row.columns()[idx].type_();
-    match *col {
-        Type::BOOL => opt(row.get::<_, Option<bool>>(idx), J::Bool),
-        Type::INT2 => opt(row.get::<_, Option<i16>>(idx), |n| {
-            J::Number((n as i64).into())
-        }),
-        Type::INT4 => opt(row.get::<_, Option<i32>>(idx), |n| {
-            J::Number((n as i64).into())
-        }),
-        Type::INT8 => opt(row.get::<_, Option<i64>>(idx), |n| J::Number(n.into())),
-        Type::FLOAT4 => opt(row.get::<_, Option<f32>>(idx), |f| {
-            serde_json::Number::from_f64(f as f64).map_or(J::Null, J::Number)
-        }),
-        Type::FLOAT8 => opt(row.get::<_, Option<f64>>(idx), |f| {
-            serde_json::Number::from_f64(f).map_or(J::Null, J::Number)
-        }),
-        // Binary layouts that are not their canonical string — decoded explicitly (see the
-        // doc-comment). Read the raw field bytes (`PgBytes` accepts any OID) and format them.
-        Type::UUID => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_uuid(&b.0)),
-        Type::TIMESTAMPTZ | Type::TIMESTAMP => {
-            opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_timestamp(&b.0))
+/// Bind every [`SqlValue`] onto a query, positionally, as its native Postgres type.
+/// The typed text-riding variants parse here — and only here; the rest of the runtime
+/// carries wire strings. A value that does not parse is an operational error (the same
+/// class the server's own rejection of a bad literal used to be).
+fn bind_all<'q>(
+    mut q: Query<'q, Postgres, PgArguments>,
+    params: &[SqlValue],
+) -> Result<Query<'q, Postgres, PgArguments>, DbError> {
+    for v in params {
+        q = match v {
+            SqlValue::Null => q.bind(PgNull),
+            SqlValue::Int(i) => q.bind(*i),
+            SqlValue::Float(f) => q.bind(*f),
+            SqlValue::Bool(b) => q.bind(*b),
+            SqlValue::Text(s) => q.bind(s.clone()),
+            SqlValue::Uuid(s) => q.bind(
+                sqlx::types::Uuid::parse_str(s)
+                    .map_err(|e| DbError::new(format!("invalid uuid `{s}`: {e}")))?,
+            ),
+            SqlValue::Timestamp(s) => q.bind(
+                parse_timestamp(s)
+                    .ok_or_else(|| DbError::new(format!("invalid timestamp `{s}`")))?,
+            ),
+            SqlValue::Date(s) => q.bind(
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .map_err(|e| DbError::new(format!("invalid date `{s}`: {e}")))?,
+            ),
+            SqlValue::Decimal(s) => q.bind(
+                sqlx::types::BigDecimal::from_str(s)
+                    .map_err(|e| DbError::new(format!("invalid decimal `{s}`: {e}")))?,
+            ),
+            SqlValue::Json(j) => q.bind(j.clone()),
+        };
+    }
+    Ok(q)
+}
+
+/// Parse a wire timestamp into UTC. Accepts the engine's own canonical form
+/// (`2024-01-02 12:30:45.500000+00`), RFC 3339, and a naive datetime (space or `T`
+/// separated, taken as UTC — matching how the server reads an offset-less literal into
+/// `timestamptz` under the UTC timezone the engine assumes).
+fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%dT%H:%M:%S%.f%#z"] {
+        if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
+            return Some(dt.with_timezone(&Utc));
         }
-        Type::DATE => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_date(&b.0)),
-        Type::JSONB => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_jsonb(&b.0)),
+    }
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
+        if let Ok(n) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(n.and_utc());
+        }
+    }
+    None
+}
+
+// ---------- decoding ----------------------------------------------------------
+
+/// One result row → JSON (the shape the wire response is built from), each column
+/// decoded from its raw binary bytes by its Postgres type. Numbers map to JSON
+/// numbers; every string-family type rides back as its canonical string via the pure
+/// decoders below; a genuinely unknown binary type falls back to lowercase hex (never
+/// a panic).
+fn row_to_json(row: &PgRow) -> Result<Row, DbError> {
+    use serde_json::Value as J;
+    let mut obj = serde_json::Map::with_capacity(row.columns().len());
+    for (i, col) in row.columns().iter().enumerate() {
+        let raw = row.try_get_raw(i).map_err(map_pg_err)?;
+        let val = if raw.is_null() {
+            J::Null
+        } else {
+            let bytes = raw
+                .as_bytes()
+                .map_err(|e| DbError::new(format!("reading column `{}`: {e}", col.name())))?;
+            match raw.format() {
+                sqlx::postgres::PgValueFormat::Binary => {
+                    decode_pg_binary(col.type_info().name(), bytes)
+                }
+                // Text format (a simple-protocol result): the bytes are already the
+                // canonical text of any type.
+                sqlx::postgres::PgValueFormat::Text => decode_pg_text(
+                    col.type_info().name(),
+                    std::str::from_utf8(bytes).unwrap_or_default(),
+                ),
+            }
+        };
+        obj.insert(col.name().to_string(), val);
+    }
+    Ok(obj)
+}
+
+/// Decode one binary-format Postgres value by its type name.
+fn decode_pg_binary(ty: &str, b: &[u8]) -> serde_json::Value {
+    use serde_json::Value as J;
+    match ty {
+        "BOOL" => J::Bool(b.first().is_some_and(|v| *v != 0)),
+        "INT2" => read_i16(b).map_or(J::Null, |n| J::Number((n as i64).into())),
+        "INT4" => read_i32(b).map_or(J::Null, |n| J::Number((n as i64).into())),
+        "INT8" => read_i64(b).map_or(J::Null, |n| J::Number(n.into())),
+        "FLOAT4" => read_i32(b)
+            .and_then(|n| serde_json::Number::from_f64(f32::from_bits(n as u32) as f64))
+            .map_or(J::Null, J::Number),
+        "FLOAT8" => read_i64(b)
+            .and_then(|n| serde_json::Number::from_f64(f64::from_bits(n as u64)))
+            .map_or(J::Null, J::Number),
+        "UUID" => pg_uuid(b),
+        "TIMESTAMPTZ" | "TIMESTAMP" => pg_timestamp(b),
+        "DATE" => pg_date(b),
+        "JSONB" => pg_jsonb(b),
         // `numeric`/`decimal` carries a packed base-10000 digit array, not its text — so a
         // decimal returns as its exact string (a JSON string, the wire form), losing no digit.
-        Type::NUMERIC => opt(row.get::<_, Option<PgBytes>>(idx), |b| pg_numeric(&b.0)),
+        "NUMERIC" => pg_numeric(b),
         // Everything else — text/varchar, `json`, etc. — has a binary form that *is* its
-        // UTF-8 text, so read it straight as a String (a `FromSql` accepting any OID).
-        _ => match row.try_get::<_, Option<PgText>>(idx) {
-            Ok(Some(PgText(s))) => J::String(s),
-            Ok(None) => J::Null,
-            // A type we can't read as UTF-8 text (a raw binary column): fall back to hex of
-            // the raw bytes so a request never panics on an exotic column.
-            Err(_) => match row.try_get::<_, Option<PgBytes>>(idx) {
-                Ok(Some(PgBytes(b))) => J::String(hex(&b)),
-                _ => J::Null,
-            },
+        // UTF-8 text; a genuinely binary value falls back to hex.
+        _ => match std::str::from_utf8(b) {
+            Ok(s) => serde_json::Value::String(s.to_string()),
+            Err(_) => serde_json::Value::String(hex(b)),
         },
+    }
+}
+
+/// Decode one text-format Postgres value: the text is already canonical; numbers and
+/// bools re-typed into JSON.
+fn decode_pg_text(ty: &str, s: &str) -> serde_json::Value {
+    use serde_json::Value as J;
+    match ty {
+        "BOOL" => J::Bool(s == "t"),
+        "INT2" | "INT4" | "INT8" => s
+            .parse::<i64>()
+            .map(|n| J::Number(n.into()))
+            .unwrap_or(J::Null),
+        "FLOAT4" | "FLOAT8" => s
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or(J::Null, J::Number),
+        _ => J::String(s.to_string()),
     }
 }
 
@@ -212,8 +232,8 @@ const PG_EPOCH_DAYS_FROM_UNIX: i64 = 10957;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 
 /// A binary `uuid` (16 raw bytes) → the canonical hyphenated `8-4-4-4-12` string. A hex fall
-/// back (via [`from_pg`]) would drop the hyphens — a technically-parseable but non-canonical
-/// form; this emits the real thing.
+/// back would drop the hyphens — a technically-parseable but non-canonical form; this emits
+/// the real thing.
 fn pg_uuid(b: &[u8]) -> serde_json::Value {
     if b.len() != 16 {
         return serde_json::Value::String(hex(b));
@@ -345,6 +365,10 @@ fn pg_numeric(b: &[u8]) -> serde_json::Value {
     J::String(out)
 }
 
+fn read_i16(b: &[u8]) -> Option<i16> {
+    b.try_into().ok().map(i16::from_be_bytes)
+}
+
 fn read_i64(b: &[u8]) -> Option<i64> {
     b.try_into().ok().map(i64::from_be_bytes)
 }
@@ -369,44 +393,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Apply `f` to a fetched `Option<T>`, mapping `None` (SQL NULL) to JSON null.
-fn opt<T>(v: Option<T>, f: impl FnOnce(T) -> serde_json::Value) -> serde_json::Value {
-    v.map_or(serde_json::Value::Null, f)
-}
-
-/// A `FromSql` that reads *any* column's text representation into a `String`. Postgres sends
-/// results in text format by default, so uuid/timestamptz/date/json all arrive as their
-/// canonical text — this pulls that text out regardless of the column's declared type.
-struct PgText(String);
-
-impl<'a> postgres::types::FromSql<'a> for PgText {
-    fn from_sql(
-        _ty: &Type,
-        raw: &'a [u8],
-    ) -> Result<PgText, Box<dyn std::error::Error + Sync + Send>> {
-        Ok(PgText(String::from_utf8(raw.to_vec())?))
-    }
-    fn accepts(_ty: &Type) -> bool {
-        true
-    }
-}
-
-/// A `FromSql` fallback that reads the raw bytes of a column that isn't valid UTF-8 text
-/// (a genuinely binary type), so `from_pg` can hex-encode it rather than panic.
-struct PgBytes(Vec<u8>);
-
-impl<'a> postgres::types::FromSql<'a> for PgBytes {
-    fn from_sql(
-        _ty: &Type,
-        raw: &'a [u8],
-    ) -> Result<PgBytes, Box<dyn std::error::Error + Sync + Send>> {
-        Ok(PgBytes(raw.to_vec()))
-    }
-    fn accepts(_ty: &Type) -> bool {
-        true
-    }
-}
-
 /// Lowercase hex of a byte slice (for a non-UTF-8 binary column value).
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -422,64 +408,92 @@ fn hex(bytes: &[u8]) -> String {
 /// One pooled Postgres connection, running one request. Checked out of a shard's pool for
 /// the request's duration and returned on drop (the pool recycles it).
 pub struct PostgresDb {
-    conn: r2d2::PooledConnection<PgManager>,
+    conn: PoolConnection<Postgres>,
 }
 
 impl PostgresDb {
     /// Wrap an already-checked-out connection (the router hands these out).
-    pub fn new(conn: r2d2::PooledConnection<PgManager>) -> PostgresDb {
+    pub fn new(conn: PoolConnection<Postgres>) -> PostgresDb {
         PostgresDb { conn }
-    }
-
-    /// Borrow the bound values as `&dyn ToSql` params (the `postgres` API's shape).
-    fn params(bound: &[PgValue]) -> Vec<&(dyn ToSql + Sync)> {
-        bound.iter().map(|v| v as &(dyn ToSql + Sync)).collect()
     }
 }
 
-impl Db for PostgresDb {
-    fn fetch(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
-        let bound: Vec<PgValue> = params.iter().map(PgValue::from).collect();
-        let rows = self
-            .conn
-            .query(sql, &Self::params(&bound))
-            .map_err(map_pg_err)?;
-        let mut out = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let cols = row.columns();
-            let mut obj = serde_json::Map::with_capacity(cols.len());
-            for (i, col) in cols.iter().enumerate() {
-                // The SELECT aliases each projection to its output name, so a row is already
-                // the response object.
-                obj.insert(col.name().to_string(), from_pg(row, i));
-            }
-            out.push(obj);
-        }
-        Ok(out)
+/// A fetch whose binds failed to parse: a single-item error stream (the one read path
+/// still reports it as a stream item).
+fn err_stream<'a>(e: DbError) -> RowStream<'a> {
+    Box::pin(futures_util::stream::iter([Err(e)]))
+}
+
+#[async_trait]
+impl DbRead for PostgresDb {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        let q = match bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params) {
+            Ok(q) => q,
+            Err(e) => return err_stream(e),
+        };
+        Box::pin(
+            q.fetch(&mut *self.conn)
+                .map(|r| r.map_err(map_pg_err).and_then(|row| row_to_json(&row))),
+        )
     }
 
-    fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
-        let bound: Vec<PgValue> = params.iter().map(PgValue::from).collect();
-        self.conn
-            .execute(sql, &Self::params(&bound))
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?
+            .execute(&mut *self.conn)
+            .await
+            .map(|d| d.rows_affected())
             .map_err(map_pg_err)
     }
+}
 
-    fn begin(&mut self) -> Result<(), DbError> {
-        self.conn.batch_execute("BEGIN").map_err(map_pg_err)
+#[async_trait]
+impl Db for PostgresDb {
+    async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError> {
+        let tx = sqlx::Transaction::begin(self.conn, None)
+            .await
+            .map_err(map_pg_err)?;
+        Ok(Box::new(PgTx { tx }))
     }
-    fn commit(&mut self) -> Result<(), DbError> {
-        self.conn.batch_execute("COMMIT").map_err(map_pg_err)
+}
+
+/// An open Postgres transaction (sqlx's guard over the same pooled connection).
+struct PgTx {
+    tx: sqlx::Transaction<'static, Postgres>,
+}
+
+#[async_trait]
+impl DbRead for PgTx {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        let q = match bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params) {
+            Ok(q) => q,
+            Err(e) => return err_stream(e),
+        };
+        Box::pin(
+            q.fetch(&mut *self.tx)
+                .map(|r| r.map_err(map_pg_err).and_then(|row| row_to_json(&row))),
+        )
     }
-    fn rollback(&mut self) -> Result<(), DbError> {
-        self.conn.batch_execute("ROLLBACK").map_err(map_pg_err)
+
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?
+            .execute(&mut *self.tx)
+            .await
+            .map(|d| d.rows_affected())
+            .map_err(map_pg_err)
+    }
+}
+
+#[async_trait]
+impl Tx for PgTx {
+    async fn commit(self: Box<Self>) -> Result<(), DbError> {
+        self.tx.commit().await.map_err(map_pg_err)
     }
 }
 
 // ---------- the shard router ------------------------------------------------
 
 /// Routes each request to exactly one physical Postgres shard's connection pool — the
-/// [`crate::driver::ShardRouter`] twin. Holds one bounded `r2d2` pool per shard and the
+/// [`crate::driver::ShardRouter`] twin. Holds one bounded pool per shard and the
 /// permanent `logical → physical` assignment (the same stable FNV routing the MariaDB
 /// router uses, so a key hashes identically regardless of the backend dialect).
 pub struct PgRouter {
@@ -518,25 +532,19 @@ impl PgRouter {
     }
 
     /// Check out a connection to the shard a key routes to (single-shard dispatch).
-    pub fn checkout(&self, key: &str) -> Result<PostgresDb, DbError> {
-        self.checkout_shard(self.shard_for(key))
+    pub async fn checkout(&self, key: &str) -> Result<PostgresDb, DbError> {
+        self.checkout_shard(self.shard_for(key)).await
     }
 
-    /// Check out a connection to a specific physical shard. `r2d2` waits at most the pool's
-    /// configured `connection_timeout` (from [`PoolConfig::checkout_timeout`]) for a free
-    /// connection, then errors — a saturated pool becomes a fast, retryable pool-exhausted
-    /// `503`, never a hung worker.
-    pub fn checkout_shard(&self, shard: ShardId) -> Result<PostgresDb, DbError> {
+    /// Check out a connection to a specific physical shard. Waits at most the pool's
+    /// configured `acquire_timeout` for a free connection, then fails fast as
+    /// pool-exhausted — a saturated pool becomes a retryable `503`, never a hung task.
+    pub async fn checkout_shard(&self, shard: ShardId) -> Result<PostgresDb, DbError> {
         let pool = self
             .shards
             .get(shard)
             .ok_or_else(|| DbError::new(format!("no shard {shard}")))?;
-        let conn = pool.get().map_err(|e: r2d2::Error| {
-            DbError::of(
-                DbErrorKind::PoolExhausted,
-                format!("connection pool exhausted: {e}"),
-            )
-        })?;
+        let conn = pool.acquire().await.map_err(map_acquire_err)?;
         Ok(PostgresDb::new(conn))
     }
 
@@ -547,145 +555,60 @@ impl PgRouter {
 }
 
 /// The router is the Postgres [`Backend`]: it checks out a pooled [`PostgresDb`] for the
-/// key's shard. The HTTP edge depends only on this trait, so it is a drop-in beside the
-/// MariaDB `ShardRouter` with no change to `based serve` (the `Db` seam is dialect-agnostic;
-/// only the `Compiled.dialect` must match the backend, a deployment invariant).
+/// key's shard — a drop-in beside the MariaDB `ShardRouter` with no change to `based serve`
+/// (the `Db` seam is dialect-agnostic; only the `Compiled.dialect` must match the backend,
+/// a deployment invariant).
+#[async_trait]
 impl Backend for PgRouter {
-    fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
-        Ok(Box::new(PgRouter::checkout(self, shard_key)?))
+    async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        Ok(Box::new(PgRouter::checkout(self, shard_key).await?))
     }
 
     /// Readiness = every physical shard's pool can hand out a connection that answers
     /// `SELECT 1` (a stale pooled socket is caught, not just a checkout) — the same
     /// all-shards-ready rule as the MariaDB router.
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self) -> Result<(), DbError> {
         for shard in 0..self.shard_count() {
-            let mut db = self.checkout_shard(shard)?;
-            db.fetch("SELECT 1", &[])?;
+            let mut db = self.checkout_shard(shard).await?;
+            crate::run::fetch_all(db.fetch("SELECT 1", &[])).await?;
         }
         Ok(())
     }
 }
 
 /// Build one shard's bounded connection pool from a `postgres://…` URL. The pool's
-/// `connection_timeout` is the checkout wait (pool-exhaustion → fast `503`), and the
-/// server-side `statement_timeout` is set as a startup option so every statement on a
-/// pooled connection is capped — a runaway query is cancelled (`57014`) rather than hanging.
+/// `acquire_timeout` is the checkout wait (pool-exhaustion → fast `503`), and each new
+/// connection's `after_connect` hook sets the server-side `statement_timeout` so every
+/// statement on a pooled connection is capped — a runaway query is cancelled (`57014`)
+/// rather than hanging.
 fn build_pool(url: &str, cfg: PoolConfig) -> Result<PgPool, DbError> {
-    let mut config = url
-        .parse::<postgres::Config>()
-        .map_err(|e| DbError::new(format!("bad database url: {e}")))?;
-    if cfg.statement_timeout > Duration::ZERO {
-        // Startup `options` apply the timeout to every statement on the connection (ms).
-        let ms = cfg.statement_timeout.as_millis();
-        config.options(&format!("-c statement_timeout={ms}"));
+    let mut opts = PgPoolOptions::new()
+        .min_connections(cfg.min as u32)
+        .max_connections(cfg.max as u32)
+        .acquire_timeout(cfg.checkout_timeout);
+    if cfg.statement_timeout > std::time::Duration::ZERO {
+        let stmt = format!(
+            "SET statement_timeout = {}",
+            cfg.statement_timeout.as_millis()
+        );
+        opts = opts.after_connect(move |conn, _meta| {
+            let stmt = stmt.clone();
+            Box::pin(async move {
+                sqlx::query(sqlx::AssertSqlSafe(stmt.clone()))
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+            })
+        });
     }
-    let manager = PostgresConnectionManager::new(config, NoTls);
-    Pool::builder()
-        .min_idle(Some(cfg.min as u32))
-        .max_size(cfg.max as u32)
-        .connection_timeout(cfg.checkout_timeout)
-        .build(manager)
-        .map_err(|e| DbError::new(format!("connecting to shard: {e}")))
-}
-
-/// A convenience one-shot [`Client`] over a URL, no pool — used for test setup (`CREATE
-/// TABLE`, seeding) where a pool is overkill. Not on the serving hot path.
-pub fn connect(url: &str) -> Result<Client, DbError> {
-    let config = url
-        .parse::<postgres::Config>()
-        .map_err(|e| DbError::new(format!("bad database url: {e}")))?;
-    config
-        .connect(NoTls)
-        .map_err(|e| DbError::new(format!("connecting: {e}")))
+    opts.connect_lazy(url)
+        .map_err(|e| DbError::new(format!("bad database url: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// A `PgValue` encodes its bytes and reports the right null/format — the pure mapping
-    /// (the live round-trip is proven in `tests/postgres_integration.rs`).
-    #[test]
-    fn pgvalue_from_sqlvalue_families() {
-        assert!(matches!(PgValue::from(&SqlValue::Null), PgValue::Null));
-        assert!(matches!(PgValue::from(&SqlValue::Int(7)), PgValue::Int(7)));
-        assert!(matches!(
-            PgValue::from(&SqlValue::Bool(true)),
-            PgValue::Bool(true)
-        ));
-        match PgValue::from(&SqlValue::Text(
-            "00000000-0000-4000-8000-0000000000a1".into(),
-        )) {
-            PgValue::Text(s) => assert_eq!(s, "00000000-0000-4000-8000-0000000000a1"),
-            _ => panic!("uuid text should map to PgValue::Text"),
-        }
-        // json is serialized to canonical text (coerced into `jsonb` server-side).
-        match PgValue::from(&SqlValue::Json(json!({ "a": 1 }))) {
-            PgValue::Text(s) => assert_eq!(s, r#"{"a":1}"#),
-            _ => panic!("json should map to PgValue::Text"),
-        }
-    }
-
-    #[test]
-    fn text_values_encode_in_text_format() {
-        // Strings *and numbers* bind in text format so Postgres coerces each into its inferred
-        // type — uuid/jsonb for strings, the inferred integer width for numbers (a binary i64
-        // is rejected against an inferred `int4`, e.g. the keyset `= 0` guard). `bool` keeps
-        // native binary encoding. (`Format` isn't `PartialEq`, so we match on its variant.)
-        assert!(matches!(
-            PgValue::Text("x".into()).encode_format(&Type::UUID),
-            Format::Text
-        ));
-        assert!(matches!(
-            PgValue::Int(1).encode_format(&Type::INT4),
-            Format::Text
-        ));
-        assert!(matches!(
-            PgValue::Float(1.5).encode_format(&Type::FLOAT8),
-            Format::Text
-        ));
-        assert!(matches!(
-            PgValue::Bool(true).encode_format(&Type::BOOL),
-            Format::Binary
-        ));
-    }
-
-    #[test]
-    fn number_values_write_decimal_text() {
-        // Int/Float render their decimal text (the bytes Postgres coerces into the inferred
-        // width), never a binary payload — so an i64 bind never mismatches an `int4` slot.
-        let mut buf = BytesMut::new();
-        assert!(matches!(
-            PgValue::Int(-42).to_sql(&Type::INT4, &mut buf).unwrap(),
-            IsNull::No
-        ));
-        assert_eq!(&buf[..], b"-42");
-        let mut fbuf = BytesMut::new();
-        PgValue::Float(1.5)
-            .to_sql(&Type::FLOAT8, &mut fbuf)
-            .unwrap();
-        assert_eq!(&fbuf[..], b"1.5");
-    }
-
-    #[test]
-    fn null_reports_is_null() {
-        // The null variant serializes as SQL NULL regardless of the inferred column type.
-        let mut buf = BytesMut::new();
-        let n = PgValue::Null.to_sql(&Type::UUID, &mut buf).unwrap();
-        assert!(matches!(n, IsNull::Yes));
-    }
-
-    #[test]
-    fn text_value_writes_utf8_bytes() {
-        let mut buf = BytesMut::new();
-        let n = PgValue::Text("abc".into())
-            .to_sql(&Type::UUID, &mut buf)
-            .unwrap();
-        assert!(matches!(n, IsNull::No));
-        assert_eq!(&buf[..], b"abc");
-    }
 
     #[test]
     fn hex_of_binary_bytes() {
@@ -722,9 +645,9 @@ mod tests {
     }
 
     /// The binary decoders round-trip a Postgres binary field into its canonical string —
-    /// the fix for reading a `uuid`/`timestamptz`/`date`/`jsonb` result column (rust-postgres
-    /// returns results in *binary* format, so a raw text read mangles these). Proven live in
-    /// `tests/postgres_integration.rs`; here the pure byte→string mapping is unit-covered.
+    /// the read path for a `uuid`/`timestamptz`/`date`/`jsonb` result column (sqlx returns
+    /// results in *binary* format). Proven live in `tests/postgres_integration.rs`; here
+    /// the pure byte→string mapping is unit-covered.
     #[test]
     fn binary_uuid_decodes_to_canonical_string() {
         let bytes = [
@@ -773,5 +696,30 @@ mod tests {
         // 2000-02-29 is day 59 since 2000-01-01.
         let (y, m, d) = civil_from_days(59 + PG_EPOCH_DAYS_FROM_UNIX);
         assert_eq!((y, m, d), (2000, 2, 29));
+    }
+
+    /// The typed bind path round-trips the engine's own canonical timestamp string —
+    /// the exact form `pg_timestamp` emits — plus the common external forms.
+    #[test]
+    fn parse_timestamp_accepts_wire_forms() {
+        for s in [
+            "2024-01-02 12:30:45.500000+00",
+            "2024-01-02 12:30:45+00",
+            "2024-01-02T12:30:45.5Z",
+            "2024-01-02T12:30:45+00:00",
+            "2024-01-02 12:30:45",
+            "2024-01-02T12:30:45.500000",
+        ] {
+            assert!(parse_timestamp(s).is_some(), "should parse: {s}");
+        }
+        assert!(parse_timestamp("not a time").is_none());
+        // The canonical wire string parses back to the same instant it encodes.
+        let dt = parse_timestamp("2024-01-02 12:30:45.500000+00").unwrap();
+        assert_eq!(
+            dt.timestamp_micros(),
+            parse_timestamp("2024-01-02T12:30:45.5Z")
+                .unwrap()
+                .timestamp_micros()
+        );
     }
 }

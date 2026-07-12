@@ -3,14 +3,16 @@
 //! A wire request carries JSON; the driver wants typed scalars. `SqlValue` is the
 //! neutral middle — one variant per storable family. Coercion is family-aware: the
 //! signature says a param is an `int`, so a JSON string is rejected at the boundary
-//! before any SQL runs. Families are coarse on purpose, matching sema's `=`-operand
-//! families: `uuid`/`timestamp`/`date`/`Id` all ride as text, since on the wire they are
-//! strings.
+//! before any SQL runs. The typed text-riding variants (`Uuid`/`Timestamp`/`Date`/
+//! `Decimal`) still carry their wire strings; only a concrete driver parses them into
+//! its native parameter types (Postgres binds all parameters binary-typed, so the bind
+//! site must know the value's primitive).
 
 use based_ast::Primitive;
 
 /// A bound argument that fills one placeholder. Neutral across drivers: the concrete
-/// driver maps these onto its parameter binding.
+/// driver maps these onto its parameter binding. The typed variants carry the value's
+/// wire *string* — parsing into a native driver type happens only inside driver impls.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlValue {
     Null,
@@ -18,6 +20,12 @@ pub enum SqlValue {
     Float(f64),
     Bool(bool),
     Text(String),
+    /// A canonical uuid string (also every engine `Id`).
+    Uuid(String),
+    Timestamp(String),
+    Date(String),
+    /// An exact decimal string — never an `f64`.
+    Decimal(String),
     Json(serde_json::Value),
 }
 
@@ -30,29 +38,33 @@ pub enum Family {
     Int,
     Float,
     Bool,
-    /// `text` and everything wire-encoded as a string: `uuid`/`timestamp`/`date`/`Id`.
     Text,
+    /// `uuid` and `Id` — a uuid string on the wire, a native uuid at a typed bind.
+    Uuid,
+    Timestamp,
+    Date,
+    /// `decimal` — its exact string on the wire, never an `f64`.
+    Decimal,
     /// `json` — any JSON value passes through unchanged.
     Json,
-    /// Untyped: coerce by the JSON value's own shape.
+    /// Untyped: coerce by the JSON value's own shape (a string stays a plain text
+    /// bind — a raw-SQL query comparing one against a typed column writes the cast).
     Any,
 }
 
 impl Family {
-    /// The family a primitive coerces to. The text-riding types collapse to `Text`.
+    /// The family a primitive coerces to.
     pub fn of(prim: Primitive) -> Family {
         match prim {
             Primitive::Int => Family::Int,
             Primitive::Float => Family::Float,
             Primitive::Bool => Family::Bool,
             Primitive::Json => Family::Json,
-            // A decimal rides the wire (and binds) as its exact string — never an `f64`.
-            Primitive::Decimal { .. }
-            | Primitive::Text
-            | Primitive::Timestamp
-            | Primitive::Date
-            | Primitive::Uuid
-            | Primitive::Id => Family::Text,
+            Primitive::Decimal { .. } => Family::Decimal,
+            Primitive::Text => Family::Text,
+            Primitive::Timestamp => Family::Timestamp,
+            Primitive::Date => Family::Date,
+            Primitive::Uuid | Primitive::Id => Family::Uuid,
         }
     }
 
@@ -63,6 +75,10 @@ impl Family {
             Family::Float => "float",
             Family::Bool => "bool",
             Family::Text => "text",
+            Family::Uuid => "uuid",
+            Family::Timestamp => "timestamp",
+            Family::Date => "date",
+            Family::Decimal => "decimal",
             Family::Json => "json",
             Family::Any => "value",
         }
@@ -126,6 +142,22 @@ pub fn coerce(
         },
         Family::Text => match v {
             J::String(s) => Ok(SqlValue::Text(s.clone())),
+            _ => mismatch(json_kind(v)),
+        },
+        Family::Uuid => match v {
+            J::String(s) => Ok(SqlValue::Uuid(s.clone())),
+            _ => mismatch(json_kind(v)),
+        },
+        Family::Timestamp => match v {
+            J::String(s) => Ok(SqlValue::Timestamp(s.clone())),
+            _ => mismatch(json_kind(v)),
+        },
+        Family::Date => match v {
+            J::String(s) => Ok(SqlValue::Date(s.clone())),
+            _ => mismatch(json_kind(v)),
+        },
+        Family::Decimal => match v {
+            J::String(s) => Ok(SqlValue::Decimal(s.clone())),
             _ => mismatch(json_kind(v)),
         },
         Family::Json => Ok(SqlValue::Json(v.clone())),

@@ -10,8 +10,12 @@
 //! pagination `:offset`. So the runtime assembles one value environment from the
 //! validated inputs and lets [`crate::scan::to_positional`] pull from it in SQL order.
 
-use based_ast::{BaseType, Decl, DefaultVal, Literal, Mutation, Param, Query, Verb};
-use based_sema::{CtxField, CtxReq};
+use based_ast::{
+    Assign, BaseType, Decl, DefaultVal, Literal, Mutation, Param, Path, Predicate, Primitive,
+    Query, Value, WriteStmt,
+};
+use based_ast::{NamedFilter, Verb};
+use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel};
 
 use crate::id::IdGen;
 use crate::load::Compiled;
@@ -250,10 +254,15 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     let ast = find_query(&compiled.decls, &req.callable)
         .ok_or_else(|| PlanError::UnknownQuery(req.callable.clone()))?;
 
-    // 1. Assemble the value environment: params, then `$ctx`, then pagination.
+    // 1. Assemble the value environment: params, then `$ctx`, then pagination. Each
+    //    param binds as its column's family — an untyped param resolves through its
+    //    binding against the target model, so a typed (binary-parameter) driver knows
+    //    the value's primitive at the bind site.
+    let root = compiled.schema.model(&rq.target);
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
-        env.insert(p.name.node.clone(), bind_param(p, req)?);
+        let (family, optional) = query_param_family(&compiled.schema, root, p);
+        env.insert(p.name.node.clone(), bind_param(p, family, optional, req)?);
     }
     for c in &rq.ctx_requires {
         env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
@@ -265,9 +274,10 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     // codegen's `:keyset_<i>` placeholders compare against, and flip
     // `:keyset_active`. Absent cursor = the first page: `:keyset_active = 0` short-
     // circuits the comparison to a no-op, and the `:keyset_<i>` bind to NULL (never
-    // consulted). `low.keyset` is the codegen-authoritative key count.
-    if let Some(n) = low.keyset {
-        bind_cursor(&mut env, req, n)?;
+    // consulted). `low.keyset` is the codegen-authoritative key list: each cursor
+    // value re-binds as its sort column's own primitive.
+    if let Some(prims) = &low.keyset {
+        bind_cursor(&mut env, req, prims)?;
     }
 
     // 2. Translate `:name` → `?` for the main and (optional) count statements.
@@ -284,8 +294,8 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     };
 
     // A keyset page carries the descriptor the run stage needs to mint the next cursor.
-    let keyset = low.keyset.map(|keys| KeysetPlan {
-        keys,
+    let keyset = low.keyset.as_ref().map(|prims| KeysetPlan {
+        keys: prims.len(),
         page_size: page_size(ast).unwrap_or(u64::MAX),
     });
 
@@ -321,17 +331,21 @@ pub fn plan_mutation(
     let ast = find_mutation(&compiled.decls, &req.callable)
         .ok_or_else(|| PlanError::UnknownMutation(req.callable.clone()))?;
 
-    // 1. Assemble the value environment: params, then `$ctx` (no pagination on a write).
+    // 1. Assemble the value environment: params, then `$ctx` (no pagination on a
+    //    write). A param's family resolves through its use in the write body (the
+    //    column it assigns or filters), so the driver can bind it typed.
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
-        env.insert(p.name.node.clone(), bind_param(p, req)?);
+        let (family, optional) = mutation_param_family(compiled, ast, p);
+        env.insert(p.name.node.clone(), bind_param(p, family, optional, req)?);
     }
     for c in &rm.ctx_requires {
         env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
     }
 
     // 2. Generate the engine `id` for each create. Record the id of the first create
-    //    matching the return model — the row the response identifies.
+    //    matching the return model — the row the response identifies. Ids fill uuid
+    //    columns, so they bind as the uuid family.
     let mut result_id = None;
     for w in &low.stmts {
         if let Some(bind) = &w.gen_id {
@@ -339,7 +353,7 @@ pub fn plan_mutation(
             if result_id.is_none() && w.model == rm.ret_model {
                 result_id = Some(id.clone());
             }
-            env.insert(bind.clone(), SqlValue::Text(id));
+            env.insert(bind.clone(), SqlValue::Uuid(id));
         }
     }
 
@@ -359,7 +373,7 @@ pub fn plan_mutation(
     let ret_select = match &low.ret_select {
         Some(sql) => {
             if let Some(id) = &result_id {
-                env.insert("result_id".to_string(), SqlValue::Text(id.clone()));
+                env.insert("result_id".to_string(), SqlValue::Uuid(id.clone()));
             }
             Some(env.bind(sql)?)
         }
@@ -408,15 +422,19 @@ impl Env {
 
 // ---------- per-input binding ---------------------------------------------
 
-/// Bind one signature param: use the supplied arg (coerced to the param's family),
+/// Bind one signature param: use the supplied arg (coerced to the resolved family),
 /// or its default, or `null` if optional — else it is missing.
-fn bind_param(p: &Param, req: &Request) -> Result<SqlValue, PlanError> {
-    let (family, optional) = param_family(p);
+fn bind_param(
+    p: &Param,
+    family: Family,
+    optional: bool,
+    req: &Request,
+) -> Result<SqlValue, PlanError> {
     match req.args.get(&p.name.node) {
         Some(v) => coerce(v, family, optional).map_err(|e| bad_arg(&p.name.node, e)),
         None => {
             if let Some(dv) = &p.default {
-                return Ok(default_value(dv));
+                return Ok(default_value(dv, family));
             }
             if optional {
                 return Ok(SqlValue::Null);
@@ -426,22 +444,171 @@ fn bind_param(p: &Param, req: &Request) -> Result<SqlValue, PlanError> {
     }
 }
 
-/// The coercion family + nullability of a param. A model-typed or untyped param
-/// keeps things loose (a relation key is a uuid string; an untyped param is
-/// shape-coerced); untyped params are not strictly per-column typed.
-fn param_family(p: &Param) -> (Family, bool) {
-    match &p.ty {
-        Some(t) => {
-            let family = match &t.base {
-                BaseType::Primitive(prim) => Family::of(*prim),
-                // A relation param carries the target's key: a uuid string.
-                BaseType::Model(_) => Family::Text,
-            };
-            (family, t.optional || p.default.is_some())
-        }
-        // Untyped: coerce by JSON shape. Optional only if it has a default.
-        None => (Family::Any, p.default.is_some()),
+/// The coercion family + nullability of a query param. An explicit annotation wins;
+/// an untyped param takes the family of the column it binds against (its `-> edge` /
+/// `op col` binding, else the same-named member of the target model) — the same
+/// inference the generated client types the input by. Unresolvable (raw SQL) params
+/// stay `Any`: shape-coerced, a plain text bind.
+fn query_param_family(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> (Family, bool) {
+    if let Some(t) = &p.ty {
+        let family = match &t.base {
+            BaseType::Primitive(prim) => Family::of(*prim),
+            // A relation param carries the target's key: a uuid.
+            BaseType::Model(_) => Family::Uuid,
+        };
+        return (family, t.optional || p.default.is_some());
     }
+    let field = binding_field(p);
+    let family = root
+        .and_then(|m| member_family(schema, m, &[field]))
+        .unwrap_or(Family::Any);
+    (family, p.default.is_some())
+}
+
+/// The coercion family + nullability of a mutation param: an explicit annotation wins;
+/// an untyped param takes the family of the first column its `$name` fills or filters
+/// in the write body. Unresolvable stays `Any`.
+fn mutation_param_family(compiled: &Compiled, ast: &Mutation, p: &Param) -> (Family, bool) {
+    if let Some(t) = &p.ty {
+        let family = match &t.base {
+            BaseType::Primitive(prim) => Family::of(*prim),
+            BaseType::Model(_) => Family::Uuid,
+        };
+        return (family, t.optional || p.default.is_some());
+    }
+    let family = param_use_in_stmts(compiled, &ast.body, &p.name.node).unwrap_or(Family::Any);
+    (family, p.default.is_some())
+}
+
+/// The field a query param binds against: its `-> edge` / `op col` binding, else its
+/// own name.
+fn binding_field(p: &Param) -> &str {
+    use based_ast::ParamBinding;
+    match &p.binding {
+        Some(ParamBinding::Edge(e)) => &e.node,
+        Some(ParamBinding::ColOp { col, .. }) => &col.node,
+        None => &p.name.node,
+    }
+}
+
+/// The family of the member a dotted path terminates in: a scalar is its primitive,
+/// a relation terminal is the target's key (a uuid). `None` when unresolved.
+fn member_family(schema: &CheckedSchema, model: &RModel, path: &[&str]) -> Option<Family> {
+    let mut cur = model;
+    let n = path.len();
+    for (i, seg) in path.iter().enumerate() {
+        let last = i + 1 == n;
+        match &cur.member(seg)?.kind {
+            MemberKind::Scalar { ty, .. } => return Some(Family::of(*ty)),
+            MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
+                if last {
+                    return Some(Family::Uuid);
+                }
+                cur = schema.model(target)?;
+            }
+        }
+    }
+    None
+}
+
+/// Find the family of the first column `$name` fills or filters across the write body.
+fn param_use_in_stmts(compiled: &Compiled, stmts: &[WriteStmt], name: &str) -> Option<Family> {
+    let schema = &compiled.schema;
+    for stmt in stmts {
+        let found = match stmt {
+            WriteStmt::Create { model, assigns } => {
+                param_use_in_assigns(schema, &model.node, assigns, name)
+            }
+            WriteStmt::Update {
+                model,
+                where_,
+                assigns,
+            } => param_use_in_assigns(schema, &model.node, assigns, name)
+                .or_else(|| param_use_in_pred(compiled, schema.model(&model.node)?, where_, name)),
+            WriteStmt::Delete { model, where_ }
+            | WriteStmt::Restore { model, where_ }
+            | WriteStmt::HardDelete { model, where_ } => {
+                param_use_in_pred(compiled, schema.model(&model.node)?, where_, name)
+            }
+            WriteStmt::Tx(inner) => param_use_in_stmts(compiled, inner, name),
+            // A raw write is opaque SQL — its params stay text binds (the escape hatch
+            // writes its own casts).
+            WriteStmt::Raw(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn param_use_in_assigns(
+    schema: &CheckedSchema,
+    model: &str,
+    assigns: &[Assign],
+    name: &str,
+) -> Option<Family> {
+    let m = schema.model(model)?;
+    for a in assigns {
+        if let Value::Param(pr) = &a.value {
+            if pr.name.node == name {
+                return member_family(schema, m, &[&a.col.node]);
+            }
+        }
+    }
+    None
+}
+
+/// Find `$name` in a predicate: a `path op $name` comparison types the param by the
+/// path's column; a named-filter call recurses into the filter's own predicate with
+/// the call's positional argument mapping.
+fn param_use_in_pred(
+    compiled: &Compiled,
+    model: &RModel,
+    pred: &Predicate,
+    name: &str,
+) -> Option<Family> {
+    let schema = &compiled.schema;
+    match pred {
+        Predicate::Or(a, b) | Predicate::And(a, b) => param_use_in_pred(compiled, model, a, name)
+            .or_else(|| param_use_in_pred(compiled, model, b, name)),
+        Predicate::Not(inner) => param_use_in_pred(compiled, model, inner, name),
+        Predicate::Cmp { path, value, .. } => match value {
+            Value::Param(pr) if pr.name.node == name => {
+                member_family(schema, model, &path_segments(path))
+            }
+            _ => None,
+        },
+        Predicate::FilterCall { name: fname, args } => {
+            let filter = find_filter(&compiled.decls, &fname.node)?;
+            // Positional mapping: the i-th call arg that is `$name` types as the
+            // filter's i-th declared param, wherever that param lands in the filter.
+            for (arg, fp) in args.iter().zip(&filter.params) {
+                if let Value::Param(pr) = arg {
+                    if pr.name.node == name {
+                        if let Some(f) =
+                            param_use_in_pred(compiled, model, &filter.pred, &fp.name.node)
+                        {
+                            return Some(f);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Predicate::Bare(_) | Predicate::Raw(_) => None,
+    }
+}
+
+fn path_segments(path: &Path) -> Vec<&str> {
+    path.segments.iter().map(|s| s.node.as_str()).collect()
+}
+
+fn find_filter<'a>(decls: &'a [Decl], name: &str) -> Option<&'a NamedFilter> {
+    decls.iter().find_map(|d| match d {
+        Decl::Filter(f) if f.name.node == name => Some(f),
+        _ => None,
+    })
 }
 
 /// Bind one `$ctx.<field>` requirement from the request context. Always required —
@@ -449,8 +616,8 @@ fn param_family(p: &Param) -> (Family, bool) {
 fn bind_ctx(c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
     let family = match &c.ty {
         CtxField::Scalar(prim) => Family::of(*prim),
-        // A relation-typed context field carries the model's key.
-        CtxField::Relation(_) => Family::Text,
+        // A relation-typed context field carries the model's key: a uuid.
+        CtxField::Relation(_) => Family::Uuid,
     };
     match req.ctx.get(&c.field) {
         Some(v) => coerce(v, family, false).map_err(|e| PlanError::BadCtx {
@@ -474,21 +641,30 @@ fn bind_offset(req: &Request) -> Result<SqlValue, PlanError> {
 /// Bind a keyset page's cursor placeholders (`:keyset_active` + `:keyset_0..n`). The
 /// caller sends the opaque `cursor` arg; absence is the first page (`:keyset_active =
 /// 0`, the comparison a no-op, the value placeholders NULL — never consulted). A
-/// present cursor is decoded + validated into its `n` sort-key values (`cursor.rs`); a
-/// bad one is a `BadCursor` boundary error, not a silent empty page.
-fn bind_cursor(env: &mut Env, req: &Request, n: usize) -> Result<(), PlanError> {
+/// present cursor is decoded + validated into one value per sort key (`cursor.rs`),
+/// each re-bound as its sort column's own primitive (so a typed driver binds the same
+/// type the row carried); a bad cursor is a `BadCursor` boundary error, not a silent
+/// empty page.
+fn bind_cursor(env: &mut Env, req: &Request, prims: &[Primitive]) -> Result<(), PlanError> {
     match req.args.get("cursor").filter(|v| !v.is_null()) {
         Some(serde_json::Value::String(s)) => {
-            let vals = crate::cursor::decode(s, n).map_err(|e| PlanError::BadCursor(e.0))?;
+            let vals =
+                crate::cursor::decode(s, prims.len()).map_err(|e| PlanError::BadCursor(e.0))?;
             env.insert("keyset_active".into(), SqlValue::Int(1));
-            for (i, v) in vals.into_iter().enumerate() {
-                env.insert(format!("keyset_{i}"), v);
+            for (i, (v, prim)) in vals.iter().zip(prims).enumerate() {
+                // A null sort-key value (a nullable sort column) stays NULL; anything
+                // else must fit the column's family — a cursor value of the wrong
+                // shape is a tampered/foreign cursor, the same boundary error.
+                let bound = coerce(v, Family::of(*prim), true).map_err(|e| {
+                    PlanError::BadCursor(format!("expected {}", e.expected.label()))
+                })?;
+                env.insert(format!("keyset_{i}"), bound);
             }
         }
         Some(_) => return Err(PlanError::BadCursor("cursor must be a string".into())),
         None => {
             env.insert("keyset_active".into(), SqlValue::Int(0));
-            for i in 0..n {
+            for i in 0..prims.len() {
                 env.insert(format!("keyset_{i}"), SqlValue::Null);
             }
         }
@@ -506,21 +682,36 @@ fn bad_arg(name: &str, e: CoerceError) -> PlanError {
     }
 }
 
-/// A literal default → its bound value. A `now()` default has no request-time value
-/// (it is a write-time engine concern) → `Null` here; query params default to
-/// literals in practice.
-fn default_value(dv: &DefaultVal) -> SqlValue {
+/// A literal default → its bound value, in the param's resolved family (so a string
+/// default on a `timestamp` column still binds typed). A `now()` default has no
+/// request-time value (it is a write-time engine concern) → `Null` here; query params
+/// default to literals in practice.
+fn default_value(dv: &DefaultVal, family: Family) -> SqlValue {
     match dv {
-        DefaultVal::Lit(Literal::Str(s)) => SqlValue::Text(s.clone()),
+        DefaultVal::Lit(Literal::Str(s)) => string_in_family(s.clone(), family),
         DefaultVal::Lit(Literal::Int(i)) => SqlValue::Int(*i),
-        // A fractional literal is carried as exact text (a decimal binds as a string); a
-        // float default's text parses back to a number.
-        DefaultVal::Lit(Literal::Decimal(s)) => SqlValue::Text(s.clone()),
+        // A fractional literal stays exact text for a decimal column; a float default
+        // parses to its number.
+        DefaultVal::Lit(Literal::Decimal(s)) => match family {
+            Family::Float => SqlValue::Float(s.parse().unwrap_or(0.0)),
+            _ => SqlValue::Decimal(s.clone()),
+        },
         DefaultVal::Lit(Literal::Bool(b)) => SqlValue::Bool(*b),
         DefaultVal::Lit(Literal::Null) => SqlValue::Null,
         DefaultVal::Func(_) => SqlValue::Null,
         // An enum default is its wire variant string.
         DefaultVal::Variant(v) => SqlValue::Text(v.node.clone()),
+    }
+}
+
+/// Wrap a string literal in the typed variant its family calls for.
+fn string_in_family(s: String, family: Family) -> SqlValue {
+    match family {
+        Family::Uuid => SqlValue::Uuid(s),
+        Family::Timestamp => SqlValue::Timestamp(s),
+        Family::Date => SqlValue::Date(s),
+        Family::Decimal => SqlValue::Decimal(s),
+        _ => SqlValue::Text(s),
     }
 }
 

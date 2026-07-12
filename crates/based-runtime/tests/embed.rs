@@ -102,8 +102,8 @@ fn generated_client_is_current() {
 
 /// A typed `get` round-trips: the engine's shaped `200` decodes into `Option<OrderCard>`.
 /// The client comes straight from the generated `client::embedded(&engine)` — no bridge.
-#[test]
-fn typed_get_round_trips_in_process() {
+#[tokio::test]
+async fn typed_get_round_trips_in_process() {
     let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 42 }))]]);
     let engine = Engine::new(compiled(), db, SeqIdGen::default());
     let api = client::embedded(&engine);
@@ -115,6 +115,7 @@ fn typed_get_round_trips_in_process() {
             },
             (),
         )
+        .await
         .expect("call ok");
     let card = got.expect("a row");
     assert_eq!(card.status, "paid");
@@ -122,8 +123,8 @@ fn typed_get_round_trips_in_process() {
 }
 
 /// A `get` that matches no row decodes to `None` (envelope `One` → JSON `null`).
-#[test]
-fn typed_get_missing_is_none() {
+#[tokio::test]
+async fn typed_get_missing_is_none() {
     let db = MockDb::new(vec![vec![]]);
     let engine = Engine::new(compiled(), db, SeqIdGen::default());
     let api = client::embedded(&engine);
@@ -135,13 +136,14 @@ fn typed_get_missing_is_none() {
             },
             (),
         )
+        .await
         .expect("call ok");
     assert!(got.is_none());
 }
 
 /// A typed `list` decodes into `Vec<OrderCard>`.
-#[test]
-fn typed_list_round_trips_in_process() {
+#[tokio::test]
+async fn typed_list_round_trips_in_process() {
     let db = MockDb::new(vec![vec![
         row(json!({ "status": "paid", "total": 9 })),
         row(json!({ "status": "open", "total": 3 })),
@@ -156,6 +158,7 @@ fn typed_list_round_trips_in_process() {
             },
             (),
         )
+        .await
         .expect("call ok");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].total, 9);
@@ -167,8 +170,8 @@ fn typed_list_round_trips_in_process() {
 /// untyped side-channel bag. With the required context the `$ctx`-scoped query runs; an
 /// empty context (the embedded bridge maps `&()` → `{}`) makes the engine's boundary `400`
 /// surface as the client's `ClientError` (the same non-200 an HTTP client sees).
-#[test]
-fn ctx_supplied_in_process_and_required() {
+#[tokio::test]
+async fn ctx_supplied_in_process_and_required() {
     // With MyOrgOrdersCtx.org present → the query runs and decodes.
     let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 1 }))]]);
     let engine = Engine::new(compiled(), db, SeqIdGen::default());
@@ -180,12 +183,13 @@ fn ctx_supplied_in_process_and_required() {
                 org: client::Id::from_raw("org-9"),
             },
         )
+        .await
         .expect("call ok");
     assert_eq!(rows.len(), 1);
 
     // A route that requires `$ctx.org` but is reached with an empty context bag (the
     // untyped raw path here, mirroring a missing header) → a boundary 400.
-    let err = engine.call("/q/my_org_orders", json!({}), json!({}));
+    let err = engine.call("/q/my_org_orders", json!({}), json!({})).await;
     assert_eq!(err.status, 400);
     assert!(
         err.body["error"]["message"]
@@ -200,8 +204,8 @@ fn ctx_supplied_in_process_and_required() {
 /// after the INSERT the engine re-selects the created `Order` as an `OrderCard`,
 /// still inside the transaction, and *that* is the `200` body — so the typed
 /// `place_order` method decodes clean into an `OrderCard`, exactly like a `get`.
-#[test]
-fn mutation_response_is_the_created_rows_declared_shape() {
+#[tokio::test]
+async fn mutation_response_is_the_created_rows_declared_shape() {
     // Two writes below (raw + typed), each answered by a post-write re-select of the
     // shaped row.
     let engine = Engine::new(
@@ -214,11 +218,13 @@ fn mutation_response_is_the_created_rows_declared_shape() {
     );
 
     // Raw: the engine returns the declared shape, not `{ id }`.
-    let raw = engine.call(
-        "/m/place_order",
-        json!({ "org": "o-1", "status": "open", "total": 7 }),
-        json!({}),
-    );
+    let raw = engine
+        .call(
+            "/m/place_order",
+            json!({ "org": "o-1", "status": "open", "total": 7 }),
+            json!({}),
+        )
+        .await;
     assert_eq!(raw.status, 200);
     assert_eq!(raw.body, json!({ "status": "open", "total": 7 }));
 
@@ -234,6 +240,7 @@ fn mutation_response_is_the_created_rows_declared_shape() {
             },
             (),
         )
+        .await
         .expect("write response decodes into the declared OrderCard ");
     assert_eq!(card.status, "open");
     assert_eq!(card.total, 7);

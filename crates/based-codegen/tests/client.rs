@@ -53,7 +53,7 @@ fn get_query_returns_option_of_shape() {
     assert!(out.contains("pub total: i64,"), "\n{out}");
     // A `get` (single, unique key) -> Option<T>.
     assert!(
-        out.contains("pub fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"),
+        out.contains("pub async fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"),
         "\n{out}"
     );
     assert!(
@@ -73,7 +73,7 @@ fn list_query_returns_vec() {
         query orders_in_org(org) -> OrderCard[];
         "#);
     assert!(
-        out.contains("pub fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError>"),
+        out.contains("pub async fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError>"),
         "\n{out}"
     );
     // A relation same-name param is the target's typed id (the FK on the wire).
@@ -93,7 +93,7 @@ fn paginated_query_returns_page_envelope() {
         "#);
     assert!(
         out.contains(
-            "pub fn active(&self, input: ActiveInput, ctx: ()) -> Result<Page<ProductCard>, ClientError>"
+            "pub async fn active(&self, input: ActiveInput, ctx: ()) -> Result<Page<ProductCard>, ClientError>"
         ),
         "\n{out}"
     );
@@ -161,7 +161,7 @@ fn mutation_returns_single_shape_and_maps_to_m_route() {
     );
     assert!(
         out.contains(
-            "pub fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError>"
+            "pub async fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError>"
         ),
         "\n{out}"
     );
@@ -262,7 +262,7 @@ fn callable_reading_ctx_gets_typed_ctx_struct() {
     assert!(out.contains("pub org: Id<entity::Org>,"), "\n{out}");
     // The method takes it (not `()`) and forwards it to the transport.
     assert!(
-        out.contains("pub fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError>"),
+        out.contains("pub async fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError>"),
         "\n{out}"
     );
     assert!(
@@ -283,7 +283,7 @@ fn public_callable_takes_unit_ctx_and_emits_no_ctx_struct() {
     assert!(!out.contains("OrderByIdCtx"), "\n{out}");
     assert!(
         out.contains(
-            "pub fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"
+            "pub async fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError>"
         ),
         "\n{out}"
     );
@@ -441,7 +441,7 @@ fn nest_ref_shape_shared_with_a_direct_return_is_one_struct() {
         "#);
     assert_eq!(out.matches("pub struct UserRef {").count(), 1, "\n{out}");
     assert!(
-        out.contains("pub fn user_ref(&self, input: UserRefInput, ctx: ()) -> Result<Option<UserRef>, ClientError>"),
+        out.contains("pub async fn user_ref(&self, input: UserRefInput, ctx: ()) -> Result<Option<UserRef>, ClientError>"),
         "\n{out}"
     );
 }

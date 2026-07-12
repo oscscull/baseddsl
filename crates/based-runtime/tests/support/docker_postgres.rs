@@ -5,7 +5,8 @@
 //! ends — so `tests/postgres_integration.rs` can run the *verbatim* Postgres-lowered
 //! (`$n`-bound) `based gen sql` output against a genuine server instead of a `MockDb`.
 //! It shells out to the `docker` CLI directly (a thin guard, not a heavy testcontainers
-//! dependency, and no async runtime pulled into the sync codebase).
+//! dependency); the readiness wait and setup helpers ride sqlx, the same executor the
+//! runtime's drivers use.
 //!
 //! **No daemon ⇒ skip, never fail.** [`PostgresContainer::start`] returns `None` when the
 //! Docker daemon is unreachable or the image/run/readiness steps do not complete, logging a
@@ -25,7 +26,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use based_runtime::pg_connect;
+use sqlx::Connection;
 
 /// A pinned Postgres image. Pinned (not `latest`) so the suite tests a known server version
 /// and a CI cache stays warm; 16 is a current stable major with the native `uuid` /
@@ -67,13 +68,13 @@ impl PostgresContainer {
     /// Prefers an externally-provided server (`TEST_POSTGRES_URL`, e.g. a CI service
     /// container); otherwise spins an ephemeral container via Docker. Returns `None` (after
     /// logging why) when neither is reachable/ready — the caller skips rather than failing.
-    pub fn start() -> Option<PostgresContainer> {
+    pub async fn start() -> Option<PostgresContainer> {
         // CI-provided server takes precedence: connect to it after the readiness-wait.
         if let Ok(url) = std::env::var(URL_ENV) {
             let url = url.trim().to_string();
             if !url.is_empty() {
                 eprintln!("[docker-postgres] using external {URL_ENV}={url}");
-                if !wait_ready(&url) {
+                if !wait_ready(&url).await {
                     eprintln!(
                         "[docker-postgres] SKIP: external server at {URL_ENV} not ready within {}s",
                         READY_TIMEOUT.as_secs()
@@ -133,7 +134,7 @@ impl PostgresContainer {
             kind: Kind::Spun { id, port },
         };
 
-        if !wait_ready(&container.url()) {
+        if !wait_ready(&container.url()).await {
             eprintln!(
                 "[docker-postgres] SKIP: Postgres did not become ready within {}s",
                 READY_TIMEOUT.as_secs()
@@ -161,6 +162,20 @@ impl PostgresContainer {
             Kind::External { url } => url.clone(),
         }
     }
+
+    /// Run a multi-statement setup script (schema reset / DDL / seed) against the live
+    /// server on one one-shot connection. Panics on failure: setup SQL failing is a broken
+    /// fixture, not a test outcome.
+    #[allow(dead_code)] // not every includer runs setup SQL
+    pub async fn exec_batch(&self, sql: &str) {
+        let mut conn = sqlx::postgres::PgConnection::connect(&self.url())
+            .await
+            .expect("setup connection");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&mut conn)
+            .await
+            .unwrap_or_else(|e| panic!("setup batch failed: {e}\n{sql}"));
+    }
 }
 
 /// Poll a real connection until the server answers `SELECT 1` or the timeout elapses. A fresh
@@ -168,15 +183,15 @@ impl PostgresContainer {
 /// retry rather than sleeping a fixed amount so a ready server starts the suite promptly. This
 /// is the portable readiness-wait — the same poll for a self-spun and a CI service container,
 /// so `based migrate apply` / the live suite never races a booting DB.
-fn wait_ready(url: &str) -> bool {
+async fn wait_ready(url: &str) -> bool {
     let deadline = Instant::now() + READY_TIMEOUT;
     while Instant::now() < deadline {
-        if let Ok(mut client) = pg_connect(url) {
-            if client.simple_query("SELECT 1").is_ok() {
+        if let Ok(mut conn) = sqlx::postgres::PgConnection::connect(url).await {
+            if sqlx::raw_sql("SELECT 1").execute(&mut conn).await.is_ok() {
                 return true;
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     false
 }

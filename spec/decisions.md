@@ -3306,3 +3306,38 @@ gate also surfaced a `make check` sequencing bug, fixed in passing: the live sui
 at *start* and leave their last schema + migration ledger on the shared throwaway DB, while each
 example scenario expects an empty database — `check` now re-freshes the servers between the two
 phases, the isolation CI already gets from one service container per job.)
+
+**N1 implementation notes (2026-07-11; the recolor as built, where it refines the above).**
+- *Deadlock retry = fresh checkout per attempt.* sqlx's transaction guard owns the pooled
+  connection (commit/drop returns it to the pool internally), so the bounded retry loop cannot
+  re-run on the same connection; each attempt checks a fresh `Db` out of the `Backend`. Refines
+  D65's "re-run on the same connection" — semantics identical, cost is one extra checkout on the
+  rare retry. Consequence: `run_mutation`/`dispatch` take `Backend` + shard key (checkout-per-call
+  lives in dispatch), which is also what made the `Send + Sync` engine handle trivial.
+- *Typed binds for untyped params.* The spike note "the planner has the primitive at every typed
+  bind site" holds, but for *untyped* params the primitive is resolved at plan time from the
+  schema: a query param through its `-> edge`/`op col` binding (else its same-named member) on the
+  target model; a mutation param through the first column its `$name` fills or filters in the
+  write body (named-filter calls resolved positionally). Unresolvable (raw-SQL) params stay
+  shape-coerced text binds, as decided.
+- *Postgres NULL binds are unknown-OID.* A `SqlValue::Null` binds as an `unknown` (OID 705) NULL —
+  the server resolves it to the target column's type like a bare NULL literal (proven live:
+  optional-param inserts + first-page keyset NULLs against uuid/timestamptz/numeric/jsonb columns).
+- *sqlx 0.9 gates dynamic SQL* (`SqlSafeStr`): the runtime's machine-lowered, positional-bind-only
+  SQL passes through `AssertSqlSafe` at the driver seam — the audit that marker asks for is the
+  compiler pipeline itself.
+- *`based serve` lost its worker-count knob*: with the async listener, concurrency is bounded by
+  the pool (`--pool-max` + checkout timeout), completing D20's sizing insight; a separate worker
+  ceiling had nothing left to bound.
+- *Drain window.* axum's graceful shutdown stops **accepting** the moment it triggers — under the
+  old worker model the drained workers kept answering `/readyz` 503, which is the half of D26's
+  contract a load balancer actually drains on (a probe must *observe* the failing readiness; a
+  refused connection is indistinguishable from a crash). `Handle::shutdown` now flips the flag,
+  holds the listener open for a fixed 1s `DRAIN_WINDOW`, then triggers the axum shutdown —
+  readiness observably fails first, in-flight requests still never cut off.
+- *Keyset `id` tiebreaker binds as the model's own id type.* The implicit tiebreaker hardcoded
+  `Primitive::Id` (a uuid-typed bind under sqlx's native-typed Postgres parameters); a model
+  declaring `id: text` then failed page 2 live ("invalid uuid"). `build_order` now takes the
+  tiebreaker's primitive from the model's `id` member, falling back to `Primitive::Id` for the
+  implicit column. Caught by the live Postgres keyset suites — invisible to the old
+  coerce-wire-text driver, which is exactly the bind-typing risk the N1 spike flagged.

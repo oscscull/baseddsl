@@ -85,7 +85,7 @@ based gen client -o src/client.rs --embedded   # src/client.rs (the typed client
   emits the in-process bridge, so the whole of the wiring is one line:
 
   ```rust
-  let engine = Engine::new(compiled, SqliteDb::new(conn), SeqIdGen::default());
+  let engine = Engine::new(compiled, SqliteBackend::open(&db_path)?, SeqIdGen::default());
   let api = client::embedded(&engine);   // typed, in-process, no socket, no bridge to write
   ```
 

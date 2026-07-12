@@ -82,9 +82,9 @@ fn create_generates_id_and_binds_params_positionally() {
     assert_eq!(
         s.params,
         vec![
-            SqlValue::Text("id-0".into()),
-            SqlValue::Text("o-1".into()),
-            SqlValue::Text("u-1".into()),
+            SqlValue::Uuid("id-0".into()),
+            SqlValue::Uuid("o-1".into()),
+            SqlValue::Uuid("u-1".into()),
             SqlValue::Int(42),
         ]
     );
@@ -92,17 +92,18 @@ fn create_generates_id_and_binds_params_positionally() {
     assert_eq!(plan.result_id.as_deref(), Some("id-0"));
 }
 
-#[test]
-fn run_create_reselects_the_declared_shape_inside_the_tx() {
+#[tokio::test]
+async fn run_create_reselects_the_declared_shape_inside_the_tx() {
     let c = compile(CREATE_SCHEMA);
     let mut ids = SeqIdGen::default();
     // The mutation returns `OrderCard { total }`, so after the INSERT the engine
     // re-selects the created row in that shape. The mock replies to that fetch
     // with the shaped row — which becomes the response, not a bare `{ id }`.
-    let mut db = MockDb::new(vec![vec![row(json!({ "total": 42 }))]]);
+    let db = MockDb::new(vec![vec![row(json!({ "total": 42 }))]]);
     let out = run_mutation(
         &c,
-        &mut db,
+        &db,
+        "",
         &mut ids,
         &NoStore,
         &req(
@@ -110,6 +111,7 @@ fn run_create_reselects_the_declared_shape_inside_the_tx() {
             json!({ "org": "o-1", "buyer": "u-1", "total": 42 }),
         ),
     )
+    .await
     .unwrap();
 
     // The response is the declared shape (matches the client's decoded output type),
@@ -117,16 +119,17 @@ fn run_create_reselects_the_declared_shape_inside_the_tx() {
     assert_eq!(out, json!({ "total": 42 }));
     // The re-select runs inside the transaction: INSERT then the shaped SELECT, all
     // between one begin/commit.
-    assert_eq!(db.tx, vec!["begin", "commit"]);
-    assert_eq!(db.calls.len(), 2);
-    let (write_sql, _) = &db.calls[0];
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
+    let calls = db.calls();
+    assert_eq!(calls.len(), 2);
+    let (write_sql, _) = &calls[0];
     assert!(write_sql.contains("INSERT INTO `order`"), "{write_sql}");
-    let (sel_sql, sel_params) = &db.calls[1];
+    let (sel_sql, sel_params) = &calls[1];
     assert!(sel_sql.starts_with("SELECT"), "{sel_sql}");
     assert!(sel_sql.contains("FROM `order`"), "{sel_sql}");
     // keyed on the created row's engine id, bound positionally.
     assert!(sel_sql.contains("`order`.`id` = ?"), "{sel_sql}");
-    assert_eq!(sel_params, &vec![SqlValue::Text("id-0".into())]);
+    assert_eq!(sel_params, &vec![SqlValue::Uuid("id-0".into())]);
 }
 
 #[test]
@@ -183,8 +186,8 @@ fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
         s.params,
         vec![
             SqlValue::Text("shipped".into()),
-            SqlValue::Text("ord-9".into()),
-            SqlValue::Text("org-7".into()),
+            SqlValue::Uuid("ord-9".into()),
+            SqlValue::Uuid("org-7".into()),
         ]
     );
     // No create, so no engine id — but the updated row survives, so the declared shape is
@@ -198,8 +201,8 @@ fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
     assert_eq!(
         rs.params,
         vec![
-            SqlValue::Text("ord-9".into()),
-            SqlValue::Text("org-7".into())
+            SqlValue::Uuid("ord-9".into()),
+            SqlValue::Uuid("org-7".into())
         ]
     );
 }
@@ -217,8 +220,8 @@ fn update_missing_ctx_is_rejected() {
     assert_eq!(err, PlanError::MissingCtx("org".into()));
 }
 
-#[test]
-fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
+#[tokio::test]
+async fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
     let c = compile(
         r#"
         @soft_delete(deleted_at)
@@ -233,38 +236,41 @@ fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
     let mut ids = SeqIdGen::default();
     // The soft-deleted row survives (tombstoned), so after the write the engine re-selects
     // it in its declared shape — the mock replies to that fetch with the shaped row.
-    let mut db = MockDb::new(vec![vec![row(json!({ "status": "cancelled" }))]]);
+    let db = MockDb::new(vec![vec![row(json!({ "status": "cancelled" }))]]);
     let out = run_mutation(
         &c,
-        &mut db,
+        &db,
+        "",
         &mut ids,
         &NoStore,
         &req("remove", json!({ "id": "ord-1" })),
     )
+    .await
     .unwrap();
 
     // the executed write is the tombstone UPDATE, not a DELETE.
-    let (sql, params) = &db.calls[0];
+    let calls = db.calls();
+    let (sql, params) = &calls[0];
     assert!(sql.starts_with("UPDATE `order`"), "{sql}");
     assert!(!sql.contains("DELETE"), "must not be a real DELETE: {sql}");
-    assert_eq!(params, &vec![SqlValue::Text("ord-1".into())]);
+    assert_eq!(params, &vec![SqlValue::Uuid("ord-1".into())]);
     // then the where-keyed re-select reads the tombstoned row back in its declared shape,
     // *without* the live predicate (it's tombstoned now), all under one transaction.
-    assert_eq!(db.tx, vec!["begin", "commit"]);
-    assert_eq!(db.calls.len(), 2);
-    let (sel_sql, sel_params) = &db.calls[1];
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
+    assert_eq!(calls.len(), 2);
+    let (sel_sql, sel_params) = &calls[1];
     assert!(sel_sql.starts_with("SELECT"), "{sel_sql}");
     assert!(
         !sel_sql.contains("deleted_at"),
         "soft-delete re-select must not filter on the tombstone: {sel_sql}"
     );
-    assert_eq!(sel_params, &vec![SqlValue::Text("ord-1".into())]);
+    assert_eq!(sel_params, &vec![SqlValue::Uuid("ord-1".into())]);
     // the response is the deleted row's declared shape.
     assert_eq!(out, json!({ "status": "cancelled" }));
 }
 
-#[test]
-fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
+#[tokio::test]
+async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     let c = compile(
         r#"
         User { email: text }
@@ -296,7 +302,7 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     assert_eq!(
         plan.stmts[0].params,
         vec![
-            SqlValue::Text("id-0".into()),
+            SqlValue::Uuid("id-0".into()),
             SqlValue::Text("a@b.c".into())
         ]
     );
@@ -310,8 +316,8 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     assert_eq!(
         plan.stmts[1].params,
         vec![
-            SqlValue::Text("id-1".into()),
-            SqlValue::Text("id-0".into()),
+            SqlValue::Uuid("id-1".into()),
+            SqlValue::Uuid("id-0".into()),
             SqlValue::Text("NYC".into()),
         ]
     );
@@ -320,45 +326,68 @@ fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
 
     // both writes plus the declared-shape re-select run under one transaction, in
     // order; the re-select reads the created User (the return model) back as UserCard.
-    let mut db = MockDb::new(vec![vec![row(json!({ "email": "a@b.c" }))]]);
+    let db = MockDb::new(vec![vec![row(json!({ "email": "a@b.c" }))]]);
     let out = run_mutation(
         &c,
-        &mut db,
+        &db,
+        "",
         &mut SeqIdGen::default(),
         &NoStore,
         &req("signup", json!({ "email": "a@b.c", "city": "NYC" })),
     )
+    .await
     .unwrap();
     assert_eq!(out, json!({ "email": "a@b.c" }));
-    assert_eq!(db.tx, vec!["begin", "commit"]);
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
     // two INSERTs, then the shaped re-select.
-    assert_eq!(db.calls.len(), 3);
-    assert!(db.calls[2].0.starts_with("SELECT"), "{}", db.calls[2].0);
+    let calls = db.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[2].0.starts_with("SELECT"), "{}", calls[2].0);
 }
 
 // ---------- deadlock-retry -------------------------------------------
 
-use based_runtime::{DbError, DbErrorKind, Row, RunError};
+use based_runtime::{Backend, Db, DbError, DbErrorKind, DbRead, RowStream, RunError, Tx};
+use std::sync::{Arc, Mutex};
 
-/// A `Db` that fails its first `deadlocks` transaction attempts with a deadlock-class
-/// error, then succeeds — modelling a real server aborting the losing side of a lock
-/// conflict. Each attempt is one `begin → execute → fetch(re-select) → commit`
-/// cycle; the deadlock fires on the first `execute` (as a real server would, mid-write),
-/// so the engine rolls back and re-runs the whole transaction.
+/// A `Backend`/`Db`/`Tx` that fails its first `deadlocks` transaction attempts with a
+/// deadlock-class error, then succeeds — modelling a real server aborting the losing
+/// side of a lock conflict. Each attempt is a fresh checkout: one `begin → execute →
+/// fetch(re-select) → commit` cycle; the deadlock fires on the first `execute` (as a
+/// real server would, mid-write), so the engine drops the tx and re-runs the whole
+/// transaction. Clones share the counters, so a test keeps one handle for assertions.
+#[derive(Clone)]
 struct DeadlockThenOk {
-    deadlocks: u32,
-    executes: u32,
-    reselect: Vec<Row>,
+    // (remaining deadlocks, executes seen)
+    counters: Arc<Mutex<(u32, u32)>>,
+    // Serves the successful attempt's re-select fetch.
+    reselect: MockDb,
 }
 
-impl based_runtime::Db for DeadlockThenOk {
-    fn fetch(&mut self, _sql: &str, _params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
-        Ok(self.reselect.clone())
+impl DeadlockThenOk {
+    fn new(deadlocks: u32, reselect: Vec<based_runtime::Row>) -> DeadlockThenOk {
+        DeadlockThenOk {
+            counters: Arc::new(Mutex::new((deadlocks, 0))),
+            reselect: MockDb::new(vec![reselect]),
+        }
     }
-    fn execute(&mut self, _sql: &str, _params: &[SqlValue]) -> Result<u64, DbError> {
-        self.executes += 1;
-        if self.deadlocks > 0 {
-            self.deadlocks -= 1;
+
+    fn executes(&self) -> u32 {
+        self.counters.lock().unwrap().1
+    }
+}
+
+#[async_trait::async_trait]
+impl DbRead for DeadlockThenOk {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        self.reselect.fetch(sql, params)
+    }
+
+    async fn execute(&mut self, _sql: &str, _params: &[SqlValue]) -> Result<u64, DbError> {
+        let mut c = self.counters.lock().unwrap();
+        c.1 += 1;
+        if c.0 > 0 {
+            c.0 -= 1;
             return Err(DbError::of(
                 DbErrorKind::Deadlock,
                 "deadlock found; try again",
@@ -368,19 +397,37 @@ impl based_runtime::Db for DeadlockThenOk {
     }
 }
 
-#[test]
-fn mutation_retries_a_deadlocked_transaction_then_commits() {
+#[async_trait::async_trait]
+impl Db for DeadlockThenOk {
+    async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError> {
+        Ok(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl Tx for DeadlockThenOk {
+    async fn commit(self: Box<Self>) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Backend for DeadlockThenOk {
+    async fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        Ok(Box::new(self.clone()))
+    }
+}
+
+#[tokio::test]
+async fn mutation_retries_a_deadlocked_transaction_then_commits() {
     // The write body deadlocks twice, then commits on the third attempt — the engine
     // re-runs the whole transaction each time and returns the declared-shape re-select.
     let c = compile(CREATE_SCHEMA);
-    let mut db = DeadlockThenOk {
-        deadlocks: 2,
-        executes: 0,
-        reselect: vec![row(json!({ "total": 42 }))],
-    };
+    let db = DeadlockThenOk::new(2, vec![row(json!({ "total": 42 }))]);
     let out = run_mutation(
         &c,
-        &mut db,
+        &db,
+        "",
         &mut SeqIdGen::default(),
         &NoStore,
         &req(
@@ -388,25 +435,23 @@ fn mutation_retries_a_deadlocked_transaction_then_commits() {
             json!({ "org": "o-1", "buyer": "u-1", "total": 42 }),
         ),
     )
+    .await
     .unwrap();
     assert_eq!(out, json!({ "total": 42 }));
     // Three attempts total: two deadlocked INSERTs + one that committed.
-    assert_eq!(db.executes, 3);
+    assert_eq!(db.executes(), 3);
 }
 
-#[test]
-fn mutation_gives_up_after_bounded_deadlock_retries() {
+#[tokio::test]
+async fn mutation_gives_up_after_bounded_deadlock_retries() {
     // A row that always deadlocks exhausts the bounded retries and surfaces a DbError
     // (→ the wire's 503) rather than retrying forever — fail fast, not a hang.
     let c = compile(CREATE_SCHEMA);
-    let mut db = DeadlockThenOk {
-        deadlocks: u32::MAX,
-        executes: 0,
-        reselect: vec![row(json!({ "total": 1 }))],
-    };
+    let db = DeadlockThenOk::new(u32::MAX, vec![row(json!({ "total": 1 }))]);
     let err = run_mutation(
         &c,
-        &mut db,
+        &db,
+        "",
         &mut SeqIdGen::default(),
         &NoStore,
         &req(
@@ -414,6 +459,7 @@ fn mutation_gives_up_after_bounded_deadlock_retries() {
             json!({ "org": "o-1", "buyer": "u-1", "total": 1 }),
         ),
     )
+    .await
     .unwrap_err();
     match err {
         RunError::Db(e) => assert_eq!(e.kind, DbErrorKind::Deadlock),
@@ -421,8 +467,8 @@ fn mutation_gives_up_after_bounded_deadlock_retries() {
     }
     // Bounded: the initial attempt + a fixed number of retries, never unbounded.
     assert!(
-        db.executes >= 2 && db.executes <= 8,
+        db.executes() >= 2 && db.executes() <= 8,
         "attempts should be bounded, got {}",
-        db.executes
+        db.executes()
     );
 }

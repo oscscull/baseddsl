@@ -12,8 +12,6 @@
 //! Cursor values only ever fill bound parameters, never concatenate into SQL, so even a
 //! forged cursor can shift which rows are returned but never inject SQL.
 
-use crate::value::{coerce, Family, SqlValue};
-
 /// Why an incoming cursor could not be decoded — always a client error (a malformed or
 /// tampered cursor), surfaced as a `PlanError::BadCursor` (→ 400).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,9 +24,10 @@ pub fn encode(values: &[serde_json::Value]) -> String {
     format!("{sum:016x}.{}", hex(payload.as_bytes()))
 }
 
-/// Decode a cursor into `n` bound values, validating the checksum, structure, and
-/// arity. Any deviation is a `CursorError` (the caller sent a bad cursor).
-pub fn decode(s: &str, n: usize) -> Result<Vec<SqlValue>, CursorError> {
+/// Decode a cursor into its `n` sort-key JSON values, validating the checksum,
+/// structure, and arity. Any deviation is a `CursorError` (the caller sent a bad
+/// cursor). The planner coerces each value into its sort column's own family.
+pub fn decode(s: &str, n: usize) -> Result<Vec<serde_json::Value>, CursorError> {
     let (sum_hex, payload_hex) = s
         .split_once('.')
         .ok_or_else(|| CursorError("malformed cursor".into()))?;
@@ -47,13 +46,7 @@ pub fn decode(s: &str, n: usize) -> Result<Vec<SqlValue>, CursorError> {
     if arr.len() != n {
         return Err(CursorError("cursor arity mismatch".into()));
     }
-    // `Family::Any` coerces each value by its own JSON shape — the sort keys ride back
-    // exactly as they came out of the DB (text/number/bool), so the comparison binds
-    // the same value the row carried.
-    Ok(arr
-        .iter()
-        .map(|v| coerce(v, Family::Any, true).expect("Any coercion is infallible"))
-        .collect())
+    Ok(arr.clone())
 }
 
 /// FNV-1a 64-bit — a lightweight non-cryptographic tamper/corruption checksum, not a
@@ -94,28 +87,14 @@ mod tests {
     fn round_trips_values() {
         let vals = vec![json!("2024-01-01T00:00:00Z"), json!("abc-123")];
         let cur = encode(&vals);
-        let got = decode(&cur, 2).unwrap();
-        assert_eq!(
-            got,
-            vec![
-                SqlValue::Text("2024-01-01T00:00:00Z".into()),
-                SqlValue::Text("abc-123".into()),
-            ]
-        );
+        assert_eq!(decode(&cur, 2).unwrap(), vals);
     }
 
     #[test]
     fn round_trips_mixed_families() {
         let vals = vec![json!(42), json!(true), json!("x")];
         let cur = encode(&vals);
-        assert_eq!(
-            decode(&cur, 3).unwrap(),
-            vec![
-                SqlValue::Int(42),
-                SqlValue::Bool(true),
-                SqlValue::Text("x".into())
-            ]
-        );
+        assert_eq!(decode(&cur, 3).unwrap(), vals);
     }
 
     #[test]

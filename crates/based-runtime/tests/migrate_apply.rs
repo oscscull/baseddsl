@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use based_codegen::Dialect;
+use based_runtime::fetch_all;
 use based_runtime::migrate::{
     apply, load_migrations, status, ApplyOpts, Direction, MigrateError, MigrationState,
 };
@@ -74,45 +75,44 @@ fn scenario(tag: &str) -> (Scratch, SqliteBackend) {
     (s, backend)
 }
 
-fn count_ledger(backend: &SqliteBackend) -> i64 {
-    let rows = backend
-        .checkout("")
-        .unwrap()
-        .fetch("SELECT COUNT(*) AS c FROM _based_migrations", &[])
+async fn count_ledger(backend: &SqliteBackend) -> i64 {
+    let mut db = backend.checkout("").await.unwrap();
+    let rows = fetch_all(db.fetch("SELECT COUNT(*) AS c FROM _based_migrations", &[]))
+        .await
         .unwrap();
     rows[0]["c"].as_i64().unwrap()
 }
 
-fn has_size_column(backend: &SqliteBackend) -> bool {
-    // PRAGMA table_info lists the columns; `size` is present only after 0002 applies.
-    backend
-        .checkout("")
-        .unwrap()
-        .fetch("SELECT name FROM pragma_table_info('widget')", &[])
+async fn has_column(backend: &SqliteBackend, col: &str) -> bool {
+    // PRAGMA table_info lists the columns; e.g. `size` is present only after 0002 applies.
+    let mut db = backend.checkout("").await.unwrap();
+    fetch_all(db.fetch("SELECT name FROM pragma_table_info('widget')", &[]))
+        .await
         .unwrap()
         .iter()
-        .any(|r| r["name"].as_str() == Some("size"))
+        .any(|r| r["name"].as_str() == Some(col))
 }
 
-#[test]
-fn fresh_apply_creates_tables_and_ledger_then_re_apply_is_a_noop() {
+#[tokio::test]
+async fn fresh_apply_creates_tables_and_ledger_then_re_apply_is_a_noop() {
     let (s, backend) = scenario("fresh");
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
     assert_eq!(migs.len(), 2);
 
-    let mut db = backend.checkout("").unwrap();
-    let report = apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap();
-    drop(db);
+    let report = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
     assert_eq!(report.applied, vec!["0001_init", "0002_add_size"]);
     assert!(report.rolled_back.is_empty());
 
     // The schema is real: widget exists with the added `size` column, and both ledger rows landed.
-    assert!(has_size_column(&backend));
-    assert_eq!(count_ledger(&backend), 2);
+    assert!(has_column(&backend, "size").await);
+    assert_eq!(count_ledger(&backend).await, 2);
 
     // A write against the migrated schema works.
     backend
         .checkout("")
+        .await
         .unwrap()
         .execute(
             "INSERT INTO `widget` (`id`, `name`, `size`) VALUES (?, ?, ?)",
@@ -122,45 +122,60 @@ fn fresh_apply_creates_tables_and_ledger_then_re_apply_is_a_noop() {
                 SqlValue::Int(7),
             ],
         )
+        .await
         .unwrap();
 
     // Re-apply: nothing pending, nothing changes.
-    let mut db = backend.checkout("").unwrap();
-    let report = apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap();
+    let report = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
     assert!(report.applied.is_empty() && report.rolled_back.is_empty());
-    assert_eq!(count_ledger(&backend), 2);
+    assert_eq!(count_ledger(&backend).await, 2);
 }
 
-#[test]
-fn status_reports_pending_then_applied() {
+#[tokio::test]
+async fn status_reports_pending_then_applied() {
     let (s, backend) = scenario("status");
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
 
-    // Before apply: the ledger doesn't exist yet, so both are pending.
-    let mut db = backend.checkout("").unwrap();
-    based_runtime::migrate::ensure_ledger(&mut *db, Dialect::Sqlite).unwrap();
-    let ledger = based_runtime::migrate::applied(&mut *db, Dialect::Sqlite).unwrap();
-    let before = status(&migs, &ledger);
-    assert!(before.iter().all(|(_, st)| *st == MigrationState::Pending));
+    // Before apply: the ledger doesn't exist yet, so both are pending. The checkout is
+    // dropped before `apply` — the in-memory pool has exactly one connection.
+    {
+        let mut db = backend.checkout("").await.unwrap();
+        based_runtime::migrate::ensure_ledger(&mut *db, Dialect::Sqlite)
+            .await
+            .unwrap();
+        let ledger = based_runtime::migrate::applied(&mut *db, Dialect::Sqlite)
+            .await
+            .unwrap();
+        let before = status(&migs, &ledger);
+        assert!(before.iter().all(|(_, st)| *st == MigrationState::Pending));
+    }
 
-    apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap();
-    let ledger = based_runtime::migrate::applied(&mut *db, Dialect::Sqlite).unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    let mut db = backend.checkout("").await.unwrap();
+    let ledger = based_runtime::migrate::applied(&mut *db, Dialect::Sqlite)
+        .await
+        .unwrap();
     let after = status(&migs, &ledger);
     assert!(after.iter().all(|(_, st)| *st == MigrationState::Applied));
 }
 
-#[test]
-fn down_rolls_back_the_latest_and_can_re_apply() {
+#[tokio::test]
+async fn down_rolls_back_the_latest_and_can_re_apply() {
     let (s, backend) = scenario("down");
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
 
-    let mut db = backend.checkout("").unwrap();
-    apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap();
-    assert!(has_size_column(&backend));
+    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    assert!(has_column(&backend, "size").await);
 
     // Roll back just 0002 via its down.mig: the size column is gone, ledger drops to 1.
     let report = apply(
-        &mut *db,
+        &backend,
         Dialect::Sqlite,
         &migs,
         &ApplyOpts {
@@ -168,23 +183,27 @@ fn down_rolls_back_the_latest_and_can_re_apply() {
             direction: Direction::Down,
         },
     )
+    .await
     .unwrap();
     assert_eq!(report.rolled_back, vec!["0002_add_size"]);
-    assert!(!has_size_column(&backend));
-    assert_eq!(count_ledger(&backend), 1);
+    assert!(!has_column(&backend, "size").await);
+    assert_eq!(count_ledger(&backend).await, 1);
 
     // Roll forward again: 0002 re-applies cleanly.
-    let report = apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap();
+    let report = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
     assert_eq!(report.applied, vec!["0002_add_size"]);
-    assert!(has_size_column(&backend));
+    assert!(has_column(&backend, "size").await);
 }
 
-#[test]
-fn a_migration_edited_after_apply_is_a_tamper_error() {
+#[tokio::test]
+async fn a_migration_edited_after_apply_is_a_tamper_error() {
     let (s, backend) = scenario("tamper");
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
-    let mut db = backend.checkout("").unwrap();
-    apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
 
     // Edit an already-applied migration's up.mig — the content hash now diverges from the ledger.
     std::fs::write(
@@ -193,12 +212,14 @@ fn a_migration_edited_after_apply_is_a_tamper_error() {
     )
     .unwrap();
     let tampered = load_migrations(&s.0, Dialect::Sqlite).unwrap();
-    let err = apply(&mut *db, Dialect::Sqlite, &tampered, &ApplyOpts::default()).unwrap_err();
+    let err = apply(&backend, Dialect::Sqlite, &tampered, &ApplyOpts::default())
+        .await
+        .unwrap_err();
     assert!(matches!(err, MigrateError::Tamper { .. }), "{err}");
 }
 
-#[test]
-fn a_destructive_migration_needs_the_allow_flag() {
+#[tokio::test]
+async fn a_destructive_migration_needs_the_allow_flag() {
     let (s, backend) = scenario("destructive");
     // 0003 drops the `name` column — destructive (data loss).
     s.migration(
@@ -210,16 +231,17 @@ fn a_destructive_migration_needs_the_allow_flag() {
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
     assert!(migs[2].destructive);
 
-    let mut db = backend.checkout("").unwrap();
     // Without the ack, apply stops before the destructive migration.
-    let err = apply(&mut *db, Dialect::Sqlite, &migs, &ApplyOpts::default()).unwrap_err();
+    let err = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap_err();
     assert!(matches!(err, MigrateError::Destructive { .. }), "{err}");
     // 0001 + 0002 (the safe ones) still applied before hitting the gate.
-    assert_eq!(count_ledger(&backend), 2);
+    assert_eq!(count_ledger(&backend).await, 2);
 
     // With the explicit ack, the drop applies.
     apply(
-        &mut *db,
+        &backend,
         Dialect::Sqlite,
         &migs,
         &ApplyOpts {
@@ -227,19 +249,10 @@ fn a_destructive_migration_needs_the_allow_flag() {
             direction: Direction::Up,
         },
     )
+    .await
     .unwrap();
-    assert_eq!(count_ledger(&backend), 3);
-    assert!(!has_size_column_named(&backend, "name"));
-}
-
-fn has_size_column_named(backend: &SqliteBackend, col: &str) -> bool {
-    backend
-        .checkout("")
-        .unwrap()
-        .fetch("SELECT name FROM pragma_table_info('widget')", &[])
-        .unwrap()
-        .iter()
-        .any(|r| r["name"].as_str() == Some(col))
+    assert_eq!(count_ledger(&backend).await, 3);
+    assert!(!has_column(&backend, "name").await);
 }
 
 #[test]

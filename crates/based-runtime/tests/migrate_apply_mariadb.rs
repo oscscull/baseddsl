@@ -1,7 +1,7 @@
 //! `based migrate apply` against a **real** MariaDB server, over Docker. The live twin of
 //! `migrate_apply.rs`: it writes a real `migrations/` tree, loads it
-//! for the MariaDB dialect, and applies it through the concrete `MariaDb` driver checked out of a
-//! live `ShardRouter` — so a passing run proves the apply engine + `_based_migrations` ledger work
+//! for the MariaDB dialect, and applies it through a live `ShardRouter` (the concrete MariaDB
+//! `Backend`) — so a passing run proves the apply engine + `_based_migrations` ledger work
 //! against a genuine server (DDL, the ledger insert, the tamper guard, a re-apply no-op), not just
 //! compile-verified. When the Docker daemon is unreachable the harness returns `None` and each test
 //! **skips cleanly**, so `cargo test --workspace --all-features` stays green with no daemon.
@@ -15,8 +15,9 @@ use std::path::PathBuf;
 
 use based_codegen::Dialect;
 use based_runtime::driver::{PoolConfig, ShardRouter};
+use based_runtime::fetch_all;
 use based_runtime::migrate::{apply, load_migrations, ApplyOpts, MigrateError};
-use based_runtime::run::Db;
+use based_runtime::run::DbRead;
 
 use docker_mariadb::MariaDbContainer;
 
@@ -70,74 +71,74 @@ fn scenario() -> Scratch {
 /// Bring up a live MariaDB; `None` (skip) when Docker is unavailable. Drops this scenario's
 /// table + the migrations ledger first, so a run against a *persistent* external server
 /// (`TEST_MARIADB_URL`) starts clean and is re-runnable (a no-op on a fresh container).
-fn live() -> Option<(ShardRouter, MariaDbContainer)> {
-    let container = MariaDbContainer::start()?;
+async fn live() -> Option<(ShardRouter, MariaDbContainer)> {
+    let container = MariaDbContainer::start().await?;
     let router = ShardRouter::single(&container.url(), PoolConfig::default())
         .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
-    let mut db = router.checkout("").expect("checkout for reset");
-    for t in ["widget", "_based_migrations"] {
-        db.execute(&format!("DROP TABLE IF EXISTS `{t}`"), &[])
-            .unwrap_or_else(|e| panic!("reset drop of `{t}` failed: {e:?}"));
-    }
+    container
+        .exec_batch("DROP TABLE IF EXISTS `widget`;\nDROP TABLE IF EXISTS `_based_migrations`;")
+        .await;
     Some((router, container))
 }
 
-fn ledger_count(router: &ShardRouter) -> i64 {
-    let mut db = router.checkout("").unwrap();
-    db.fetch("SELECT COUNT(*) AS c FROM `_based_migrations`", &[])
+async fn ledger_count(router: &ShardRouter) -> i64 {
+    let mut db = router.checkout("").await.unwrap();
+    fetch_all(db.fetch("SELECT COUNT(*) AS c FROM `_based_migrations`", &[]))
+        .await
         .unwrap()[0]["c"]
         .as_i64()
         .unwrap()
 }
 
-fn widget_has_size(router: &ShardRouter) -> bool {
-    let mut db = router.checkout("").unwrap();
-    let n = db
-        .fetch(
-            "SELECT COUNT(*) AS c FROM information_schema.columns \
-             WHERE table_schema = DATABASE() AND table_name = 'widget' AND column_name = 'size'",
-            &[],
-        )
-        .unwrap();
+async fn widget_has_size(router: &ShardRouter) -> bool {
+    let mut db = router.checkout("").await.unwrap();
+    let n = fetch_all(db.fetch(
+        "SELECT COUNT(*) AS c FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = 'widget' AND column_name = 'size'",
+        &[],
+    ))
+    .await
+    .unwrap();
     n[0]["c"].as_i64().unwrap() == 1
 }
 
-#[test]
-fn apply_runs_migrations_against_live_mariadb() {
-    let Some((router, _guard)) = live() else {
+#[tokio::test]
+async fn apply_runs_migrations_against_live_mariadb() {
+    let Some((router, _guard)) = live().await else {
         return;
     };
     let s = scenario();
     let migs = load_migrations(&s.0, Dialect::MariaDb).unwrap();
 
     // Fresh apply: both migrations run their real MariaDB DDL, both ledger rows land.
-    let mut db = router.checkout("").unwrap();
-    let report = apply(&mut db, Dialect::MariaDb, &migs, &ApplyOpts::default()).unwrap();
-    drop(db);
+    let report = apply(&router, Dialect::MariaDb, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
     assert_eq!(report.applied, vec!["0001_init", "0002_add_size"]);
     assert!(
-        widget_has_size(&router),
+        widget_has_size(&router).await,
         "0002 added the `size` column live"
     );
-    assert_eq!(ledger_count(&router), 2);
+    assert_eq!(ledger_count(&router).await, 2);
 
     // Re-apply: nothing pending, the ledger is unchanged (idempotent).
-    let mut db = router.checkout("").unwrap();
-    let report = apply(&mut db, Dialect::MariaDb, &migs, &ApplyOpts::default()).unwrap();
-    drop(db);
+    let report = apply(&router, Dialect::MariaDb, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
     assert!(report.applied.is_empty());
-    assert_eq!(ledger_count(&router), 2);
+    assert_eq!(ledger_count(&router).await, 2);
 }
 
-#[test]
-fn editing_an_applied_migration_is_a_tamper_error_live() {
-    let Some((router, _guard)) = live() else {
+#[tokio::test]
+async fn editing_an_applied_migration_is_a_tamper_error_live() {
+    let Some((router, _guard)) = live().await else {
         return;
     };
     let s = scenario();
     let migs = load_migrations(&s.0, Dialect::MariaDb).unwrap();
-    let mut db = router.checkout("").unwrap();
-    apply(&mut db, Dialect::MariaDb, &migs, &ApplyOpts::default()).unwrap();
+    apply(&router, Dialect::MariaDb, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
 
     // Edit an applied migration's up.mig; the recorded ledger hash no longer matches.
     std::fs::write(
@@ -146,6 +147,8 @@ fn editing_an_applied_migration_is_a_tamper_error_live() {
     )
     .unwrap();
     let tampered = load_migrations(&s.0, Dialect::MariaDb).unwrap();
-    let err = apply(&mut db, Dialect::MariaDb, &tampered, &ApplyOpts::default()).unwrap_err();
+    let err = apply(&router, Dialect::MariaDb, &tampered, &ApplyOpts::default())
+        .await
+        .unwrap_err();
     assert!(matches!(err, MigrateError::Tamper { .. }), "{err}");
 }

@@ -5,7 +5,8 @@
 //! the *verbatim* `based gen sql` output against a genuine server instead of a `MockDb`.
 //! It shells out to the `docker` CLI directly (OrbStack provides the daemon locally); a
 //! thin guard rather than a heavy testcontainers dependency — reuse the hardened external
-//! tool, without pulling an async runtime into a sync codebase.
+//! tool. The readiness wait and setup helpers ride sqlx, the same executor the runtime's
+//! drivers use.
 //!
 //! **No daemon ⇒ skip, never fail.** [`MariaDbContainer::start`] returns `None` when the
 //! Docker daemon is unreachable (`docker info` fails) or the image/run/readiness steps do
@@ -25,6 +26,8 @@
 
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+use sqlx::Connection;
 
 /// A pinned MariaDB image. Pinned (not `latest`) so the suite tests a known server version
 /// and a CI cache stays warm; 11.4 is an LTS release with the native `UUID`/`DATETIME`
@@ -66,13 +69,13 @@ impl MariaDbContainer {
     /// container); otherwise spins an ephemeral container via Docker. Returns `None` (after
     /// logging why) when neither is reachable/ready — the caller skips the test rather than
     /// failing it.
-    pub fn start() -> Option<MariaDbContainer> {
+    pub async fn start() -> Option<MariaDbContainer> {
         // CI-provided server takes precedence: connect to it after the readiness-wait.
         if let Ok(url) = std::env::var(URL_ENV) {
             let url = url.trim().to_string();
             if !url.is_empty() {
                 eprintln!("[docker-mariadb] using external {URL_ENV}={url}");
-                if !wait_ready(&url) {
+                if !wait_ready(&url).await {
                     eprintln!(
                         "[docker-mariadb] SKIP: external server at {URL_ENV} not ready within {}s",
                         READY_TIMEOUT.as_secs()
@@ -135,7 +138,7 @@ impl MariaDbContainer {
             kind: Kind::Spun { id, port },
         };
 
-        if !wait_ready(&container.url()) {
+        if !wait_ready(&container.url()).await {
             eprintln!(
                 "[docker-mariadb] SKIP: MariaDB did not become ready within {}s",
                 READY_TIMEOUT.as_secs()
@@ -163,6 +166,21 @@ impl MariaDbContainer {
             Kind::External { url } => url.clone(),
         }
     }
+
+    /// Run a multi-statement setup script (DDL / seed / reset) against the live server on
+    /// one one-shot connection — so session-scoped statements (`SET FOREIGN_KEY_CHECKS`)
+    /// apply to the whole batch. Panics on failure: setup SQL failing is a broken fixture,
+    /// not a test outcome.
+    #[allow(dead_code)] // not every includer runs setup SQL
+    pub async fn exec_batch(&self, sql: &str) {
+        let mut conn = sqlx::mysql::MySqlConnection::connect(&self.url())
+            .await
+            .expect("setup connection");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&mut conn)
+            .await
+            .unwrap_or_else(|e| panic!("setup batch failed: {e}\n{sql}"));
+    }
 }
 
 /// Poll a real connection until the server answers `SELECT 1` or the timeout elapses. A fresh
@@ -170,18 +188,15 @@ impl MariaDbContainer {
 /// we retry rather than sleeping a fixed amount so a ready server starts the suite promptly.
 /// This is the portable readiness-wait — the same poll for a self-spun container and a CI
 /// service container, so `based migrate apply` / the live suite never races a booting DB.
-fn wait_ready(url: &str) -> bool {
+async fn wait_ready(url: &str) -> bool {
     let deadline = Instant::now() + READY_TIMEOUT;
     while Instant::now() < deadline {
-        if let Ok(pool) = mysql::Pool::new(url) {
-            if let Ok(mut conn) = pool.get_conn() {
-                use mysql::prelude::Queryable;
-                if conn.query_drop("SELECT 1").is_ok() {
-                    return true;
-                }
+        if let Ok(mut conn) = sqlx::mysql::MySqlConnection::connect(url).await {
+            if sqlx::raw_sql("SELECT 1").execute(&mut conn).await.is_ok() {
+                return true;
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     false
 }

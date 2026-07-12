@@ -43,7 +43,7 @@ fn plans_a_commerce_ctx_query() {
         "{}",
         plan.main.sql
     );
-    assert_eq!(plan.main.params, vec![SqlValue::Text("org-42".into())]);
+    assert_eq!(plan.main.params, vec![SqlValue::Uuid("org-42".into())]);
 }
 
 #[test]
@@ -67,6 +67,6 @@ fn plans_the_commerce_place_order_mutation() {
     );
     // engine id leads the bound values; params carry no unresolved `:name`.
     assert!(!plan.stmts[0].sql.contains(':'), "{}", plan.stmts[0].sql);
-    assert_eq!(plan.stmts[0].params[0], SqlValue::Text("id-0".into()));
+    assert_eq!(plan.stmts[0].params[0], SqlValue::Uuid("id-0".into()));
     assert_eq!(plan.result_id.as_deref(), Some("id-0"));
 }

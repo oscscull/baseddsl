@@ -51,12 +51,13 @@ impl MockBackend {
     }
 }
 
+#[async_trait::async_trait]
 impl Backend for MockBackend {
-    fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+    async fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
         Ok(Box::new(MockDb::new(self.rows.clone())))
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self) -> Result<(), DbError> {
         if self.ready {
             Ok(())
         } else {
@@ -100,15 +101,19 @@ fn start_with_handle(backend: MockBackend) -> (String, Handle, thread::JoinHandl
     let listen = addr.clone();
     let (tx, rx) = std::sync::mpsc::channel::<Handle>();
     let server = thread::spawn(move || {
-        let config = ServeConfig { listen, workers: 2 };
-        serve_with_handle(
-            compile(),
-            backend,
-            TrustedHeaderContext::default(),
-            config,
-            |handle| tx.send(handle).unwrap(),
-        )
-        .unwrap();
+        let config = ServeConfig { listen };
+        // The listener is async; the test drives it on its own runtime in this thread
+        // (the client side stays plain blocking TCP).
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(serve_with_handle(
+                compile(),
+                backend,
+                TrustedHeaderContext::default(),
+                config,
+                |handle| tx.send(handle).unwrap(),
+            ))
+            .unwrap();
     });
     // The handle is sent once the listener is up; receiving it means we're serving.
     let handle = rx.recv().unwrap();

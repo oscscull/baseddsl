@@ -249,13 +249,15 @@ impl std::error::Error for ClientError {
 
 /// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
 /// of band as request context), and decode the typed output. A callable with no `$ctx`
-/// requirements passes `ctx: &()`. Implemented by the runtime's HTTP client; codegen
-/// only depends on this shape.
+/// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
+/// client's socket, or the in-process engine's execution). Codegen only depends on
+/// this shape.
+#[allow(async_fn_in_trait)]
 pub trait Transport {
-    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
-        I: Serialize,
-        C: Serialize,
+        I: Serialize + Sync,
+        C: Serialize + Sync,
         O: serde::de::DeserializeOwned;
 }
 
@@ -316,20 +318,20 @@ pub const PLACE_ORDER_ROUTE: &str = "/m/place_order";
 
 impl<T: Transport> Client<T> {
     /// `POST /q/order_by_id`
-    pub fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError> {
-        self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx)
+    pub async fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError> {
+        self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx).await
     }
     /// `POST /q/orders_in_org`
-    pub fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError> {
-        self.transport.call(ORDERS_IN_ORG_ROUTE, &input, &ctx)
+    pub async fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError> {
+        self.transport.call(ORDERS_IN_ORG_ROUTE, &input, &ctx).await
     }
     /// `POST /q/my_org_orders`
-    pub fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError> {
-        self.transport.call(MY_ORG_ORDERS_ROUTE, &input, &ctx)
+    pub async fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError> {
+        self.transport.call(MY_ORG_ORDERS_ROUTE, &input, &ctx).await
     }
     /// `POST /m/place_order`
-    pub fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError> {
-        self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx)
+    pub async fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError> {
+        self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx).await
     }
 }
 
@@ -342,10 +344,10 @@ pub struct Embedded<'a> {
 }
 
 impl Transport for Embedded<'_> {
-    fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
-        I: Serialize,
-        C: Serialize,
+        I: Serialize + Sync,
+        C: Serialize + Sync,
         O: serde::de::DeserializeOwned,
     {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
@@ -353,7 +355,7 @@ impl Transport for Embedded<'_> {
         let ctx = serde_json::to_value(ctx)
             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
             .map_err(ClientError::decode)?;
-        let resp = self.engine.call(route, args, ctx);
+        let resp = self.engine.call(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {

@@ -73,10 +73,6 @@ enum Command {
         /// to `BASED_DATABASE_URL` (comma-separated) when none is passed.
         #[arg(long = "database-url")]
         database_url: Vec<String>,
-        /// Worker threads (the per-process concurrency ceiling). Defaults to the pool
-        /// ceiling so every worker can hold a connection.
-        #[arg(long)]
-        workers: Option<usize>,
         /// Warm connections kept per shard pool.
         #[arg(long, default_value_t = 4)]
         pool_min: usize,
@@ -196,16 +192,19 @@ enum GenTarget {
     },
 }
 
-fn main() -> ExitCode {
+// The binary owns the async runtime; front-end commands are sync and just run on it,
+// execution commands (serve, migrate apply/status) await the runtime's futures.
+#[tokio::main]
+async fn main() -> ExitCode {
     // clap prints its own usage error + exits 2 before we get here; our commands return a
     // structured error so `main` can pick a clean message + exit class (2 usage, 1 failure).
-    match run(Cli::parse()) {
+    match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => e.report(),
     }
 }
 
-fn run(cli: Cli) -> Result<(), CliError> {
+async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Check { root } => cmd_check(&root),
         Command::Fmt { root, check } => cmd_fmt(&root, check),
@@ -231,8 +230,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 allow_destructive,
                 to,
                 down,
-            } => cmd_migrate_apply(&root, database_url, allow_destructive, to, down),
-            MigrateAction::Status { root, database_url } => cmd_migrate_status(&root, database_url),
+            } => cmd_migrate_apply(&root, database_url, allow_destructive, to, down).await,
+            MigrateAction::Status { root, database_url } => {
+                cmd_migrate_status(&root, database_url).await
+            }
             MigrateAction::Verify { root } => cmd_migrate_verify(&root),
         },
         Command::Facts { root, json } => cmd_facts(&root, json),
@@ -240,10 +241,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             root,
             listen,
             database_url,
-            workers,
             pool_min,
             pool_max,
-        } => cmd_serve(&root, &listen, database_url, workers, pool_min, pool_max),
+        } => cmd_serve(&root, &listen, database_url, pool_min, pool_max).await,
     }
 }
 
@@ -504,7 +504,7 @@ fn cmd_migrate_render(
 /// `based migrate apply`: apply pending migrations (or roll back) against a live database,
 /// reconciling the `_based_migrations` ledger. Runs against every `--database-url` in
 /// turn — a sharded fleet migrates each shard with the same migration set.
-fn cmd_migrate_apply(
+async fn cmd_migrate_apply(
     root: &Path,
     database_url: Vec<String>,
     allow_destructive: bool,
@@ -539,8 +539,9 @@ fn cmd_migrate_apply(
 
     let urls = shard_urls(database_url)?;
     for url in &urls {
-        let mut db = connect(dialect, url)?;
-        let report = migrate::apply(&mut *db, dialect, &migrations, &opts)
+        let backend = backend(dialect, url)?;
+        let report = migrate::apply(&*backend, dialect, &migrations, &opts)
+            .await
             .map_err(|e| CliError::migrate(format!("applying migrations to {}", redact(url)), e))?;
         report_apply(&report, &redact(url));
     }
@@ -549,7 +550,7 @@ fn cmd_migrate_apply(
 
 /// `based migrate status`: read the ledger and show applied vs. pending migrations, flagging
 /// any hash mismatch (an edited applied migration) or an applied row missing from disk.
-fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<(), CliError> {
+async fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<(), CliError> {
     use based_runtime::migrate::{self, MigrationState};
 
     let project = discover_project(root)?;
@@ -559,10 +560,16 @@ fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<(), CliE
 
     // Status is about applied-vs-pending, so it needs the ledger (first shard suffices).
     let urls = shard_urls(database_url)?;
-    let mut db = connect(dialect, &urls[0])?;
+    let backend = backend(dialect, &urls[0])?;
+    let mut db = backend
+        .checkout("")
+        .await
+        .map_err(|e| CliError::db(format!("connecting to {}", redact(&urls[0])), e))?;
     migrate::ensure_ledger(&mut *db, dialect)
+        .await
         .map_err(|e| CliError::db("reading the migration ledger", e))?;
     let ledger = migrate::applied(&mut *db, dialect)
+        .await
         .map_err(|e| CliError::db("reading the migration ledger", e))?;
 
     let states = migrate::status(&migrations, &ledger);
@@ -703,35 +710,29 @@ fn shard_urls(database_url: Vec<String>) -> Result<Vec<String>, CliError> {
     Ok(urls)
 }
 
-/// Check out a single [`Db`] connection to `url` for the manifest dialect — the same driver
-/// stack `based serve` uses (MariaDB/Postgres via a single-shard router; SQLite over a file).
-/// The returned connection keeps its pool/connection alive on its own, so the local backend
-/// dropping at return is fine.
-fn connect(dialect: Dialect, url: &str) -> Result<Box<dyn based_runtime::Db>, CliError> {
+/// Build a single-shard [`based_runtime::Backend`] over `url` for the manifest dialect —
+/// the same driver stack `based serve` uses (MariaDB/Postgres via a single-shard router;
+/// SQLite over a file).
+fn backend(dialect: Dialect, url: &str) -> Result<Box<dyn based_runtime::Backend>, CliError> {
     use based_runtime::driver::{PoolConfig, ShardRouter};
-    use based_runtime::run::Backend;
 
     let connecting = || format!("connecting to {}", redact(url));
-    let db: Box<dyn based_runtime::Db> = match dialect {
-        Dialect::MariaDb => {
-            let router = ShardRouter::single(url, PoolConfig::default())
-                .map_err(|e| CliError::db(connecting(), e))?;
-            Backend::checkout(&router, "").map_err(|e| CliError::db(connecting(), e))?
-        }
-        Dialect::Postgres => {
-            let router = based_runtime::PgRouter::single(url, PoolConfig::default())
-                .map_err(|e| CliError::db(connecting(), e))?;
-            Backend::checkout(&router, "").map_err(|e| CliError::db(connecting(), e))?
-        }
+    let backend: Box<dyn based_runtime::Backend> = match dialect {
+        Dialect::MariaDb => Box::new(
+            ShardRouter::single(url, PoolConfig::default())
+                .map_err(|e| CliError::db(connecting(), e))?,
+        ),
+        Dialect::Postgres => Box::new(
+            based_runtime::PgRouter::single(url, PoolConfig::default())
+                .map_err(|e| CliError::db(connecting(), e))?,
+        ),
         // A SQLite `url` is a filesystem path (or `:memory:`, useless for a persisted apply).
-        Dialect::Sqlite => {
-            let backend = based_runtime::SqliteBackend::open(url)
-                .map_err(|e| CliError::db(format!("opening {url}"), e))?;
-            Backend::checkout(&backend, "")
-                .map_err(|e| CliError::db(format!("opening {url}"), e))?
-        }
+        Dialect::Sqlite => Box::new(
+            based_runtime::SqliteBackend::open(url)
+                .map_err(|e| CliError::db(format!("opening {url}"), e))?,
+        ),
     };
-    Ok(db)
+    Ok(backend)
 }
 
 /// Discover the project (manifest + files) without running the full front end — apply/status
@@ -897,12 +898,10 @@ fn cmd_facts(root: &Path, json: bool) -> Result<(), CliError> {
 /// front end as every other command (rendering diagnostics, bailing on any error —
 /// a dirty schema never serves), builds the sharded connection pool, and hands both to
 /// the runtime's HTTP listener. Blocks until the process is killed.
-#[allow(clippy::too_many_arguments)]
-fn cmd_serve(
+async fn cmd_serve(
     root: &Path,
     listen: &str,
     database_url: Vec<String>,
-    workers: Option<usize>,
     pool_min: usize,
     pool_max: usize,
 ) -> Result<(), CliError> {
@@ -920,40 +919,36 @@ fn cmd_serve(
     let compiled = Compiled::from_checked(schema, decls, dialect);
 
     // Pool sizing from the flags; the hardening timeouts (checkout + statement) keep
-    // their conservative defaults (a saturated pool → fast 503, a runaway query aborted).
+    // their conservative defaults (a saturated pool → fast 503, a runaway query
+    // aborted). The pool is also the concurrency ceiling — requests past it wait at
+    // most the checkout timeout, then fail fast.
     let pool = PoolConfig {
         min: pool_min,
         max: pool_max,
         ..PoolConfig::default()
     };
-    // Default workers to the pool ceiling so a worker never blocks waiting for a free
-    // connection on a single shard.
     let config = ServeConfig {
         listen: listen.to_string(),
-        workers: workers.unwrap_or(pool_max),
     };
 
-    eprintln!(
-        "based serve: {dialect:?}, {} worker(s), listening on {listen}",
-        config.workers,
-    );
+    eprintln!("based serve: {dialect:?}, listening on {listen}");
     eprintln!("liveness: GET /healthz  readiness: GET /readyz");
 
     // Build the backend for the manifest dialect and stand the listener up. The `@scope`
     // owner field routes to a shard schema-side, so no shard key is hand-set here —
     // the driver reads it off the compiled schema. SQLite is a single local file (one url,
-    // one shared connection), so it neither shards nor pools.
+    // one shared database), so it neither shards nor pools.
     let ctx = TrustedHeaderContext;
     match dialect {
         Dialect::MariaDb => {
             let router = ShardRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
-            run_listener(compiled, router, ctx, config)
+            run_listener(compiled, router, ctx, config).await
         }
         Dialect::Postgres => {
             let router = based_runtime::PgRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
-            run_listener(compiled, router, ctx, config)
+            run_listener(compiled, router, ctx, config).await
         }
         Dialect::Sqlite => {
             if urls.len() > 1 {
@@ -964,7 +959,7 @@ fn cmd_serve(
             }
             let backend = based_runtime::SqliteBackend::open(&urls[0])
                 .map_err(|e| CliError::db(format!("opening {}", urls[0]), e))?;
-            run_listener(compiled, backend, ctx, config)
+            run_listener(compiled, backend, ctx, config).await
         }
     }
 }
@@ -975,9 +970,9 @@ fn cmd_serve(
 /// load balancer pulls this instance out of rotation) and let in-flight requests finish,
 /// then the call returns. The handle is captured once the listener is up (`on_start`), so
 /// the signal handler can only fire after we're serving.
-fn run_listener(
+async fn run_listener(
     compiled: based_runtime::Compiled,
-    backend: impl based_runtime::run::Backend + 'static,
+    backend: impl based_runtime::Backend + 'static,
     ctx: based_runtime::http::TrustedHeaderContext,
     config: based_runtime::http::ServeConfig,
 ) -> Result<(), CliError> {
@@ -991,6 +986,7 @@ fn run_listener(
             eprintln!("based serve: could not install shutdown handler: {e}");
         }
     })
+    .await
     .map_err(|e| CliError::caused_by("serve failed", e))
 }
 

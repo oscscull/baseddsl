@@ -87,7 +87,7 @@ fn get_binds_param_positionally() {
         "no named binds left: {}",
         plan.main.sql
     );
-    assert_eq!(plan.main.params, vec![SqlValue::Text("o-1".into())]);
+    assert_eq!(plan.main.params, vec![SqlValue::Uuid("o-1".into())]);
     assert_eq!(plan.envelope, Envelope::One);
     assert!(plan.count.is_none());
 }
@@ -108,7 +108,7 @@ fn postgres_binds_ordinal_dollar_placeholders() {
     // no anonymous `?` and no leftover named binds on Postgres.
     assert!(!plan.main.sql.contains('?'), "{}", plan.main.sql);
     assert!(!plan.main.sql.contains(':'), "{}", plan.main.sql);
-    assert_eq!(plan.main.params, vec![SqlValue::Text("org-1".into())]);
+    assert_eq!(plan.main.params, vec![SqlValue::Uuid("org-1".into())]);
 }
 
 #[test]
@@ -140,32 +140,36 @@ fn postgres_offset_pagination_orders_placeholders() {
     );
     assert_eq!(
         plan.main.params,
-        vec![SqlValue::Text("org-1".into()), SqlValue::Int(40)]
+        vec![SqlValue::Uuid("org-1".into()), SqlValue::Int(40)]
     );
 }
 
-#[test]
-fn get_shapes_single_row_as_option() {
+#[tokio::test]
+async fn get_shapes_single_row_as_option() {
     let c = compile(SCHEMA);
     let mut db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 42 }))]]);
-    let out = run_query(&c, &mut db, &req("order_by_id", json!({ "id": "o-1" }))).unwrap();
+    let out = run_query(&c, &mut db, &req("order_by_id", json!({ "id": "o-1" })))
+        .await
+        .unwrap();
     assert_eq!(out, json!({ "status": "paid", "total": 42 }));
 }
 
-#[test]
-fn get_missing_row_is_json_null() {
+#[tokio::test]
+async fn get_missing_row_is_json_null() {
     let c = compile(SCHEMA);
     let mut db = MockDb::new(vec![vec![]]);
-    let out = run_query(&c, &mut db, &req("order_by_id", json!({ "id": "nope" }))).unwrap();
+    let out = run_query(&c, &mut db, &req("order_by_id", json!({ "id": "nope" })))
+        .await
+        .unwrap();
     assert_eq!(out, serde_json::Value::Null);
 }
 
-#[test]
-fn list_shapes_rows_as_array() {
+#[tokio::test]
+async fn list_shapes_rows_as_array() {
     let c = compile(SCHEMA);
     let plan = plan_query(&c, &req("orders_in_org", json!({ "org": "org-9" }))).unwrap();
     assert_eq!(plan.envelope, Envelope::Many);
-    assert_eq!(plan.main.params, vec![SqlValue::Text("org-9".into())]);
+    assert_eq!(plan.main.params, vec![SqlValue::Uuid("org-9".into())]);
 
     let mut db = MockDb::new(vec![vec![
         row(json!({ "status": "paid", "total": 1 })),
@@ -176,6 +180,7 @@ fn list_shapes_rows_as_array() {
         &mut db,
         &req("orders_in_org", json!({ "org": "org-9" })),
     )
+    .await
     .unwrap();
     assert_eq!(
         out,
@@ -197,7 +202,7 @@ fn ctx_field_binds_from_request_context() {
         "{}",
         plan.main.sql
     );
-    assert_eq!(plan.main.params, vec![SqlValue::Text("org-7".into())]);
+    assert_eq!(plan.main.params, vec![SqlValue::Uuid("org-7".into())]);
 }
 
 #[test]
@@ -255,8 +260,8 @@ fn unknown_callable_is_rejected() {
     assert_eq!(err, PlanError::UnknownQuery("nope".into()));
 }
 
-#[test]
-fn paginated_list_uses_page_envelope_with_offset_and_count() {
+#[tokio::test]
+async fn paginated_list_uses_page_envelope_with_offset_and_count() {
     let c = compile(
         r#"
         @sort(created_at desc)
@@ -280,7 +285,9 @@ fn paginated_list_uses_page_envelope_with_offset_and_count() {
         vec![row(json!({ "name": "a" }))],
         vec![row(json!({ "count": 57 }))],
     ]);
-    let out = run_query(&c, &mut db, &req("recent", json!({ "offset": 40 }))).unwrap();
+    let out = run_query(&c, &mut db, &req("recent", json!({ "offset": 40 })))
+        .await
+        .unwrap();
     assert_eq!(
         out,
         json!({ "rows": [{ "name": "a" }], "cursor": null, "total": 57 })

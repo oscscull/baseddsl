@@ -129,14 +129,15 @@ pub struct LoweredQuery {
     pub sql: String,
     /// The live-row `COUNT(*)` SELECT for a `with count` page, else `None`.
     pub count_sql: Option<String>,
-    /// For a **keyset** page (paginated, not `offset`): the number of sort-key columns
-    /// the cursor comparison ranges over. The SELECT carries `<key> AS __keyset_<i>`
-    /// hidden columns (`0..n`) so the runtime can read the last row's cursor basis, and
-    /// `:keyset_active` + `:keyset_<i>` placeholders it binds from the incoming cursor.
-    /// `None` for a non-paginated or offset-paginated query. The runtime reads `n` to
-    /// bind the cursor in and extract the next one — one source of the keyset convention
-    /// codegen emits it, the runtime reads it.
-    pub keyset: Option<usize>,
+    /// For a **keyset** page (paginated, not `offset`): the sort-key columns' primitive
+    /// types, in sort order. The SELECT carries `<key> AS __keyset_<i>` hidden columns
+    /// (`0..n`) so the runtime can read the last row's cursor basis, and
+    /// `:keyset_active` + `:keyset_<i>` placeholders it binds from the incoming cursor —
+    /// each cursor value re-binds as its column's own primitive (a typed bind, which a
+    /// binary-parameter driver requires). `None` for a non-paginated or
+    /// offset-paginated query. One source of the keyset convention: codegen emits it,
+    /// the runtime reads it.
+    pub keyset: Option<Vec<Primitive>>,
 }
 
 /// Lower every query in the schema to its structured SQL, in declaration order.
@@ -229,7 +230,7 @@ fn lower_query(
     //    WHERE only. Requires resolved sort keys (the tiebreaker guarantees ≥1).
     let keyset = query_page(q)
         .filter(|p| !p.offset && !order_keys.is_empty())
-        .map(|_| order_keys.len());
+        .map(|_| order_keys.iter().map(|k| k.prim).collect::<Vec<_>>());
     let mut main_wheres = wheres.clone();
     if keyset.is_some() {
         let hidden = order_keys
@@ -532,11 +533,13 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
 
 // ---------- sort cascade ---------------------------------------------------
 
-/// One resolved sort key: its quoted `table`.`col` reference + direction. Drives both
+/// One resolved sort key: its quoted `table`.`col` reference, direction, and the
+/// column's primitive (the type the runtime re-binds the cursor value as). Drives both
 /// the ORDER BY and (for a keyset page) the cursor comparison, so the two can't drift.
 struct OrderKey {
     col_ref: String,
     dir: SortDir,
+    prim: Primitive,
 }
 
 /// query `order (...)` > model `@sort` > none (sema already lints the empty case).
@@ -552,11 +555,13 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
     let mut out: Vec<OrderKey> = Vec::new();
     let mut last_is_id = false;
     for t in terms {
+        let prim = path_primitive(sel.schema, root, &t.path);
         let (alias, col) = sel.resolve(&t.path, root);
         last_is_id = alias == sel.root_alias && col == "id";
         out.push(OrderKey {
             col_ref: sel.qcol(&alias, &col),
             dir: t.dir,
+            prim,
         });
     }
     if let Some(page) = query_page(q) {
@@ -566,13 +571,45 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         // cursor comparison has a unique basis and never drops or repeats a row. Offset
         // pages don't need the tiebreaker (their window is positional).
         if !page.offset && !last_is_id {
+            // The tiebreaker's primitive is the model's own `id` type: a declared
+            // `id: text` cursor value must re-bind as text, not uuid.
+            let prim = match root.member("id").map(|m| &m.kind) {
+                Some(MemberKind::Scalar { ty, .. }) => *ty,
+                _ => Primitive::Id,
+            };
             out.push(OrderKey {
                 col_ref: sel.qcol(&sel.root_alias, "id"),
                 dir: SortDir::Asc,
+                prim,
             });
         }
     }
     out
+}
+
+/// The primitive a dotted sort path terminates in, walked against the schema: a scalar
+/// is its own primitive, a relation terminal is the FK it sorts by (a uuid). An
+/// unresolved path (sema already flagged) falls back to `Text` so lowering terminates.
+fn path_primitive(schema: &CheckedSchema, root: &RModel, path: &Path) -> Primitive {
+    let mut cur = root;
+    let n = path.segments.len();
+    for (i, seg) in path.segments.iter().enumerate() {
+        let last = i + 1 == n;
+        match cur.member(&seg.node).map(|m| &m.kind) {
+            Some(MemberKind::Scalar { ty, .. }) => return *ty,
+            Some(MemberKind::Forward { target, .. }) | Some(MemberKind::Inverse { target, .. }) => {
+                if last {
+                    return Primitive::Uuid;
+                }
+                match schema.model(target) {
+                    Some(m) => cur = m,
+                    None => return Primitive::Text,
+                }
+            }
+            None => return Primitive::Text,
+        }
+    }
+    Primitive::Text
 }
 
 // ---------- the join-accumulating resolver --------------------------------

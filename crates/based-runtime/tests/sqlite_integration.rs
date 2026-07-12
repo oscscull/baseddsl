@@ -45,11 +45,12 @@ fn commerce() -> Compiled {
 /// SQLite DDL (`based gen sql` with `Dialect::Sqlite`), then insert a couple of rows.
 /// Running the real DDL — not a hand-shaped copy — means this test now exercises the whole
 /// `based gen sql` artifact end to end: the DDL creates the schema the DML then reads/writes.
-fn seeded_backend(c: &Compiled) -> SqliteBackend {
+async fn seeded_backend(c: &Compiled) -> SqliteBackend {
     let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("generated SQLite DDL failed to execute: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -60,12 +61,14 @@ fn seeded_backend(c: &Compiled) -> SqliteBackend {
                 VALUES ('order-1', 'org-1', 'user-1', 'paid', '500.00');
             "#,
         )
+        .await
         .expect("seed fixtures");
     backend
 }
 
-/// Run one request through the real dispatch core against a checked-out `SqliteDb`.
-fn call(
+/// Run one request through the real dispatch core against the live backend — the exact
+/// path `based serve` uses, minus the socket (dispatch checks its own connection out).
+async fn call(
     compiled: &Compiled,
     backend: &SqliteBackend,
     method: &str,
@@ -73,27 +76,19 @@ fn call(
     args: serde_json::Value,
     ctx: serde_json::Value,
 ) -> based_runtime::WireResponse {
-    let mut db = backend.checkout("").expect("checkout");
     let mut ids = SeqIdGen::default();
     dispatch(
-        compiled,
-        db.as_mut(),
-        &mut ids,
-        &NoStore,
-        method,
-        path,
-        args,
-        ctx,
-        None,
+        compiled, backend, "", &mut ids, &NoStore, method, path, args, ctx, None,
     )
+    .await
 }
 
-#[test]
-fn get_query_runs_against_real_sqlite() {
+#[tokio::test]
+async fn get_query_runs_against_real_sqlite() {
     // `order_by_id` is a `get`: it joins order → user + org and projects the OrderCard
     // shape. This is the verbatim lowered SELECT executed against a live SQLite row.
     let c = commerce();
-    let backend = seeded_backend(&c);
+    let backend = seeded_backend(&c).await;
     let resp = call(
         &c,
         &backend,
@@ -103,7 +98,8 @@ fn get_query_runs_against_real_sqlite() {
         // Order is `@scope`d: even a keyed `get` is org-scoped, so `$ctx.org` is
         // required. order-1 belongs to org-1, so it's visible to this caller.
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -111,12 +107,12 @@ fn get_query_runs_against_real_sqlite() {
     );
 }
 
-#[test]
-fn get_query_misses_return_null() {
+#[tokio::test]
+async fn get_query_misses_return_null() {
     // A `get` on an absent key is `Option<T>` → JSON null (the envelope, realized by a
     // real empty result set, not a canned one).
     let c = commerce();
-    let backend = seeded_backend(&c);
+    let backend = seeded_backend(&c).await;
     let resp = call(
         &c,
         &backend,
@@ -124,17 +120,18 @@ fn get_query_misses_return_null() {
         "/q/order_by_id",
         json!({ "id": "nope" }),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(resp.body, json!(null));
 }
 
-#[test]
-fn ctx_scoped_list_query_binds_context() {
+#[tokio::test]
+async fn ctx_scoped_list_query_binds_context() {
     // `my_org_orders` reads `$ctx.org` — the server supplies it out of band, and the
     // runtime binds it positionally into the WHERE. A `list` shapes as a JSON array.
     let c = commerce();
-    let backend = seeded_backend(&c);
+    let backend = seeded_backend(&c).await;
     let resp = call(
         &c,
         &backend,
@@ -142,7 +139,8 @@ fn ctx_scoped_list_query_binds_context() {
         "/q/my_org_orders",
         json!({}),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -157,17 +155,18 @@ fn ctx_scoped_list_query_binds_context() {
         "/q/my_org_orders",
         json!({}),
         json!({ "org": "org-other" }),
-    );
+    )
+    .await;
     assert_eq!(empty.body, json!([]));
 }
 
-#[test]
-fn mutation_writes_then_reselects_declared_shape() {
+#[tokio::test]
+async fn mutation_writes_then_reselects_declared_shape() {
     // `place_order` creates an Order (engine-generated id) and reads it back in its
     // declared OrderCard shape, all under one transaction — the full write path
     // against a real engine: INSERT executes, the re-select joins and projects.
     let c = commerce();
-    let backend = seeded_backend(&c);
+    let backend = seeded_backend(&c).await;
     let resp = call(
         &c,
         &backend,
@@ -177,7 +176,8 @@ fn mutation_writes_then_reselects_declared_shape() {
         // INSERT — never a body arg. The re-select projects `org.name` = "Acme" (org-1).
         json!({ "buyer": "user-1", "total": "99.00" }),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     // The response is the created row in its declared shape (status defaults to 'pending').
     assert_eq!(
@@ -193,7 +193,8 @@ fn mutation_writes_then_reselects_declared_shape() {
         "/q/my_org_orders",
         json!({}),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     let rows = listed.body.as_array().expect("list");
     assert_eq!(
         rows.len(),
@@ -203,12 +204,12 @@ fn mutation_writes_then_reselects_declared_shape() {
     );
 }
 
-#[test]
-fn bad_arg_is_a_400_before_sql() {
+#[tokio::test]
+async fn bad_arg_is_a_400_before_sql() {
     // A mistyped arg is a boundary error caught before any SQL touches SQLite. `total` is a
     // `decimal` — its wire form is a JSON string, so a bare number is the wrong shape.
     let c = commerce();
-    let backend = seeded_backend(&c);
+    let backend = seeded_backend(&c).await;
     let resp = call(
         &c,
         &backend,
@@ -216,24 +217,25 @@ fn bad_arg_is_a_400_before_sql() {
         "/m/place_order",
         json!({ "buyer": "user-1", "total": 4200 }),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 400, "{:?}", resp.body);
     assert_eq!(resp.body["error"]["code"], json!("bad_arg"));
 }
 
-#[test]
-fn backend_ping_succeeds_on_a_live_db() {
+#[tokio::test]
+async fn backend_ping_succeeds_on_a_live_db() {
     // The readiness seam works against a real engine: `SELECT 1` round-trips.
     let c = commerce();
-    assert!(seeded_backend(&c).ping().is_ok());
+    assert!(seeded_backend(&c).await.ping().await.is_ok());
 }
 
 /// An `update` mutation reads its row back in the **full declared shape**, not a bare
 /// `{ id }`, keyed off the write's own `where` and run inside the same transaction
 /// (read-your-writes) — proven against a real engine. The shape includes a nested to-one
 /// sub-object (`placed_by { name }`), so the re-select exercises a relation join too.
-#[test]
-fn update_mutation_reselects_full_declared_shape_end_to_end() {
+#[tokio::test]
+async fn update_mutation_reselects_full_declared_shape_end_to_end() {
     let c = compile_sqlite(
         r#"
         User { name: text }
@@ -250,6 +252,7 @@ fn update_mutation_reselects_full_declared_shape_end_to_end() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -259,6 +262,7 @@ fn update_mutation_reselects_full_declared_shape_end_to_end() {
                 VALUES ('o1', '2020-01-01 00:00:00', 'u1', 'pending', 99);
             "#,
         )
+        .await
         .expect("seed");
 
     // Update the status; the response is the *updated* row in its full declared shape
@@ -270,7 +274,8 @@ fn update_mutation_reselects_full_declared_shape_end_to_end() {
         "/m/set_status",
         json!({ "id": "o1", "status": "shipped" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -286,7 +291,8 @@ fn update_mutation_reselects_full_declared_shape_end_to_end() {
         "/q/order_by_id",
         json!({ "id": "o1" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(
         got.body,
         json!({ "status": "shipped", "total": 99, "placed_by": { "name": "Ada" } })
@@ -300,8 +306,8 @@ fn update_mutation_reselects_full_declared_shape_end_to_end() {
 /// to-one `contact { name }` and a to-many `items { sku }`. Against a live engine, an
 /// out-of-scope contact's name reads back NULL (not the real name) and an out-of-scope
 /// line item is absent from the array — proven, not compile-only.
-#[test]
-fn nest_reached_scoped_child_is_confined_cross_tenant() {
+#[tokio::test]
+async fn nest_reached_scoped_child_is_confined_cross_tenant() {
     let c = compile_sqlite(
         r#"
         Org { name: text }
@@ -325,6 +331,7 @@ fn nest_reached_scoped_child_is_confined_cross_tenant() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -339,6 +346,7 @@ fn nest_reached_scoped_child_is_confined_cross_tenant() {
                 VALUES ('li1', 'o1', 'r1', 'IN'), ('li2', 'o1', 'r2', 'OUT');
             "#,
         )
+        .await
         .expect("seed");
 
     let ctx = json!({ "org": "org-1", "region": "r1" });
@@ -352,7 +360,8 @@ fn nest_reached_scoped_child_is_confined_cross_tenant() {
         "/q/order_by_id",
         json!({ "id": "o1" }),
         ctx.clone(),
-    );
+    )
+    .await;
     assert_eq!(o1.status, 200, "{:?}", o1.body);
     assert_eq!(
         o1.body,
@@ -368,7 +377,8 @@ fn nest_reached_scoped_child_is_confined_cross_tenant() {
         "/q/order_by_id",
         json!({ "id": "o2" }),
         ctx,
-    );
+    )
+    .await;
     assert_eq!(o2.status, 200, "{:?}", o2.body);
     assert_eq!(
         o2.body,
@@ -382,8 +392,8 @@ fn nest_reached_scoped_child_is_confined_cross_tenant() {
 /// the response shape carries their *wire* values (`"PAID"`, `2`); a filter on the string
 /// enum and an *ordered* filter on the int enum each return the row; and the DB CHECK
 /// rejects an out-of-range value directly inserted — proving the constraint is live.
-#[test]
-fn enum_round_trip_string_and_int_end_to_end() {
+#[tokio::test]
+async fn enum_round_trip_string_and_int_end_to_end() {
     let c = compile_sqlite(
         r#"
         enum Status { pending, paid = "PAID", shipped }
@@ -401,6 +411,7 @@ fn enum_round_trip_string_and_int_end_to_end() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
 
     // Create: `status = paid` and `priority = high` are assigned by name; the response
@@ -412,7 +423,8 @@ fn enum_round_trip_string_and_int_end_to_end() {
         "/m/open_ticket",
         json!({ "title": "server down" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(created.status, 200, "{:?}", created.body);
     assert_eq!(
         created.body,
@@ -421,7 +433,7 @@ fn enum_round_trip_string_and_int_end_to_end() {
     );
 
     // Ordered filter on the int enum (`priority >= medium`) returns the row live.
-    let urgent = call(&c, &backend, "POST", "/q/urgent", json!({}), json!({}));
+    let urgent = call(&c, &backend, "POST", "/q/urgent", json!({}), json!({})).await;
     assert_eq!(urgent.status, 200, "{:?}", urgent.body);
     assert_eq!(
         urgent.body,
@@ -429,7 +441,7 @@ fn enum_round_trip_string_and_int_end_to_end() {
     );
 
     // Filter on the string enum by name (`status = paid` → 'PAID') returns the row.
-    let paid = call(&c, &backend, "POST", "/q/by_paid", json!({}), json!({}));
+    let paid = call(&c, &backend, "POST", "/q/by_paid", json!({}), json!({})).await;
     assert_eq!(
         paid.body,
         json!([{ "status": "PAID", "priority": 2, "title": "server down" }])
@@ -438,16 +450,16 @@ fn enum_round_trip_string_and_int_end_to_end() {
     // The DB CHECK rejects an out-of-range value inserted directly (defense in depth).
     let bad_int = backend.execute_batch(
         "INSERT INTO `ticket` (`id`, `status`, `priority`, `title`) VALUES ('x', 'PAID', 99, 't');",
-    );
+    ).await;
     assert!(bad_int.is_err(), "int-enum CHECK must reject 99");
     let bad_str = backend.execute_batch(
         "INSERT INTO `ticket` (`id`, `status`, `priority`, `title`) VALUES ('y', 'bogus', 0, 't');",
-    );
+    ).await;
     assert!(bad_str.is_err(), "string-enum CHECK must reject 'bogus'");
 }
 
-#[test]
-fn decimal_and_float_round_trip_end_to_end() {
+#[tokio::test]
+async fn decimal_and_float_round_trip_end_to_end() {
     let c = compile_sqlite(
         r#"
         Ledger { name: text, price: decimal(12, 2), score: float }
@@ -463,12 +475,13 @@ fn decimal_and_float_round_trip_end_to_end() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     // A seeded row whose exact decimal (with a trailing zero) must survive the read.
     backend
         .execute_batch(
             "INSERT INTO `ledger` (`id`, `name`, `price`, `score`) VALUES ('seed', 'cheap', '0.10', 0.25);",
-        )
+        ).await
         .expect("seed");
 
     // Create: a decimal is sent (and returned) as its exact string, a float as a number.
@@ -479,7 +492,8 @@ fn decimal_and_float_round_trip_end_to_end() {
         "/m/add_entry",
         json!({ "name": "pricey", "price": "19.99", "score": 1.5 }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(big.status, 200, "{:?}", big.body);
     assert_eq!(
         big.body,
@@ -496,7 +510,8 @@ fn decimal_and_float_round_trip_end_to_end() {
         "/q/pricey",
         json!({ "min": "10.00" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(filtered.status, 200, "{:?}", filtered.body);
     assert_eq!(
         filtered.body,
@@ -517,8 +532,8 @@ fn compile_sqlite(src: &str) -> Compiled {
     Compiled::from_checked(schema, sf.decls, Dialect::Sqlite)
 }
 
-#[test]
-fn joined_scope_hides_cross_scope_row_end_to_end() {
+#[tokio::test]
+async fn joined_scope_hides_cross_scope_row_end_to_end() {
     // Proven against a real engine: a query on the *unscoped* `Ticket` reaches the
     // org-*scoped* `Contact` through `raised_by`. Codegen injects `Contact`'s `@scope`
     // into the join `ON` (`contact.org_id = :ctx_org`), so a contact belonging to another
@@ -538,6 +553,7 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -548,6 +564,7 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
                 VALUES ('t-1', 'c-2', 'help');
             "#,
         )
+        .await
         .expect("seed");
 
     // Caller is in org-1; the ticket's contact belongs to org-2. The `LEFT JOIN` still
@@ -560,7 +577,8 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
         "/q/ticket_by_id",
         json!({ "id": "t-1" }),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(resp.body, json!({ "subject": "help", "who": null }));
 
@@ -572,7 +590,8 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
         "/q/ticket_by_id",
         json!({ "id": "t-1" }),
         json!({ "org": "org-2" }),
-    );
+    )
+    .await;
     assert_eq!(in_scope.body, json!({ "subject": "help", "who": "Zoe" }));
 }
 
@@ -581,8 +600,8 @@ fn joined_scope_hides_cross_scope_row_end_to_end() {
 /// from the live SELECT and the runtime reassembles them into a sub-object — proven
 /// against a real engine, not compile-verified. Self-contained (no commerce schema) so
 /// the nesting is the only variable.
-#[test]
-fn nested_to_one_query_returns_nested_json() {
+#[tokio::test]
+async fn nested_to_one_query_returns_nested_json() {
     let src = r#"
         User { name: text, email: text }
         @sort(id asc)
@@ -605,6 +624,7 @@ fn nested_to_one_query_returns_nested_json() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("generated DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -613,14 +633,15 @@ fn nested_to_one_query_returns_nested_json() {
             INSERT INTO `order` (`id`, `placed_by_id`, `total`) VALUES ('o1', 'u1', 500);
             "#,
         )
+        .await
         .expect("seed");
 
     // `get`: the nested object rides back under `placed_by`, not as flat `placed_by.*`.
-    let mut db = backend.checkout("").expect("checkout");
     let mut ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
-        db.as_mut(),
+        &backend,
+        "",
         &mut ids,
         &NoStore,
         "POST",
@@ -628,7 +649,8 @@ fn nested_to_one_query_returns_nested_json() {
         json!({ "id": "o1" }),
         json!({}),
         None,
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -636,10 +658,10 @@ fn nested_to_one_query_returns_nested_json() {
     );
 
     // `list`: every row reassembles independently.
-    let mut db = backend.checkout("").expect("checkout");
     let listed = dispatch(
         &c,
-        db.as_mut(),
+        &backend,
+        "",
         &mut ids,
         &NoStore,
         "POST",
@@ -647,7 +669,8 @@ fn nested_to_one_query_returns_nested_json() {
         json!({}),
         json!({}),
         None,
-    );
+    )
+    .await;
     assert_eq!(listed.status, 200, "{:?}", listed.body);
     assert_eq!(
         listed.body,
@@ -660,8 +683,8 @@ fn nested_to_one_query_returns_nested_json() {
 /// an opaque cursor, the final short page returns a `null` cursor, and the cursor works
 /// even though the sort basis (`rank`, `id`) is not projected (the runtime strips the
 /// hidden `__keyset_*` columns from the response). A tampered cursor is a 400.
-#[test]
-fn keyset_pagination_walks_the_set_end_to_end() {
+#[tokio::test]
+async fn keyset_pagination_walks_the_set_end_to_end() {
     let c = compile_sqlite(
         r#"
         @sort(id asc)
@@ -674,6 +697,7 @@ fn keyset_pagination_walks_the_set_end_to_end() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -683,6 +707,7 @@ fn keyset_pagination_walks_the_set_end_to_end() {
                 ('i4', 'd', 40), ('i5', 'e', 50);
             "#,
         )
+        .await
         .expect("seed");
 
     let page = |args: serde_json::Value| call(&c, &backend, "POST", "/q/items", args, json!({}));
@@ -690,7 +715,7 @@ fn keyset_pagination_walks_the_set_end_to_end() {
     // Page 1 (no cursor): the two lowest-ranked rows + a "more" cursor (a full page).
     // Rows carry only the projected `{name, rank}` — the hidden sort-key columns are
     // stripped even though they drive the cursor.
-    let p1 = page(json!({}));
+    let p1 = page(json!({})).await;
     assert_eq!(p1.status, 200, "{:?}", p1.body);
     assert_eq!(
         p1.body["rows"],
@@ -702,7 +727,7 @@ fn keyset_pagination_walks_the_set_end_to_end() {
         .to_string();
 
     // Page 2 (cursor from page 1): the next window, another full page → another cursor.
-    let p2 = page(json!({ "cursor": c1 }));
+    let p2 = page(json!({ "cursor": c1 })).await;
     assert_eq!(
         p2.body["rows"],
         json!([{ "name": "c", "rank": 30 }, { "name": "d", "rank": 40 }])
@@ -713,12 +738,12 @@ fn keyset_pagination_walks_the_set_end_to_end() {
         .to_string();
 
     // Page 3 (cursor from page 2): the final row. A short page (1 < 2) → no more cursor.
-    let p3 = page(json!({ "cursor": c2 }));
+    let p3 = page(json!({ "cursor": c2 })).await;
     assert_eq!(p3.body["rows"], json!([{ "name": "e", "rank": 50 }]));
     assert_eq!(p3.body["cursor"], json!(null), "last page has no cursor");
 
     // A tampered cursor is rejected at the boundary (400), never fed to the query.
-    let bad = page(json!({ "cursor": "deadbeef.00" }));
+    let bad = page(json!({ "cursor": "deadbeef.00" })).await;
     assert_eq!(bad.status, 400, "{:?}", bad.body);
     assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
 }
@@ -729,8 +754,8 @@ fn keyset_pagination_walks_the_set_end_to_end() {
 /// a string, and the runtime parses it into a real JSON array — proven against a real
 /// engine. Also asserts a parent with no children returns `[]`, and the child's soft-delete
 /// tombstone is respected (a deleted item is excluded from the array).
-#[test]
-fn nested_to_many_query_returns_json_array() {
+#[tokio::test]
+async fn nested_to_many_query_returns_json_array() {
     let c = compile_sqlite(
         r#"
         @sort(id asc)
@@ -747,6 +772,7 @@ fn nested_to_many_query_returns_json_array() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -759,6 +785,7 @@ fn nested_to_many_query_returns_json_array() {
                 VALUES ('i3', 'o1', 'GONE', 9, '2020-01-01 00:00:00');
             "#,
         )
+        .await
         .expect("seed");
 
     // `get`: the child rows ride back nested under `items`, not as a flat string column.
@@ -769,7 +796,8 @@ fn nested_to_many_query_returns_json_array() {
         "/q/order_by_id",
         json!({ "id": "o1" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -781,7 +809,7 @@ fn nested_to_many_query_returns_json_array() {
     );
 
     // `list`: o2 has no items → an empty array (not null, not a missing field).
-    let listed = call(&c, &backend, "POST", "/q/orders", json!({}), json!({}));
+    let listed = call(&c, &backend, "POST", "/q/orders", json!({}), json!({})).await;
     assert_eq!(listed.status, 200, "{:?}", listed.body);
     assert_eq!(
         listed.body,
@@ -796,8 +824,8 @@ fn nested_to_many_query_returns_json_array() {
 /// itself under a distinct subquery alias. Proven end-to-end against a real engine — the
 /// correlated subquery's `s<n>_user` alias never collides with the outer `user` row, so a
 /// user's invitees nest correctly.
-#[test]
-fn nested_self_referential_to_many_returns_json_array() {
+#[tokio::test]
+async fn nested_self_referential_to_many_returns_json_array() {
     let c = compile_sqlite(
         r#"
         @sort(id asc)
@@ -814,6 +842,7 @@ fn nested_self_referential_to_many_returns_json_array() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -822,6 +851,7 @@ fn nested_self_referential_to_many_returns_json_array() {
                 ('u1', 'Ada', NULL), ('u2', 'Bob', 'u1'), ('u3', 'Cy', 'u1');
             "#,
         )
+        .await
         .expect("seed");
 
     // Ada (u1) invited Bob + Cy: both nest under `invited_users`.
@@ -832,7 +862,8 @@ fn nested_self_referential_to_many_returns_json_array() {
         "/q/user_by_id",
         json!({ "id": "u1" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -847,7 +878,8 @@ fn nested_self_referential_to_many_returns_json_array() {
         "/q/user_by_id",
         json!({ "id": "u2" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(leaf.body, json!({ "name": "Bob", "invited_users": [] }));
 }
 
@@ -856,8 +888,8 @@ fn nested_self_referential_to_many_returns_json_array() {
 /// pure body expansion (same SQL, same `nest_row`/array reassembly), the payoff being the
 /// shared nominal type on the client. Covers to-one and to-many refs in one shape, with a
 /// soft-deleted child excluded exactly as the nest context dictates.
-#[test]
-fn named_shape_nest_returns_nested_json() {
+#[tokio::test]
+async fn named_shape_nest_returns_nested_json() {
     let c = compile_sqlite(
         r#"
         User { name: text, email: text }
@@ -881,6 +913,7 @@ fn named_shape_nest_returns_nested_json() {
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
     backend
         .execute_batch(&ddl)
+        .await
         .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
     backend
         .execute_batch(
@@ -895,6 +928,7 @@ fn named_shape_nest_returns_nested_json() {
                 VALUES ('i2', 'o1', 'GONE', 9, '2020-01-01 00:00:00');
             "#,
         )
+        .await
         .expect("seed");
 
     // `get`: buyer nests as the named `UserRef` projection, items as `ItemRow` elements.
@@ -905,7 +939,8 @@ fn named_shape_nest_returns_nested_json() {
         "/q/order_detail",
         json!({ "id": "o1" }),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -924,7 +959,8 @@ fn named_shape_nest_returns_nested_json() {
         "/q/order_details",
         json!({}),
         json!({}),
-    );
+    )
+    .await;
     assert_eq!(listed.status, 200, "{:?}", listed.body);
     assert_eq!(
         listed.body,
@@ -946,10 +982,10 @@ fn named_shape_nest_returns_nested_json() {
 /// The commerce example's `order_detail` (its `OrderDetail` nests `placed_by ->
 /// UserRef`) runs live: the worked example's named-shape reference is executable,
 /// not just documentation.
-#[test]
-fn commerce_order_detail_nests_named_user_ref() {
+#[tokio::test]
+async fn commerce_order_detail_nests_named_user_ref() {
     let c = commerce();
-    let backend = seeded_backend(&c);
+    let backend = seeded_backend(&c).await;
     let resp = call(
         &c,
         &backend,
@@ -957,7 +993,8 @@ fn commerce_order_detail_nests_named_user_ref() {
         "/q/order_detail",
         json!({ "id": "order-1" }),
         json!({ "org": "org-1" }),
-    );
+    )
+    .await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -969,8 +1006,8 @@ fn commerce_order_detail_nests_named_user_ref() {
     );
 }
 
-#[test]
-fn enum_variant_filter_and_check_constraint_end_to_end() {
+#[tokio::test]
+async fn enum_variant_filter_and_check_constraint_end_to_end() {
     // A self-contained enum schema: a `where status = <variant>` filter (lowered to a
     // string literal) executed live, plus proof the DB CHECK rejects a non-variant value.
     let c = compile_sqlite(
@@ -986,7 +1023,10 @@ fn enum_variant_filter_and_check_constraint_end_to_end() {
     );
     let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
     let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
-    backend.execute_batch(&ddl).expect("generated DDL executes");
+    backend
+        .execute_batch(&ddl)
+        .await
+        .expect("generated DDL executes");
     backend
         .execute_batch(
             r#"
@@ -995,11 +1035,12 @@ fn enum_variant_filter_and_check_constraint_end_to_end() {
             INSERT INTO `item` (`id`, `status`, `name`) VALUES ('i3', 'paid', 'C');
             "#,
         )
+        .await
         .expect("seed enum rows");
 
     // The variant filter runs live and returns only the two `paid` rows, with the enum
     // value round-tripping as its wire string.
-    let resp = call(&c, &backend, "POST", "/q/paid_items", json!({}), json!({}));
+    let resp = call(&c, &backend, "POST", "/q/paid_items", json!({}), json!({})).await;
     assert_eq!(resp.status, 200, "{:?}", resp.body);
     assert_eq!(
         resp.body,
@@ -1011,7 +1052,8 @@ fn enum_variant_filter_and_check_constraint_end_to_end() {
 
     // The generated CHECK constraint rejects a value outside the enum's variants.
     let bad = backend
-        .execute_batch("INSERT INTO `item` (`id`, `status`, `name`) VALUES ('x', 'bogus', 'X');");
+        .execute_batch("INSERT INTO `item` (`id`, `status`, `name`) VALUES ('x', 'bogus', 'X');")
+        .await;
     assert!(
         bad.is_err(),
         "DB should reject a non-variant enum value via the CHECK constraint"

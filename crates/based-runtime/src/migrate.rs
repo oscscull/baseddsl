@@ -33,7 +33,7 @@ use std::path::Path;
 use based_codegen::migrate::{self, Snapshot};
 use based_codegen::Dialect;
 
-use crate::run::{Db, DbError, Row};
+use crate::run::{fetch_all, Backend, DbError, DbRead, Row};
 use crate::value::SqlValue;
 
 /// The engine-owned ledger table. Underscore-prefixed so it never collides with a user
@@ -278,8 +278,13 @@ fn split_sql(script: &str) -> Vec<String> {
 
 /// Create the `_based_migrations` ledger if it does not exist (idempotent — safe to call on
 /// every apply/status). The engine owns this table; the author never writes it.
-pub fn ensure_ledger(db: &mut dyn Db, dialect: Dialect) -> Result<(), DbError> {
-    db.execute(&create_ledger_sql(dialect), &[]).map(|_| ())
+pub async fn ensure_ledger<D: DbRead + ?Sized>(
+    db: &mut D,
+    dialect: Dialect,
+) -> Result<(), DbError> {
+    db.execute(&create_ledger_sql(dialect), &[])
+        .await
+        .map(|_| ())
 }
 
 fn create_ledger_sql(dialect: Dialect) -> String {
@@ -303,7 +308,10 @@ fn create_ledger_sql(dialect: Dialect) -> String {
 
 /// Read the applied-migrations ledger, ordered by id (== apply order, since ids are
 /// zero-padded). Assumes [`ensure_ledger`] has run.
-pub fn applied(db: &mut dyn Db, dialect: Dialect) -> Result<Vec<LedgerRow>, DbError> {
+pub async fn applied<D: DbRead + ?Sized>(
+    db: &mut D,
+    dialect: Dialect,
+) -> Result<Vec<LedgerRow>, DbError> {
     let sql = format!(
         "SELECT {id}, {hash}, {at} FROM {tbl} ORDER BY {id}",
         id = dialect.quote("id"),
@@ -311,7 +319,7 @@ pub fn applied(db: &mut dyn Db, dialect: Dialect) -> Result<Vec<LedgerRow>, DbEr
         at = dialect.quote("applied_at"),
         tbl = dialect.quote(LEDGER),
     );
-    let rows = db.fetch(&sql, &[])?;
+    let rows = fetch_all(db.fetch(&sql, &[])).await?;
     Ok(rows
         .iter()
         .map(|r| LedgerRow {
@@ -363,20 +371,24 @@ fn delete_ledger_sql(dialect: Dialect) -> String {
 // ---------- apply ----------------------------------------------------------
 
 /// Apply (or roll back) migrations against a live database, reconciling the `_based_migrations`
-/// ledger to the requested [`Direction`]. Each migration runs in its own transaction with its
-/// ledger row. Enforces the tamper guard (an edited applied migration is a hard error), the
-/// destructive-ack gate, and the contiguous-prefix ledger invariant.
+/// ledger to the requested [`Direction`]. Each migration runs in its own transaction on a
+/// fresh checkout with its ledger row. Enforces the tamper guard (an edited applied
+/// migration is a hard error), the destructive-ack gate, and the contiguous-prefix ledger
+/// invariant.
 ///
 /// The `migrations` slice is the full ordered set from [`load_migrations`]; already-applied
 /// ones are skipped (roll-forward) or reversed (rollback), so `apply` is safe to re-run.
-pub fn apply(
-    db: &mut dyn Db,
+pub async fn apply(
+    backend: &dyn Backend,
     dialect: Dialect,
     migrations: &[PlannedMigration],
     opts: &ApplyOpts,
 ) -> Result<ApplyReport, MigrateError> {
-    ensure_ledger(db, dialect)?;
-    let ledger = applied(db, dialect)?;
+    let ledger = {
+        let mut db = backend.checkout("").await?;
+        ensure_ledger(&mut *db, dialect).await?;
+        applied(&mut *db, dialect).await?
+    };
     let applied_ids: BTreeSet<&str> = ledger.iter().map(|r| r.id.as_str()).collect();
 
     // Tamper + existence guard: every applied migration must still be on disk with the same
@@ -447,7 +459,7 @@ pub fn apply(
             .down_sql
             .as_ref()
             .ok_or_else(|| MigrateError::NoDown { id: m.id.clone() })?;
-        run_in_tx(db, down, LedgerOp::Delete(&m.id), dialect)?;
+        run_in_tx(backend, down, LedgerOp::Delete(&m.id), dialect).await?;
         report.rolled_back.push(m.id.clone());
     }
 
@@ -463,14 +475,15 @@ pub fn apply(
             return Err(MigrateError::Destructive { id: m.id.clone() });
         }
         run_in_tx(
-            db,
+            backend,
             &m.up_sql,
             LedgerOp::Insert {
                 id: &m.id,
                 hash: &m.up_hash,
             },
             dialect,
-        )?;
+        )
+        .await?;
         report.applied.push(m.id.clone());
     }
 
@@ -483,22 +496,21 @@ enum LedgerOp<'a> {
     Delete(&'a str),
 }
 
-/// Run a migration's statements + its ledger write under one engine-owned transaction. If any
-/// statement fails, roll back and surface the error — a migration is all-or-nothing. (On
-/// MySQL/MariaDB, DDL implicitly commits, so the tx is best-effort there; the ledger row is
-/// still written in the same connection turn, and a re-apply skips completed migrations.)
-fn run_in_tx(
-    db: &mut dyn Db,
+/// Run a migration's statements + its ledger write under one engine-owned transaction on
+/// a fresh checkout. If any statement fails, the dropped [`crate::run::Tx`] rolls back and
+/// the error surfaces — a migration is all-or-nothing. (On MySQL/MariaDB, DDL implicitly
+/// commits, so the tx is best-effort there; the ledger row is still written in the same
+/// connection turn, and a re-apply skips completed migrations.)
+async fn run_in_tx(
+    backend: &dyn Backend,
     stmts: &[String],
     ledger: LedgerOp<'_>,
     dialect: Dialect,
 ) -> Result<(), MigrateError> {
-    db.begin()?;
+    let db = backend.checkout("").await?;
+    let mut tx = db.begin().await.map_err(MigrateError::Db)?;
     for s in stmts {
-        if let Err(e) = db.execute(s, &[]) {
-            let _ = db.rollback();
-            return Err(MigrateError::Db(e));
-        }
+        tx.execute(s, &[]).await.map_err(MigrateError::Db)?;
     }
     let (sql, params) = match ledger {
         LedgerOp::Insert { id, hash } => (
@@ -513,11 +525,8 @@ fn run_in_tx(
             vec![SqlValue::Text(id.to_string())],
         ),
     };
-    if let Err(e) = db.execute(&sql, &params) {
-        let _ = db.rollback();
-        return Err(MigrateError::Db(e));
-    }
-    db.commit()?;
+    tx.execute(&sql, &params).await.map_err(MigrateError::Db)?;
+    tx.commit().await.map_err(MigrateError::Db)?;
     Ok(())
 }
 

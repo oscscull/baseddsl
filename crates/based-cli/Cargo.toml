@@ -20,10 +20,17 @@ based-codegen = { workspace = true }
 based-facts = { workspace = true }
 # The runtime, with the HTTP listener + all three concrete drivers, so `based serve` can
 # stand the schema up as a live RPC service and `based migrate apply` can apply migrations
-# against whichever dialect the manifest targets (MariaDB/SQLite/Postgres). (`serve` pulls the
-# MariaDB driver + HTTP server; the front-end commands — check/gen/facts/migrate gen|render —
-# don't touch any of them.)
-based-runtime = { path = "../based-runtime", features = ["serve", "sqlite", "postgres"] }
+# against whichever dialect the manifest targets (MariaDB/SQLite/Postgres). The front-end
+# commands — check/gen/facts/migrate gen|render — don't touch any of them.
+based-runtime = { path = "../based-runtime", features = [
+    "serve",
+    "mariadb",
+    "sqlite",
+    "postgres",
+] }
+# The binary owns the async runtime: execution (serve, migrate apply/status) is native
+# async; the front-end commands just run on it.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 clap = { workspace = true }
 # Graceful shutdown of `based serve`: catch SIGTERM/SIGINT and drain (principle 7 —
 # reuse a hardened signal crate rather than hand-roll platform signal handling).

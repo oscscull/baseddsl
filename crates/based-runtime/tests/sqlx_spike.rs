@@ -99,11 +99,7 @@ fn assert_rust_decimal_lossy(decoded: Result<Decimal, sqlx::Error>) {
 
 #[tokio::test]
 async fn mariadb_values_round_trip_through_sqlx() {
-    // The harness waits on the sync drivers, which block; keep that off the runtime.
-    let started = tokio::task::spawn_blocking(docker_mariadb::MariaDbContainer::start)
-        .await
-        .expect("harness task");
-    let Some(server) = started else {
+    let Some(server) = docker_mariadb::MariaDbContainer::start().await else {
         return;
     };
     let pool = sqlx::mysql::MySqlPoolOptions::new()
@@ -237,8 +233,9 @@ async fn mariadb_values_round_trip_through_sqlx() {
         .get::<NaiveDateTime, _>(0);
     assert_eq!(mysql_ts(dt), "2024-01-02 12:30:45.500000");
 
-    // Affected-rows semantics for a same-value UPDATE: the sync `mysql` crate reports
-    // *changed* rows; observe what sqlx reports so the recolor knows the difference.
+    // Affected-rows semantics for a same-value UPDATE: sqlx sets CLIENT_FOUND_ROWS and
+    // reports *matched* rows (1) — the Postgres semantics — where MariaDB's default
+    // would report *changed* rows (0). The engine never branches on the count.
     let via_sqlx = sqlx::query("UPDATE `sqlx_codec` SET `name` = ? WHERE `id` = ?")
         .bind("Ada")
         .bind(UUID_1)
@@ -246,25 +243,9 @@ async fn mariadb_values_round_trip_through_sqlx() {
         .await
         .expect("same-value update")
         .rows_affected();
-    let url = server.url();
-    let via_mysql_crate = tokio::task::spawn_blocking(move || {
-        use mysql::prelude::Queryable;
-        let p = mysql::Pool::new(url.as_str()).expect("mysql crate pool");
-        let mut conn = p.get_conn().expect("mysql crate conn");
-        conn.exec_drop(
-            "UPDATE `sqlx_codec` SET `name` = ? WHERE `id` = ?",
-            ("Ada", UUID_1),
-        )
-        .expect("same-value update via mysql crate");
-        conn.affected_rows()
-    })
-    .await
-    .expect("mysql crate task");
     assert_eq!(
-        (via_mysql_crate, via_sqlx),
-        (0, 1),
-        "mysql crate reports changed rows (0), sqlx sets CLIENT_FOUND_ROWS and reports \
-         matched rows (1) — the Postgres semantics; the engine never branches on the count"
+        via_sqlx, 1,
+        "matched-rows semantics under CLIENT_FOUND_ROWS"
     );
 }
 
@@ -272,12 +253,7 @@ async fn mariadb_values_round_trip_through_sqlx() {
 
 #[tokio::test]
 async fn postgres_values_round_trip_through_sqlx() {
-    // The harness waits on the sync `postgres` crate, which drives its own tokio
-    // `block_on`; keep that off this test's runtime.
-    let started = tokio::task::spawn_blocking(docker_postgres::PostgresContainer::start)
-        .await
-        .expect("harness task");
-    let Some(server) = started else {
+    let Some(server) = docker_postgres::PostgresContainer::start().await else {
         return;
     };
     let pool = sqlx::postgres::PgPoolOptions::new()

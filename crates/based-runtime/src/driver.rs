@@ -1,10 +1,16 @@
-//! The concrete MariaDB driver + shard router (feature `mariadb`).
+//! The concrete MariaDB driver + shard router (feature `mariadb`), over sqlx's MySql
+//! driver.
 //!
-//! This is the production [`Db`] behind the seam the mock stands in for. Two layers:
+//! This is the production [`Db`]/[`Backend`] behind the seam the mock stands in for.
+//! sqlx is strictly the executor/pool layer: the SQL arrives already lowered with
+//! positional binds, run via `sqlx::query` + per-value binds — no macros, no query
+//! builder. Two layers:
 //!
 //! - [`MariaDb`] — a [`Db`] over one pooled connection. It runs the whole request on
 //!   that single connection (a mutation's `tx` must see its own writes), converting
-//!   [`SqlValue`] binds to the driver's `?` parameters and driver rows back to JSON.
+//!   [`SqlValue`] binds to driver parameters and driver rows back to JSON.
+//!   [`Db::begin`] consumes it into a [`Tx`] wrapping sqlx's own transaction guard, so
+//!   drop-without-commit rolls back and an open tx never re-enters the pool.
 //!
 //! - [`ShardRouter`] — the scale-out seam. It owns one bounded connection pool per
 //!   physical shard and routes each request to exactly one shard (single-shard, no
@@ -14,86 +20,161 @@
 //!   assignment maps to a pool — so adding a physical shard moves some logical shards
 //!   without rehashing every key.
 //!
-//! The value conversions ([`to_mysql`]/[`from_mysql`]) are pure and unit-tested below.
+//! Value notes: every text-riding family (text/uuid/timestamp/date/decimal/json) binds
+//! as its wire string — MariaDB coerces strings into every column type. Result columns:
+//! native `UUID`/`JSON` arrive wire-flagged with the binary charset (typed BINARY/BLOB),
+//! so they decode as raw bytes → UTF-8; `DECIMAL` decodes through `BigDecimal`, whose
+//! `to_plain_string` re-renders the exact wire string. `rows_affected` reports *matched*
+//! rows (sqlx sets `CLIENT_FOUND_ROWS`); nothing in the engine branches on the count.
 
-use std::time::Duration;
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use sqlx::mysql::{MySql, MySqlArguments, MySqlPool, MySqlPoolOptions, MySqlRow};
+use sqlx::pool::PoolConnection;
+use sqlx::query::Query;
+use sqlx::{Column, Row as SqlxRow, TypeInfo, ValueRef};
 
-use mysql::prelude::Queryable;
-use mysql::{Opts, OptsBuilder, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Value};
-
-use crate::run::{Backend, Db, DbError, DbErrorKind, Row};
+use crate::run::{Backend, Db, DbError, DbErrorKind, DbRead, Row, RowStream, Tx};
 use crate::shard::{fnv1a_64, LOGICAL_SHARDS};
 use crate::value::SqlValue;
-
-/// MariaDB deadlock (1213, `ER_LOCK_DEADLOCK`) and lock-wait timeout (1205,
-/// `ER_LOCK_WAIT_TIMEOUT`): the server rolled the transaction back for lock contention, so
-/// the mutation path may retry it. Everything else is an opaque operational `503`.
-fn map_mysql_err(e: mysql::Error) -> DbError {
-    let kind = match &e {
-        mysql::Error::MySqlError(se) if se.code == 1213 || se.code == 1205 => DbErrorKind::Deadlock,
-        _ => DbErrorKind::Other,
-    };
-    DbError::of(kind, e.to_string())
-}
 
 // Re-exported so `based_runtime::driver::{PoolConfig, ShardId}` paths still resolve; the
 // routing primitives live in the backend-agnostic `crate::shard` module.
 pub use crate::shard::{PoolConfig, ShardId};
 
-// ---------- value conversion (pure, unit-tested) ---------------------------
+/// MariaDB deadlock (1213, `ER_LOCK_DEADLOCK`) and lock-wait timeout (1205,
+/// `ER_LOCK_WAIT_TIMEOUT`): the server rolled the transaction back for lock contention, so
+/// the mutation path may retry it. Everything else is an opaque operational `503`.
+fn map_mysql_err(e: sqlx::Error) -> DbError {
+    let kind = match e
+        .as_database_error()
+        .and_then(|d| d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
+    {
+        Some(se) if se.number() == 1213 || se.number() == 1205 => DbErrorKind::Deadlock,
+        _ => DbErrorKind::Other,
+    };
+    DbError::of(kind, e.to_string())
+}
 
-/// A bound [`SqlValue`] → the driver's parameter value. A `bool` binds as MySQL's
-/// tinyint `0/1`; `json` is sent as its serialized text (MySQL parses it into the `JSON`
-/// column).
-pub(crate) fn to_mysql(v: &SqlValue) -> Value {
-    match v {
-        SqlValue::Null => Value::NULL,
-        SqlValue::Int(i) => Value::Int(*i),
-        SqlValue::Float(f) => Value::Double(*f),
-        SqlValue::Bool(b) => Value::Int(*b as i64),
-        SqlValue::Text(s) => Value::Bytes(s.clone().into_bytes()),
-        SqlValue::Json(j) => Value::Bytes(j.to_string().into_bytes()),
+/// A pool checkout failure: the bounded `acquire_timeout` elapsing is pool exhaustion
+/// (the fast-503 path); anything else (host down, auth) is an opaque operational fault.
+fn map_acquire_err(e: sqlx::Error) -> DbError {
+    match e {
+        sqlx::Error::PoolTimedOut => DbError::of(
+            DbErrorKind::PoolExhausted,
+            format!("connection pool exhausted: {e}"),
+        ),
+        other => DbError::new(format!("checking out a connection: {other}")),
     }
 }
 
-/// A returned column value → JSON (the shape the wire response is built from). Numbers
-/// map to JSON numbers; `Bytes` is decoded as UTF-8 text (text/uuid/json/timestamp all
-/// ride the wire as strings), falling back to lowercase hex for genuinely binary columns
-/// (e.g. a `BINARY(16)` uuid where native `UUID` is unavailable). Date/Time render as
-/// their canonical SQL string.
-///
-/// A `JSON` column comes back as a JSON-encoded string, not a reconstructed object: the
-/// runtime does not carry per-column types into row shaping.
-pub(crate) fn from_mysql(v: Value) -> serde_json::Value {
+// ---------- value conversion ------------------------------------------------
+
+/// Bind every [`SqlValue`] onto a query, positionally. A `bool` binds as MySQL's
+/// tinyint `0/1`; every text-riding family binds its wire string (MariaDB coerces
+/// strings into uuid/datetime/date/decimal/json columns); `json` is serialized text.
+fn bind_all<'q>(
+    mut q: Query<'q, MySql, MySqlArguments>,
+    params: &[SqlValue],
+) -> Query<'q, MySql, MySqlArguments> {
+    for v in params {
+        q = match v {
+            SqlValue::Null => q.bind(Option::<String>::None),
+            SqlValue::Int(i) => q.bind(*i),
+            SqlValue::Float(f) => q.bind(*f),
+            SqlValue::Bool(b) => q.bind(*b as i64),
+            SqlValue::Text(s)
+            | SqlValue::Uuid(s)
+            | SqlValue::Timestamp(s)
+            | SqlValue::Date(s)
+            | SqlValue::Decimal(s) => q.bind(s.clone()),
+            SqlValue::Json(j) => q.bind(j.to_string()),
+        };
+    }
+    q
+}
+
+/// One result row → JSON (the shape the wire response is built from), each column read
+/// by its wire type. Numbers map to JSON numbers (`BOOLEAN` is tinyint → `0/1`);
+/// `DECIMAL` re-renders its exact wire string via `BigDecimal::to_plain_string` (the
+/// wire is text, but sqlx only surfaces it through a decimal type); datetime/date
+/// render canonical (micros only when present); everything string-ish — including the
+/// binary-charset-flagged native `UUID`/`JSON` columns — decodes as raw bytes → UTF-8,
+/// falling back to lowercase hex for genuinely binary values (never a panic).
+fn row_to_json(row: &MySqlRow) -> Result<Row, DbError> {
     use serde_json::Value as J;
-    match v {
-        Value::NULL => J::Null,
-        Value::Int(i) => J::Number(i.into()),
-        Value::UInt(u) => J::Number(u.into()),
-        Value::Float(f) => serde_json::Number::from_f64(f as f64).map_or(J::Null, J::Number),
-        Value::Double(d) => serde_json::Number::from_f64(d).map_or(J::Null, J::Number),
-        Value::Bytes(b) => match String::from_utf8(b) {
+    let mut obj = serde_json::Map::with_capacity(row.columns().len());
+    for (i, col) in row.columns().iter().enumerate() {
+        let raw = row.try_get_raw(i).map_err(map_mysql_err)?;
+        let val = if raw.is_null() {
+            J::Null
+        } else {
+            decode_mysql(row, i, raw.type_info().name())
+                .map_err(|e| DbError::new(format!("decoding column `{}`: {e}", col.name())))?
+        };
+        obj.insert(col.name().to_string(), val);
+    }
+    Ok(obj)
+}
+
+fn decode_mysql(row: &MySqlRow, i: usize, ty: &str) -> Result<serde_json::Value, sqlx::Error> {
+    use serde_json::Value as J;
+    Ok(match ty {
+        "BOOLEAN" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => {
+            J::Number(row.try_get_unchecked::<i64, _>(i)?.into())
+        }
+        "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
+        | "BIGINT UNSIGNED" => J::Number(row.try_get_unchecked::<u64, _>(i)?.into()),
+        "FLOAT" => serde_json::Number::from_f64(row.try_get_unchecked::<f32, _>(i)? as f64)
+            .map_or(J::Null, J::Number),
+        "DOUBLE" => serde_json::Number::from_f64(row.try_get_unchecked::<f64, _>(i)?)
+            .map_or(J::Null, J::Number),
+        "DECIMAL" => J::String(
+            row.try_get_unchecked::<sqlx::types::BigDecimal, _>(i)?
+                .to_plain_string(),
+        ),
+        "DATETIME" | "TIMESTAMP" => J::String(mysql_datetime(
+            row.try_get_unchecked::<chrono::NaiveDateTime, _>(i)?,
+        )),
+        "DATE" => J::String(
+            row.try_get_unchecked::<chrono::NaiveDate, _>(i)?
+                .format("%Y-%m-%d")
+                .to_string(),
+        ),
+        "TIME" => J::String(mysql_time(
+            row.try_get_unchecked::<chrono::NaiveTime, _>(i)?,
+        )),
+        // Everything string-ish, including the binary-charset-flagged UUID/JSON
+        // columns sqlx types BINARY/BLOB: raw bytes → UTF-8 (the value is already the
+        // canonical text), hex for genuinely binary data.
+        _ => match String::from_utf8(row.try_get_unchecked::<Vec<u8>, _>(i)?) {
             Ok(s) => J::String(s),
             Err(e) => J::String(hex(e.as_bytes())),
         },
-        Value::Date(y, mo, d, h, mi, s, us) => {
-            let base = format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}");
-            J::String(if us == 0 {
-                base
-            } else {
-                format!("{base}.{us:06}")
-            })
-        }
-        Value::Time(neg, days, h, mi, s, us) => {
-            let sign = if neg { "-" } else { "" };
-            let hours = days * 24 + h as u32;
-            let base = format!("{sign}{hours:02}:{mi:02}:{s:02}");
-            J::String(if us == 0 {
-                base
-            } else {
-                format!("{base}.{us:06}")
-            })
-        }
+    })
+}
+
+/// Canonical datetime string: seconds base, micros appended only when nonzero.
+fn mysql_datetime(dt: chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let micros = dt.nanosecond() / 1_000;
+    let base = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    if micros == 0 {
+        base
+    } else {
+        format!("{base}.{micros:06}")
+    }
+}
+
+/// Canonical time string, same micros convention as datetimes.
+fn mysql_time(t: chrono::NaiveTime) -> String {
+    use chrono::Timelike;
+    let micros = t.nanosecond() / 1_000;
+    let base = t.format("%H:%M:%S").to_string();
+    if micros == 0 {
+        base
+    } else {
+        format!("{base}.{micros:06}")
     }
 }
 
@@ -112,73 +193,88 @@ fn hex(bytes: &[u8]) -> String {
 /// One pooled MariaDB connection, running one request. Checked out of a shard's pool
 /// for the request's duration and returned on drop (the pool recycles it).
 pub struct MariaDb {
-    conn: PooledConn,
+    conn: PoolConnection<MySql>,
 }
 
 impl MariaDb {
     /// Wrap an already-checked-out connection (the router hands these out).
-    pub fn new(conn: PooledConn) -> MariaDb {
+    pub fn new(conn: PoolConnection<MySql>) -> MariaDb {
         MariaDb { conn }
-    }
-
-    fn positional(params: &[SqlValue]) -> Params {
-        Params::Positional(params.iter().map(to_mysql).collect())
     }
 }
 
-impl Db for MariaDb {
-    fn fetch(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
-        let result = self
-            .conn
-            .exec_iter(sql, Self::positional(params))
-            .map_err(map_mysql_err)?;
-        let mut rows = Vec::new();
-        // Build each row from its column names (the SELECT aliases each projection to
-        // its output name, so a row is already the response object).
-        for row in result {
-            let row = row.map_err(map_mysql_err)?;
-            let cols = row.columns();
-            let mut obj = serde_json::Map::with_capacity(cols.len());
-            for (col, val) in cols.iter().zip(row.unwrap()) {
-                obj.insert(col.name_str().into_owned(), from_mysql(val));
-            }
-            rows.push(obj);
-        }
-        Ok(rows)
+#[async_trait]
+impl DbRead for MariaDb {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        let q = bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params);
+        Box::pin(
+            q.fetch(&mut *self.conn)
+                .map(|r| r.map_err(map_mysql_err).and_then(|row| row_to_json(&row))),
+        )
     }
 
-    fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
-        self.conn
-            .exec_drop(sql, Self::positional(params))
-            .map_err(map_mysql_err)?;
-        Ok(self.conn.affected_rows())
-    }
-
-    fn begin(&mut self) -> Result<(), DbError> {
-        self.conn
-            .query_drop("START TRANSACTION")
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)
+            .execute(&mut *self.conn)
+            .await
+            .map(|d| d.rows_affected())
             .map_err(map_mysql_err)
     }
-    fn commit(&mut self) -> Result<(), DbError> {
-        self.conn.query_drop("COMMIT").map_err(map_mysql_err)
+}
+
+#[async_trait]
+impl Db for MariaDb {
+    async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError> {
+        // sqlx's transaction guard owns the pooled connection: commit consumes it,
+        // drop without commit rolls back before the connection can be pooled again.
+        let tx = sqlx::Transaction::begin(self.conn, None)
+            .await
+            .map_err(map_mysql_err)?;
+        Ok(Box::new(MariaTx { tx }))
     }
-    fn rollback(&mut self) -> Result<(), DbError> {
-        self.conn.query_drop("ROLLBACK").map_err(map_mysql_err)
+}
+
+/// An open MariaDB transaction (sqlx's guard over the same pooled connection).
+struct MariaTx {
+    tx: sqlx::Transaction<'static, MySql>,
+}
+
+#[async_trait]
+impl DbRead for MariaTx {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        let q = bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params);
+        Box::pin(
+            q.fetch(&mut *self.tx)
+                .map(|r| r.map_err(map_mysql_err).and_then(|row| row_to_json(&row))),
+        )
+    }
+
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)
+            .execute(&mut *self.tx)
+            .await
+            .map(|d| d.rows_affected())
+            .map_err(map_mysql_err)
+    }
+}
+
+#[async_trait]
+impl Tx for MariaTx {
+    async fn commit(self: Box<Self>) -> Result<(), DbError> {
+        self.tx.commit().await.map_err(map_mysql_err)
     }
 }
 
 // ---------- the shard router ------------------------------------------------
 
 /// Routes each request to exactly one physical shard's connection pool. Holds the
-/// pools (cheap to clone — each is an `Arc` internally, shared across worker threads)
-/// and the permanent `logical → physical` assignment.
+/// pools (cheap to clone — each is an `Arc` internally) and the permanent
+/// `logical → physical` assignment.
 pub struct ShardRouter {
     /// One bounded pool per physical shard.
-    shards: Vec<Pool>,
+    shards: Vec<MySqlPool>,
     /// `logical shard → physical shard index`; length is always [`LOGICAL_SHARDS`].
     assign: Vec<ShardId>,
-    /// Max wait for a free connection before a checkout fails fast as pool-exhausted.
-    checkout_timeout: Duration,
 }
 
 impl ShardRouter {
@@ -198,11 +294,7 @@ impl ShardRouter {
         // the default balance; a deployment can later hand-assign to move hot shards.
         let n = shards.len();
         let assign = (0..LOGICAL_SHARDS).map(|i| i % n).collect();
-        Ok(ShardRouter {
-            shards,
-            assign,
-            checkout_timeout: pool.checkout_timeout,
-        })
+        Ok(ShardRouter { shards, assign })
     }
 
     /// The common case: one physical shard (all logical shards map to it). The router
@@ -218,27 +310,19 @@ impl ShardRouter {
     }
 
     /// Check out a connection to the shard a key routes to (single-shard dispatch).
-    pub fn checkout(&self, key: &str) -> Result<MariaDb, DbError> {
-        self.checkout_shard(self.shard_for(key))
+    pub async fn checkout(&self, key: &str) -> Result<MariaDb, DbError> {
+        self.checkout_shard(self.shard_for(key)).await
     }
 
-    /// Check out a connection to a specific physical shard. Waits at most the configured
-    /// `checkout_timeout` for a free connection, then fails fast as pool-exhausted —
-    /// a saturated pool becomes a retryable `503`, never a hung worker.
-    pub fn checkout_shard(&self, shard: ShardId) -> Result<MariaDb, DbError> {
+    /// Check out a connection to a specific physical shard. Waits at most the pool's
+    /// configured `acquire_timeout` for a free connection, then fails fast as
+    /// pool-exhausted — a saturated pool becomes a retryable `503`, never a hung task.
+    pub async fn checkout_shard(&self, shard: ShardId) -> Result<MariaDb, DbError> {
         let pool = self
             .shards
             .get(shard)
             .ok_or_else(|| DbError::new(format!("no shard {shard}")))?;
-        let conn = pool.try_get_conn(self.checkout_timeout).map_err(|e| {
-            DbError::of(
-                DbErrorKind::PoolExhausted,
-                format!(
-                    "connection pool exhausted (waited {:?}): {e}",
-                    self.checkout_timeout
-                ),
-            )
-        })?;
+        let conn = pool.acquire().await.map_err(map_acquire_err)?;
         Ok(MariaDb::new(conn))
     }
 
@@ -249,92 +333,63 @@ impl ShardRouter {
 }
 
 /// The router is the MariaDB [`Backend`]: it checks out a pooled [`MariaDb`] for the
-/// key's shard. The HTTP edge depends only on this trait, so a future Postgres / MySQL
-/// / SQLite backend is a drop-in without touching `based serve`.
+/// key's shard. The edges depend only on this trait, so another dialect's backend is a
+/// drop-in without touching `based serve`.
+#[async_trait]
 impl Backend for ShardRouter {
-    fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
-        Ok(Box::new(ShardRouter::checkout(self, shard_key)?))
+    async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        Ok(Box::new(ShardRouter::checkout(self, shard_key).await?))
     }
 
     /// Readiness = *every* physical shard's pool can hand out a connection. A single
     /// down shard means this instance can't serve that shard's traffic, so the whole
     /// instance reports not-ready and the load balancer drains it (a partial-outage
-    /// instance is worse than one fewer healthy instance). Each probe runs the driver's
+    /// instance is worse than one fewer healthy instance). Each probe runs a
     /// lightweight `SELECT 1` so a stale pooled connection is caught, not just a checkout.
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self) -> Result<(), DbError> {
         for shard in 0..self.shard_count() {
-            let mut db = self.checkout_shard(shard)?;
-            // A trivial round-trip validates the connection end to end (the pool may hand
-            // out a socket the server has since closed); `fetch` surfaces that as a DbError.
-            db.fetch("SELECT 1", &[])?;
+            let mut db = self.checkout_shard(shard).await?;
+            crate::run::fetch_all(db.fetch("SELECT 1", &[])).await?;
         }
         Ok(())
     }
 }
 
 /// Build one shard's bounded connection pool from a `mysql://…` URL. Each new connection
-/// runs an `init` that sets the session `max_statement_time` — MariaDB's per-query
-/// server-side timeout (seconds; unlike MySQL's SELECT-only `max_execution_time`, it caps
-/// every statement), so a runaway query is aborted rather than hanging the connection.
-fn build_pool(url: &str, cfg: PoolConfig) -> Result<Pool, DbError> {
-    let opts = Opts::from_url(url).map_err(|e| DbError::new(format!("bad database url: {e}")))?;
-    let constraints = PoolConstraints::new(cfg.min, cfg.max)
-        .ok_or_else(|| DbError::new("pool min must be <= max"))?;
-    let mut builder =
-        OptsBuilder::from_opts(opts).pool_opts(PoolOpts::new().with_constraints(constraints));
-    if cfg.statement_timeout > Duration::ZERO {
+/// runs an `after_connect` hook that sets the session `max_statement_time` — MariaDB's
+/// per-query server-side timeout (seconds; unlike MySQL's SELECT-only
+/// `max_execution_time`, it caps every statement), so a runaway query is aborted rather
+/// than hanging the connection. The pool's `acquire_timeout` is the checkout wait
+/// (pool-exhaustion → fast `503`).
+fn build_pool(url: &str, cfg: PoolConfig) -> Result<MySqlPool, DbError> {
+    let mut opts = MySqlPoolOptions::new()
+        .min_connections(cfg.min as u32)
+        .max_connections(cfg.max as u32)
+        .acquire_timeout(cfg.checkout_timeout);
+    if cfg.statement_timeout > std::time::Duration::ZERO {
         // `max_statement_time` is a float number of seconds; sub-second is honoured.
-        let secs = cfg.statement_timeout.as_secs_f64();
-        builder = builder.init(vec![format!("SET SESSION max_statement_time = {secs}")]);
+        let stmt = format!(
+            "SET SESSION max_statement_time = {}",
+            cfg.statement_timeout.as_secs_f64()
+        );
+        opts = opts.after_connect(move |conn, _meta| {
+            let stmt = stmt.clone();
+            Box::pin(async move {
+                sqlx::query(sqlx::AssertSqlSafe(stmt.clone()))
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+            })
+        });
     }
-    Pool::new(builder).map_err(|e| DbError::new(format!("connecting to shard: {e}")))
+    opts.connect_lazy(url)
+        .map_err(|e| DbError::new(format!("bad database url: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn sqlvalue_to_mysql_families() {
-        assert_eq!(to_mysql(&SqlValue::Null), Value::NULL);
-        assert_eq!(to_mysql(&SqlValue::Int(7)), Value::Int(7));
-        assert_eq!(to_mysql(&SqlValue::Float(1.5)), Value::Double(1.5));
-        // bool rides as tinyint 0/1.
-        assert_eq!(to_mysql(&SqlValue::Bool(true)), Value::Int(1));
-        assert_eq!(to_mysql(&SqlValue::Bool(false)), Value::Int(0));
-        assert_eq!(
-            to_mysql(&SqlValue::Text("o-1".into())),
-            Value::Bytes(b"o-1".to_vec())
-        );
-        // json is sent as serialized text.
-        assert_eq!(
-            to_mysql(&SqlValue::Json(json!({ "a": 1 }))),
-            Value::Bytes(br#"{"a":1}"#.to_vec())
-        );
-    }
-
-    #[test]
-    fn mysql_value_to_json() {
-        use serde_json::Value as J;
-        assert_eq!(from_mysql(Value::NULL), J::Null);
-        assert_eq!(from_mysql(Value::Int(42)), json!(42));
-        assert_eq!(from_mysql(Value::UInt(42)), json!(42));
-        assert_eq!(from_mysql(Value::Double(2.5)), json!(2.5));
-        // text/uuid ride back as strings.
-        assert_eq!(from_mysql(Value::Bytes(b"paid".to_vec())), json!("paid"));
-        // a genuinely binary (non-UTF-8) value falls back to hex, never a panic.
-        assert_eq!(from_mysql(Value::Bytes(vec![0xff, 0x01])), json!("ff01"));
-        // datetime renders canonical, with micros only when present.
-        assert_eq!(
-            from_mysql(Value::Date(2026, 7, 3, 12, 30, 0, 0)),
-            json!("2026-07-03 12:30:00")
-        );
-        assert_eq!(
-            from_mysql(Value::Date(2026, 7, 3, 12, 30, 0, 500)),
-            json!("2026-07-03 12:30:00.000500")
-        );
-    }
+    use crate::shard::LOGICAL_SHARDS;
 
     #[test]
     fn shard_routing_is_stable_and_in_range() {
@@ -348,5 +403,22 @@ mod tests {
             }
             h % LOGICAL_SHARDS as u64
         });
+    }
+
+    #[test]
+    fn datetime_renders_canonical() {
+        use chrono::NaiveDate;
+        let base = NaiveDate::from_ymd_opt(2026, 7, 3)
+            .unwrap()
+            .and_hms_opt(12, 30, 0)
+            .unwrap();
+        assert_eq!(mysql_datetime(base), "2026-07-03 12:30:00");
+        let with_micros = base + chrono::Duration::microseconds(500);
+        assert_eq!(mysql_datetime(with_micros), "2026-07-03 12:30:00.000500");
+    }
+
+    #[test]
+    fn hex_of_binary_bytes() {
+        assert_eq!(hex(&[0xff, 0x01]), "ff01");
     }
 }

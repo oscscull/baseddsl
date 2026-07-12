@@ -7,8 +7,9 @@
 
 /// Produces fresh ids for engine-generated `id` columns. Called once per `create`
 /// (and once more is never needed — a `^.id` back-reference *reuses* the value the
-/// prior create already generated, it does not draw a new one).
-pub trait IdGen {
+/// prior create already generated, it does not draw a new one). `Send` so an engine
+/// holding one stays shareable across tasks.
+pub trait IdGen: Send {
     fn next_id(&mut self) -> String;
 }
 

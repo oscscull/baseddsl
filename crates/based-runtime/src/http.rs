@@ -1,70 +1,74 @@
-//! The HTTP listener (`based serve`) — the thin socket edge over [`crate::serve::dispatch`].
+//! The HTTP listener (`based serve`) — the thin axum edge over [`crate::serve::dispatch`].
 //!
 //! The interesting logic lives in the pure dispatch core; this module only decodes the
-//! socket into `dispatch`'s arguments and writes its [`WireResponse`] back. It is a sync,
-//! bounded worker-thread pool over the driver's bounded connection pool: `workers`
-//! threads share one blocking [`tiny_http::Server`], each looping `recv → handle →
-//! respond`, so the thread count is bounded and matched to the pool.
+//! socket into `dispatch`'s arguments and writes its [`WireResponse`] back. It is an
+//! async tokio service: concurrency is bounded by the backend's connection pool (a
+//! request past the pool's capacity waits at most the checkout timeout, then fails fast
+//! as a `503`), so no separate worker ceiling is configured here.
 //!
 //! ## Per-request flow
-//! 1. Decode the request line (`POST /q|m/<name>`), headers, and the JSON body (the
-//!    argument object). A non-POST or unroutable path is rejected before a connection is
-//!    borrowed ([`crate::serve::preflight`]).
+//! 1. Decode the request line (`POST /q|m/<name>`), headers, and the (size-capped) JSON
+//!    body (the argument object). A non-POST or unroutable path is rejected before a
+//!    connection is borrowed ([`crate::serve::preflight`]).
 //! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`] — never the
 //!    body (a client cannot inject scope; request context is server-supplied out of band
 //!    by the auth edge). The shard key is derived from the callable's resolved `@scope`
 //!    owner field pulled out of `$ctx` — the same `@scope` that filters the row, so
 //!    routing and row-visibility share one source of truth (an explicit
 //!    `X-Based-Shard-Key` header can override it).
-//! 3. Check a connection out of the [`Backend`] for that shard key and run [`dispatch`]
-//!    with a fresh per-request [`UuidGen`]. The edge is `Backend`-generic, so a Postgres /
-//!    MySQL / SQLite backend drops in without a change here.
-//! 4. Write `WireResponse.status` + JSON body back. A pool checkout failure is a
-//!    [`crate::run::DbError`] → a retryable `503`, exactly like an in-flight DB fault.
+//! 3. Run [`dispatch`] with a fresh per-request [`UuidGen`]; dispatch checks a
+//!    connection out of the [`Backend`] for that shard key. The edge is
+//!    `Backend`-generic, so any dialect's backend drops in without a change here.
+//! 4. Write `WireResponse.status` + JSON body back.
 //!
 //! ## Operational endpoints
 //! Two unauthenticated `GET` probes an orchestrator / load balancer uses, answered before
 //! any routing:
-//! - `GET /healthz` — liveness: the process is up and its worker loop is running. Always
-//!   `200` while serving; a container that fails this is restarted. No DB touch.
+//! - `GET /healthz` — liveness: the process is up and serving. Always `200` while
+//!   serving; a container that fails this is restarted. No DB touch.
 //! - `GET /readyz` — readiness: this instance should receive traffic. `200` only when the
 //!   backend can serve (`Backend::ping`) and we are not draining. On shutdown it flips to
 //!   `503` first, so the load balancer pulls the instance out of rotation before in-flight
 //!   requests finish — the drain half of a zero-downtime rolling deploy.
 //!
 //! ## Graceful shutdown
-//! [`Handle::shutdown`] (wired to SIGTERM/SIGINT by the CLI) flips a shared flag: workers
-//! poll it between requests (via `recv_timeout`, so a blocked worker wakes on its own),
-//! stop accepting new work, and exit once their current request finishes — in-flight
-//! requests always run to completion.
+//! [`Handle::shutdown`] (wired to SIGTERM/SIGINT by the CLI) flips the drain flag (so
+//! `/readyz` fails first), holds the listener open for [`DRAIN_WINDOW`] so the load
+//! balancer's probe can observe the failing readiness and stop routing, then triggers
+//! axum's graceful shutdown: the listener stops accepting, in-flight requests run to
+//! completion, then [`serve`] returns.
 
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
-use tiny_http::{Header, Method, Request, Response, Server};
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
 
 use crate::id::UuidGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
 use crate::run::Backend;
-use crate::serve::{dispatch, preflight, route_target, WireResponse};
+use crate::serve::{dispatch, preflight, resolve_shard_key, route_target, WireResponse};
 
 /// Largest request body we read (1 MiB). The wire carries a small argument object;
-/// anything larger is malformed or hostile, so we cap the read rather than let a
-/// worker buffer an unbounded body.
-const MAX_BODY: u64 = 1 << 20;
+/// anything larger is malformed or hostile, so we cap the read rather than buffer an
+/// unbounded body.
+const MAX_BODY: usize = 1 << 20;
 
-/// Listener configuration: where to bind and how many worker threads to run. The
-/// worker count is the per-process concurrency ceiling; keep it in step with the
-/// router's total pool capacity (workers past the available connections just block on
-/// checkout).
+/// How long the listener keeps answering after `shutdown()` before it stops accepting.
+/// Readiness must *observably* fail before the socket closes — a load balancer drains on
+/// a 503 probe, not on connection refused — so the drain window is the probe's chance to
+/// see it. In-flight requests are never cut off regardless; this only delays the close.
+const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Listener configuration: where to bind.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub listen: String,
-    pub workers: usize,
 }
 
 /// Derives the request `$ctx` and shard key from a request's headers — the seam
@@ -147,62 +151,41 @@ impl ContextSource for TrustedHeaderContext {
     }
 }
 
-/// Resolve the shard key for a routable request: the explicit `X-Based-Shard-Key`
-/// override wins; else the callable's `@scope` owner field pulled out of `$ctx`; else the
-/// empty string (an unscoped callable, or a single-shard deployment — both route to shard
-/// 0). Pure, so the derivation is unit-testable without a socket. `$ctx.<field>` is read
-/// as its JSON string; a non-string owner (e.g. an int tenant id) is stringified so the
-/// FNV hash sees a stable byte string.
-fn resolve_shard_key(compiled: &Compiled, is_mutation: bool, name: &str, ctx: &Context) -> String {
-    if let Some(explicit) = &ctx.shard_key_override {
-        return explicit.clone();
-    }
-    let Some(field) = compiled.shard_key_field(is_mutation, name) else {
-        return String::new();
-    };
-    match ctx.ctx.get(field) {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => String::new(),
-    }
-}
-
-/// Everything a worker thread needs, shared read-only across all of them.
+/// Everything a request handler needs, shared read-only across all of them.
 struct Shared {
     compiled: Compiled,
     backend: Box<dyn Backend>,
     ctx_source: Box<dyn ContextSource>,
-    /// The mutation idempotency store, shared across all workers so a retry that lands on
-    /// any worker dedupes. `MemStore` dedupes within this one process; a
+    /// The mutation idempotency store, shared across all requests so a retry that lands
+    /// on any task dedupes. `MemStore` dedupes within this one process; a
     /// multi-instance deployment wants a shared/durable store behind the same
     /// `IdempotencyStore` trait.
     idempotency: MemStore,
     /// Set once when a graceful shutdown is requested (SIGTERM/SIGINT). `/readyz` reads
-    /// it to fail readiness first (drain), and the worker loop reads it to stop.
+    /// it to fail readiness first (drain).
     draining: Arc<AtomicBool>,
 }
 
-/// A control handle for a running listener, returned by [`serve_with_handle`]. Its one
-/// job is [`shutdown`](Handle::shutdown): request a graceful drain from another thread
-/// (typically a signal handler). Cheap to clone — every clone drives the same server.
+/// A control handle for a running listener, returned via [`serve_with_handle`]'s
+/// `on_start`. Its one job is [`shutdown`](Handle::shutdown): request a graceful drain
+/// from another thread (typically a signal handler). Cheap to clone — every clone
+/// drives the same server.
 #[derive(Clone)]
 pub struct Handle {
     draining: Arc<AtomicBool>,
-    server: Arc<Server>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl Handle {
     /// Begin a graceful shutdown: flip readiness to failing (so the load balancer drains
-    /// this instance) and tell the workers to stop after their current request. Returns
-    /// immediately; the [`serve`]/[`serve_with_handle`] call returns once every worker
-    /// has finished its in-flight request and exited. Idempotent — calling it twice is
-    /// harmless.
+    /// this instance) and stop accepting new requests; in-flight requests run to
+    /// completion, then the [`serve`]/[`serve_with_handle`] call returns. Idempotent —
+    /// calling it twice is harmless.
     pub fn shutdown(&self) {
         self.draining.store(true, Ordering::SeqCst);
-        // Wake any worker blocked in `recv_timeout` so it observes the flag now rather
-        // than after its poll interval elapses (faster drain; `unblock` wakes one, the
-        // short poll timeout covers the rest).
-        self.server.unblock();
+        self.notify.notify_waiters();
+        // A late waiter must still see the flag (notify_waiters wakes only current ones).
+        self.notify.notify_one();
     }
 }
 
@@ -282,41 +265,36 @@ impl From<EdgeError> for WireResponse {
     }
 }
 
-/// How long a worker blocks on one `recv` before waking to re-check the drain flag.
-/// Short enough that shutdown is prompt even for a worker that `unblock` didn't wake,
-/// long enough that idle polling is negligible.
-const DRAIN_POLL: Duration = Duration::from_millis(100);
+/// Render a [`WireResponse`] as the axum response: its status + JSON body.
+fn into_response(resp: WireResponse) -> Response {
+    let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, axum::Json(resp.body)).into_response()
+}
 
-/// Bind `config.listen` and serve requests until the process is killed. Spawns
-/// `config.workers` threads over one shared blocking server (a bounded worker-thread
-/// pool, not a thread-per-connection). Blocks the calling thread until every worker
-/// returns. A caller that wants graceful shutdown uses [`serve_with_handle`] instead and
-/// triggers the returned [`Handle`] from a signal.
-pub fn serve(
+/// Bind `config.listen` and serve requests until the process is killed. A caller that
+/// wants graceful shutdown uses [`serve_with_handle`] instead and triggers the returned
+/// [`Handle`] from a signal.
+pub async fn serve(
     compiled: Compiled,
     backend: impl Backend + 'static,
     ctx_source: impl ContextSource + 'static,
     config: ServeConfig,
 ) -> Result<(), ServeError> {
-    // No handle wanted here: build one, drop it, and run until the process is killed.
-    serve_with_handle(compiled, backend, ctx_source, config, |_| {})
+    serve_with_handle(compiled, backend, ctx_source, config, |_| {}).await
 }
 
 /// Like [`serve`], but hands the caller a [`Handle`] (via `on_start`) *before* the
 /// listener blocks, so it can wire the handle to a signal for graceful shutdown. The
-/// `on_start` closure runs once, on the serving thread, right after the socket binds
-/// and the workers spawn — the point at which the listener is accepting requests. This
-/// call blocks until every worker has drained and exited (i.e. after [`Handle::shutdown`]).
-pub fn serve_with_handle(
+/// `on_start` closure runs once, right after the socket binds — the point at which the
+/// listener is accepting requests. This call resolves once every in-flight request has
+/// finished after [`Handle::shutdown`].
+pub async fn serve_with_handle(
     compiled: Compiled,
     backend: impl Backend + 'static,
     ctx_source: impl ContextSource + 'static,
     config: ServeConfig,
     on_start: impl FnOnce(Handle),
 ) -> Result<(), ServeError> {
-    let server = Server::http(&config.listen)
-        .map_err(|e| ServeError(format!("cannot bind {}: {e}", config.listen)))?;
-    let server = Arc::new(server);
     let draining = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Shared {
         compiled,
@@ -326,107 +304,86 @@ pub fn serve_with_handle(
         draining: Arc::clone(&draining),
     });
 
-    let workers = config.workers.max(1);
-    let mut handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let server = Arc::clone(&server);
-        let shared = Arc::clone(&shared);
-        handles.push(thread::spawn(move || worker_loop(&server, &shared)));
-    }
+    let app = Router::new()
+        .route("/healthz", get(health_response))
+        .route("/readyz", get(ready_response))
+        // Every other path is the RPC surface; the fallback keeps the dispatch core's
+        // own routing (and its 404/405 wire contract) as the one source of truth.
+        .fallback(handle)
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
+        .with_state(Arc::clone(&shared));
 
+    let listener = tokio::net::TcpListener::bind(&config.listen)
+        .await
+        .map_err(|e| ServeError(format!("cannot bind {}: {e}", config.listen)))?;
+
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let handle = Handle {
+        draining: Arc::clone(&draining),
+        notify: Arc::clone(&notify),
+    };
     // The listener is up: hand the caller its shutdown handle.
-    on_start(Handle {
-        draining,
-        server: Arc::clone(&server),
-    });
+    on_start(handle);
 
-    for h in handles {
-        // A worker ends when the drain flag is set (graceful) or the server is dropped;
-        // a panicked worker is logged by the default hook. Joining blocks the serving
-        // thread until every worker's in-flight request has finished.
-        let _ = h.join();
-    }
-    Ok(())
-}
-
-/// One worker: pull the next request off the shared server and handle it, until a
-/// graceful shutdown is requested. Between requests it polls the drain flag (waking from
-/// its blocking wait every [`DRAIN_POLL`]); once set, the loop exits after the *current*
-/// request completes — no in-flight request is ever cut off (the drain guarantee).
-fn worker_loop(server: &Server, shared: &Shared) {
-    loop {
-        if shared.draining.load(Ordering::SeqCst) {
-            return;
+    let drain = {
+        let draining = Arc::clone(&draining);
+        async move {
+            // Wake on shutdown(); the flag check covers a shutdown that raced the await.
+            while !draining.load(Ordering::SeqCst) {
+                notify.notified().await;
+            }
+            // Readiness now fails; keep accepting until the LB has had a chance to see it.
+            tokio::time::sleep(DRAIN_WINDOW).await;
         }
-        match server.recv_timeout(DRAIN_POLL) {
-            // A request arrived: run it to completion before re-checking the drain flag.
-            Ok(Some(request)) => handle(request, shared),
-            // The poll interval elapsed with no request (or `unblock` woke us): loop back
-            // and re-check the drain flag.
-            Ok(None) => {}
-            // The server was dropped (or a socket error): nothing more to serve.
-            Err(_) => return,
-        }
-    }
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(drain)
+        .await
+        .map_err(|e| ServeError(format!("serve failed: {e}")))
 }
 
-/// Decode one request, run it, and write the response. All the branching lives in
-/// [`build_response`]; this only owns the socket read/write.
-fn handle(mut request: Request, shared: &Shared) {
-    let response = build_response(&mut request, shared);
-    let body = response.body.to_string();
-    let json = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-        .expect("static header is valid");
-    let out = Response::from_string(body)
-        .with_status_code(response.status)
-        .with_header(json);
-    // A write failure means the client hung up; nothing to do but drop it.
-    let _ = request.respond(out);
+/// Decode one request, run it through the dispatch core, and write the response.
+async fn handle(
+    State(shared): State<Arc<Shared>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    into_response(build_response(&shared, &method, &uri, &headers, &body).await)
 }
 
-/// The pure heart of a request: route → derive `$ctx` → check out a shard connection →
+/// The pure heart of a request: route → derive `$ctx` → resolve the shard key →
 /// `dispatch`. Every failure is a [`WireResponse`], so `handle` never branches on kinds.
-fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
-    let is_get = matches!(request.method(), Method::Get);
-    let method = request.method().as_str().to_string();
-    // `url()` is path + optional query; our routes carry no query, so drop it.
-    let path = request
-        .url()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .to_string();
-
-    // Operational probes (liveness/readiness) are unauthenticated GETs answered before
-    // routing — they carry no body, no `$ctx`, and (except readiness's ping) touch no DB.
-    if is_get {
-        match path.as_str() {
-            "/healthz" => return health_response(shared),
-            "/readyz" => return ready_response(shared),
-            _ => {}
-        }
-    }
+async fn build_response(
+    shared: &Shared,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> WireResponse {
+    let path = uri.path();
 
     // Reject a non-POST/unroutable request before borrowing a connection.
-    if let Some(resp) = preflight(&method, &path) {
+    if let Some(resp) = preflight(method.as_str(), path) {
         return resp;
     }
     // Preflight guaranteed a routable path, so this is the callable to run — needed now
     // to derive the shard key from its `@scope` field, before checkout.
-    let (is_mutation, name) = route_target(&path).expect("preflight guaranteed a routable path");
+    let (is_mutation, name) = route_target(path).expect("preflight guaranteed a routable path");
 
     // Derive $ctx (never the body) + the explicit shard-key override, from the headers.
-    let headers: Vec<(String, String)> = request
-        .headers()
+    let header_pairs: Vec<(String, String)> = headers
         .iter()
-        .map(|h| {
+        .map(|(k, v)| {
             (
-                h.field.as_str().as_str().to_string(),
-                h.value.as_str().to_string(),
+                k.as_str().to_string(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
             )
         })
         .collect();
-    let header_view = HeaderView(&headers);
+    let header_view = HeaderView(&header_pairs);
     let context = match shared.ctx_source.derive(&header_view) {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -435,50 +392,48 @@ fn build_response(request: &mut Request, shared: &Shared) -> WireResponse {
     // The shard key: the callable's `@scope` owner field pulled out of `$ctx`, or an
     // explicit header override, or "" (unscoped / single-shard → shard 0). Derived from
     // the same `@scope` that filters the row, so routing and row-visibility can't drift.
-    let shard_key = resolve_shard_key(&shared.compiled, is_mutation, name, &context);
+    let shard_key = resolve_shard_key(
+        &shared.compiled,
+        is_mutation,
+        name,
+        &context.ctx,
+        context.shard_key_override.as_deref(),
+    );
 
     // The mutation idempotency key rides the standard `Idempotency-Key` header — out of
     // band, never the body. Absent/blank → no dedupe; queries ignore it.
     let idem_key = header_view.get("Idempotency-Key").map(str::to_string);
 
     // Decode the JSON argument object from the (size-capped) body.
-    let args = match read_json_body(request) {
+    let args = match read_json_body(body) {
         Ok(v) => v,
         Err(e) => return e.into(),
     };
 
-    // Route to one physical shard and borrow a connection for this request. A checkout
-    // failure (pool exhausted, shard down) is operational → the same retryable 503 an
-    // in-flight DB fault yields.
-    let mut db = match shared.backend.checkout(&shard_key) {
-        Ok(db) => db,
-        // A checkout failure is an operational DB fault: the driver's own classified
-        // code (`pool_exhausted`/`database_error`) carries through to the wire.
-        Err(e) => return WireResponse::error(503, e.code(), e.message),
-    };
     let mut id_gen = UuidGen;
-
     dispatch(
         &shared.compiled,
-        db.as_mut(),
+        &*shared.backend,
+        &shard_key,
         &mut id_gen,
         &shared.idempotency,
-        &method,
-        &path,
+        method.as_str(),
+        path,
         args,
         context.ctx,
         idem_key,
     )
+    .await
 }
 
 /// Liveness (`GET /healthz`): the process is up and serving. Always `200` while a
-/// worker can answer — reaching this code *is* the liveness signal. It deliberately does
+/// task can answer — reaching this code *is* the liveness signal. It deliberately does
 /// **not** consult the backend: a DB outage must not restart an otherwise-healthy app
 /// container (that is readiness's job — drain, don't restart). While draining it still
 /// reports live (the process is up until the last request finishes); readiness is what
 /// flips first.
-fn health_response(_shared: &Shared) -> WireResponse {
-    WireResponse::ok(serde_json::json!({ "status": "ok" }))
+async fn health_response(State(_shared): State<Arc<Shared>>) -> Response {
+    into_response(WireResponse::ok(serde_json::json!({ "status": "ok" })))
 }
 
 /// Readiness (`GET /readyz`): should this instance receive traffic *now*? `200` only when
@@ -487,37 +442,28 @@ fn health_response(_shared: &Shared) -> WireResponse {
 /// out of rotation on that, which is exactly the drain (shutdown) and back-pressure (DB
 /// down) behaviour we want. Distinct from liveness so a transient DB blip drains rather
 /// than restarts the container.
-fn ready_response(shared: &Shared) -> WireResponse {
+async fn ready_response(State(shared): State<Arc<Shared>>) -> Response {
     if shared.draining.load(Ordering::SeqCst) {
         // The drain half of a zero-downtime rollout: fail readiness first so the LB stops
         // sending new requests while in-flight ones finish.
-        return EdgeError::Draining.into();
+        return into_response(EdgeError::Draining.into());
     }
-    match shared.backend.ping() {
+    into_response(match shared.backend.ping().await {
         Ok(()) => WireResponse::ok(serde_json::json!({ "status": "ready" })),
         Err(e) => EdgeError::NotReady(e.message).into(),
-    }
+    })
 }
 
-/// Read the request body (capped at [`MAX_BODY`]) and parse it as the JSON argument
-/// object. An empty body is an empty object (a no-arg callable). A non-object or
-/// unparseable body is a `400` — a client mistake it can fix.
-fn read_json_body(request: &mut Request) -> Result<serde_json::Value, EdgeError> {
-    let mut body = String::new();
-    if request
-        .as_reader()
-        .take(MAX_BODY)
-        .read_to_string(&mut body)
-        .is_err()
-    {
-        return Err(EdgeError::BadBody(
-            "request body is not valid UTF-8".to_string(),
-        ));
-    }
-    if body.trim().is_empty() {
+/// Parse the request body as the JSON argument object. An empty body is an empty object
+/// (a no-arg callable). A non-object or unparseable body is a `400` — a client mistake
+/// it can fix.
+fn read_json_body(body: &Bytes) -> Result<serde_json::Value, EdgeError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|_| EdgeError::BadBody("request body is not valid UTF-8".to_string()))?;
+    if text.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    match serde_json::from_str::<serde_json::Value>(&body) {
+    match serde_json::from_str::<serde_json::Value>(text) {
         Ok(v) if v.is_object() => Ok(v),
         Ok(_) => Err(EdgeError::BadBody(
             "request body must be a JSON object".to_string(),
@@ -529,6 +475,7 @@ fn read_json_body(request: &mut Request) -> Result<serde_json::Value, EdgeError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serve::resolve_shard_key;
     use serde_json::json;
 
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -600,7 +547,7 @@ mod tests {
 
     /// A tiny scoped schema: `Order @scope Tenant`, one scoped query, one scoped
     /// mutation, one `unscoped` cross-org query, and one unscoped-model query.
-    fn compiled() -> Compiled {
+    fn compiled() -> crate::load::Compiled {
         use based_ast::FileId;
         const SCHEMA: &str = r#"
             Org { name: text }
@@ -624,14 +571,7 @@ mod tests {
                 .any(|d| d.severity == based_diagnostics::Severity::Error),
             "schema should check clean: {diags:?}"
         );
-        Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
-    }
-
-    fn ctx(v: serde_json::Value) -> Context {
-        Context {
-            ctx: v,
-            shard_key_override: None,
-        }
+        crate::load::Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
     }
 
     #[test]
@@ -639,7 +579,7 @@ mod tests {
         let c = compiled();
         // `Order @scope(org = $ctx.org)` → a query on it shards on `$ctx.org`.
         assert_eq!(c.shard_key_field(false, "order_by_id"), Some("org"));
-        let key = resolve_shard_key(&c, false, "order_by_id", &ctx(json!({ "org": "org-1" })));
+        let key = resolve_shard_key(&c, false, "order_by_id", &json!({ "org": "org-1" }), None);
         assert_eq!(key, "org-1");
     }
 
@@ -647,7 +587,7 @@ mod tests {
     fn scoped_mutation_shards_on_its_scope_ctx_field() {
         let c = compiled();
         assert_eq!(c.shard_key_field(true, "place_order"), Some("org"));
-        let key = resolve_shard_key(&c, true, "place_order", &ctx(json!({ "org": "org-9" })));
+        let key = resolve_shard_key(&c, true, "place_order", &json!({ "org": "org-9" }), None);
         assert_eq!(key, "org-9");
     }
 
@@ -656,7 +596,7 @@ mod tests {
         let c = compiled();
         // `unscoped("admin")` disables scope → no owning shard → key "" (shard 0).
         assert_eq!(c.shard_key_field(false, "all_orders"), None);
-        let key = resolve_shard_key(&c, false, "all_orders", &ctx(json!({ "org": "org-1" })));
+        let key = resolve_shard_key(&c, false, "all_orders", &json!({ "org": "org-1" }), None);
         assert_eq!(key, "");
     }
 
@@ -665,19 +605,21 @@ mod tests {
         let c = compiled();
         // `Org` has no `@scope`, so a query on it has no shard field.
         assert_eq!(c.shard_key_field(false, "list_orgs"), None);
-        let key = resolve_shard_key(&c, false, "list_orgs", &ctx(json!({})));
+        let key = resolve_shard_key(&c, false, "list_orgs", &json!({}), None);
         assert_eq!(key, "");
     }
 
     #[test]
     fn explicit_header_overrides_scope_field() {
         let c = compiled();
-        let context = Context {
-            ctx: json!({ "org": "org-1" }),
-            shard_key_override: Some("forced-shard".to_string()),
-        };
         // The override wins even for a scoped callable.
-        let key = resolve_shard_key(&c, false, "order_by_id", &context);
+        let key = resolve_shard_key(
+            &c,
+            false,
+            "order_by_id",
+            &json!({ "org": "org-1" }),
+            Some("forced-shard"),
+        );
         assert_eq!(key, "forced-shard");
     }
 
@@ -685,7 +627,7 @@ mod tests {
     fn non_string_scope_value_is_stringified() {
         // A tenant id that arrives as a JSON number still yields a stable byte key.
         let c = compiled();
-        let key = resolve_shard_key(&c, false, "order_by_id", &ctx(json!({ "org": 42 })));
+        let key = resolve_shard_key(&c, false, "order_by_id", &json!({ "org": 42 }), None);
         assert_eq!(key, "42");
     }
 
@@ -694,7 +636,7 @@ mod tests {
         // The callable is scoped but `$ctx` lacks the field (a plan error follows in
         // dispatch — here we only pin the routing: no owner → shard 0).
         let c = compiled();
-        let key = resolve_shard_key(&c, false, "order_by_id", &ctx(json!({})));
+        let key = resolve_shard_key(&c, false, "order_by_id", &json!({}), None);
         assert_eq!(key, "");
     }
 }

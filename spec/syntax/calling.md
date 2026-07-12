@@ -38,13 +38,13 @@ A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque curs
 The cursor is a typed `Cursor` on the client surface — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
 
 ## Transport + the embedded bridge (D62)
-The generated `Client<T>` is generic over a `Transport` trait the module *defines itself* (post typed input + typed `$ctx` to a route, decode the reply). A wire/HTTP transport is the caller's; the module carries no HTTP stack.
+The generated `Client<T>` is generic over a `Transport` trait the module *defines itself* (post typed input + typed `$ctx` to a route, decode the reply). Both the trait's `call` and every client method are `async` — a transport awaits its round-trip (an HTTP client's socket, or the in-process engine's execution). A wire/HTTP transport is the caller's; the module carries no HTTP stack.
 
 The in-process path is different: because the trait is defined in the generated module, the orphan rule forbids a library-side `impl Transport for Engine` in based-runtime — so `based gen client` **emits the bridge** when asked (`ClientOptions::embedded`). The module then also carries an `Embedded` transport over `based_runtime::Engine` and a one-call constructor:
 
 ```
-let api = client::embedded(&engine);      // no bridge to write
-let out = api.place_order(input, ctx)?;   // typed, in-process, no socket
+let api = client::embedded(&engine);            // no bridge to write
+let out = api.place_order(input, ctx).await?;   // typed, in-process, no socket
 ```
 
 It is opt-in: the wire client leaves it off (a pure-wire consumer need not depend on based-runtime), an embedding build turns it on. based-codegen gains no based-runtime dep — the reference is by path in the emitted text, resolved by the consuming crate.

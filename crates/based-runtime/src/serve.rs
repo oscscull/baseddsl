@@ -23,7 +23,7 @@ use crate::id::IdGen;
 use crate::idempotency::IdempotencyStore;
 use crate::load::Compiled;
 use crate::plan::PlanError;
-use crate::run::{run_mutation, run_query, Db, RunError};
+use crate::run::{run_mutation, run_query, Backend, RunError};
 use crate::Request;
 
 /// An HTTP response the listener writes back: a status code and a JSON body.
@@ -54,17 +54,21 @@ impl WireResponse {
 
 /// Route + run one request. `method`/`path` come straight off the request line; `args`
 /// is the decoded JSON body; `ctx` is the server-derived request context (never the
-/// body); `idem_key` is the out-of-band mutation idempotency key (the `Idempotency-Key`
+/// body); `shard_key` routes the checkout ([`resolve_shard_key`] derives it);
+/// `idem_key` is the out-of-band mutation idempotency key (the `Idempotency-Key`
 /// header, `None` when absent, ignored by queries) and `store` is the dedupe store it
-/// consults. Every failure is a `WireResponse`, so the listener never has to branch on
-/// error kinds — it writes `status` + `body` verbatim.
+/// consults. Connections are checked out here, per call — a query borrows one for its
+/// reads, a mutation opens one fresh transaction per attempt. Every failure is a
+/// `WireResponse`, so the listener never has to branch on error kinds — it writes
+/// `status` + `body` verbatim.
 ///
 /// A caller that wants no idempotency passes a [`crate::idempotency::NoStore`] and a
 /// `None` key — one dispatch path, not a with/without-store fork.
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch(
+pub async fn dispatch(
     compiled: &Compiled,
-    db: &mut dyn Db,
+    backend: &dyn Backend,
+    shard_key: &str,
     id_gen: &mut dyn IdGen,
     store: &dyn IdempotencyStore,
     method: &str,
@@ -82,10 +86,15 @@ pub fn dispatch(
 
     let result = match kind {
         // A query is naturally idempotent (no writes) — the key/store never apply.
-        Kind::Query => run_query(compiled, db, &Request::new(name, args, ctx)),
+        Kind::Query => match backend.checkout(shard_key).await {
+            // A checkout failure (pool exhausted, shard down) is operational → the
+            // same retryable 503 an in-flight DB fault yields, with the driver's code.
+            Err(e) => Err(RunError::Db(e)),
+            Ok(mut db) => run_query(compiled, &mut *db, &Request::new(name, args, ctx)).await,
+        },
         Kind::Mutation => {
             let req = Request::new(name, args, ctx).with_idempotency_key(idem_key);
-            run_mutation(compiled, db, id_gen, store, &req)
+            run_mutation(compiled, backend, shard_key, id_gen, store, &req).await
         }
     };
     match result {
@@ -166,6 +175,33 @@ fn parse_route(path: &str) -> Option<(Kind, &str)> {
         "q" => Some((Kind::Query, name)),
         "m" => Some((Kind::Mutation, name)),
         _ => None,
+    }
+}
+
+/// Resolve the shard key for a routable request: an explicit override wins; else the
+/// callable's `@scope` owner field pulled out of `$ctx`; else the empty string (an
+/// unscoped callable, or a single-shard deployment — both route to shard 0). Pure, so
+/// the derivation is unit-testable without a socket. `$ctx.<field>` is read as its
+/// JSON string; a non-string owner (e.g. an int tenant id) is stringified so the FNV
+/// hash sees a stable byte string. Shared by the HTTP edge and the in-process engine,
+/// so routing and row-visibility read the same `@scope`.
+pub fn resolve_shard_key(
+    compiled: &Compiled,
+    is_mutation: bool,
+    name: &str,
+    ctx: &serde_json::Value,
+    explicit: Option<&str>,
+) -> String {
+    if let Some(explicit) = explicit {
+        return explicit.to_string();
+    }
+    let Some(field) = compiled.shard_key_field(is_mutation, name) else {
+        return String::new();
+    };
+    match ctx.get(field) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
     }
 }
 

@@ -376,24 +376,36 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     parameters kill the coerce-wire-text trick, so `SqlValue` grows typed text-riding variants;
     MariaDB-via-MySql-driver confirmed (binary-charset uuid/json decode + `CLIENT_FOUND_ROWS`
     affected-rows quirk noted). Full findings: D84 addendum.
-  - Traits: the D84 shapes — `DbRead` (stream `fetch` + `execute`) / `Db` (`begin` → `Tx`) / `Tx`
-    (`commit`, drop-guard) / async `Backend` (`async_trait`-style boxing accepted);
-    `dispatch`/`run_query`/`run_mutation`/`migrate apply` recolor mechanically on top.
-  - Drivers: all three hand-rolled stacks (`mysql`, sync `postgres` + r2d2, rusqlite wiring) retire
-    for sqlx per-database executors/pools — MariaDB via the MySql driver, SQLite via sqlx's async
-    SQLite driver. Statement timeouts move to the pool connect hook (`after_connect`), preserving D65.
-  - **Cancel-safety acceptance gate (I2):** drop a mutation future at every await point; assert
-    rollback/discard, never a pooled open-tx connection. The D65 deadlock-retry loop survives as a
-    per-attempt fresh `Tx`; the D65 crossed-lock + pool-exhaustion live tests re-run green.
-  - **BYO-pool seam (design-partner requirement, concrete):** a `Backend` constructor over a caller's
-    existing `sqlx::Pool` (the partner runs wrapped `sqlx_core` pools), sharing the codec path with
-    our own backends; proven with a sqlx-pool-backed impl in a test or example.
-  - Edge + embed: `based serve` listener tiny_http → axum (dogfoods the target stack; keeps `/healthz`
-    + `/readyz` + graceful drain). The `RefCell` single-connection `Engine` retires in favor of a
-    `Send + Sync` checkout-per-call handle (safe to `Arc` into axum state). The generated client emits
-    async methods (`Transport::call` → async).
-  - Binaries own their runtime: the CLI wraps at `main` (`#[tokio::main]`/`block_on`); the LSP is
-    already tower-lsp/tokio. Execution tests → `#[tokio::test]`; MockDb stays.
+  - ✅ **The bulk recolor shipped.** Traits are the D84 shapes — `DbRead` (stream-only `fetch` +
+    `execute`) / `Db` (`begin(self)` → `Tx`) / `Tx` (`commit(self)`, drop = rollback) / async
+    `Backend` — with `dispatch`/`run_query`/`run_mutation`/`migrate apply` recolored on top
+    (dispatch now owns checkout-per-call: it takes `Backend` + shard key). `SqlValue` grew the
+    typed text-riding variants (uuid/timestamp/date/decimal); the planner types every bind site
+    from the schema (params via their bound column, `$ctx` via inference, gen-ids as uuid, keyset
+    cursor re-binds via the sort columns' primitives threaded through `LoweredQuery.keyset`); raw-SQL
+    params stay text binds. All three hand-rolled driver stacks retired for sqlx 0.9
+    executors/pools (statement timeouts via `after_connect`; `acquire_timeout` →
+    `PoolExhausted` fast-503; deadlock retry = fresh checkout + fresh `Tx` per attempt; `pg_numeric`
+    survives decode-only on raw bytes). `based serve` moved tiny_http → axum (healthz/readyz/drain
+    kept; the worker-count knob retired — the pool is the concurrency ceiling). The `RefCell`
+    `Engine` retired for a `Send + Sync` checkout-per-call handle over `Arc<dyn Backend>`. The
+    generated client + `Transport` are async; the CLI wraps at `#[tokio::main]`; `MockDb` implements
+    the async traits (Clone, shared state, drop-records-rollback). Execution tests are
+    `#[tokio::test]`; the three quickstarts are async-integrated, minimal (the SQLite one lost its
+    rusqlite plumbing — `SqliteBackend::open` is the whole wiring). The coloring boundary is
+    CI-enforced: `make ci-coloring` (in `ci-workspace`) walks `cargo tree` for every front-end crate
+    and fails on tokio/sqlx/futures/axum. **`make check` green** — full workspace suite + fmt +
+    clippy + live MariaDB/Postgres suites + all three quickstart scenarios on the async core.
+    Landing the gate surfaced + fixed two real recolor bugs (D84 implementation notes): the drain
+    window (`/readyz` must observably 503 before the axum listener stops accepting) and the keyset
+    `id` tiebreaker binding as uuid for a model that declares `id: text`.
+  - **Cancel-safety acceptance gate (I2), remaining:** drop a mutation future at every await point;
+    assert rollback/discard, never a pooled open-tx connection (the typestate + a live SQLite
+    dropped-tx test exist; the systematic every-await-point suite does not yet).
+  - **BYO-pool seam (design-partner requirement, concrete), remaining:** a `Backend` constructor
+    over a caller's existing `sqlx::Pool` (per dialect), sharing the codec path with our own
+    backends; proven with a sqlx-pool-backed impl in a test or example. The router constructors are
+    already shaped so a from-existing-pool constructor slots in.
   - Gate unchanged: full workspace suite + fmt + clippy + all three live-DB suites green.
 - **N2. Streaming reads (claims N1's payoff immediately).** Driver-level row streams (`mysql_async` /
   `tokio-postgres` native; SQLite via the blocking bridge) surfaced through a streaming read path → an

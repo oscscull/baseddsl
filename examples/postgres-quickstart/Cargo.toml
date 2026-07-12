@@ -13,6 +13,8 @@ publish = false
 # Postgres's native `uuid` id columns reject non-uuid ids, so a real embed uses the same
 # v4-uuid generator production does (never the deterministic `SeqIdGen`).
 based-runtime = { path = "../../crates/based-runtime", features = ["postgres", "serve"] }
+# The engine is async; tokio's macro runtime drives `#[tokio::main]`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # The generated client derives serde; the embedded bridge serializes the typed input.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

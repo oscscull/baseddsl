@@ -1,10 +1,10 @@
 //! In-process embedding — run callables with no socket.
 //!
-//! [`Engine`] is the library twin of `based serve`: it owns a [`Compiled`] schema, one
-//! database connection ([`Db`]), and an id generator ([`IdGen`]), and runs a callable
-//! straight through [`crate::serve::dispatch`] — the same wire core the HTTP listener
-//! uses, minus the socket. So an embedded call and an HTTP call take the identical
-//! plan → run → shape path and yield the identical [`WireResponse`].
+//! [`Engine`] is the library twin of `based serve`: it owns a [`Compiled`] schema, a
+//! [`Backend`] (the connection source), and an id generator ([`IdGen`]), and runs a
+//! callable straight through [`crate::serve::dispatch`] — the same wire core the HTTP
+//! listener uses, minus the socket. So an embedded call and an HTTP call take the
+//! identical plan → run → shape path and yield the identical [`WireResponse`].
 //!
 //! Dropping the socket removes the loopback TCP + HTTP framing while keeping the same
 //! typed generated client — one binary (no sidecar), lower and steadier latency, and
@@ -19,8 +19,8 @@
 //! zero bridge code:
 //!
 //! ```ignore
-//! let api = client::embedded(&engine);          // no Transport impl to write
-//! let out = api.place_order(input, ctx)?;        // typed, in-process, no socket
+//! let api = client::embedded(&engine);              // no Transport impl to write
+//! let out = api.place_order(input, ctx).await?;      // typed, in-process, no socket
 //! ```
 //!
 //! The emitted bridge serializes the typed input and the typed `$ctx` to JSON, calls
@@ -30,46 +30,49 @@
 //! to an empty context bag.
 //!
 //! ## Concurrency
-//! `Engine` holds its one connection behind a [`RefCell`], so a call needs only `&self`
-//! (which backs the `&self` `Transport::call`). That makes it single-threaded by design —
-//! one embedded connection, used from one thread at a time. A multi-threaded or pooled
-//! embed routes through the [`crate::run::Backend`] seam instead.
+//! `Engine` is `Send + Sync`: every call checks a connection out of the [`Backend`]
+//! for its own duration, so it is safe to `Arc` an engine into shared state (e.g. an
+//! axum router) and call it from any number of tasks — concurrency is bounded by the
+//! backend's pool, exactly like the HTTP edge.
 
-use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::id::IdGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
-use crate::run::Db;
-use crate::serve::{dispatch, WireResponse};
+use crate::run::Backend;
+use crate::serve::{dispatch, resolve_shard_key, route_target, WireResponse};
 
-/// An in-process engine: a loaded schema + one database connection + an id generator,
+/// An in-process engine: a loaded schema + a connection [`Backend`] + an id generator,
 /// ready to run callables directly. Build one with [`Engine::new`] (from a
 /// [`Compiled`], via [`Compiled::load`] or [`Compiled::from_checked`]) and call it with
 /// a route, JSON args, and the request `$ctx`.
 pub struct Engine {
     compiled: Compiled,
-    // Interior mutability: `dispatch` needs `&mut` on the connection and id-gen, but a
-    // call takes `&self` so it can back the generated `Transport` (also `&self`). One
-    // connection ⇒ one thread at a time — a pooled embed uses `Backend` instead.
-    db: RefCell<Box<dyn Db>>,
-    id_gen: RefCell<Box<dyn IdGen>>,
+    backend: Arc<dyn Backend>,
+    // The id generator is engine-owned mutable state; an async-aware lock so a call
+    // holding it across dispatch's awaits stays `Send`.
+    id_gen: tokio::sync::Mutex<Box<dyn IdGen>>,
     // An in-process idempotency store for keyed mutation retries via
     // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
-    // `Engine::call` (no key) never consults it.
+    // [`Engine::call`] (no key) never consults it.
     store: MemStore,
 }
 
 impl Engine {
-    /// Build an engine over a compiled schema, a database connection, and an id
-    /// generator. For a `MockDb`-backed test pass [`crate::id::SeqIdGen`]; a real embed
-    /// passes its own [`Db`] (e.g. the caller's existing pool checkout) and a uuid
-    /// generator.
-    pub fn new(compiled: Compiled, db: impl Db + 'static, id_gen: impl IdGen + 'static) -> Engine {
+    /// Build an engine over a compiled schema, a connection backend, and an id
+    /// generator. For a [`crate::run::MockDb`]-backed test pass [`crate::id::SeqIdGen`];
+    /// a real embed passes its own [`Backend`] (e.g. a driver router over its pool) and
+    /// a uuid generator.
+    pub fn new(
+        compiled: Compiled,
+        backend: impl Backend + 'static,
+        id_gen: impl IdGen + 'static,
+    ) -> Engine {
         Engine {
             compiled,
-            db: RefCell::new(Box::new(db)),
-            id_gen: RefCell::new(Box::new(id_gen)),
+            backend: Arc::new(backend),
+            id_gen: tokio::sync::Mutex::new(Box::new(id_gen)),
             store: MemStore::new(),
         }
     }
@@ -79,13 +82,13 @@ impl Engine {
     /// client supplies the constant), `args` is the JSON argument object, and `ctx` is
     /// the request `$ctx` the app derived from its auth layer (never from the caller). The
     /// method is always `POST`: the closed RPC surface has no other verb.
-    pub fn call(
+    pub async fn call(
         &self,
         route: &str,
         args: serde_json::Value,
         ctx: serde_json::Value,
     ) -> WireResponse {
-        self.call_with_key(route, args, ctx, None)
+        self.call_with_key(route, args, ctx, None).await
     }
 
     /// Like [`Engine::call`], with a mutation idempotency key. A retry of a
@@ -93,17 +96,26 @@ impl Engine {
     /// attempt's response instead of writing again (queries ignore the key). This is the
     /// in-process twin of the HTTP edge's `Idempotency-Key` header — supplied straight in,
     /// no header dance.
-    pub fn call_with_key(
+    pub async fn call_with_key(
         &self,
         route: &str,
         args: serde_json::Value,
         ctx: serde_json::Value,
         idem_key: Option<String>,
     ) -> WireResponse {
+        // The same schema-derived shard routing as the HTTP edge (an unroutable path
+        // keys to "" and 404s in dispatch).
+        let shard_key = route_target(route)
+            .map(|(is_mutation, name)| {
+                resolve_shard_key(&self.compiled, is_mutation, name, &ctx, None)
+            })
+            .unwrap_or_default();
+        let mut id_gen = self.id_gen.lock().await;
         dispatch(
             &self.compiled,
-            self.db.borrow_mut().as_mut(),
-            self.id_gen.borrow_mut().as_mut(),
+            &*self.backend,
+            &shard_key,
+            id_gen.as_mut(),
             &self.store,
             "POST",
             route,
@@ -111,6 +123,7 @@ impl Engine {
             ctx,
             idem_key,
         )
+        .await
     }
 
     /// The compiled schema this engine serves (its lowered queries/mutations + resolved
@@ -155,37 +168,42 @@ mod tests {
     }
 
     /// A read call over the engine returns the same shaped `200` a `dispatch` would.
-    #[test]
-    fn engine_runs_a_query() {
+    #[tokio::test]
+    async fn engine_runs_a_query() {
         let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 42 }))]]);
         let engine = Engine::new(compiled(), db, SeqIdGen::default());
 
-        let resp = engine.call("/q/order_by_id", json!({ "id": "o-1" }), json!({}));
+        let resp = engine
+            .call("/q/order_by_id", json!({ "id": "o-1" }), json!({}))
+            .await;
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, json!({ "status": "paid", "total": 42 }));
     }
 
     /// A write call runs the transaction and returns the created row in its declared
     /// shape, read back inside the tx — no socket.
-    #[test]
-    fn engine_runs_a_mutation() {
+    #[tokio::test]
+    async fn engine_runs_a_mutation() {
         let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
-        let engine = Engine::new(compiled(), db, SeqIdGen::default());
+        let engine = Engine::new(compiled(), db.clone(), SeqIdGen::default());
 
-        let resp = engine.call(
-            "/m/place_order",
-            json!({ "org": "o-1", "status": "open", "total": 7 }),
-            json!({}),
-        );
+        let resp = engine
+            .call(
+                "/m/place_order",
+                json!({ "org": "o-1", "status": "open", "total": 7 }),
+                json!({}),
+            )
+            .await;
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, json!({ "status": "open", "total": 7 }));
+        assert_eq!(db.tx_log(), vec!["begin", "commit"]);
     }
 
     /// Boundary failures map to the same statuses the wire uses (unknown route → 404).
-    #[test]
-    fn engine_reports_boundary_errors() {
+    #[tokio::test]
+    async fn engine_reports_boundary_errors() {
         let engine = Engine::new(compiled(), MockDb::new(vec![]), SeqIdGen::default());
-        let resp = engine.call("/q/nope", json!({}), json!({}));
+        let resp = engine.call("/q/nope", json!({}), json!({})).await;
         assert_eq!(resp.status, 404);
         assert_eq!(resp.body["error"]["code"], "unknown_query");
     }

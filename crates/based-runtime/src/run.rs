@@ -1,12 +1,22 @@
 //! Executing a planned query and shaping the rows into the response envelope.
 //!
-//! Execution goes through the abstract [`Db`] trait — the runtime's twin of the
-//! generated client's abstract `Transport`; concrete drivers (`sqlite`, `driver`,
-//! `postgres`) implement it, and a [`MockDb`] returns canned rows so the whole
-//! request → JSON path is testable with no database. Row shaping is where the
-//! envelope becomes real: `get` → a JSON object or `null`, `list` → an array, a
-//! paginated `list` → the `{ rows, cursor }` page envelope (the keyset cursor is
-//! minted here from the last row's hidden sort-key columns).
+//! Execution goes through the abstract [`DbRead`]/[`Db`]/[`Tx`]/[`Backend`] traits —
+//! the runtime's twin of the generated client's abstract `Transport`; concrete drivers
+//! (`sqlite`, `driver`, `postgres`) implement them, and a [`MockDb`] returns canned
+//! rows so the whole request → JSON path is testable with no database. Row shaping is
+//! where the envelope becomes real: `get` → a JSON object or `null`, `list` → an
+//! array, a paginated `list` → the `{ rows, cursor }` page envelope (the keyset cursor
+//! is minted here from the last row's hidden sort-key columns).
+//!
+//! Reads have exactly one path: [`DbRead::fetch`] returns a fallible row *stream*,
+//! always — a one-shot response is a collect at this layer, and a streaming wire
+//! surface consumes the same stream. Transactions are a consuming typestate:
+//! [`Db::begin`] takes the connection, [`Tx::commit`] takes the transaction, and a
+//! `Tx` dropped without commit rolls back or discards its connection — an open
+//! transaction can never re-enter the pool, and a cancelled caller can never leave a
+//! half-written mutation behind.
+
+use async_trait::async_trait;
 
 use crate::id::IdGen;
 use crate::idempotency::{IdempotencyStore, KeyState};
@@ -21,6 +31,17 @@ use based_codegen::sql::{ARRAY_MARK, KEYSET_PREFIX};
 /// One returned row: column alias → JSON value (the SELECT aliases each projection
 /// to its output name, so a row is already the response object).
 pub type Row = serde_json::Map<String, serde_json::Value>;
+
+/// The one read shape: a fallible stream of rows borrowed from the connection it
+/// runs on. A one-shot caller collects it ([`fetch_all`]); a streaming caller
+/// consumes it row by row.
+pub type RowStream<'a> = futures_core::stream::BoxStream<'a, Result<Row, DbError>>;
+
+/// Collect a [`RowStream`] into a `Vec` — the one-shot read path.
+pub async fn fetch_all(stream: RowStream<'_>) -> Result<Vec<Row>, DbError> {
+    use futures_util::TryStreamExt;
+    stream.try_collect().await
+}
 
 /// A failure from the database itself — connection lost, timeout, deadlock, a shard
 /// down, pool exhausted. Distinct from a [`PlanError`] (a boundary/validation failure
@@ -173,45 +194,49 @@ impl std::error::Error for RunError {
     }
 }
 
-/// The database seam. The runtime hands it positional SQL + values; the read path
-/// `fetch`es rows, the write path `execute`s statements under an engine-owned
-/// transaction (the engine, not the emitted SQL, owns BEGIN/COMMIT). Every method is
-/// fallible: a dependable driver surfaces connection/query failures rather than
-/// panicking. The write methods default so a read-only [`Db`] need not implement them.
-pub trait Db {
-    fn fetch(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError>;
+/// The read seam a connection and an open transaction share. The runtime hands it
+/// positional SQL + values; [`fetch`](DbRead::fetch) streams rows (the *only* read
+/// shape — a one-shot caller collects), [`execute`](DbRead::execute) runs one write
+/// statement. Every method is fallible: a dependable driver surfaces
+/// connection/query failures rather than panicking.
+#[async_trait]
+pub trait DbRead: Send {
+    /// Run a SELECT and stream its rows. The stream borrows the connection; errors
+    /// surface as stream items (a failure to even start the query is the first item).
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a>;
 
     /// Execute one write statement (INSERT/UPDATE/DELETE); returns rows affected.
-    fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
-        let _ = (sql, params);
-        Ok(0)
-    }
-    /// Open the transaction the whole mutation body runs in.
-    fn begin(&mut self) -> Result<(), DbError> {
-        Ok(())
-    }
-    /// Commit it (all writes succeeded).
-    fn commit(&mut self) -> Result<(), DbError> {
-        Ok(())
-    }
-    /// Roll it back (a write failed). Best-effort: called on the error path, its own
-    /// failure must not mask the original error.
-    fn rollback(&mut self) -> Result<(), DbError> {
-        Ok(())
-    }
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError>;
 }
 
-/// A source of per-request database connections for the listener, keyed by shard.
-/// Given a request's shard key it hands back a boxed [`Db`] to run that request on
-/// (single-shard dispatch). This is the seam that keeps the HTTP edge driver-neutral:
-/// the MariaDB [`crate::driver::ShardRouter`] is one implementation; a Postgres / MySQL /
-/// SQLite backend is another (the [`Db`] trait below is already dialect-agnostic — it
-/// speaks positional SQL + [`SqlValue`], not a MariaDB protocol). A single-file SQLite
-/// backend simply ignores the key and returns the one connection.
+/// A checked-out connection. [`begin`](Db::begin) consumes it into a [`Tx`] — the
+/// typestate that makes an open transaction impossible to leak back to the pool.
+#[async_trait]
+pub trait Db: DbRead {
+    /// Open the transaction a mutation body runs in, consuming the connection.
+    async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError>;
+}
+
+/// An open transaction. [`commit`](Tx::commit) consumes it; dropping it without
+/// commit rolls back or discards the connection (never pooled with an open tx), so a
+/// write can only survive via `commit` — cancellation at any await point cannot
+/// double-write.
+#[async_trait]
+pub trait Tx: DbRead {
+    async fn commit(self: Box<Self>) -> Result<(), DbError>;
+}
+
+/// A source of per-request database connections, keyed by shard. Given a request's
+/// shard key it hands back a boxed [`Db`] to run that request on (single-shard
+/// dispatch). This is the seam that keeps the edges driver-neutral: the MariaDB
+/// [`crate::driver::ShardRouter`] is one implementation; the Postgres / SQLite
+/// backends are others (the [`Db`] trait is already dialect-agnostic — it speaks
+/// positional SQL + [`SqlValue`], not a wire protocol).
+#[async_trait]
 pub trait Backend: Send + Sync {
     /// Check out a connection for the shard the key routes to. A failure (pool
     /// exhausted, shard/host down) is a [`DbError`] → the wire's retryable `503`.
-    fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError>;
+    async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError>;
 
     /// Readiness probe: can the backend actually serve traffic *right now*? A
     /// container orchestrator / load balancer calls the listener's `GET /readyz` (which
@@ -223,23 +248,28 @@ pub trait Backend: Send + Sync {
     /// common single-shard case): if the pool can hand one out, the backend is ready. A
     /// multi-shard backend overrides this to probe every shard. A backend with no live
     /// database (the mock) is trivially ready.
-    fn ping(&self) -> Result<(), DbError> {
-        self.checkout("").map(|_| ())
+    async fn ping(&self) -> Result<(), DbError> {
+        self.checkout("").await.map(|_| ())
     }
 }
 
-/// Plan and run a query request, returning the shaped JSON response.
-pub fn run_query(
+/// Plan and run a query request, returning the shaped JSON response. Takes any
+/// [`DbRead`] — a checked-out connection or an open transaction (generic so a
+/// `&mut dyn Db` / `&mut dyn Tx` passes straight in).
+pub async fn run_query<D: DbRead + ?Sized>(
     compiled: &Compiled,
-    db: &mut dyn Db,
+    db: &mut D,
     req: &Request,
 ) -> Result<serde_json::Value, RunError> {
     let plan = plan_query(compiled, req)?;
-    Ok(shape(db, &plan)?)
+    Ok(shape(db, &plan).await?)
 }
 
 /// Plan and run a mutation request: id-gen + bind, then execute every write under one
-/// engine-owned transaction, returning the write response.
+/// engine-owned transaction, returning the write response. Takes the [`Backend`]
+/// (not a connection): each transaction attempt — including a deadlock re-run — is a
+/// fresh checkout + fresh [`Tx`], so a failed attempt's connection is already back in
+/// the pool (or discarded) before the next begins.
 ///
 /// When the request carries an idempotency key the write body runs at most once per
 /// `(callable, key)`: a first attempt claims the key, runs, and records its response; a
@@ -247,9 +277,10 @@ pub fn run_query(
 /// retry while the first is still in flight is a [`RunError::Conflict`]. Planning (arg /
 /// `$ctx` validation) happens before the store is consulted, so a malformed request is a
 /// clean `4xx` that never claims a key. Without a key this is the plain run-every-time path.
-pub fn run_mutation(
+pub async fn run_mutation(
     compiled: &Compiled,
-    db: &mut dyn Db,
+    backend: &dyn Backend,
+    shard_key: &str,
     id_gen: &mut dyn IdGen,
     store: &dyn IdempotencyStore,
     req: &Request,
@@ -261,7 +292,7 @@ pub fn run_mutation(
     // No key → the plain path (run every time). This is also what `NoStore` yields, but
     // short-circuiting here means a keyless request never touches the store at all.
     let key = match &req.idempotency_key {
-        None => return Ok(apply(db, &plan)?),
+        None => return Ok(apply(backend, shard_key, &plan).await?),
         Some(k) => k,
     };
 
@@ -276,7 +307,7 @@ pub fn run_mutation(
         KeyState::Mismatch => Err(RunError::KeyReuse(key.clone())),
         // Fresh: we hold the claim. Run the write, then record its response — or release
         // the claim on failure so a later retry (same key) may try again.
-        KeyState::Fresh => match apply(db, &plan) {
+        KeyState::Fresh => match apply(backend, shard_key, &plan).await {
             Ok(response) => {
                 store.record(&req.callable, key, response.clone());
                 Ok(response)
@@ -310,16 +341,21 @@ fn deadlock_backoff(attempt: u32) -> std::time::Duration {
 
 /// Execute a mutation's transaction, retrying the whole thing on a deadlock. A
 /// deadlock/serialization abort ([`DbErrorKind::Deadlock`]) rolled the transaction back
-/// server-side, so re-running it from the top on the same connection usually succeeds once
-/// the contending transaction commits; a bounded [`TX_RETRY_LIMIT`] then a `503` prevents a
-/// hot row retrying forever. Every other failure surfaces immediately (no auto-retry).
-fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
+/// server-side; each retry is a fresh checkout + fresh [`Tx`], so re-running usually
+/// succeeds once the contending transaction commits. A bounded [`TX_RETRY_LIMIT`] then a
+/// `503` prevents a hot row retrying forever. Every other failure surfaces immediately.
+async fn apply(
+    backend: &dyn Backend,
+    shard_key: &str,
+    plan: &MutationPlan,
+) -> Result<serde_json::Value, DbError> {
     let mut attempt = 0u32;
     loop {
-        match apply_once(db, plan) {
+        let db = backend.checkout(shard_key).await?;
+        match apply_once(db, plan).await {
             Err(e) if e.is_deadlock() && attempt < TX_RETRY_LIMIT => {
                 attempt += 1;
-                std::thread::sleep(deadlock_backoff(attempt));
+                tokio::time::sleep(deadlock_backoff(attempt)).await;
                 // The server already rolled the aborted transaction back; re-run it.
             }
             result => return result,
@@ -328,35 +364,28 @@ fn apply(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbEr
 }
 
 /// Run a mutation plan's writes in order under one transaction, then assemble the write
-/// response. If any write fails the transaction is rolled back and the error surfaced — a
-/// mutation is all-or-nothing, never a partial write. Wrapped by [`apply`] for the
-/// deadlock-retry loop.
+/// response. A failed write (or a caller cancelling mid-body) drops the [`Tx`], which
+/// rolls back — a mutation is all-or-nothing, never a partial write. Wrapped by
+/// [`apply`] for the deadlock-retry loop.
 ///
 /// The response is the written row read back in the mutation's declared shape: when the
 /// plan carries a re-select, it runs inside the same transaction (read-your-writes, atomic
 /// with the writes) and its single row is the response — matching the client's decoded
 /// output type. Only a mutation whose row does not survive the write (a real DELETE) has no
 /// re-select and falls back to `{ id }` / `{}`.
-fn apply_once(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
+async fn apply_once(db: Box<dyn Db>, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
-    db.begin()?;
+    let mut tx = db.begin().await?;
     for stmt in &plan.stmts {
-        if let Err(e) = db.execute(&stmt.sql, &stmt.params) {
-            // Best-effort rollback; surface the original write error, not a
-            // rollback failure (the connection may already be gone).
-            let _ = db.rollback();
-            return Err(e);
-        }
+        // An error propagates and drops `tx` → rollback (never a pooled open tx).
+        tx.execute(&stmt.sql, &stmt.params).await?;
     }
     // Read the written row back in its declared shape, still inside the transaction.
     let response = match &plan.ret_select {
-        Some(stmt) => match db.fetch(&stmt.sql, &stmt.params) {
-            Ok(rows) => rows.into_iter().next().map(nest_row).unwrap_or(J::Null),
-            Err(e) => {
-                let _ = db.rollback();
-                return Err(e);
-            }
-        },
+        Some(stmt) => {
+            let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
+            rows.into_iter().next().map(nest_row).unwrap_or(J::Null)
+        }
         // No declared-shape re-select (the row did not survive — a real DELETE): identify
         // the created row by its engine `id`, or an empty object when nothing was created.
         None => match &plan.result_id {
@@ -368,7 +397,7 @@ fn apply_once(db: &mut dyn Db, plan: &MutationPlan) -> Result<serde_json::Value,
             None => J::Object(serde_json::Map::new()),
         },
     };
-    db.commit()?;
+    tx.commit().await?;
     Ok(response)
 }
 
@@ -455,9 +484,12 @@ fn next_cursor(rows: &[Row], ks: KeysetPlan) -> Option<String> {
 }
 
 /// Execute a plan's statements and assemble the response per its envelope.
-fn shape(db: &mut dyn Db, plan: &QueryPlan) -> Result<serde_json::Value, DbError> {
+async fn shape<D: DbRead + ?Sized>(
+    db: &mut D,
+    plan: &QueryPlan,
+) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
-    let mut rows = run_stmt(db, &plan.main)?;
+    let mut rows = fetch_all(db.fetch(&plan.main.sql, &plan.main.params)).await?;
     Ok(match plan.envelope {
         // `get`: the first row, or JSON null (Option<T>).
         Envelope::One => rows.into_iter().next().map(nest_row).unwrap_or(J::Null),
@@ -481,7 +513,8 @@ fn shape(db: &mut dyn Db, plan: &QueryPlan) -> Result<serde_json::Value, DbError
             obj.insert("cursor".into(), cursor.map(J::String).unwrap_or(J::Null));
             if with_count {
                 if let Some(count) = &plan.count {
-                    let total = run_stmt(db, count)?
+                    let total = fetch_all(db.fetch(&count.sql, &count.params))
+                        .await?
                         .into_iter()
                         .next()
                         .and_then(|mut r| r.remove("count"))
@@ -494,73 +527,153 @@ fn shape(db: &mut dyn Db, plan: &QueryPlan) -> Result<serde_json::Value, DbError
     })
 }
 
-fn run_stmt(db: &mut dyn Db, stmt: &Stmt) -> Result<Vec<Row>, DbError> {
-    db.fetch(&stmt.sql, &stmt.params)
+/// Run one statement to completion — the collected one-shot read, for callers holding
+/// a [`Stmt`].
+pub async fn run_stmt<D: DbRead + ?Sized>(db: &mut D, stmt: &Stmt) -> Result<Vec<Row>, DbError> {
+    fetch_all(db.fetch(&stmt.sql, &stmt.params)).await
 }
 
-/// A test double: returns pre-loaded row batches in call order, recording every
-/// `(sql, params)` it was asked to run (both `fetch` and `execute`) so tests can
-/// assert the bound statements, plus the transaction boundaries it saw. Set `fail`
-/// to make every `fetch`/`execute` return a [`DbError`] (the driver-failure path).
+// ---------- the mock -------------------------------------------------------
+
 #[derive(Default)]
+struct MockState {
+    responses: std::collections::VecDeque<Vec<Row>>,
+    calls: Vec<(String, Vec<SqlValue>)>,
+    tx: Vec<&'static str>,
+    fail: Option<String>,
+}
+
+/// A test double for the whole driver stack: it is a [`Backend`] (checkout clones the
+/// shared state), a [`Db`], and — via [`Db::begin`] — a [`Tx`]. It returns pre-loaded
+/// row batches in call order, recording every `(sql, params)` it was asked to run
+/// (`fetch` and `execute` alike) plus the transaction boundaries it saw, so tests can
+/// assert the bound statements. Cheap to clone; every clone shares the same state, so
+/// a test keeps a handle for assertions while the engine consumes another.
+#[derive(Clone, Default)]
 pub struct MockDb {
-    /// Row batches, popped front-to-back per `fetch` call.
-    pub responses: std::collections::VecDeque<Vec<Row>>,
-    /// Every executed statement, in order — `fetch` and `execute` alike (for assertions).
-    pub calls: Vec<(String, Vec<SqlValue>)>,
-    /// `begin`/`commit`/`rollback` seen, in order (write-path transaction assertions).
-    pub tx: Vec<&'static str>,
-    /// When set, `fetch`/`execute` return this as a [`DbError`] (simulate a DB fault).
-    pub fail: Option<String>,
+    state: std::sync::Arc<std::sync::Mutex<MockState>>,
 }
 
 impl MockDb {
     /// A mock that replies to each `fetch` with the given batches, in order.
     pub fn new(responses: Vec<Vec<Row>>) -> Self {
         MockDb {
-            responses: responses.into(),
-            calls: Vec::new(),
-            tx: Vec::new(),
-            fail: None,
+            state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
+                responses: responses.into(),
+                ..MockState::default()
+            })),
         }
     }
 
     /// A mock whose every `fetch`/`execute` fails with `message` (the DB-fault path).
     pub fn failing(message: impl Into<String>) -> Self {
         MockDb {
-            fail: Some(message.into()),
-            ..MockDb::default()
+            state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
+                fail: Some(message.into()),
+                ..MockState::default()
+            })),
         }
+    }
+
+    /// Every executed statement so far, in order — `fetch` and `execute` alike.
+    pub fn calls(&self) -> Vec<(String, Vec<SqlValue>)> {
+        self.state.lock().unwrap().calls.clone()
+    }
+
+    /// The transaction boundaries seen, in order (`begin`/`commit`/`rollback` — a
+    /// dropped-without-commit [`Tx`] records `rollback`).
+    pub fn tx_log(&self) -> Vec<&'static str> {
+        self.state.lock().unwrap().tx.clone()
+    }
+
+    fn record(&self, sql: &str, params: &[SqlValue]) -> Result<(), DbError> {
+        let mut st = self.state.lock().unwrap();
+        st.calls.push((sql.to_string(), params.to_vec()));
+        match &st.fail {
+            Some(m) => Err(DbError::new(m.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn pop(&self) -> Vec<Row> {
+        self.state
+            .lock()
+            .unwrap()
+            .responses
+            .pop_front()
+            .unwrap_or_default()
     }
 }
 
+#[async_trait]
+impl DbRead for MockDb {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        let items: Vec<Result<Row, DbError>> = match self.record(sql, params) {
+            Ok(()) => self.pop().into_iter().map(Ok).collect(),
+            Err(e) => vec![Err(e)],
+        };
+        Box::pin(futures_util::stream::iter(items))
+    }
+
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        self.record(sql, params).map(|()| 0)
+    }
+}
+
+#[async_trait]
 impl Db for MockDb {
-    fn fetch(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
-        self.calls.push((sql.to_string(), params.to_vec()));
-        if let Some(m) = &self.fail {
-            return Err(DbError::new(m.clone()));
-        }
-        Ok(self.responses.pop_front().unwrap_or_default())
+    async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError> {
+        self.state.lock().unwrap().tx.push("begin");
+        Ok(Box::new(MockTx {
+            db: *self,
+            committed: false,
+        }))
+    }
+}
+
+#[async_trait]
+impl Backend for MockDb {
+    async fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        Ok(Box::new(self.clone()))
     }
 
-    fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
-        self.calls.push((sql.to_string(), params.to_vec()));
-        if let Some(m) = &self.fail {
-            return Err(DbError::new(m.clone()));
-        }
-        Ok(0)
+    /// A mock has no live database — trivially ready.
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+/// The mock's open transaction: statements delegate to the shared state; drop without
+/// commit records the rollback the typestate guarantees.
+struct MockTx {
+    db: MockDb,
+    committed: bool,
+}
+
+#[async_trait]
+impl DbRead for MockTx {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        self.db.fetch(sql, params)
     }
 
-    fn begin(&mut self) -> Result<(), DbError> {
-        self.tx.push("begin");
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        self.db.execute(sql, params).await
+    }
+}
+
+#[async_trait]
+impl Tx for MockTx {
+    async fn commit(mut self: Box<Self>) -> Result<(), DbError> {
+        self.committed = true;
+        self.db.state.lock().unwrap().tx.push("commit");
         Ok(())
     }
-    fn commit(&mut self) -> Result<(), DbError> {
-        self.tx.push("commit");
-        Ok(())
-    }
-    fn rollback(&mut self) -> Result<(), DbError> {
-        self.tx.push("rollback");
-        Ok(())
+}
+
+impl Drop for MockTx {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.db.state.lock().unwrap().tx.push("rollback");
+        }
     }
 }

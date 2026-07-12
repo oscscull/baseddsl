@@ -33,22 +33,27 @@
 //! against [`run::MockDb`], no socket. A boundary [`plan::PlanError`] maps to `4xx`, a
 //! [`run::DbError`] to a retryable `503`.
 //!
-//! The concrete [`driver::MariaDb`] is the production `Db` over one pooled connection,
-//! and [`driver::ShardRouter`] is the scale-out seam: one bounded pool per physical
-//! shard, single-shard dispatch by a stable logical-shard hash.
+//! Execution is native async over the [`run::DbRead`]/[`run::Db`]/[`run::Tx`]/
+//! [`run::Backend`] traits: `fetch` always returns a row stream (a one-shot response is
+//! a collect at the dispatch layer), and a transaction is a consuming typestate —
+//! dropped without commit it rolls back, so an open tx never re-enters the pool. The
+//! concrete drivers run over sqlx as a pure executor/pool layer: [`driver::ShardRouter`]
+//! (MariaDB) and [`postgres::PgRouter`] are the scale-out seams — one bounded pool per
+//! physical shard, single-shard dispatch by a stable logical-shard hash.
 //!
 //! ## The socket edge (feature `serve`)
-//! [`http::serve`] is the HTTP listener (`based serve`): a sync bounded worker-thread
-//! pool over `tiny_http`. `$ctx` comes from headers via a pluggable
-//! [`http::ContextSource`], never the body. The edge depends only on the driver-neutral
-//! [`run::Backend`] seam, so a second backend drops in without a change here.
-//! [`sqlite::SqliteBackend`] is an infra-free in-memory `Db`/`Backend` for end-to-end
-//! integration tests against a genuine engine.
+//! [`http::serve`] is the HTTP listener (`based serve`): an axum service. `$ctx` comes
+//! from headers via a pluggable [`http::ContextSource`], never the body. The edge
+//! depends only on the driver-neutral [`run::Backend`] seam, so a second backend drops
+//! in without a change here. [`sqlite::SqliteBackend`] is an infra-free in-memory
+//! `Db`/`Backend` for end-to-end integration tests against a genuine engine.
 //!
 //! ## The in-process door
-//! [`embed::Engine`] is the library twin of the HTTP edge: a [`Compiled`] schema over one
-//! [`run::Db`] and an [`id::IdGen`], run straight through the same [`serve::dispatch`]
-//! core with no socket. It backs the same typed generated client (`based gen client`).
+//! [`embed::Engine`] is the library twin of the HTTP edge: a [`Compiled`] schema over a
+//! [`run::Backend`] and an [`id::IdGen`], run straight through the same
+//! [`serve::dispatch`] core with no socket. `Send + Sync`, checkout-per-call — safe to
+//! `Arc` into shared app state. It backs the same typed generated client
+//! (`based gen client`).
 
 pub mod cursor;
 pub mod embed;
@@ -87,8 +92,11 @@ pub use migrate::{
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };
-pub use run::{run_mutation, run_query, Backend, Db, DbError, DbErrorKind, MockDb, Row, RunError};
-pub use serve::{dispatch, preflight, WireResponse};
+pub use run::{
+    fetch_all, run_mutation, run_query, Backend, Db, DbError, DbErrorKind, DbRead, MockDb, Row,
+    RowStream, RunError, Tx,
+};
+pub use serve::{dispatch, preflight, resolve_shard_key, WireResponse};
 pub use value::SqlValue;
 
 #[cfg(feature = "serve")]
@@ -101,4 +109,4 @@ pub use http::{
 pub use sqlite::{SqliteBackend, SqliteDb};
 
 #[cfg(feature = "postgres")]
-pub use postgres::{connect as pg_connect, PgRouter, PostgresDb};
+pub use postgres::{PgRouter, PostgresDb};

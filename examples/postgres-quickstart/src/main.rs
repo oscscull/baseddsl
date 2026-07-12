@@ -31,7 +31,8 @@ mod client;
 // can't be passed where a user id is wanted (the client hands each one back typed).
 use client::{entity, Id};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // `.env` supplies `DATABASE_URL` (dotenvy, the 12-factor convention) — no hard-coded URL.
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL (see .env)");
@@ -42,19 +43,16 @@ fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let compiled = Compiled::load(&manifest).expect("schema checks clean");
 
-    // The `PgRouter` is the production `Backend` (a bounded pool per physical shard); a
-    // single-server deploy is `single`. A checked-out connection is the engine's `Db`.
+    // The `PgRouter` is the production `Backend` (a bounded pool per physical shard);
+    // a single-server deploy is `single`. The engine checks a connection out of it per call.
     let router = PgRouter::single(&url, PoolConfig::default())
         .unwrap_or_else(|e| panic!("connect to Postgres at {url}: {e:?}"));
 
     // The `Engine` is the library twin of `based serve`, minus the socket: it owns the
-    // schema, a connection, and an id generator, and runs each call through the same dispatch
-    // core. `UuidGen` is the production generator (the Postgres `uuid` id columns require it).
-    let engine = Engine::new(
-        compiled,
-        router.checkout("").expect("checkout for engine"),
-        UuidGen,
-    );
+    // schema, the `Backend`, and an id generator, and runs each call through the same async
+    // dispatch core. `UuidGen` is the production generator (the Postgres `uuid` id columns
+    // require it).
+    let engine = Engine::new(compiled, router, UuidGen);
 
     // `client::embedded(&engine)` is the entire bridge — a typed, in-process client
     // with no socket and no hand-written `Transport` impl.
@@ -70,6 +68,7 @@ fn main() {
             },
             (),
         )
+        .await
         .expect("create_org")
         .id;
     let other = api
@@ -80,6 +79,7 @@ fn main() {
             },
             (),
         )
+        .await
         .expect("create_org (other)")
         .id;
     let ada = api
@@ -90,6 +90,7 @@ fn main() {
             },
             (),
         )
+        .await
         .expect("create_user")
         .id;
 
@@ -106,6 +107,7 @@ fn main() {
             },
             acme_ctx(),
         )
+        .await
         .expect("place_order");
     assert_eq!(placed.status, "pending", "status defaults on create");
     assert_eq!(placed.total, money(100));
@@ -116,11 +118,11 @@ fn main() {
     println!("created order {} for {}", placed.id, placed.placed_by.name);
 
     // Two more, so there is a set to paginate.
-    let second = place(&api, &acme, &ada, 200);
-    let third = place(&api, &acme, &ada, 300);
+    let second = place(&api, &acme, &ada, 200).await;
+    let third = place(&api, &acme, &ada, 300).await;
 
     // --- 2. read one back by id ---
-    let got = get(&api, &acme, &placed.id).expect("the order exists");
+    let got = get(&api, &acme, &placed.id).await.expect("the order exists");
     assert_eq!(got.id, placed.id);
     assert_eq!(got.total, money(100));
 
@@ -130,6 +132,7 @@ fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() },
         )
+        .await
         .expect("my_orders");
     assert_eq!(mine.len(), 3, "all three orders are visible to their org");
     // A different org sees none of them — the injected scope predicate is real.
@@ -138,6 +141,7 @@ fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: other.clone() },
         )
+        .await
         .expect("my_orders (other org)");
     assert!(others.is_empty(), "cross-org rows are invisible");
 
@@ -147,6 +151,7 @@ fn main() {
             client::RecentOrdersInput { cursor: None },
             client::RecentOrdersCtx { org: acme.clone() },
         )
+        .await
         .expect("recent_orders page 1");
     assert_eq!(p1.rows.len(), 2, "a full first page");
     let cursor = p1.cursor.clone().expect("more pages → a cursor");
@@ -157,6 +162,7 @@ fn main() {
             },
             client::RecentOrdersCtx { org: acme.clone() },
         )
+        .await
         .expect("recent_orders page 2");
     assert_eq!(p2.rows.len(), 1, "a short final page");
     assert!(p2.cursor.is_none(), "the last page carries no cursor");
@@ -183,11 +189,12 @@ fn main() {
             },
             client::CancelOrderCtx { org: acme.clone() },
         )
+        .await
         .expect("cancel_order");
     assert_eq!(cancelled.id, placed.id);
     // It is now hidden from ordinary reads (the soft-delete live predicate).
     assert!(
-        get(&api, &acme, &placed.id).is_none(),
+        get(&api, &acme, &placed.id).await.is_none(),
         "a cancelled order is hidden from a get"
     );
     assert_eq!(
@@ -195,6 +202,7 @@ fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() }
         )
+        .await
         .expect("my_orders")
         .len(),
         2,
@@ -209,10 +217,11 @@ fn main() {
             },
             client::RestoreOrderCtx { org: acme.clone() },
         )
+        .await
         .expect("restore_order");
     assert_eq!(restored.id, placed.id);
     assert!(
-        get(&api, &acme, &placed.id).is_some(),
+        get(&api, &acme, &placed.id).await.is_some(),
         "restored order is readable"
     );
     assert_eq!(
@@ -220,6 +229,7 @@ fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() }
         )
+        .await
         .expect("my_orders")
         .len(),
         3,
@@ -238,8 +248,8 @@ fn money(dollars: i64) -> rust_decimal::Decimal {
 }
 
 /// Place an order for `buyer` at `total`, acting as `org`; return its id.
-fn place(
-    api: &client::Client<client::Embedded>,
+async fn place(
+    api: &client::Client<client::Embedded<'_>>,
     org: &Id<entity::Org>,
     buyer: &Id<entity::User>,
     total: i64,
@@ -251,13 +261,14 @@ fn place(
         },
         client::PlaceOrderCtx { org: org.clone() },
     )
+    .await
     .expect("place_order")
     .id
 }
 
 /// Read an order back by id, acting as `org`.
-fn get(
-    api: &client::Client<client::Embedded>,
+async fn get(
+    api: &client::Client<client::Embedded<'_>>,
     org: &Id<entity::Org>,
     id: &Id<entity::Order>,
 ) -> Option<client::OrderCard> {
@@ -265,5 +276,6 @@ fn get(
         client::OrderByIdInput { id: id.clone() },
         client::OrderByIdCtx { org: org.clone() },
     )
+    .await
     .expect("order_by_id")
 }

@@ -19,8 +19,7 @@
 //! server-side failure, the HTTP `status()`. Step 6 shows the pattern — a deliberately
 //! malformed cursor is rejected and matched on `kind()`.
 
-use based_runtime::{Compiled, Engine, SeqIdGen, SqliteDb};
-use rusqlite::Connection;
+use based_runtime::{Compiled, Engine, SeqIdGen, SqliteBackend};
 use std::path::PathBuf;
 
 /// The typed client — the verbatim output of `based gen client -o src/client.rs --embedded`,
@@ -33,7 +32,8 @@ mod client;
 // rejects passing an org id where a user id is wanted (the client hands each one back typed).
 use client::{entity, Id};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `.env` supplies `DATABASE_URL` (dotenvy, the 12-factor convention).
     dotenvy::dotenv().ok();
     let db_path = std::env::var("DATABASE_URL").map_err(|_| "set DATABASE_URL (see .env)")?;
@@ -45,11 +45,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compiled = Compiled::load(&manifest).map_err(|e| format!("load schema: {e:?}"))?;
 
     // The `Engine` is the library twin of `based serve`, minus the socket: it owns the
-    // schema, the connection, and an id generator, and runs each call through the same
-    // dispatch core. `SeqIdGen` yields readable ids for a demo; production uses `UuidGen`
-    // (behind the runtime's `serve` feature) or any custom `IdGen`.
-    let conn = Connection::open(&db_path)?;
-    let engine = Engine::new(compiled, SqliteDb::new(conn), SeqIdGen::default());
+    // schema, a connection `Backend`, and an id generator, and runs each call through the
+    // same async dispatch core. `SqliteBackend::open` is the whole database setup — bundled
+    // SQLite, file created if absent. `SeqIdGen` yields readable ids for a demo; production
+    // uses `UuidGen` (behind the runtime's `serve` feature) or any custom `IdGen`.
+    let engine = Engine::new(
+        compiled,
+        SqliteBackend::open(&db_path)?,
+        SeqIdGen::default(),
+    );
 
     // `client::embedded(&engine)` is the entire bridge — a typed, in-process client that
     // implements the `Transport` seam over `Engine` for you.
@@ -64,7 +68,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slug: "acme".into(),
             },
             (),
-        )?
+        )
+        .await?
         .id;
     let other = api
         .create_org(
@@ -73,7 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slug: "other".into(),
             },
             (),
-        )?
+        )
+        .await?
         .id;
     let ada = api
         .create_user(
@@ -82,7 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name: "Ada".into(),
             },
             (),
-        )?
+        )
+        .await?
         .id;
 
     // `$ctx` is the per-request context the *app* derives from its auth layer. Here every
@@ -90,13 +97,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let acme_ctx = || client::PlaceOrderCtx { org: acme.clone() };
 
     // --- 1. create → read the write back in its declared shape (read-your-writes) ---
-    let placed = api.place_order(
-        client::PlaceOrderInput {
-            buyer: ada.clone(),
-            total: money(100),
-        },
-        acme_ctx(),
-    )?;
+    let placed = api
+        .place_order(
+            client::PlaceOrderInput {
+                buyer: ada.clone(),
+                total: money(100),
+            },
+            acme_ctx(),
+        )
+        .await?;
     assert_eq!(placed.status, "pending", "status defaults on create");
     assert_eq!(placed.total, money(100));
     // The nested to-one sub-object (`placed_by { name, email }`) comes back as a real
@@ -106,40 +115,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("created order {} for {}", placed.id, placed.placed_by.name);
 
     // Two more, so there is a set to paginate.
-    let second = place(&api, &acme, &ada, 200)?;
-    let third = place(&api, &acme, &ada, 300)?;
+    let second = place(&api, &acme, &ada, 200).await?;
+    let third = place(&api, &acme, &ada, 300).await?;
 
     // --- 2. read one back by id ---
-    let got = get(&api, &acme, &placed.id)?.expect("the order exists");
+    let got = get(&api, &acme, &placed.id)
+        .await?
+        .expect("the order exists");
     assert_eq!(got.id, placed.id);
     assert_eq!(got.total, money(100));
 
     // --- 3. list/filter: the Tenant scope makes a plain `list` "my org's orders" ---
-    let mine = api.my_orders(
-        client::MyOrdersInput,
-        client::MyOrdersCtx { org: acme.clone() },
-    )?;
+    let mine = api
+        .my_orders(
+            client::MyOrdersInput,
+            client::MyOrdersCtx { org: acme.clone() },
+        )
+        .await?;
     assert_eq!(mine.len(), 3, "all three orders are visible to their org");
     // A different org sees none of them — the injected scope predicate is real.
-    let others = api.my_orders(
-        client::MyOrdersInput,
-        client::MyOrdersCtx { org: other.clone() },
-    )?;
+    let others = api
+        .my_orders(
+            client::MyOrdersInput,
+            client::MyOrdersCtx { org: other.clone() },
+        )
+        .await?;
     assert!(others.is_empty(), "cross-org rows stay hidden");
 
     // --- 4. keyset pagination: walk all three orders two at a time ---
-    let p1 = api.recent_orders(
-        client::RecentOrdersInput { cursor: None },
-        client::RecentOrdersCtx { org: acme.clone() },
-    )?;
+    let p1 = api
+        .recent_orders(
+            client::RecentOrdersInput { cursor: None },
+            client::RecentOrdersCtx { org: acme.clone() },
+        )
+        .await?;
     assert_eq!(p1.rows.len(), 2, "a full first page");
     let cursor = p1.cursor.clone().expect("more pages → a cursor");
-    let p2 = api.recent_orders(
-        client::RecentOrdersInput {
-            cursor: Some(cursor),
-        },
-        client::RecentOrdersCtx { org: acme.clone() },
-    )?;
+    let p2 = api
+        .recent_orders(
+            client::RecentOrdersInput {
+                cursor: Some(cursor),
+            },
+            client::RecentOrdersCtx { org: acme.clone() },
+        )
+        .await?;
     assert_eq!(p2.rows.len(), 1, "a short final page");
     assert!(p2.cursor.is_none(), "the last page carries no cursor");
     // Every order appeared exactly once across the two pages.
@@ -158,45 +177,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 5. soft-delete + restore round-trip ---
     // `delete` on a @soft_delete model tombstones the row and reads it back in its
     // declared shape — the row still projects while it is soft-deleted.
-    let cancelled = api.cancel_order(
-        client::CancelOrderInput {
-            id: placed.id.clone(),
-        },
-        client::CancelOrderCtx { org: acme.clone() },
-    )?;
+    let cancelled = api
+        .cancel_order(
+            client::CancelOrderInput {
+                id: placed.id.clone(),
+            },
+            client::CancelOrderCtx { org: acme.clone() },
+        )
+        .await?;
     assert_eq!(cancelled.id, placed.id);
     // It is now hidden from ordinary reads (the soft-delete live predicate).
     assert!(
-        get(&api, &acme, &placed.id)?.is_none(),
+        get(&api, &acme, &placed.id).await?.is_none(),
         "a cancelled order is hidden from a get"
     );
     assert_eq!(
         api.my_orders(
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() }
-        )?
+        )
+        .await?
         .len(),
         2,
         "and from the list"
     );
 
     // `restore` lifts the tombstone; the row is readable again.
-    let restored = api.restore_order(
-        client::RestoreOrderInput {
-            id: placed.id.clone(),
-        },
-        client::RestoreOrderCtx { org: acme.clone() },
-    )?;
+    let restored = api
+        .restore_order(
+            client::RestoreOrderInput {
+                id: placed.id.clone(),
+            },
+            client::RestoreOrderCtx { org: acme.clone() },
+        )
+        .await?;
     assert_eq!(restored.id, placed.id);
     assert!(
-        get(&api, &acme, &placed.id)?.is_some(),
+        get(&api, &acme, &placed.id).await?.is_some(),
         "restored order is readable"
     );
     assert_eq!(
         api.my_orders(
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() }
-        )?
+        )
+        .await?
         .len(),
         3,
         "back to all three"
@@ -209,12 +234,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // from a `Transport` / `Decode` one, then read its stable `code()` and HTTP `status()`
     // — this is the pattern a caller uses to handle failures without matching on text.
     let bad_cursor = client::Cursor::from_raw("not-a-real-cursor");
-    match api.recent_orders(
-        client::RecentOrdersInput {
-            cursor: Some(bad_cursor),
-        },
-        client::RecentOrdersCtx { org: acme.clone() },
-    ) {
+    match api
+        .recent_orders(
+            client::RecentOrdersInput {
+                cursor: Some(bad_cursor),
+            },
+            client::RecentOrdersCtx { org: acme.clone() },
+        )
+        .await
+    {
         Ok(_) => return Err("a malformed cursor should have been rejected".into()),
         Err(e) => match e.kind() {
             client::ClientErrorKind::Api { status, code } => {
@@ -240,8 +268,8 @@ fn money(dollars: i64) -> rust_decimal::Decimal {
 }
 
 /// Place an order for `buyer` at `total`, acting as `org`; return its id.
-fn place(
-    api: &client::Client<client::Embedded>,
+async fn place(
+    api: &client::Client<client::Embedded<'_>>,
     org: &Id<entity::Org>,
     buyer: &Id<entity::User>,
     total: i64,
@@ -253,13 +281,14 @@ fn place(
                 total: money(total),
             },
             client::PlaceOrderCtx { org: org.clone() },
-        )?
+        )
+        .await?
         .id)
 }
 
 /// Read an order back by id, acting as `org`.
-fn get(
-    api: &client::Client<client::Embedded>,
+async fn get(
+    api: &client::Client<client::Embedded<'_>>,
     org: &Id<entity::Org>,
     id: &Id<entity::Order>,
 ) -> Result<Option<client::OrderCard>, client::ClientError> {
@@ -267,4 +296,5 @@ fn get(
         client::OrderByIdInput { id: id.clone() },
         client::OrderByIdCtx { org: org.clone() },
     )
+    .await
 }
