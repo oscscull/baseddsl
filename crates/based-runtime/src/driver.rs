@@ -303,6 +303,28 @@ impl ShardRouter {
         ShardRouter::new(std::slice::from_ref(&url.to_string()), pool)
     }
 
+    /// Build the [`Backend`] over a caller's **existing** sqlx pool — the embed for an
+    /// app that already owns a [`MySqlPool`] and wants the engine on it, not on a
+    /// second pool. One physical shard; the shared codec/tx path is identical to a
+    /// router built from a URL. Cloning a pool is cheap (it is an `Arc` internally),
+    /// so the app keeps using its handle while the engine uses this one.
+    ///
+    /// **The pool is used exactly as configured — their pool, their settings.** The
+    /// engine installs nothing on it: the session `max_statement_time` its own
+    /// constructors apply rides `after_connect`, which only a pool's builder can set —
+    /// and silently reconfiguring sessions the app's own queries share would be wrong
+    /// anyway. Sizing, `acquire_timeout`, and connect hooks are all the caller's. A
+    /// saturated pool still fails fast as
+    /// [`PoolExhausted`](crate::run::DbErrorKind::PoolExhausted) when its own
+    /// `acquire_timeout` elapses (sqlx's default is 30s), and deadlock-retry works
+    /// unchanged (each attempt is a fresh checkout).
+    pub fn from_pool(pool: MySqlPool) -> ShardRouter {
+        ShardRouter {
+            shards: vec![pool],
+            assign: vec![0; LOGICAL_SHARDS],
+        }
+    }
+
     /// The physical shard a key routes to: a stable logical hash, then the assignment.
     pub fn shard_for(&self, key: &str) -> ShardId {
         let logical = (fnv1a_64(key.as_bytes()) % LOGICAL_SHARDS as u64) as usize;

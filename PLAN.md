@@ -368,7 +368,8 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
   CI-enforced** (front-end crates provably tokio/sqlx-free via a `cargo tree` check); retry ×
   cancellation composes via per-attempt `Tx` (no double-write window; idempotency keys unchanged).
   Full design, trait sketch, invariant table, de-risk spike scope: **D84**.
-- **N1. Native async execution core (the biggest cost; implements D84).**
+- **N1. ✅ COMPLETE. Native async execution core (implements D84).** All four slices landed;
+  N2 streaming is next.
   - ✅ **First step — the D84 de-risk spike** (`tests/sqlx_spike.rs`; live gate `ci-live-sqlx`):
     all three dialects codec-faithful through sqlx. Decimal feature = **`bigdecimal`**
     (`rust_decimal` silently truncates past ~28 digits, disqualified; `pg_numeric` stays, decoding
@@ -410,15 +411,22 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     principle 7). The gate caught + fixed a real bug: a cancelled **keyed** mutation stranded its
     idempotency claim `InFlight` forever (every retry → 409 Conflict); `run_mutation` now holds
     the claim in an abandon-on-drop guard, disarmed only once the response is recorded (D84 notes).
-  - **BYO-pool seam (design-partner requirement, concrete), remaining:** a `Backend` constructor
-    over a caller's existing `sqlx::Pool` (per dialect), sharing the codec path with our own
-    backends; proven with a sqlx-pool-backed impl in a test or example. The router constructors are
-    already shaped so a from-existing-pool constructor slots in.
-  - Gate unchanged: full workspace suite + fmt + clippy + all three live-DB suites green.
-- **N2. Streaming reads (claims N1's payoff immediately).** Driver-level row streams (`mysql_async` /
-  `tokio-postgres` native; SQLite via the blocking bridge) surfaced through a streaming read path → an
-  axum streaming body on the wire (NDJSON or chunked JSON array) and a `Stream`-returning
-  generated-client method. Spec-first: how a query opts in (or a size threshold), and what nesting
+  - ✅ **BYO-pool seam shipped (the design-partner embed — the last N1 item).**
+    `ShardRouter::from_pool(MySqlPool)` / `PgRouter::from_pool(PgPool)` /
+    `SqliteBackend::from_pool(SqlitePool)` build the `Backend` over a caller's *existing* sqlx
+    pool (cheap-cloned; one physical shard), sharing the codec/tx path with the URL-built
+    constructors. Contract (D84 notes): **their pool, their settings** — the engine installs
+    nothing on a supplied pool (the session statement timeouts our constructors apply ride
+    `after_connect`, a builder-only hook; reconfiguring sessions the app's own queries share
+    would be wrong anyway); pool-exhaustion fast-503 classification + deadlock retry work
+    unchanged. Proven live on MariaDB + Postgres (`byo_sqlx_pool_backs_the_engine`: the app's
+    own sqlx queries and the engine's scoped read + transactional mutation interleave on one
+    pool) plus a SQLite unit twin.
+  - Gate held throughout: full workspace suite + fmt + clippy + all three live-DB suites green.
+- **N2. Streaming reads (claims N1's payoff immediately).** The driver seam already streams —
+  `fetch` returns a sqlx-backed row stream on all three dialects (D84 decision 3); N2 surfaces it
+  through a streaming read path → an axum streaming body on the wire (NDJSON or chunked JSON
+  array) and a `Stream`-returning generated-client method. Spec-first: how a query opts in (or a size threshold), and what nesting
   means per streamed row (to-many sub-arrays still materialize per-row). Keyset pagination stays the
   random-access answer; streaming is the export/large-scan answer.
 - **N3. Flagship axum example + syntax appeal pass (the re-pitch artifact).** A nontrivial

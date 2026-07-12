@@ -226,6 +226,22 @@ impl SqliteBackend {
         Ok(SqliteBackend { pool })
     }
 
+    /// Build the [`Backend`] over a caller's **existing** sqlx pool — the embed for an
+    /// app that already owns a [`SqlitePool`] and wants the engine on it, not on a
+    /// second pool. Cloning a pool is cheap (it is an `Arc` internally), so the app
+    /// keeps using its handle while the engine uses this one.
+    ///
+    /// **The pool is used exactly as configured — their pool, their settings** (busy
+    /// timeout, sizing, lifetimes). One caveat carries over from [`in_memory`]: a
+    /// `:memory:` database is per-connection, so an in-memory pool must be pinned to a
+    /// single never-expiring connection or each checkout sees a different empty
+    /// database.
+    ///
+    /// [`in_memory`]: SqliteBackend::in_memory
+    pub fn from_pool(pool: SqlitePool) -> SqliteBackend {
+        SqliteBackend { pool }
+    }
+
     /// Run setup SQL (e.g. `CREATE TABLE …; INSERT …;`) against the database — a
     /// multi-statement batch. A test seeds its schema + fixtures through this before
     /// dispatching requests.
@@ -349,6 +365,50 @@ mod tests {
         assert_eq!(rows[0]["at"], json!("2024-01-02 12:30:45.500000"));
         assert_eq!(rows[0]["day"], json!("2024-01-02"));
         assert_eq!(rows[0]["total"], json!("19.90"));
+    }
+
+    #[tokio::test]
+    async fn byo_pool_is_shared_with_the_caller() {
+        // The BYO-pool embed: the app builds and owns the sqlx pool, uses it directly,
+        // and hands a clone to the engine — one pool, two users. A write made through
+        // the app's own sqlx query is visible through the Backend, and vice versa.
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .busy_timeout(BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_lazy_with(opts);
+        sqlx::raw_sql("CREATE TABLE t (id TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (id) VALUES (?)")
+            .bind("from-the-app")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let backend = SqliteBackend::from_pool(pool.clone());
+        let mut db = backend.checkout("").await.unwrap();
+        let rows = fetch_all(db.fetch("SELECT id FROM t", &[])).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], json!("from-the-app"));
+        db.execute(
+            "INSERT INTO t (id) VALUES (?)",
+            &[SqlValue::Text("from-the-engine".into())],
+        )
+        .await
+        .unwrap();
+        drop(db); // return the single connection so the app's next query gets it
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "the engine's write landed on the app's pool");
     }
 
     #[tokio::test]

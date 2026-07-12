@@ -3360,3 +3360,19 @@ phases, the isolation CI already gets from one service container per job.)
   an unknown outcome; releasing there matches the existing failed-commit semantics for a
   non-durable store (the durable store that resolves the claim atomically with the transaction
   remains the deferred multi-instance item).
+- *BYO pool (the design-partner embed), as built.* `ShardRouter::from_pool(MySqlPool)` /
+  `PgRouter::from_pool(PgPool)` / `SqliteBackend::from_pool(SqlitePool)` construct the
+  `Backend` over a caller's **existing** sqlx pool (cheap-cloned — a pool is an `Arc`
+  internally; one physical shard, the pool is the database), sharing the codec/tx path with
+  the URL-built constructors. Contract: **their pool, their settings.** The engine applies
+  nothing to a supplied pool — the session statement timeouts our own constructors install
+  ride `after_connect`, which only a pool's *builder* can set, and silently reconfiguring
+  sessions the app's own queries share would be wrong even if sqlx allowed it. Sizing,
+  `acquire_timeout`, and connect hooks are all the caller's; a saturated pool still
+  classifies `PoolTimedOut` → `PoolExhausted` (fast 503 — sqlx's default acquire wait is
+  30s), and deadlock retry is unchanged (each attempt is a fresh checkout, valid against any
+  pool). A caller wanting the engine's session hardening sets the equivalent `after_connect`
+  on their own pool options. Proven live on MariaDB + Postgres
+  (`byo_sqlx_pool_backs_the_engine`: the app's own sqlx queries and the engine's joined
+  scoped read + transactional mutation interleave on one pool) plus a SQLite unit twin
+  (write-through visibility both directions on a single pinned connection). This closes N1.
