@@ -102,6 +102,15 @@ impl Compiled {
     /// The shard key is the model's resolved scope owner field (read off the same `@scope`
     /// that filters rows), so the shard a row lives in and the shard its owner's requests
     /// route to share one source of truth — no hand-set, drift-prone config.
+    /// Whether `name` is a declared `-> stream` query. The wire edge branches on it:
+    /// a stream query's response is the NDJSON row stream, never the collected array.
+    pub fn is_stream_query(&self, name: &str) -> bool {
+        self.schema
+            .queries
+            .iter()
+            .any(|q| q.name == name && q.stream)
+    }
+
     pub fn shard_key_field(&self, is_mutation: bool, name: &str) -> Option<&str> {
         if is_mutation {
             self.schema

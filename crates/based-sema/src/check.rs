@@ -179,13 +179,27 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
             s.verb
         }
         _ => {
-            if q.ret.many {
+            if q.ret.many || q.ret.stream {
                 Verb::List
             } else {
                 Verb::Get
             }
         }
     };
+
+    // A stream is a list delivered incrementally: a `get` body is a cardinality
+    // mismatch (E0200).
+    if q.ret.stream && verb == Verb::Get {
+        sink.error_note(
+            code::STREAM_GET,
+            q.ret.ty.span,
+            format!(
+                "stream query `{}` uses `get` — a stream is many rows",
+                q.name.node
+            ),
+            "use `list`, or drop `stream` for a scalar return",
+        );
+    }
 
     // Bare/inline queries map each param onto a same-named column (the filter);
     // block queries reference params via `$`, so no same-name mapping is required.
@@ -204,7 +218,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         }
     }
 
-    if verb == Verb::Get && !get_is_keyed(q, ti, cx) {
+    if verb == Verb::Get && !q.ret.stream && !get_is_keyed(q, ti, cx) {
         sink.error_note(
             code::GET_NOT_UNIQUE,
             q.span,
@@ -218,6 +232,17 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
 
     // Nondeterministic-order lint: a `list` with no sort at any tier.
     let paginated = matches!(&q.body, QueryBody::Inline(cs) | QueryBody::Block(Statement{clauses: cs, ..}) if cs.iter().any(|c| matches!(c, Clause::Page(_))));
+
+    // A page is a bounded chunk + a re-entry cursor; a stream is one unbounded
+    // forward pass — the envelopes contradict (E0201).
+    if q.ret.stream && paginated {
+        sink.error_note(
+            code::STREAM_PAGE,
+            q.span,
+            format!("stream query `{}` declares `page`", q.name.node),
+            "paginate for random access, stream for the full pass — drop one",
+        );
+    }
     if verb == Verb::List && !has_order && cx.model(ti).sort.is_empty() {
         sink.warn(
             code::NONDET_SORT,
@@ -279,7 +304,8 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         span: q.span,
         target: ret.model,
         verb,
-        many: q.ret.many,
+        many: q.ret.many || q.ret.stream,
+        stream: q.ret.stream,
         ret_shape: ret.shape,
         paginated,
         ctx_requires,
@@ -490,6 +516,15 @@ fn collect_eq_cols(p: &Predicate, out: &mut Vec<String>) {
 // ---------- mutations ------------------------------------------------------
 
 pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutation> {
+    // A mutation returns its written row once — never a stream (E0202).
+    if m.ret.stream {
+        sink.error_note(
+            code::STREAM_MUTATION,
+            m.ret.ty.span,
+            format!("mutation `{}` cannot return a stream", m.name.node),
+            "a write returns its row once; declare a stream query for the read",
+        );
+    }
     let params: Vec<String> = m.params.iter().map(|p| p.name.node.clone()).collect();
     for p in &m.params {
         if let Some(d) = &p.default {

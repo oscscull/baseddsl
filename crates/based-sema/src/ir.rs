@@ -98,6 +98,11 @@ pub mod code {
     pub const STALE_UNSCOPED: &str = "W0106"; // unscoped(...) on a callable whose model has no @scope
     pub const WAS_SPENT: &str = "W0107"; // `@was` rename already captured — remove it (offline, LSP)
     pub const MIGRATE_DRIFT: &str = "W0108"; // schema is ahead of migrations — run `based migrate gen` (offline, LSP)
+
+    // streaming: the `-> stream Shape` return form (E02xx)
+    pub const STREAM_GET: &str = "E0200"; // stream body verb must be `list` (`get` is a cardinality mismatch)
+    pub const STREAM_PAGE: &str = "E0201"; // `page` forbidden on a stream query (bounded chunk vs unbounded pass)
+    pub const STREAM_MUTATION: &str = "E0202"; // a mutation return never streams
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
@@ -453,6 +458,9 @@ pub struct RQuery {
     /// `get`/`list` — explicit in a block body, inferred from cardinality otherwise.
     pub verb: Verb,
     pub many: bool,
+    /// Declared `-> stream Shape`: the same many-cardinality read (identical SQL),
+    /// delivered row-by-row on the wire instead of as one collected array.
+    pub stream: bool,
     /// The return shape, or `None` when the return type is a bare model.
     pub ret_shape: Option<String>,
     pub paginated: bool,

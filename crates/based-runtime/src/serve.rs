@@ -23,7 +23,7 @@ use crate::id::IdGen;
 use crate::idempotency::IdempotencyStore;
 use crate::load::Compiled;
 use crate::plan::PlanError;
-use crate::run::{run_mutation, run_query, Backend, RunError};
+use crate::run::{run_mutation, run_query, run_query_stream, Backend, RunError, ShapedStream};
 use crate::Request;
 
 /// An HTTP response the listener writes back: a status code and a JSON body.
@@ -122,6 +122,46 @@ pub async fn dispatch(
             format!("idempotency key `{key}` was already used for a different request"),
         ),
     }
+}
+
+/// Route + start one `-> stream` query — the streaming twin of [`dispatch`]. Every
+/// failure *before the body* (bad route, unknown query, bad args, missing `$ctx`, a
+/// checkout fault) is the same [`WireResponse`] `dispatch` would produce, with its real
+/// HTTP status — the stream begins only after validation and planning succeed. On
+/// success the [`ShapedStream`] owns its checked-out connection for the whole pass;
+/// a mid-stream database failure arrives as the stream's last item (the wire frames it
+/// in-band — the status line is spent), and dropping the stream cancels the read.
+///
+/// Only a declared `-> stream` query dispatches here (the listener branches on
+/// [`Compiled::is_stream_query`]); anything else is an internal misuse of the surface.
+pub async fn dispatch_stream(
+    compiled: &Compiled,
+    backend: &dyn Backend,
+    shard_key: &str,
+    method: &str,
+    path: &str,
+    args: serde_json::Value,
+    ctx: serde_json::Value,
+) -> Result<ShapedStream, WireResponse> {
+    if let Some(resp) = preflight(method, path) {
+        return Err(resp);
+    }
+    let (kind, name) = parse_route(path).expect("preflight guaranteed a routable path");
+    if matches!(kind, Kind::Query) && !compiled.queries.contains_key(name) {
+        return Err(plan_error_response(PlanError::UnknownQuery(name.into())));
+    }
+    if !matches!(kind, Kind::Query) || !compiled.is_stream_query(name) {
+        return Err(WireResponse::error(
+            500,
+            "internal",
+            format!("`{name}` is not a stream query"),
+        ));
+    }
+    let db = match backend.checkout(shard_key).await {
+        Ok(db) => db,
+        Err(e) => return Err(WireResponse::error(503, e.code(), e.message)),
+    };
+    run_query_stream(compiled, db, &Request::new(name, args, ctx)).map_err(plan_error_response)
 }
 
 /// The cheap pre-check the listener runs *before* borrowing a database connection:

@@ -93,10 +93,10 @@ pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };
 pub use run::{
-    fetch_all, run_mutation, run_query, Backend, Db, DbError, DbErrorKind, DbRead, MockDb, Row,
-    RowStream, RunError, Tx,
+    fetch_all, run_mutation, run_query, run_query_stream, Backend, Db, DbError, DbErrorKind,
+    DbRead, MockDb, Row, RowStream, RunError, ShapedStream, Tx,
 };
-pub use serve::{dispatch, preflight, resolve_shard_key, WireResponse};
+pub use serve::{dispatch, dispatch_stream, preflight, resolve_shard_key, WireResponse};
 pub use value::SqlValue;
 
 #[cfg(feature = "serve")]

@@ -287,7 +287,13 @@ fn resolved_query_fact(q: &RQuery) -> Fact {
         Verb::Get => "get",
         Verb::List => "list",
     };
-    let card = if q.many { "[]" } else { "" };
+    let card = if q.stream {
+        " stream"
+    } else if q.many {
+        "[]"
+    } else {
+        ""
+    };
     let mut label = format!("{verb} {}{card}", q.target);
     if q.paginated {
         label.push_str(" paginated");
@@ -300,7 +306,13 @@ fn resolved_query_fact(q: &RQuery) -> Fact {
             "resolved query: reads `{}` as a `{verb}` returning {}, inferred from the \
              return shape and cardinality{}.",
             q.target,
-            if q.many { "many rows" } else { "one row" },
+            if q.stream {
+                "a row stream"
+            } else if q.many {
+                "many rows"
+            } else {
+                "one row"
+            },
             if q.paginated {
                 "; keyset-paginated"
             } else {

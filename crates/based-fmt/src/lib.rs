@@ -593,7 +593,12 @@ fn clause(c: &Clause) -> String {
 }
 
 fn ret_type(r: &RetType) -> String {
-    format!("{}{}", r.ty.node, if r.many { "[]" } else { "" })
+    format!(
+        "{}{}{}",
+        if r.stream { "stream " } else { "" },
+        r.ty.node,
+        if r.many { "[]" } else { "" }
+    )
 }
 
 fn scope_ack(scoped: Option<&Scoped>, unscoped: Option<&Unscoped>) -> String {

@@ -157,6 +157,18 @@ fn query_block_inline_and_expanded_by_clause_count() {
 }
 
 #[test]
+fn stream_return_form_round_trips() {
+    assert_eq!(
+        fmt("query export() ->   stream   OrderCard scoped Tenant;"),
+        "query export() -> stream OrderCard scoped Tenant;\n"
+    );
+    assert_eq!(
+        fmt("query export() -> stream OrderCard { list Order; }"),
+        "query export() -> stream OrderCard { list Order; }\n"
+    );
+}
+
+#[test]
 fn mutation_body_and_tx() {
     let got = fmt(
         "mutation m(e: text, c: text) -> R { tx { create User { email = $e } create Addr { user = ^.id, city = $c } } }",

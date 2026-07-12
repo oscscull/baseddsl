@@ -1313,9 +1313,11 @@ impl Snapshot {
         items
     }
 
-    /// Return type position: models and shapes (a callable may return either).
+    /// Return type position: models and shapes (a callable may return either), plus
+    /// the `stream` return form.
     fn return_type_items(&self) -> Vec<CompletionItem> {
-        let mut items = self.model_name_items();
+        let mut items = vec![item("stream", CompletionItemKind::KEYWORD)];
+        items.extend(self.model_name_items());
         items.extend(self.decls.iter().filter_map(|d| match d {
             Decl::Shape(s) => Some(item(&s.name.node, CompletionItemKind::INTERFACE)),
             _ => None,
@@ -1387,6 +1389,7 @@ const KEYWORDS: &[&str] = &[
     "has",
     "on",
     "full",
+    "stream",
     "sql",
     "read",
     "max_rows",
@@ -2043,11 +2046,12 @@ fn scope_hover(s: &ScopeDecl) -> String {
     format!("```based\nscope {} ({terms})\n```", s.name.node)
 }
 
-/// A query's hover: `query name(params) -> Ret[]`.
+/// A query's hover: `query name(params) -> Ret[]` (or `-> stream Ret`).
 fn query_hover(q: &Query) -> String {
+    let stream = if q.ret.stream { "stream " } else { "" };
     let card = if q.ret.many { "[]" } else { "" };
     format!(
-        "```based\nquery {}({}) -> {}{card}\n```",
+        "```based\nquery {}({}) -> {stream}{}{card}\n```",
         q.name.node,
         params_str(&q.params),
         q.ret.ty.node,
@@ -2958,6 +2962,34 @@ mod tests {
         let sh = src.find("OrderCard from Order").unwrap() + 1;
         let hs = snap.hover_at(fid, sh as u32).expect("shape decl hover");
         assert!(hs.contains("shape OrderCard from Order"), "{hs}");
+    }
+
+    /// A `-> stream Shape` query's hover shows the stream return form.
+    #[test]
+    fn hover_shows_the_stream_return_form() {
+        let ws = TempWorkspace::new("stream_hover");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "@sort(total desc)\n\
+             Order { status: text  total: int }\n\
+             shape OrderRow from Order { status  total }\n\
+             query export_orders() -> stream OrderRow;\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+        let off = (src.find("export_orders").unwrap() + 1) as u32;
+        let h = snap.hover_at(fid, off).expect("query hover");
+        assert!(h.contains("-> stream OrderRow"), "{h}");
     }
 
     /// Field-reference go-to-def reaches beyond shapes: a query block's `where`/`order`

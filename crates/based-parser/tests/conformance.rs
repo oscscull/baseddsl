@@ -115,9 +115,10 @@ fn summarize_decl(decl: &Decl) -> String {
                 QueryBody::Block(_) => "block",
             };
             format!(
-                "query {}  params={}  ret={}{}  body={body}",
+                "query {}  params={}  ret={}{}{}  body={body}",
                 q.name.node,
                 q.params.len(),
+                if q.ret.stream { "stream " } else { "" },
                 q.ret.ty.node,
                 if q.ret.many { "[]" } else { "" }
             )

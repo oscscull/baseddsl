@@ -19,7 +19,9 @@
 //! 3. Run [`dispatch`] with a fresh per-request [`UuidGen`]; dispatch checks a
 //!    connection out of the [`Backend`] for that shard key. The edge is
 //!    `Backend`-generic, so any dialect's backend drops in without a change here.
-//! 4. Write `WireResponse.status` + JSON body back.
+//! 4. Write `WireResponse.status` + JSON body back. A `-> stream` query diverges only
+//!    here: [`dispatch_stream`] starts the row stream (pre-body failures keep their
+//!    real statuses) and the body is NDJSON with a mandatory terminal line.
 //!
 //! ## Operational endpoints
 //! Two unauthenticated `GET` probes an orchestrator / load balancer uses, answered before
@@ -51,8 +53,10 @@ use axum::Router;
 use crate::id::UuidGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
-use crate::run::Backend;
-use crate::serve::{dispatch, preflight, resolve_shard_key, route_target, WireResponse};
+use crate::run::{Backend, ShapedStream};
+use crate::serve::{
+    dispatch, dispatch_stream, preflight, resolve_shard_key, route_target, WireResponse,
+};
 
 /// Largest request body we read (1 MiB). The wire carries a small argument object;
 /// anything larger is malformed or hostile, so we cap the read rather than buffer an
@@ -343,7 +347,10 @@ pub async fn serve_with_handle(
         .map_err(|e| ServeError(format!("serve failed: {e}")))
 }
 
-/// Decode one request, run it through the dispatch core, and write the response.
+/// Decode one request, run it through the dispatch core, and write the response. A
+/// `-> stream` query takes the streaming path: the same pre-body decode + validation
+/// (failures keep their real HTTP statuses), then the NDJSON body; every other request
+/// is the buffered `dispatch` → JSON response, unchanged.
 async fn handle(
     State(shared): State<Arc<Shared>>,
     method: Method,
@@ -351,23 +358,72 @@ async fn handle(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    into_response(build_response(&shared, &method, &uri, &headers, &body).await)
+    let d = match decode_request(&shared, &method, &uri, &headers, &body) {
+        Ok(d) => d,
+        Err(resp) => return into_response(resp),
+    };
+
+    if !d.is_mutation && shared.compiled.is_stream_query(&d.name) {
+        return match dispatch_stream(
+            &shared.compiled,
+            &*shared.backend,
+            &d.shard_key,
+            method.as_str(),
+            uri.path(),
+            d.args,
+            d.ctx,
+        )
+        .await
+        {
+            Ok(rows) => ndjson_response(rows),
+            Err(resp) => into_response(resp),
+        };
+    }
+
+    let mut id_gen = UuidGen;
+    into_response(
+        dispatch(
+            &shared.compiled,
+            &*shared.backend,
+            &d.shard_key,
+            &mut id_gen,
+            &shared.idempotency,
+            method.as_str(),
+            uri.path(),
+            d.args,
+            d.ctx,
+            d.idem_key,
+        )
+        .await,
+    )
 }
 
-/// The pure heart of a request: route → derive `$ctx` → resolve the shard key →
-/// `dispatch`. Every failure is a [`WireResponse`], so `handle` never branches on kinds.
-async fn build_response(
+/// A request decoded to `dispatch`'s arguments — everything the edge derives before
+/// any connection is borrowed.
+struct Decoded {
+    is_mutation: bool,
+    name: String,
+    shard_key: String,
+    args: serde_json::Value,
+    ctx: serde_json::Value,
+    idem_key: Option<String>,
+}
+
+/// The pure pre-dispatch half of a request: route → derive `$ctx` → resolve the shard
+/// key → parse the body. Every failure is a [`WireResponse`], so the handler never
+/// branches on kinds.
+fn decode_request(
     shared: &Shared,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: &Bytes,
-) -> WireResponse {
+) -> Result<Decoded, WireResponse> {
     let path = uri.path();
 
     // Reject a non-POST/unroutable request before borrowing a connection.
     if let Some(resp) = preflight(method.as_str(), path) {
-        return resp;
+        return Err(resp);
     }
     // Preflight guaranteed a routable path, so this is the callable to run — needed now
     // to derive the shard key from its `@scope` field, before checkout.
@@ -384,10 +440,7 @@ async fn build_response(
         })
         .collect();
     let header_view = HeaderView(&header_pairs);
-    let context = match shared.ctx_source.derive(&header_view) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let context = shared.ctx_source.derive(&header_view)?;
 
     // The shard key: the callable's `@scope` owner field pulled out of `$ctx`, or an
     // explicit header override, or "" (unscoped / single-shard → shard 0). Derived from
@@ -405,25 +458,66 @@ async fn build_response(
     let idem_key = header_view.get("Idempotency-Key").map(str::to_string);
 
     // Decode the JSON argument object from the (size-capped) body.
-    let args = match read_json_body(body) {
-        Ok(v) => v,
-        Err(e) => return e.into(),
-    };
+    let args = read_json_body(body)?;
 
-    let mut id_gen = UuidGen;
-    dispatch(
-        &shared.compiled,
-        &*shared.backend,
-        &shard_key,
-        &mut id_gen,
-        &shared.idempotency,
-        method.as_str(),
-        path,
+    Ok(Decoded {
+        is_mutation,
+        name: name.to_string(),
+        shard_key,
         args,
-        context.ctx,
+        ctx: context.ctx,
         idem_key,
-    )
-    .await
+    })
+}
+
+/// The `-> stream` response: `200` + `application/x-ndjson`, one envelope object per
+/// line. The status line is written before the first row, so it is spent by the time a
+/// late failure can happen — the terminal line is the in-band verdict.
+fn ndjson_response(rows: ShapedStream) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+        .body(axum::body::Body::from_stream(ndjson_lines(rows)))
+        .expect("static response parts are valid")
+}
+
+/// Frame a [`ShapedStream`] as NDJSON lines: `{"row":…}` per row, then exactly one
+/// terminal line — `{"done":{"rows":N}}` on success or `{"error":{code,message}}` on a
+/// mid-stream failure. A body that ends without a terminal line was truncated
+/// (connection cut, server death) and the client must treat it as a transport error;
+/// `done.rows` doubles as an integrity checksum. A client disconnect drops this
+/// stream, which drops the row stream and its connection — cancel, not a leak.
+fn ndjson_lines(
+    rows: ShapedStream,
+) -> impl futures_core::Stream<Item = Result<Bytes, std::convert::Infallible>> {
+    use futures_util::StreamExt;
+    async_stream::stream! {
+        let mut rows = rows;
+        let mut count: u64 = 0;
+        while let Some(item) = rows.next().await {
+            match item {
+                Ok(row) => {
+                    count += 1;
+                    yield Ok(ndjson_line(serde_json::json!({ "row": row })));
+                }
+                // The stream is finished after an error: the error line is terminal.
+                Err(e) => {
+                    yield Ok(ndjson_line(
+                        serde_json::json!({ "error": { "code": e.code(), "message": e.message } }),
+                    ));
+                    return;
+                }
+            }
+        }
+        yield Ok(ndjson_line(serde_json::json!({ "done": { "rows": count } })));
+    }
+}
+
+/// One NDJSON line: the envelope object, compact-serialized, newline-terminated.
+fn ndjson_line(envelope: serde_json::Value) -> Bytes {
+    let mut s = envelope.to_string();
+    s.push('\n');
+    Bytes::from(s)
 }
 
 /// Liveness (`GET /healthz`): the process is up and serving. Always `200` while a

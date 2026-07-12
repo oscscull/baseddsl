@@ -43,6 +43,14 @@ pub async fn fetch_all(stream: RowStream<'_>) -> Result<Vec<Row>, DbError> {
     stream.try_collect().await
 }
 
+/// An owned stream of shaped response rows — a `-> stream` query's payload. Each item
+/// is exactly one element of what the `[]` form's array would be (nests materialized
+/// within the row), in sort order. The stream owns the connection it reads on;
+/// dropping it mid-pass cancels the read and returns the connection to the pool
+/// (reads hold no transaction). After an `Err` item the stream is finished.
+pub type ShapedStream =
+    futures_core::stream::BoxStream<'static, Result<serde_json::Value, DbError>>;
+
 /// A failure from the database itself — connection lost, timeout, deadlock, a shard
 /// down, pool exhausted. Distinct from a [`PlanError`] (a boundary/validation failure
 /// *before* any SQL): a `DbError` is an operational failure the wire maps to a
@@ -263,6 +271,36 @@ pub async fn run_query<D: DbRead + ?Sized>(
 ) -> Result<serde_json::Value, RunError> {
     let plan = plan_query(compiled, req)?;
     Ok(shape(db, &plan).await?)
+}
+
+/// Plan a query request and return its rows as an owned [`ShapedStream`] — the
+/// `-> stream` read path. Planning (arg / `$ctx` validation) happens before the first
+/// row, so a boundary failure is an ordinary [`PlanError`] and the stream never
+/// starts. The same plan → fetch → shape path as [`run_query`], minus the collect:
+/// scope, soft-delete, and shaping are identical to the `[]` form.
+///
+/// Takes the connection by value: the returned stream owns it for the whole pass, and
+/// dropping the stream (caller cancelled) drops the connection back to the pool.
+pub fn run_query_stream(
+    compiled: &Compiled,
+    mut db: Box<dyn Db>,
+    req: &Request,
+) -> Result<ShapedStream, PlanError> {
+    use futures_util::StreamExt;
+    let plan = plan_query(compiled, req)?;
+    Ok(Box::pin(async_stream::stream! {
+        let mut rows = db.fetch(&plan.main.sql, &plan.main.params);
+        while let Some(item) = rows.next().await {
+            match item {
+                Ok(row) => yield Ok(nest_row(row)),
+                // A mid-stream failure is the stream's last item.
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            }
+        }
+    }))
 }
 
 /// Plan and run a mutation request: id-gen + bind, then execute every write under one
@@ -565,6 +603,8 @@ struct MockState {
     calls: Vec<(String, Vec<SqlValue>)>,
     tx: Vec<&'static str>,
     fail: Option<String>,
+    /// `fetch` yields its batch, then this failure — the stream-broke-late case.
+    fail_mid_stream: Option<String>,
 }
 
 /// A test double for the whole driver stack: it is a [`Backend`] (checkout clones the
@@ -594,6 +634,18 @@ impl MockDb {
         MockDb {
             state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
                 fail: Some(message.into()),
+                ..MockState::default()
+            })),
+        }
+    }
+
+    /// A mock whose `fetch` yields `rows`, then fails with `message` — the database
+    /// breaking *mid-stream*, after the read has started delivering.
+    pub fn failing_mid_stream(rows: Vec<Row>, message: impl Into<String>) -> Self {
+        MockDb {
+            state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
+                responses: vec![rows].into(),
+                fail_mid_stream: Some(message.into()),
                 ..MockState::default()
             })),
         }
@@ -633,7 +685,13 @@ impl MockDb {
 impl DbRead for MockDb {
     fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
         let items: Vec<Result<Row, DbError>> = match self.record(sql, params) {
-            Ok(()) => self.pop().into_iter().map(Ok).collect(),
+            Ok(()) => {
+                let mut items: Vec<Result<Row, DbError>> = self.pop().into_iter().map(Ok).collect();
+                if let Some(m) = self.state.lock().unwrap().fail_mid_stream.clone() {
+                    items.push(Err(DbError::new(m)));
+                }
+                items
+            }
             Err(e) => vec![Err(e)],
         };
         Box::pin(futures_util::stream::iter(items))

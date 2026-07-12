@@ -1,0 +1,14 @@
+DIAGNOSTICS
+  E0200: stream query `one_order` uses `get` — a stream is many rows
+  E0201: stream query `paged_orders` declares `page`
+  E0202: mutation `place_order` cannot return a stream
+  W0103: query `paged_orders` will scan `Order`: no index leads with any of (total)
+SCHEMA
+model Order  table=order
+  id: Id
+  status: text
+  total: int
+shape OrderCard from Order
+query one_order  target=Order verb=get many stream  shape=OrderCard
+query paged_orders  target=Order verb=list many stream  shape=OrderCard  page
+mutation place_order  ret=Order

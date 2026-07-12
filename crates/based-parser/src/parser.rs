@@ -945,6 +945,8 @@ impl<'a> Parser<'a> {
     }
 
     fn ret_type(&mut self) -> PResult<RetType> {
+        // `stream` is contextual: a keyword only in return-type position.
+        let stream = self.eat_kw("stream");
         let ty = if self.at_kw("full") {
             let l = self.bump().unwrap();
             Spanned {
@@ -956,10 +958,14 @@ impl<'a> Parser<'a> {
         };
         let many = self.at(Tok::LBracket) && self.tok_at(1) == Some(Tok::RBracket);
         if many {
+            if stream {
+                self.err("`stream` already means many — drop the `[]`");
+                return Err(());
+            }
             self.bump();
             self.bump();
         }
-        Ok(RetType { ty, many })
+        Ok(RetType { ty, many, stream })
     }
 
     fn query_block(&mut self) -> PResult<(Statement, u32)> {

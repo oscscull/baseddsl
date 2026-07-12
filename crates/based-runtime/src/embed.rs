@@ -41,7 +41,7 @@ use crate::id::IdGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
 use crate::run::Backend;
-use crate::serve::{dispatch, resolve_shard_key, route_target, WireResponse};
+use crate::serve::{dispatch, dispatch_stream, resolve_shard_key, route_target, WireResponse};
 
 /// An in-process engine: a loaded schema + a connection [`Backend`] + an id generator,
 /// ready to run callables directly. Build one with [`Engine::new`] (from a
@@ -122,6 +122,35 @@ impl Engine {
             args,
             ctx,
             idem_key,
+        )
+        .await
+    }
+
+    /// Run one `-> stream` query and yield its shaped rows in-process — the library
+    /// twin of the HTTP edge's NDJSON body, minus the framing (no socket, no lines).
+    /// A failure before the first row (unknown route, bad args, missing `$ctx`, a
+    /// checkout fault) is the same [`WireResponse`] the wire would send; a mid-stream
+    /// database failure is the stream's last item, and dropping the stream cancels the
+    /// read and releases its connection.
+    pub async fn call_stream(
+        &self,
+        route: &str,
+        args: serde_json::Value,
+        ctx: serde_json::Value,
+    ) -> Result<crate::run::ShapedStream, WireResponse> {
+        let shard_key = route_target(route)
+            .map(|(is_mutation, name)| {
+                resolve_shard_key(&self.compiled, is_mutation, name, &ctx, None)
+            })
+            .unwrap_or_default();
+        dispatch_stream(
+            &self.compiled,
+            &*self.backend,
+            &shard_key,
+            "POST",
+            route,
+            args,
+            ctx,
         )
         .await
     }

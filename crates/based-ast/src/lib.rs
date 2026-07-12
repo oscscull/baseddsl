@@ -346,10 +346,14 @@ pub enum ParamBinding {
     ColOp { op: Op, col: Ident },
 }
 
+/// A callable's return form: `-> Shape` (one), `-> Shape[]` (many), or
+/// `-> stream Shape` (many, delivered incrementally — `stream` already means many,
+/// so `stream` and `[]` never combine).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetType {
     pub ty: Ident,
     pub many: bool,
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

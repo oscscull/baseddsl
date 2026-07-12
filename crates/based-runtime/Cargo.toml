@@ -49,6 +49,9 @@ serde_json.workspace = true
 async-trait = "0.1"
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The owned shaped-row stream (`run_query_stream`) holds its checked-out connection
+# across yields — a self-borrowing generator this macro writes safely.
+async-stream = "0.3"
 # The runtime's own async needs: the deadlock-retry backoff sleep and the engine's
 # id-gen lock. The listener feature adds `net`; binaries own the actual runtime.
 tokio = { version = "1", features = ["time", "sync"] }

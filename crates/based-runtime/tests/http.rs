@@ -23,6 +23,7 @@ const SCHEMA: &str = r#"
 
     query order_by_id(id) -> OrderCard;
     query orders_in_org(org) -> OrderCard[];
+    query export_orders(org) -> stream OrderCard;
     query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
     mutation place_order(org: Id, status, total: int) -> OrderCard {
         create Order { org = $org, status = $status, total = $total };
@@ -35,11 +36,18 @@ const SCHEMA: &str = r#"
 struct MockBackend {
     rows: Vec<Vec<Row>>,
     ready: bool,
+    /// When set, every connection's `fetch` yields its rows then this failure —
+    /// the database breaking mid-stream.
+    mid_stream_fail: Option<String>,
 }
 
 impl MockBackend {
     fn new(rows: Vec<Vec<Row>>) -> MockBackend {
-        MockBackend { rows, ready: true }
+        MockBackend {
+            rows,
+            ready: true,
+            mid_stream_fail: None,
+        }
     }
 
     /// A backend whose readiness probe fails (the DB-down case).
@@ -47,6 +55,16 @@ impl MockBackend {
         MockBackend {
             rows: vec![],
             ready: false,
+            mid_stream_fail: None,
+        }
+    }
+
+    /// A backend whose reads deliver `rows`, then fail with `message` mid-stream.
+    fn failing_mid_stream(rows: Vec<Row>, message: &str) -> MockBackend {
+        MockBackend {
+            rows: vec![rows],
+            ready: true,
+            mid_stream_fail: Some(message.to_string()),
         }
     }
 }
@@ -54,7 +72,13 @@ impl MockBackend {
 #[async_trait::async_trait]
 impl Backend for MockBackend {
     async fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
-        Ok(Box::new(MockDb::new(self.rows.clone())))
+        Ok(match &self.mid_stream_fail {
+            Some(m) => Box::new(MockDb::failing_mid_stream(
+                self.rows.first().cloned().unwrap_or_default(),
+                m.clone(),
+            )),
+            None => Box::new(MockDb::new(self.rows.clone())),
+        })
     }
 
     async fn ping(&self) -> Result<(), DbError> {
@@ -167,6 +191,86 @@ fn post(addr: &str, path: &str, body: &str, headers: &[(&str, &str)]) -> Resp {
     Resp { status, body }
 }
 
+/// A streaming response, undecoded: status, lowercased header pairs, and the
+/// (de-chunked) body text — for asserting NDJSON framing line by line.
+struct RawResp {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl RawResp {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == &name.to_ascii_lowercase())
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Send one raw HTTP/1.1 POST and return the response undecoded (body as text).
+fn post_raw(addr: &str, path: &str, body: &str, headers: &[(&str, &str)]) -> RawResp {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let mut req = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).unwrap();
+
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (head, payload) = raw.split_once("\r\n\r\n").expect("response has a body");
+    let status: u16 = head
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers: Vec<(String, String)> = head
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    let chunked = headers
+        .iter()
+        .any(|(k, v)| k == "transfer-encoding" && v.contains("chunked"));
+    let body = if chunked {
+        dechunk(payload)
+    } else {
+        payload.to_string()
+    };
+    RawResp {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// Decode an HTTP/1.1 chunked body: `<hex size>\r\n<chunk>\r\n` repeated, ended by a
+/// zero-size chunk (a streamed axum body arrives chunked).
+fn dechunk(payload: &str) -> String {
+    let mut out = String::new();
+    let mut rest = payload;
+    while let Some((size_line, tail)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+        if size == 0 || tail.len() < size {
+            break;
+        }
+        out.push_str(&tail[..size]);
+        rest = tail.get(size + 2..).unwrap_or("");
+    }
+    out
+}
+
 /// Send one raw HTTP/1.1 GET (no body) and read the whole response — for the `/healthz`
 /// and `/readyz` operational probes, which are GETs (the POST rule is for the
 /// RPC wire; the probes are outside it).
@@ -209,6 +313,70 @@ fn list_query_returns_array() {
     let resp = post(&addr, "/q/orders_in_org", r#"{"org":"org-1"}"#, &[]);
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn stream_query_returns_ndjson_with_the_terminal_done_line() {
+    let backend = MockBackend::new(vec![vec![
+        row(json!({ "status": "paid", "total": 1 })),
+        row(json!({ "status": "open", "total": 2 })),
+    ]]);
+    let addr = start(backend);
+    let resp = post_raw(&addr, "/q/export_orders", r#"{"org":"org-1"}"#, &[]);
+
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.header("content-type"), Some("application/x-ndjson"));
+    // Every line parses standalone; the last is the mandatory `done` with the row count.
+    let lines: Vec<serde_json::Value> = resp
+        .body
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("each line is one JSON envelope"))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            json!({ "row": { "status": "paid", "total": 1 } }),
+            json!({ "row": { "status": "open", "total": 2 } }),
+            json!({ "done": { "rows": 2 } }),
+        ]
+    );
+}
+
+#[test]
+fn stream_mid_stream_failure_is_the_terminal_error_line() {
+    // The status line is spent once the body starts: a database failure mid-stream
+    // arrives in-band as the terminal `error` line, and no `done` follows.
+    let backend = MockBackend::failing_mid_stream(
+        vec![row(json!({ "status": "paid", "total": 1 }))],
+        "connection lost",
+    );
+    let addr = start(backend);
+    let resp = post_raw(&addr, "/q/export_orders", r#"{"org":"org-1"}"#, &[]);
+
+    assert_eq!(resp.status, 200);
+    let lines: Vec<serde_json::Value> = resp
+        .body
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("each line is one JSON envelope"))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            json!({ "row": { "status": "paid", "total": 1 } }),
+            json!({ "error": { "code": "database_error", "message": "connection lost" } }),
+        ]
+    );
+}
+
+#[test]
+fn stream_pre_body_failure_keeps_its_real_http_status() {
+    // Validation runs before the first byte of the body: a missing arg is the
+    // ordinary JSON `400`, never a `200` NDJSON stream.
+    let backend = MockBackend::new(vec![]);
+    let addr = start(backend);
+    let resp = post(&addr, "/q/export_orders", "{}", &[]);
+    assert_eq!(resp.status, 400);
+    assert_eq!(resp.body["error"]["code"], "missing_arg");
 }
 
 #[test]

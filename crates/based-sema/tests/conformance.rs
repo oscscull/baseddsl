@@ -111,11 +111,12 @@ fn summarize_schema(s: &CheckedSchema) -> String {
     }
     for q in &s.queries {
         out.push_str(&format!(
-            "query {}  target={} verb={}{}{}{}{}\n",
+            "query {}  target={} verb={}{}{}{}{}{}\n",
             q.name,
             q.target,
             verb(q.verb),
             if q.many { " many" } else { "" },
+            if q.stream { " stream" } else { "" },
             match &q.ret_shape {
                 Some(sh) => format!("  shape={sh}"),
                 None => String::new(),

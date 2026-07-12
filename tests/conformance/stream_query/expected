@@ -1,0 +1,7 @@
+OK
+model Org  decorators=[]  fields=1  indexes=0
+model Order  decorators=[]  fields=3  indexes=0
+shape OrderCard from Order  fields=2
+query export_orders  params=1  ret=stream OrderCard  body=bare
+query recent_orders  params=1  ret=stream OrderCard  body=inline
+query all_orders  params=0  ret=stream OrderCard  body=block

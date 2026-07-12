@@ -1,0 +1,16 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model Order  table=order  scope  sort=[placed_at desc]
+  id: Id
+  org: -> Org  fk=org_id
+  status: text
+  total: int
+  placed_at: timestamp
+  index(org, placed_at)
+shape OrderCard from Order
+query export_orders  target=Order verb=list many stream  shape=OrderCard  ctx=[org: -> Org]
+query big_orders  target=Order verb=list many stream  shape=OrderCard  ctx=[org: -> Org]

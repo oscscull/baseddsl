@@ -432,12 +432,23 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     method returning `Result<RowStream<Shape>, ClientError>` with per-item `Result`, drop = cancel;
     `page` forbidden (E0201), `get`/mutations can't stream (E0200/E0202), everything else (filters,
     sorts, shapes, scope, soft-delete, index lint) composes unchanged on the single read path.
+  - ✅ **Front-end slice.** `RetType.stream` parses (`stream X[]` is a parse error — `stream`
+    already means many), sema infers `list` and rejects the three misuses (E0200 get / E0201 page /
+    E0202 mutation), the flag rides `RQuery.stream` (with `many = true`, so SQL lowering is the
+    `[]` form, untouched); fmt round-trips, LSP hover/completion/facts surface the form;
+    conformance goldens (parser positive + no-brackets negative, sema positive + errors bundle).
+  - ✅ **Runtime streaming dispatch + NDJSON wire.** `run_query_stream` (plan → owned
+    `ShapedStream` of shaped rows over the checked-out connection; drop = cancel, connection back
+    to the pool) + `dispatch_stream` (the streaming twin of `dispatch`: pre-body failures are the
+    ordinary `WireResponse` with real statuses) + `Engine::call_stream` (in-process door). The
+    axum edge branches on `Compiled::is_stream_query`: `200` + `application/x-ndjson`,
+    `{"row":…}` per line, mandatory terminal `{"done":{"rows":N}}` or in-band `{"error":…}`;
+    non-stream traffic byte-for-byte unchanged. Proven mock + live SQLite (rows in sort order,
+    terminal framing over a real socket, mid-stream error line, drop-mid-stream returns the
+    single pooled connection healthy).
   - Remaining implementation slices:
-    - Parser/sema/fmt for `stream` ret form + E0200/E0201/E0202; LSP surfaces it; conformance goldens.
-    - Runtime streaming dispatch: a public engine surface yielding shaped rows off the existing
-      `fetch` stream + the axum NDJSON body (terminal-line framing, drain/cancel behavior).
     - Generated client: `Transport` streaming call + HTTP NDJSON parsing + embedded bridge over the
-      engine's row stream; OpenAPI emitter for the NDJSON response.
+      engine's row stream (`Engine::call_stream`); OpenAPI emitter for the NDJSON response.
     - Acceptance gates: mid-stream DB error observed as the in-band `error` line live; truncation →
       transport error; drop-mid-stream releases the connection (extends the I2 cancel gate).
 - **N3. Flagship axum example + syntax appeal pass (the re-pitch artifact).** A nontrivial
