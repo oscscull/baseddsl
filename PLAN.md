@@ -479,6 +479,38 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
   quickstarts stay largely as they are — async-integrated but minimal — and the axum example is the
   **total-feature-coverage** vehicle: every language/runtime feature demonstrated somewhere in it, so
   feature-coverage growth lands in one example instead of three.
+  - ✅ **Design gate (D86).** Domain = a multi-tenant **support desk** (`examples/axum-helpdesk`;
+    not commerce — the flagship must show the language generalizes), dialect = **Postgres only**
+    (the modal axum+sqlx pairing; the strictest bind path N1 built). Architecture: the app embeds
+    the engine — its own sqlx `PgPool` → `PgRouter::from_pool` (the BYO-pool seam, demonstrated) →
+    `Engine` in axum state; auth middleware resolves `Authorization: Bearer` through the typed
+    client itself (`session_by_token … unscoped("auth: …")`) into per-request `Ctx { org, user }`.
+    ~12 routes across three audiences (requester portal / agent desk / ops+finance export). Full
+    feature→site coverage map + the deliberate exceptions (`based serve`/image, legacy affordances
+    `(column …)`/`@table`/`on:`, `shape full`) recorded in D86. **Syntax-appeal audit verdict: zero
+    grammar changes** — the drift it found was worked-example/prose level and is fixed (commerce
+    `UserRef` shape-name drift; pagination.md pre-grammar example forms); accepted-as-is list with
+    rationale in D86.
+  - **N3a (prereq). Ordered to-many nests.** The ticket detail needs comments in `@sort` order;
+    D57 left JSON-aggregation order unspecified, but all three dialects now have an ordered
+    aggregate form (pg `json_agg(… ORDER BY …)`, MariaDB `JSON_ARRAYAGG(… ORDER BY …)`, SQLite
+    ≥ 3.44 aggregate `ORDER BY`) — honor the sort cascade inside the D57 subquery; own decision
+    entry; removes the documented caveat.
+  - **N3b (prereq). Two seams.** (i) `guard` (Handle 3) parses but nothing invokes it — engine
+    gains a registered-guard registry (host async fn over ctx+args; deny → 403; declared-but-
+    unregistered fails loudly at engine build), invoked by dispatch on both doors. (ii) The typed
+    client can't pass an idempotency key (`Engine::call_with_key` exists; `Transport::call` and the
+    generated mutation methods don't carry one) — thread an optional key through the generated
+    surface + both transports.
+  - **N3c. Schema + migrations + client.** The helpdesk `.bsl` (by-domain layout), `0001_init` +
+    `0002` `@was` rename, checked-in `src/client.rs` (`--embedded`), seed step via the client's own
+    mutations (D63 pattern; prints demo bearer tokens).
+  - **N3d. The axum service.** Routes/middleware/state per D86; streaming export re-served as
+    NDJSON through axum; `ClientError` → HTTP mapping; a live smoke scenario (boot against
+    Postgres, drive every route incl. export truncation/idempotent-replay/cross-tenant probes) as
+    a `make` target.
+  - **N3e. README + re-audit + CI.** The re-pitch README (walks the `.bsl` surfaces first), a final
+    first-look appeal pass over the real artifact, example wired into `make check`/CI.
 
 ## Track T — core DB feature parity (owner-approved 2026-07-09; PAUSED behind Track N)
 

@@ -2587,17 +2587,17 @@ mod tests {
         let snap = compile_manifest(&root, &HashMap::new());
         assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
 
-        // Cursor mid-`UserDetail` in `placed_by -> UserDetail` (order/model.bsl). The last
+        // Cursor mid-`UserRef` in `placed_by -> UserRef` (order/model.bsl). The last
         // occurrence is the shape field (earlier ones sit in comments).
         let ofid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
         let src = &snap.sources[ofid].1;
-        let off = (src.rfind("-> UserDetail").unwrap() + 4) as u32;
+        let off = (src.rfind("-> UserRef").unwrap() + 4) as u32;
         let def = snap
             .definition_at(ofid, off)
             .expect("shape reference resolves");
         let (def_path, def_src) = &snap.sources[def.file.0 as usize];
         assert!(def_path.ends_with("user/model.bsl"), "{def_path:?}");
-        assert_eq!(&def_src[def.start as usize..def.end as usize], "UserDetail");
+        assert_eq!(&def_src[def.start as usize..def.end as usize], "UserRef");
 
         // Find-references from the decl lists the nest reference site.
         let ufid = def.file.0 as usize;

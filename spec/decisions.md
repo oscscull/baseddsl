@@ -98,7 +98,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
   codegen + in-process `Engine` + typed client, end-to-end scenario), D61 (MariaDB + Postgres
   quickstart slices against live Docker servers; Track B / DoD #2 complete), D63 (quickstart DX
   rebuild: `based migrate apply` setup + checked-in `src/client.rs`/`migrations/` + `client::embedded`
-  + `.env`/dotenvy + client-`create` seeding; no build.rs, no raw SQL; `based gen client --embedded` flag)
+  + `.env`/dotenvy + client-`create` seeding; no build.rs, no raw SQL; `based gen client --embedded` flag),
+  D86 (Track N3 design: flagship `examples/axum-helpdesk` — multi-tenant support desk on Postgres,
+  BYO-pool embedded engine, bearer→`$ctx` middleware via an `unscoped` session query, total-feature
+  coverage map + syntax-appeal audit verdicts — zero grammar changes; prereqs: ordered to-many nests,
+  `guard` runtime seam, typed-client idempotency key)
 - **Source hygiene / conventions** — D69 (Track F1 comment-hygiene sweep: source reads as finished, no
   build-time/WIP narration, TODOs live in the roadmap `.md`s — the standing Conventions rule enforced),
   D74 (H4/H5 hygiene: positive framing over define-by-negation; `based-codegen` D#-refs + overlong
@@ -3489,3 +3493,147 @@ design left open).**
 - *`done.rows` is enforced, not advisory.* The decoder counts rows and a terminal `done` that
   disagrees yields a transport-kind `Err` (a lost line inside an intact body would otherwise
   pass silently — "no terminal line = failure" extended to "wrong count = failure").
+
+## D86 — flagship axum example: domain, architecture, coverage map, syntax-appeal audit (Track N3 — design)
+
+**Context.** N3 builds the re-pitch artifact: a nontrivial axum service consuming the typed async
+client end to end, at quickstart-DX polish, paired with a syntax appeal pass over every surface it
+shows. This entry is the N3 design gate — domain, dialect, auth story, route surface, and the
+feature-coverage plan settled before example code, plus the appeal audit's verdicts. Coverage policy
+(owner, 2026-07-10): the three quickstarts stay minimal; this example is the total-feature-coverage
+vehicle.
+
+**1. Domain: a multi-tenant support desk (`examples/axum-helpdesk`).** Orgs, agents, requesters,
+tickets, comments, billable time. Why this and not commerce: commerce is the spec's worked reference,
+and the flagship must show the language *generalizes* (Track T: "commerce is only a named example");
+a support desk is what a workplace backend team actually builds or integrates, and every feature falls
+out of the domain instead of being decorated on:
+- both enum kinds arise naturally — a string `Status { open, waiting = "waiting_on_customer",
+  resolved, closed }` (with one name≠value variant) and an ordered int
+  `Priority { low = 1, normal = 2, high = 3, urgent = 4 }` whose `priority >= high` is the D82
+  ordered-comparison showcase;
+- decimal + float arise as billable time (`hours: float`, `amount: decimal(10, 2)`, an agent
+  `rate: decimal(8, 2)?`), not bolted-on money;
+- two real audiences give the scope DNF meaning: agents see the org (`scoped Tenant`), requesters
+  see their own tickets (`scoped Requester`) — `@scope Tenant` + `@scope Requester` stacked on
+  `Ticket` is a genuine OR; an agent's private `DraftNote` is a genuine AND (`@scope Tenant, Author`);
+- streaming is the compliance/BI ticket export; raw SQL is honestly motivated (the workload report
+  needs aggregation, which the DSL defers to T4; date-interval math in an `overdue` filter term);
+  soft-delete is archive/restore; `hard delete` is comment purging; `tx` + `^` is
+  open-ticket-with-first-comment.
+
+Models (~7, by-domain layout as in commerce): `Org`, `User` (role enum, rate), `Session` (bearer
+token → org + user; the auth bootstrap), `Ticket` (status/priority enums, self-ref `duplicate_of` +
+inverse `duplicates`, `tags: json`, `@created`/`@updated`, soft-delete, comments/time inverses),
+`Comment`, `TimeEntry`, `DraftNote`. The build slice owns exact field lists; the coverage map below
+is the contract.
+
+**2. Dialect: Postgres, exactly one.** The modal axum + sqlx production pairing — the market the
+async pivot targets — and the strictest driver path N1 built (native-typed binds), so the flagship
+exercises what the design partner will run. One dialect keeps it an app, not a matrix; MariaDB/SQLite
+stay proven by the quickstarts + live suites.
+
+**3. Architecture + auth story.** The service *embeds* the engine — that is the pitch (an app's own
+axum listener, not a `based serve` sidecar): the app builds its own sqlx `PgPool`, hands it to
+`PgRouter::from_pool` (the D84 BYO-pool seam, demonstrated for real), wraps it in the `Send + Sync`
+`Engine`, and every handler calls the generated embedded client. Auth-derived `$ctx`: a tower
+middleware reads `Authorization: Bearer <token>` and resolves it *through the typed client itself* —
+`query session_by_token(token) -> SessionCtx unscoped("auth: resolves the caller's tenant")` — into
+the request's `Ctx { org, user }` extension; handlers pass that to every call. So the auth story
+dogfoods the client, shows `unscoped` doing its one legitimate job, and `$ctx` is visibly *derived*,
+never trusted from the body. Demo tokens come from a seed step using the client's own mutations (D63
+pattern; no raw SQL).
+
+**Route surface** (~12 routes, three audiences):
+- requester portal: `POST /tickets` (tx create + first comment, Idempotency-Key honored),
+  `GET /my/tickets` (`scoped Requester`), `POST /tickets/:id/comments`;
+- agent desk: `GET /tickets` (search: named filter + `~` + enum `in`, keyset page, `order`
+  override), `GET /tickets/:id` (nested detail: `requester -> UserRef`, ordered `comments`
+  to-many, time entries), `GET /queue` (`priority >= high`, `assignee = $ctx.user` Handle-1),
+  `POST /tickets/:id/assign` + `/close` (guarded), `POST /tickets/:id/time` (float + decimal),
+  `DELETE /tickets/:id` + `/restore` (soft-delete round trip), drafts (AND scope);
+- ops/finance: `GET /export/tickets.ndjson` (`-> stream`, re-served through axum),
+  `GET /reports/workload` (raw SQL aggregation), `GET /admin/tickets` (offset + `with count`,
+  `unscoped("ops: cross-org support")`), comment purge (`hard delete`).
+
+**4. Feature-coverage map** (feature → where it appears):
+
+| feature | site |
+|---|---|
+| models, nullable/defaults, implicit id | every model |
+| forward + inverse + self-ref relations | `Ticket.assignee?`, `Ticket.comments`, `duplicate_of`/`duplicates` |
+| string enum (name≠value) / int enum + ordered op | `Status.waiting` / `Priority`, `/queue` `priority >= high` |
+| decimal / float | `TimeEntry.amount`, `User.rate` / `TimeEntry.hours` |
+| soft-delete, restore, `hard delete` | ticket archive/restore, comment purge |
+| `@created` / `@updated` | `Ticket` |
+| sort cascade (model / relation / query) | `Ticket @sort` / `comments @sort(created_at asc)` / search `order` |
+| `@index` bare + composite + unique, W0103/W0104 clean | `Ticket`, `Session.token (unique)` |
+| `unindexed(...)` annotation | the export / audit scan |
+| named scope, OR-DNF, AND-DNF, `scoped`, `unscoped` | `Tenant`+`Requester` on `Ticket`; `Tenant, Author` on `DraftNote`; auth + admin routes |
+| Handle 1 (`$ctx` in `where`) / Handle 3 (`guard`) | `/queue` `assignee = $ctx.user` / `close_ticket guard caller_can_close` |
+| bare / per-param (`->`, `op col`) / full-body queries | `ticket(id)`; `tickets_for(agent -> assignee)`, `since: timestamp > created_at`; search |
+| param defaults | `status: Status = open` on search |
+| named filters, `~`, `in`, `has`, `not`/`or` | `filter open_states`, search, `tags has $tag` |
+| shapes: bare, reach-rename, inline nest, named ref | `TicketRow`, `requester_name = requester.name`, detail nests, `-> UserRef` |
+| keyset / offset + `with count` | search / admin listing |
+| `-> stream` + NDJSON + client `RowStream` | the export route |
+| raw SQL: value, predicate term, whole query | an export shape's raw `age_days` value, the `overdue` interval predicate term, the workload report |
+| mutations: create/update/delete/restore/tx+`^` | open (tx), assign/close (update), archive/restore |
+| idempotency-keyed writes | `POST /tickets` + Idempotency-Key |
+| typed ids, `Cursor`, `ClientError` mapping | handlers end to end |
+| migrations + `@was` rename + drift verify | `0001_init`, `0002` renames a field via `@was` |
+| BYO pool + embedded client + async engine | `PgRouter::from_pool` + `client::embedded` |
+
+**Deliberate exceptions** (coverage forced in would damage the pitch; owner can veto): `based serve`
++ the container image (the flagship embeds — serving stays covered by quickstarts, docker/, CI);
+the legacy-DB affordances `(column "…")`, `@table("…")`, `(on: …)` (a greenfield app would have to
+fake a legacy database to show them — they stay spec + conformance covered; `@was` *is* shown);
+`shape full` (a naming convention, adds no surface the named shapes don't show).
+
+**5. Syntax-appeal audit.** Verdict list over every surface the example shows. Headline: **zero
+grammar changes** — consistent with the pitch feedback ("the syntax landed well"); what needed
+polish was worked-example/prose drift, and the real gaps the example surfaces are runtime seams
+(§6), not spellings.
+
+*Polish now (landed with this entry):*
+- commerce shape-name drift: the shared User projection was renamed `UserDetail` while its own
+  comments, shapes.md, and D79 all say `UserRef` — renamed back to `UserRef` (order/model.bsl,
+  user/model.bsl, the LSP nest-reference test).
+- pagination.md's example block predated the delimited-clause grammar (`list User by active order
+  created_at desc page 20` — no `by` exists; clauses take parens) — rewritten to canonical forms.
+
+*Accept as-is (each with why):*
+- `@soft_delete(deleted_at)` + the declared tombstone field — the double-spell *is* the visible
+  contract (principle 2); the pairing is a pitch point, not noise.
+- explicit param types on mutations / full-body callables (`total: decimal(12, 2)`) — the signature
+  is the wire contract; explicitness there is documentation, and the bare form already covers the
+  low-ceremony case.
+- `= null` (no `is null`) — one operator set everywhere; SQL's null special case is the wart.
+- `^` tx back-ref — single-purpose, always adjacent to the create it references; hover explains it.
+- `@index field` vs `@index(a, b)` dual spelling — the bare form reads better for one column; the
+  example adopts the convention bare-single/parens-composite rather than the grammar losing a form.
+- `unscoped("reason")` wordiness — the loudness is the feature (principle 6).
+- `scoped Name` after the return type, `-> stream Shape`, `field -> Shape` named nests, bare enum
+  variants in value position — all land at first look; no change.
+
+*Deferred:* none carrying syntax. (The D57 "to-many element order unspecified" caveat graduates
+from documented-limitation to build-slice prerequisite, below — it is a lowering gap, not a
+spelling.)
+
+**6. Prerequisites the design surfaced (build slices, tracked in PLAN.md N3):**
+- **Ordered to-many nests.** The ticket detail must show comments in `@sort(created_at asc)` order;
+  D57 deliberately left JSON-aggregation order unspecified. All three dialects now have an ordered
+  aggregate form (Postgres `json_agg(… ORDER BY …)`, MariaDB `JSON_ARRAYAGG(… ORDER BY …)`, SQLite
+  ≥ 3.44 aggregate `ORDER BY`), so the sort cascade can be honored inside the subquery. Gets its own
+  decision entry when built.
+- **`guard` runtime seam.** Handle 3 parses (`Mutation.guard`) but nothing invokes it — auth.md
+  promises "we own that the check runs." The engine needs a registered-guard registry (host async fn
+  over ctx + args; deny → 403; a declared guard with no registered impl fails loudly at engine
+  build), invoked by dispatch before the write on both doors.
+- **Idempotency key on the typed client.** `Engine::call_with_key` exists but `Transport::call` and
+  the generated mutation methods carry no key, so the wire header has no typed-surface twin — thread
+  an optional key through the generated surface + both transports.
+
+**Slice plan** (one iteration each, PLAN.md N3 is the tracker): N3a ordered nests → N3b guard +
+idempotency-key seams → N3c schema/migrations/client → N3d the axum service + live smoke gate →
+N3e README + final appeal re-audit on the real artifact + CI wiring.
