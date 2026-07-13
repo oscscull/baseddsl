@@ -492,3 +492,65 @@ fn stream_query_response_is_ndjson_with_the_envelope_line_schema() {
         "#/components/schemas/Error"
     );
 }
+
+// ---------- idempotency key + guard wire surface -----------------------------
+
+#[test]
+fn mutation_documents_the_idempotency_key_header_and_outcomes() {
+    let doc = gen(r#"
+        Order { status: text, total: int }
+        shape OrderCard from Order { status, total }
+        query order_by_id(id) -> OrderCard;
+        mutation place_order(status, total: int) -> OrderCard {
+            create Order { status = $status, total = $total };
+        }
+        "#);
+    // The reusable header parameter exists and the mutation references it.
+    assert_eq!(
+        doc["components"]["parameters"]["IdempotencyKey"]["name"],
+        "Idempotency-Key"
+    );
+    let op = &doc["paths"]["/m/place_order"]["post"];
+    assert_eq!(
+        op["parameters"][1]["$ref"],
+        "#/components/parameters/IdempotencyKey"
+    );
+    // The keyed-write outcomes are documented on the mutation only.
+    assert!(op["responses"]["409"].is_object());
+    assert!(op["responses"]["422"].is_object());
+    let q = &doc["paths"]["/q/order_by_id"]["post"];
+    assert_eq!(q["parameters"].as_array().map(Vec::len), Some(1));
+    assert!(q["responses"]["409"].is_null());
+}
+
+#[test]
+fn query_only_schema_carries_no_idempotency_parameter() {
+    let doc = gen(r#"
+        Order { status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(doc["components"]["parameters"]["IdempotencyKey"].is_null());
+}
+
+#[test]
+fn guarded_mutation_documents_the_403_denial() {
+    let doc = gen(r#"
+        Order { status: text, total: int }
+        shape OrderCard from Order { status, total }
+        mutation close_order(id) -> OrderCard guard caller_can_close {
+            update Order where (id = $id) { status = "closed" };
+        }
+        mutation open_order(id) -> OrderCard {
+            update Order where (id = $id) { status = "open" };
+        }
+        "#);
+    let guarded = &doc["paths"]["/m/close_order"]["post"];
+    assert!(guarded["responses"]["403"].is_object());
+    assert!(guarded["responses"]["403"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("caller_can_close"));
+    // An unguarded mutation documents no 403.
+    assert!(doc["paths"]["/m/open_order"]["post"]["responses"]["403"].is_null());
+}

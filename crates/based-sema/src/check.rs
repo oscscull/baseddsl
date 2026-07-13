@@ -575,6 +575,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     Some(RMutation {
         name: m.name.node.clone(),
         span: m.span,
+        guard: m.guard.as_ref().map(|g| g.node.clone()),
         ctx_requires: crate::ctx::collect_mutation(m, ret.shape.as_deref(), &ret.model, cx),
         ret_model: ret.model,
         ret_shape: ret.shape,

@@ -16,7 +16,7 @@
 //! JSON).
 
 use based_ast::FileId;
-use based_runtime::{Compiled, Engine, MockDb, Row, SeqIdGen};
+use based_runtime::{Compiled, Engine, GuardVerdict, Guards, MockDb, Row, SeqIdGen};
 use serde_json::json;
 
 /// The **verbatim** `based gen client` output for `SCHEMA` (target: rust, embedded bridge
@@ -225,6 +225,125 @@ async fn mutation_response_is_the_created_rows_declared_shape() {
     assert_eq!(card.total, 7);
 }
 
+/// The typed keyed door in-process: `place_order_with_key` rides
+/// `Engine::call_with_key`, so a retry with the same key replays the first attempt's
+/// recorded response — two identical typed results, exactly one transaction.
+#[tokio::test]
+async fn keyed_mutation_replays_in_process() {
+    let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
+    let engine = Engine::new(compiled(), db.clone(), SeqIdGen::default());
+    let api = client::embedded(&engine);
+    let input = || client::PlaceOrderInput {
+        org: client::Id::from_raw("o-1"),
+        status: "open".into(),
+        total: 7,
+    };
+
+    let first = api
+        .place_order_with_key(input(), (), "key-embed-1")
+        .await
+        .expect("the first keyed write runs");
+    let second = api
+        .place_order_with_key(input(), (), "key-embed-1")
+        .await
+        .expect("the retry replays");
+    assert_eq!(first.status, second.status);
+    assert_eq!(first.total, second.total);
+    assert_eq!(
+        db.tx_log(),
+        vec!["begin", "commit"],
+        "the retry must never open a second transaction"
+    );
+}
+
+// ---------- guards (auth.md Handle 3) ---------------------------------------
+
+/// A schema whose one mutation declares a host guard.
+const GUARDED_SCHEMA: &str = r#"
+    Order { status: text, total: int }
+    shape OrderCard from Order { status, total }
+    mutation close_order(id) -> OrderCard guard caller_can_close {
+        update Order where (id = $id) { status = "closed" };
+    }
+"#;
+
+fn guarded_compiled() -> Compiled {
+    let sf = based_parser::parse_file(GUARDED_SCHEMA, FileId(0)).expect("parse");
+    let (schema, diags) = based_sema::check(&sf.decls);
+    assert!(!diags
+        .iter()
+        .any(|d| d.severity == based_diagnostics::Severity::Error));
+    Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
+}
+
+/// The registered guard decides per request: an allowed caller's write runs, a denied
+/// caller gets the `403 guard_denied` with the guard's reason — through the same
+/// in-process door every embedded typed call takes.
+#[tokio::test]
+async fn registered_guard_allows_and_denies_in_process() {
+    let db = MockDb::new(vec![vec![row(json!({ "status": "closed", "total": 9 }))]]);
+    let guards = Guards::new().register("caller_can_close", |req| async move {
+        if req.ctx["role"] == "agent" {
+            GuardVerdict::Allow
+        } else {
+            GuardVerdict::deny("only agents may close orders")
+        }
+    });
+    let engine = Engine::with_guards(guarded_compiled(), db.clone(), SeqIdGen::default(), guards)
+        .expect("every declared guard is registered");
+
+    let allowed = engine
+        .call(
+            "/m/close_order",
+            json!({ "id": "o-1" }),
+            json!({ "role": "agent" }),
+        )
+        .await;
+    assert_eq!(allowed.status, 200, "{:?}", allowed.body);
+
+    let denied = engine
+        .call(
+            "/m/close_order",
+            json!({ "id": "o-1" }),
+            json!({ "role": "requester" }),
+        )
+        .await;
+    assert_eq!(denied.status, 403);
+    assert_eq!(denied.body["error"]["code"], "guard_denied");
+    assert_eq!(
+        denied.body["error"]["message"],
+        "only agents may close orders"
+    );
+    // Exactly the allowed call's transaction ran; the denial wrote nothing.
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
+}
+
+/// A declared guard nobody registered fails when the engine is *built* — never a
+/// silent pass at request time.
+#[tokio::test]
+async fn unregistered_guard_fails_at_engine_build() {
+    let err = Engine::with_guards(
+        guarded_compiled(),
+        MockDb::new(vec![]),
+        SeqIdGen::default(),
+        Guards::new(),
+    )
+    .err()
+    .expect("a guarded schema with no registered guard must not build");
+    assert_eq!(
+        err.missing,
+        vec![("close_order".to_string(), "caller_can_close".to_string())]
+    );
+    assert!(err.to_string().contains("caller_can_close"));
+}
+
+/// The guard-free convenience constructor refuses a guarded schema loudly.
+#[tokio::test]
+#[should_panic(expected = "caller_can_close")]
+async fn engine_new_panics_on_a_guarded_schema() {
+    let _ = Engine::new(guarded_compiled(), MockDb::new(vec![]), SeqIdGen::default());
+}
+
 /// A `-> stream` query on the typed surface: same method name, a `RowStream<OrderCard>`
 /// back, one typed row per item — the engine's shaped rows decoded in-process, no
 /// socket and no NDJSON framing.
@@ -377,4 +496,59 @@ async fn dropping_the_typed_stream_releases_the_connection() {
         .await;
     assert_eq!(full.len(), 3);
     assert!(full.iter().all(|r| r.is_ok()));
+}
+
+/// Keyed replay against a real database: a retried `place_order_with_key` returns the
+/// first attempt's row and inserts **nothing** — the row count proves no double effect,
+/// not just an equal-looking response.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn keyed_mutation_has_no_double_effect_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::SqliteBackend;
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch("INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');")
+        .await
+        .expect("seed fixtures");
+
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+    let input = || client::PlaceOrderInput {
+        org: client::Id::from_raw("org-1"),
+        status: "open".into(),
+        total: 7,
+    };
+
+    let first = api
+        .place_order_with_key(input(), (), "key-live-1")
+        .await
+        .expect("the first keyed write runs");
+    let second = api
+        .place_order_with_key(input(), (), "key-live-1")
+        .await
+        .expect("the retry replays");
+    assert_eq!(first.status, second.status);
+    assert_eq!(first.total, second.total);
+
+    // Exactly one row landed in the real database.
+    let rows = api
+        .orders_in_org(
+            client::OrdersInOrgInput {
+                org: client::Id::from_raw("org-1"),
+            },
+            (),
+        )
+        .await
+        .expect("list runs");
+    assert_eq!(rows.len(), 1, "the retry must not insert a second row");
 }

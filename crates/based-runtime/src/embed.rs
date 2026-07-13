@@ -37,6 +37,7 @@
 
 use std::sync::Arc;
 
+use crate::guard::{GuardSetupError, Guards};
 use crate::id::IdGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
@@ -57,6 +58,9 @@ pub struct Engine {
     // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
     // [`Engine::call`] (no key) never consults it.
     store: MemStore,
+    // The registered host guard implementations (auth.md Handle 3); construction
+    // guarantees every guard the schema declares is present.
+    guards: Guards,
 }
 
 impl Engine {
@@ -64,17 +68,42 @@ impl Engine {
     /// generator. For a [`crate::run::MockDb`]-backed test pass [`crate::id::SeqIdGen`];
     /// a real embed passes its own [`Backend`] (e.g. a driver router over its pool) and
     /// a uuid generator.
+    ///
+    /// # Panics
+    /// If the schema declares a `guard` — a guard is a host function this constructor
+    /// cannot know about, and a declared check must never silently not run. Build a
+    /// guarded schema's engine with [`Engine::with_guards`] instead.
     pub fn new(
         compiled: Compiled,
         backend: impl Backend + 'static,
         id_gen: impl IdGen + 'static,
     ) -> Engine {
-        Engine {
+        match Engine::with_guards(compiled, backend, id_gen, Guards::new()) {
+            Ok(engine) => engine,
+            Err(e) => panic!("{e} (use Engine::with_guards)"),
+        }
+    }
+
+    /// Like [`Engine::new`], registering the host guard implementations for the
+    /// schema's `guard` declarations. Fails — at build, not at request time — when a
+    /// declared guard has no registered implementation.
+    pub fn with_guards(
+        compiled: Compiled,
+        backend: impl Backend + 'static,
+        id_gen: impl IdGen + 'static,
+        guards: Guards,
+    ) -> Result<Engine, GuardSetupError> {
+        let missing = guards.missing_for(&compiled);
+        if !missing.is_empty() {
+            return Err(GuardSetupError { missing });
+        }
+        Ok(Engine {
             compiled,
             backend: Arc::new(backend),
             id_gen: tokio::sync::Mutex::new(Box::new(id_gen)),
             store: MemStore::new(),
-        }
+            guards,
+        })
     }
 
     /// Run one callable and return the wire response — the same status + JSON body the
@@ -117,6 +146,7 @@ impl Engine {
             &shard_key,
             id_gen.as_mut(),
             &self.store,
+            &self.guards,
             "POST",
             route,
             args,

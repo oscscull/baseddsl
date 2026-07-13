@@ -259,6 +259,22 @@ pub trait Transport {
         I: Serialize + Sync,
         C: Serialize + Sync,
         O: serde::de::DeserializeOwned;
+
+    /// Like [`call`](Transport::call), carrying a mutation **idempotency key** out of
+    /// band — an HTTP transport sends it as the `Idempotency-Key` header; the embedded
+    /// transport hands it to `Engine::call_with_key`. A retry with the same key replays
+    /// the first attempt's recorded response instead of running the write again.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned;
 }
 
 /// The generated client, generic over a `Transport`.
@@ -393,6 +409,16 @@ impl<T: Transport> Client<T> {
     pub async fn create_org(&self, input: CreateOrgInput, ctx: ()) -> Result<OrgRow, ClientError> {
         self.transport.call(CREATE_ORG_ROUTE, &input, &ctx).await
     }
+    /// `POST /m/create_org` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn create_org_with_key(
+        &self,
+        input: CreateOrgInput,
+        ctx: (),
+        key: &str,
+    ) -> Result<OrgRow, ClientError> {
+        self.transport.call_with_key(CREATE_ORG_ROUTE, &input, &ctx, key).await
+    }
     /// `POST /q/order_by_id`
     pub async fn order_by_id(&self, input: OrderByIdInput, ctx: OrderByIdCtx) -> Result<Option<OrderCard>, ClientError> {
         self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx).await
@@ -409,17 +435,57 @@ impl<T: Transport> Client<T> {
     pub async fn place_order(&self, input: PlaceOrderInput, ctx: PlaceOrderCtx) -> Result<OrderCard, ClientError> {
         self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx).await
     }
+    /// `POST /m/place_order` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn place_order_with_key(
+        &self,
+        input: PlaceOrderInput,
+        ctx: PlaceOrderCtx,
+        key: &str,
+    ) -> Result<OrderCard, ClientError> {
+        self.transport.call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key).await
+    }
     /// `POST /m/cancel_order`
     pub async fn cancel_order(&self, input: CancelOrderInput, ctx: CancelOrderCtx) -> Result<OrderCard, ClientError> {
         self.transport.call(CANCEL_ORDER_ROUTE, &input, &ctx).await
+    }
+    /// `POST /m/cancel_order` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn cancel_order_with_key(
+        &self,
+        input: CancelOrderInput,
+        ctx: CancelOrderCtx,
+        key: &str,
+    ) -> Result<OrderCard, ClientError> {
+        self.transport.call_with_key(CANCEL_ORDER_ROUTE, &input, &ctx, key).await
     }
     /// `POST /m/restore_order`
     pub async fn restore_order(&self, input: RestoreOrderInput, ctx: RestoreOrderCtx) -> Result<OrderCard, ClientError> {
         self.transport.call(RESTORE_ORDER_ROUTE, &input, &ctx).await
     }
+    /// `POST /m/restore_order` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn restore_order_with_key(
+        &self,
+        input: RestoreOrderInput,
+        ctx: RestoreOrderCtx,
+        key: &str,
+    ) -> Result<OrderCard, ClientError> {
+        self.transport.call_with_key(RESTORE_ORDER_ROUTE, &input, &ctx, key).await
+    }
     /// `POST /m/create_user`
     pub async fn create_user(&self, input: CreateUserInput, ctx: ()) -> Result<UserRow, ClientError> {
         self.transport.call(CREATE_USER_ROUTE, &input, &ctx).await
+    }
+    /// `POST /m/create_user` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn create_user_with_key(
+        &self,
+        input: CreateUserInput,
+        ctx: (),
+        key: &str,
+    ) -> Result<UserRow, ClientError> {
+        self.transport.call_with_key(CREATE_USER_ROUTE, &input, &ctx, key).await
     }
 }
 
@@ -444,6 +510,39 @@ impl Transport for Embedded<'_> {
             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
             .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx).await;
+        if resp.status == 200 {
+            serde_json::from_value(resp.body).map_err(ClientError::decode)
+        } else {
+            // Preserve the server's structured error: its status + stable code + message.
+            let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            Err(ClientError::api(resp.status, code, message))
+        }
+    }
+
+    /// The keyed door in-process: the same idempotent-replay contract the HTTP
+    /// `Idempotency-Key` header gets, via `Engine::call_with_key` — no header dance.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned,
+    {
+        let args = serde_json::to_value(input).map_err(ClientError::decode)?;
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map_err(ClientError::decode)?;
+        let resp = self
+            .engine
+            .call_with_key(route, args, ctx, Some(key.to_string()))
+            .await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {

@@ -13,7 +13,7 @@ use based_parser::parse_file;
 use based_sema::check;
 use serde_json::json;
 
-use based_runtime::{dispatch, Compiled, MemStore, MockDb, NoStore, Row, SeqIdGen};
+use based_runtime::{dispatch, Compiled, Guards, MemStore, MockDb, NoStore, Row, SeqIdGen};
 
 fn compile(src: &str) -> Compiled {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
@@ -65,6 +65,7 @@ async fn query_route_returns_shaped_response() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/order_by_id",
         json!({ "id": "o-1" }),
@@ -96,6 +97,7 @@ async fn list_route_returns_array() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/orders_in_org",
         json!({ "org": "org-1" }),
@@ -122,6 +124,7 @@ async fn mutation_route_returns_the_created_rows_declared_shape() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -154,6 +157,7 @@ async fn ctx_supplied_out_of_band_and_required() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/my_org_orders",
         json!({}),
@@ -175,6 +179,7 @@ async fn ctx_supplied_out_of_band_and_required() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/my_org_orders",
         json!({}),
@@ -199,6 +204,7 @@ async fn arg_validation_maps_to_400() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/order_by_id",
         json!({}),
@@ -215,6 +221,7 @@ async fn arg_validation_maps_to_400() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": "not-an-int" }),
@@ -242,6 +249,7 @@ async fn unknown_and_mismatched_routes_404() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/nope",
         json!({}),
@@ -259,6 +267,7 @@ async fn unknown_and_mismatched_routes_404() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/place_order",
         json!({}),
@@ -284,6 +293,7 @@ async fn db_fault_maps_to_503() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/order_by_id",
         json!({ "id": "o-1" }),
@@ -310,6 +320,7 @@ async fn bad_route_and_method() {
             "",
             &mut ids,
             &NoStore,
+            &Guards::new(),
             "POST",
             path,
             json!({}),
@@ -327,6 +338,7 @@ async fn bad_route_and_method() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "GET",
         "/q/order_by_id",
         json!({}),
@@ -355,6 +367,7 @@ async fn idempotency_key_dedupes_a_mutation_retry() {
         "",
         &mut ids1,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -376,6 +389,7 @@ async fn idempotency_key_dedupes_a_mutation_retry() {
         "",
         &mut ids2,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -406,6 +420,7 @@ async fn failed_keyed_mutation_is_retryable() {
         "",
         &mut ids1,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -424,6 +439,7 @@ async fn failed_keyed_mutation_is_retryable() {
         "",
         &mut ids2,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -451,6 +467,7 @@ async fn bad_request_does_not_consume_the_key() {
         "",
         &mut ids1,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": "nope" }),
@@ -469,6 +486,7 @@ async fn bad_request_does_not_consume_the_key() {
         "",
         &mut ids2,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -498,6 +516,7 @@ async fn reused_key_with_different_args_is_a_422() {
         "",
         &mut ids1,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -516,6 +535,7 @@ async fn reused_key_with_different_args_is_a_422() {
         "",
         &mut ids2,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 999 }),
@@ -544,6 +564,7 @@ async fn reused_key_with_different_args_is_a_422() {
         "",
         &mut ids3,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "org": "o-1", "status": "open", "total": 7 }),
@@ -556,5 +577,185 @@ async fn reused_key_with_different_args_is_a_422() {
     assert!(
         db3.calls().is_empty(),
         "the genuine retry replays, runs no SQL"
+    );
+}
+
+// ---------- guards (auth.md Handle 3) ---------------------------------------
+
+const GUARDED_SCHEMA: &str = r#"
+    Order { status: text, total: int }
+    shape OrderCard from Order { status, total }
+    mutation close_order(id) -> OrderCard guard caller_can_close {
+        update Order where (id = $id) { status = "closed" };
+    }
+"#;
+
+/// The declared guard runs before the write body and receives the callable's name,
+/// its args, and the server-derived `$ctx`; an allow lets the mutation proceed.
+#[tokio::test]
+async fn declared_guard_runs_and_allows() {
+    use based_runtime::GuardVerdict;
+    use std::sync::{Arc, Mutex};
+
+    let c = compile(GUARDED_SCHEMA);
+    let db = MockDb::new(vec![vec![row(json!({ "status": "closed", "total": 9 }))]]);
+    let seen: Arc<Mutex<Option<based_runtime::GuardRequest>>> = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&seen);
+    let guards = Guards::new().register("caller_can_close", move |req| {
+        *observed.lock().unwrap() = Some(req);
+        async { GuardVerdict::Allow }
+    });
+    let mut ids = SeqIdGen::default();
+
+    let resp = dispatch(
+        &c,
+        &db,
+        "",
+        &mut ids,
+        &NoStore,
+        &guards,
+        "POST",
+        "/m/close_order",
+        json!({ "id": "o-1" }),
+        json!({ "role": "agent" }),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
+
+    let req = seen.lock().unwrap().clone().expect("the guard ran");
+    assert_eq!(req.callable, "close_order");
+    assert_eq!(req.args, json!({ "id": "o-1" }));
+    assert_eq!(req.ctx, json!({ "role": "agent" }));
+}
+
+/// A denial is a `403` with the stable code and the guard's reason, and the write
+/// never runs — no SQL, no transaction.
+#[tokio::test]
+async fn guard_denial_is_403_and_runs_no_sql() {
+    use based_runtime::GuardVerdict;
+
+    let c = compile(GUARDED_SCHEMA);
+    let db = MockDb::new(vec![]);
+    let guards = Guards::new().register("caller_can_close", |_req| async {
+        GuardVerdict::deny("only agents may close orders")
+    });
+    let mut ids = SeqIdGen::default();
+
+    let resp = dispatch(
+        &c,
+        &db,
+        "",
+        &mut ids,
+        &NoStore,
+        &guards,
+        "POST",
+        "/m/close_order",
+        json!({ "id": "o-1" }),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, 403);
+    assert_eq!(resp.body["error"]["code"], "guard_denied");
+    assert_eq!(
+        resp.body["error"]["message"],
+        "only agents may close orders"
+    );
+    assert!(db.calls().is_empty(), "a denied mutation runs no SQL");
+    assert!(
+        db.tx_log().is_empty(),
+        "a denied mutation opens no transaction"
+    );
+}
+
+/// The request-time backstop for a raw dispatch with an unregistered declared guard:
+/// a loud `500`, never a silent pass. (Engine build / listener startup refuse the
+/// pairing before any request exists.)
+#[tokio::test]
+async fn unregistered_declared_guard_is_a_loud_500() {
+    let c = compile(GUARDED_SCHEMA);
+    let db = MockDb::new(vec![]);
+    let mut ids = SeqIdGen::default();
+
+    let resp = dispatch(
+        &c,
+        &db,
+        "",
+        &mut ids,
+        &NoStore,
+        &Guards::new(),
+        "POST",
+        "/m/close_order",
+        json!({ "id": "o-1" }),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, 500);
+    assert_eq!(resp.body["error"]["code"], "guard_unregistered");
+    assert!(resp.body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("caller_can_close"));
+    assert!(
+        db.calls().is_empty(),
+        "an unenforceable mutation runs no SQL"
+    );
+}
+
+/// A denied keyed mutation never claims its idempotency key: once the caller is
+/// allowed, the same key runs fresh instead of hitting a stranded claim or a replay.
+#[tokio::test]
+async fn guard_denial_never_claims_the_idempotency_key() {
+    use based_runtime::GuardVerdict;
+
+    let c = compile(GUARDED_SCHEMA);
+    let store = MemStore::default();
+    let mut ids = SeqIdGen::default();
+
+    let deny = Guards::new().register("caller_can_close", |_req| async {
+        GuardVerdict::deny("not yet")
+    });
+    let denied = dispatch(
+        &c,
+        &MockDb::new(vec![]),
+        "",
+        &mut ids,
+        &store,
+        &deny,
+        "POST",
+        "/m/close_order",
+        json!({ "id": "o-1" }),
+        json!({}),
+        Some("key-guarded".to_string()),
+    )
+    .await;
+    assert_eq!(denied.status, 403);
+
+    // The same key, now allowed: a fresh run (200 from the database), not a conflict
+    // and not a replay of anything.
+    let db = MockDb::new(vec![vec![row(json!({ "status": "closed", "total": 9 }))]]);
+    let allow = Guards::new().register("caller_can_close", |_req| async { GuardVerdict::Allow });
+    let allowed = dispatch(
+        &c,
+        &db,
+        "",
+        &mut ids,
+        &store,
+        &allow,
+        "POST",
+        "/m/close_order",
+        json!({ "id": "o-1" }),
+        json!({}),
+        Some("key-guarded".to_string()),
+    )
+    .await;
+    assert_eq!(allowed.status, 200, "{:?}", allowed.body);
+    assert_eq!(
+        db.tx_log(),
+        vec!["begin", "commit"],
+        "the allowed run is fresh"
     );
 }

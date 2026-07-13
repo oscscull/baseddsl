@@ -129,6 +129,14 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
         schemas.insert(input_name(c.name), input_schema(schema, c));
     }
 
+    // `$ctx` rides a header, not the body: model it as a reusable header parameter
+    // every operation references; mutations also reference the idempotency-key header.
+    let mut parameters = Map::new();
+    parameters.insert("BasedContext".to_string(), context_header_param());
+    if callables.iter().any(|c| c.is_mutation) {
+        parameters.insert("IdempotencyKey".to_string(), idempotency_key_header_param());
+    }
+
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -140,9 +148,7 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
         },
         "paths": Value::Object(paths),
         "components": {
-            // `$ctx` rides a header, not the body: model it as a reusable
-            // header parameter every operation references.
-            "parameters": { "BasedContext": context_header_param() },
+            "parameters": Value::Object(parameters),
             "schemas": Value::Object(schemas),
         }
     })
@@ -184,11 +190,50 @@ fn path_item(schema: &CheckedSchema, c: &Callable) -> Value {
             "content": { "application/json": { "schema": c.response.clone() } }
         })
     };
+    let mut parameters = vec![json!({ "$ref": "#/components/parameters/BasedContext" })];
+    let mut responses = Map::new();
+    responses.insert("200".to_string(), ok);
+    responses.insert(
+        "400".to_string(),
+        error_response("Invalid request (bad argument, missing `$ctx`)."),
+    );
+    responses.insert("404".to_string(), error_response("No such query/mutation."));
+    responses.insert(
+        "503".to_string(),
+        error_response("Retryable database error."),
+    );
+    if c.is_mutation {
+        // Mutations may carry the idempotency key; the 409/422 outcomes exist only
+        // for a keyed write.
+        parameters.push(json!({ "$ref": "#/components/parameters/IdempotencyKey" }));
+        responses.insert(
+            "409".to_string(),
+            error_response(
+                "A request with this idempotency key is still in flight; retry once it settles.",
+            ),
+        );
+        responses.insert(
+            "422".to_string(),
+            error_response("This idempotency key was already used for a different request."),
+        );
+        // A guarded mutation can be denied by its host guard before the write runs.
+        if let Some(g) = schema
+            .mutations
+            .iter()
+            .find(|m| m.name == c.name)
+            .and_then(|m| m.guard.as_deref())
+        {
+            responses.insert(
+                "403".to_string(),
+                error_response(&format!("Denied by guard `{g}`.")),
+            );
+        }
+    }
     json!({
         "post": {
             "operationId": c.name,
             "summary": format!("{kind} `{}`", c.name),
-            "parameters": [ { "$ref": "#/components/parameters/BasedContext" } ],
+            "parameters": Value::Array(parameters),
             "requestBody": {
                 "required": true,
                 "content": {
@@ -197,12 +242,7 @@ fn path_item(schema: &CheckedSchema, c: &Callable) -> Value {
                     }
                 }
             },
-            "responses": {
-                "200": ok,
-                "400": error_response("Invalid request (bad argument, missing `$ctx`)."),
-                "404": error_response("No such query/mutation."),
-                "503": error_response("Retryable database error."),
-            },
+            "responses": Value::Object(responses),
             // The `$ctx` fields this callable requires surfaced as a vendor
             // extension — descriptive, not enforced by the wire.
             "x-ctx-requires": Value::Array(ctx.clone()),
@@ -888,6 +928,20 @@ fn context_header_param() -> Value {
         "description": "Pre-authenticated request context (`$ctx`) as a JSON object, \
                         set by an upstream auth proxy. Carries the \
                         `$ctx.<field>` values a callable requires (see `x-ctx-requires`).",
+        "schema": { "type": "string" }
+    })
+}
+
+/// The reusable mutation idempotency-key header parameter (`Idempotency-Key`): a
+/// client-minted opaque key making a retried write run at most once.
+fn idempotency_key_header_param() -> Value {
+    json!({
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Optional mutation idempotency key: a retry with the same key \
+                        replays the first attempt's response instead of running the \
+                        write again. Queries ignore it.",
         "schema": { "type": "string" }
     })
 }

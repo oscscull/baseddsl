@@ -19,6 +19,7 @@
 //! - Success → `200` + the shaped response (`run_query`/`run_mutation`'s JSON). A
 //!   boundary failure ([`PlanError`]) → a `4xx`/`5xx` with `{ "error": { code, message } }`.
 
+use crate::guard::{GuardRequest, GuardVerdict, Guards};
 use crate::id::IdGen;
 use crate::idempotency::IdempotencyStore;
 use crate::load::Compiled;
@@ -57,13 +58,17 @@ impl WireResponse {
 /// body); `shard_key` routes the checkout ([`resolve_shard_key`] derives it);
 /// `idem_key` is the out-of-band mutation idempotency key (the `Idempotency-Key`
 /// header, `None` when absent, ignored by queries) and `store` is the dedupe store it
-/// consults. Connections are checked out here, per call — a query borrows one for its
-/// reads, a mutation opens one fresh transaction per attempt. Every failure is a
-/// `WireResponse`, so the listener never has to branch on error kinds — it writes
-/// `status` + `body` verbatim.
+/// consults. `guards` holds the registered host guard implementations (auth.md Handle
+/// 3): a mutation that declares one is checked here — before its write body, before
+/// the idempotency store, before argument validation — on every door, so the two
+/// doors can never enforce differently. Connections are checked out here, per call —
+/// a query borrows one for its reads, a mutation opens one fresh transaction per
+/// attempt. Every failure is a `WireResponse`, so the listener never has to branch on
+/// error kinds — it writes `status` + `body` verbatim.
 ///
 /// A caller that wants no idempotency passes a [`crate::idempotency::NoStore`] and a
-/// `None` key — one dispatch path, not a with/without-store fork.
+/// `None` key; a schema with no guards passes an empty [`Guards`] — one dispatch
+/// path, never a with/without fork.
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     compiled: &Compiled,
@@ -71,6 +76,7 @@ pub async fn dispatch(
     shard_key: &str,
     id_gen: &mut dyn IdGen,
     store: &dyn IdempotencyStore,
+    guards: &Guards,
     method: &str,
     path: &str,
     args: serde_json::Value,
@@ -93,6 +99,12 @@ pub async fn dispatch(
             Ok(mut db) => run_query(compiled, &mut *db, &Request::new(name, args, ctx)).await,
         },
         Kind::Mutation => {
+            // A declared guard runs first — before the write, before the idempotency
+            // store (a denied request never claims a key), before argument validation
+            // (a denied caller learns nothing about the request's validity).
+            if let Some(resp) = check_guard(compiled, guards, name, &args, &ctx).await {
+                return resp;
+            }
             let req = Request::new(name, args, ctx).with_idempotency_key(idem_key);
             run_mutation(compiled, backend, shard_key, id_gen, store, &req).await
         }
@@ -162,6 +174,40 @@ pub async fn dispatch_stream(
         Err(e) => return Err(WireResponse::error(503, e.code(), e.message)),
     };
     run_query_stream(compiled, db, &Request::new(name, args, ctx)).map_err(plan_error_response)
+}
+
+/// Run the guard a mutation declares, if any: `None` means proceed (no guard, or the
+/// guard allowed). A denial is a `403` with the stable code `guard_denied` and the
+/// guard's reason. A declared-but-unregistered guard is a `500` — the request-time
+/// backstop for a raw dispatch; engine build / listener startup refuse that pairing
+/// up front, so a declared check can never silently not run.
+async fn check_guard(
+    compiled: &Compiled,
+    guards: &Guards,
+    name: &str,
+    args: &serde_json::Value,
+    ctx: &serde_json::Value,
+) -> Option<WireResponse> {
+    let guard_name = compiled.guard_of(name)?;
+    let Some(guard) = guards.get(guard_name) else {
+        return Some(WireResponse::error(
+            500,
+            "guard_unregistered",
+            format!(
+                "mutation `{name}` declares guard `{guard_name}`, but no guard with that name is registered"
+            ),
+        ));
+    };
+    match guard(GuardRequest {
+        callable: name.to_string(),
+        args: args.clone(),
+        ctx: ctx.clone(),
+    })
+    .await
+    {
+        GuardVerdict::Allow => None,
+        GuardVerdict::Deny { message } => Some(WireResponse::error(403, "guard_denied", message)),
+    }
 }
 
 /// The cheap pre-check the listener runs *before* borrowing a database connection:

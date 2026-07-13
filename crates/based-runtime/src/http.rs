@@ -50,6 +50,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
+use crate::guard::Guards;
 use crate::id::UuidGen;
 use crate::idempotency::MemStore;
 use crate::load::Compiled;
@@ -168,6 +169,10 @@ struct Shared {
     /// Set once when a graceful shutdown is requested (SIGTERM/SIGINT). `/readyz` reads
     /// it to fail readiness first (drain).
     draining: Arc<AtomicBool>,
+    /// Always empty: guards are host functions, and the standalone listener has no host
+    /// code to register — startup refuses a guarded schema. Held so dispatch takes the
+    /// one registry shape on every door.
+    guards: Guards,
 }
 
 /// A control handle for a running listener, returned via [`serve_with_handle`]'s
@@ -299,6 +304,15 @@ pub async fn serve_with_handle(
     config: ServeConfig,
     on_start: impl FnOnce(Handle),
 ) -> Result<(), ServeError> {
+    // A guard is a host function only an embedding app can register; this listener has
+    // no host code, so a guarded schema must not come up here — refusing at startup is
+    // what keeps a declared check from silently not running.
+    if let Some((m, g)) = compiled.declared_guards().next() {
+        return Err(ServeError(format!(
+            "mutation `{m}` declares guard `{g}` — guards are host functions this listener \
+             cannot register; embed the engine (Engine::with_guards) instead"
+        )));
+    }
     let draining = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Shared {
         compiled,
@@ -306,6 +320,7 @@ pub async fn serve_with_handle(
         ctx_source: Box::new(ctx_source),
         idempotency: MemStore::new(),
         draining: Arc::clone(&draining),
+        guards: Guards::new(),
     });
 
     let app = Router::new()
@@ -388,6 +403,7 @@ async fn handle(
             &d.shard_key,
             &mut id_gen,
             &shared.idempotency,
+            &shared.guards,
             method.as_str(),
             uri.path(),
             d.args,

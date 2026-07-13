@@ -663,3 +663,58 @@ fn decimal_field_emits_rust_decimal_and_float_emits_f64() {
     assert!(out.contains("pub price: rust_decimal::Decimal,"), "\n{out}");
     assert!(out.contains("pub score: f64,"), "\n{out}");
 }
+
+// ---------- idempotency keys -------------------------------------------------
+
+const KEYED_SRC: &str = r#"
+    Order { status: text, total: int }
+    shape OrderCard from Order { status, total }
+    query order_by_id(id) -> OrderCard;
+    mutation place_order(status, total: int) -> OrderCard {
+        create Order { status = $status, total = $total };
+    }
+"#;
+
+#[test]
+fn mutation_gets_a_keyed_twin_through_the_keyed_call() {
+    let out = gen(KEYED_SRC);
+    // The transport's keyed door, and the mutation's `_with_key` twin riding it.
+    assert!(out.contains("async fn call_with_key<I, C, O>"), "\n{out}");
+    assert!(
+        out.contains("pub async fn place_order_with_key("),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("self.transport.call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key)"),
+        "\n{out}"
+    );
+    // The plain method is unchanged, and a query gets no keyed twin.
+    assert!(
+        out.contains("pub async fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError>"),
+        "\n{out}"
+    );
+    assert!(!out.contains("order_by_id_with_key"), "\n{out}");
+}
+
+#[test]
+fn schema_without_mutations_emits_no_keyed_surface() {
+    // No mutation → no key to carry: the module is exactly the pre-key output.
+    let out = gen(r#"
+        Order { status: text }
+        shape OrderCard from Order { status }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(!out.contains("call_with_key"), "\n{out}");
+    assert!(!out.contains("_with_key"), "\n{out}");
+}
+
+#[test]
+fn embedded_bridge_keys_through_engine_call_with_key() {
+    // With the embedded option on, the bridge implements the keyed door over
+    // `Engine::call_with_key` — the in-process twin of the `Idempotency-Key` header.
+    let out = gen_opts(KEYED_SRC, ClientOptions { embedded: true });
+    assert!(
+        out.contains(".call_with_key(route, args, ctx, Some(key.to_string()))"),
+        "\n{out}"
+    );
+}

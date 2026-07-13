@@ -498,12 +498,18 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     (field `@sort` already parsed + sema-checked; `RMember` now carries it into lowering).
     Proven by per-dialect codegen assertions + live out-of-order seeds coming back sorted on
     SQLite (normal gate), MariaDB, and Postgres (both tiers in one response each).
-  - **N3b (prereq). Two seams.** (i) `guard` (Handle 3) parses but nothing invokes it — engine
-    gains a registered-guard registry (host async fn over ctx+args; deny → 403; declared-but-
-    unregistered fails loudly at engine build), invoked by dispatch on both doors. (ii) The typed
-    client can't pass an idempotency key (`Engine::call_with_key` exists; `Transport::call` and the
-    generated mutation methods don't carry one) — thread an optional key through the generated
-    surface + both transports.
+  - ✅ **N3b (prereq). Two seams (D88).** (i) `guard` runs: `Guards::new().register(name, async fn)`
+    → `Engine::with_guards` (build fails naming any unregistered declared guard; `Engine::new`
+    panics on a guarded schema; `based serve` refuses one); `dispatch` — the one core both doors
+    run through — invokes the guard before the write/idempotency-claim/arg-validation; deny →
+    `403 guard_denied` with the guard's mandatory reason. Proven mock + live SQLite (a guard that
+    reads the DB itself: close allowed once, denied after its own write). (ii) Every generated
+    mutation method gains a `<name>_with_key(input, ctx, key)` twin over a new required
+    `Transport::call_with_key` — `Idempotency-Key` header on HTTP, `Engine::call_with_key`
+    embedded — emitted only when the schema declares a mutation (query-only modules byte-identical).
+    Replay proven through the typed client over a real socket + in-process (one tx, identical
+    bodies). OpenAPI documents the key header, 409/422, and the guard 403. Committed generated
+    clients regenerated (gate-enforced).
   - **N3c. Schema + migrations + client.** The helpdesk `.bsl` (by-domain layout), `0001_init` +
     `0002` `@was` rename, checked-in `src/client.rs` (`--embedded`), seed step via the client's own
     mutations (D63 pattern; prints demo bearer tokens).

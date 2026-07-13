@@ -25,7 +25,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D49 (multi-scope DNF, impl + E0186), D50 (scope editor surface + snapshot serializer),
   D80 (`$ctx`-field rename; scope column left alone as a polymorphic contract name),
   D81 (`@scope` confines a nest-only scoped child: both shape walks recurse into `Nest`/`NestRef`,
-  E0185 at compile time + runtime enforcement kept; type optionality mirrors the schema only)
+  E0185 at compile time + runtime enforcement kept; type optionality mirrors the schema only),
+  D88 (Handle-3 `guard` runtime seam: registered host async fns, deny → 403 `guard_denied`,
+  unregistered fails at engine build / listener startup)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
@@ -54,7 +56,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D73 (typed `Cursor` newtype in the paginated surface: single opaque `#[serde(transparent)]` type,
   `from_raw` escape, no blanket `From<String>`), D79 (a `field -> Shape` nest emits the named shape's
   struct/schema instead of a per-parent anonymous type), D85 (a `-> stream` query's method returns a
-  typed row `Stream`; `Transport` gains a streaming call)
+  typed row `Stream`; `Transport` gains a streaming call), D88 (`<name>_with_key` mutation twins +
+  `Transport::call_with_key`: the `Idempotency-Key` header / `Engine::call_with_key`, emitted only
+  when the schema declares a mutation)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
@@ -68,7 +72,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   door), D25 (write-retry idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency
   key fingerprint), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
   pool-exhaustion→fast-503), D84 (async-native execution architecture: sqlx driver layer, typestate
-  tx, stream-first reads, enforced coloring boundary — Track N0 design)
+  tx, stream-first reads, enforced coloring boundary — Track N0 design), D88 (guard registry on
+  the engine; single dispatch enforcement point on both doors)
 - **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
 - **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
   scanner), D38 (Postgres driver + live suite), D61 (Postgres binary-format result decode: uuid/
@@ -3678,3 +3683,44 @@ Governed by sorting.md ("sort is a property of rows, not projection") + principl
 - **Deferred.** A per-nest sort override spelling (ordering one *use* of a traversal differently)
   — the helpdesk design needs only the two declaration tiers; adding a third, projection-side
   spelling would break "sort is a row property" for no shown need.
+
+## D88 — guard runtime seam + idempotency key on the typed client (Track N3b)
+
+Closes the two runtime seams D86 §6 flagged before the helpdesk example: `guard` (auth.md Handle
+3) parsed but nothing invoked it, and the typed client had no way to send the idempotency key the
+wire (D25) and `Engine::call_with_key` already accepted.
+
+**Guard seam.** `RMutation.guard` now carries the declared name out of sema. The runtime gains
+`guard::Guards` — a registry the embedding app builds (`Guards::new().register(name, async fn)`);
+a guard fn receives an owned `GuardRequest { callable, args, ctx }` and returns
+`GuardVerdict::Allow` or `GuardVerdict::deny(reason)` (a denial reason is mandatory — never
+silent). Enforcement is a **single point**: `dispatch` runs the declared guard on the mutation
+path before the write body, before the idempotency store (a denial never claims a key), and
+before argument validation (a denied caller learns nothing about the request's validity) — so the
+HTTP door and the in-process `Engine` door cannot diverge. Wire: deny → `403 guard_denied` with
+the guard's reason. Build-time contract: `Engine::with_guards` fails (`GuardSetupError`, naming
+every uncovered `(mutation, guard)` pair) when a declared guard is unregistered; `Engine::new`
+stays the guard-free convenience and panics on a guarded schema; `based serve` refuses to start on
+one (the standalone listener has no host code to register — a guarded schema embeds). The
+request-time backstop for a raw `dispatch` is a loud `500 guard_unregistered`. Guards are
+mutation-only (grammar); auth.md's Handle-3 example predated that and is fixed to a `mutation`.
+Streams can't carry guards (a guard gates a write; mutations can't stream, E0202), so D85's
+pre-body-status rule needs no guard case. Proven: dispatch unit tests (allow with observed
+args/ctx, deny 403 + no SQL, unregistered 500, denial-never-claims-key), Engine build tests, a
+listener-refusal test, and a live-SQLite guard that genuinely reads the database (allowed while
+the row is open, denied after its own write closes it).
+
+**Idempotency key on the typed client.** Every mutation method gains a keyed twin —
+`place_order_with_key(input, ctx, key: &str)` — mirroring `Engine::call`/`call_with_key`, so the
+common no-key call stays clean and the retry-safe call is one suffix (rather than an
+`Option<&str>` on every call or a builder the common case pays for). `Transport` gains
+`call_with_key` (required, no default — a transport must carry the key, never silently drop it):
+the HTTP path sends the standard `Idempotency-Key` header, the emitted embedded bridge calls
+`Engine::call_with_key`. Emitted **only when the schema declares a mutation** (the D85
+conditional-surface pattern), so a query-only schema's module is byte-identical. The committed
+generated clients (tests/support + the three quickstarts) were regenerated; the sqlite
+quickstart's copy had drifted from verbatim generator output (it had been rustfmt-ed) and is now
+verbatim again. OpenAPI now documents the wire it always had plus the new code: a reusable
+`Idempotency-Key` header parameter on mutations, `409`/`422` keyed outcomes, and a `403` denial on
+guarded mutations. Proven: real-HTTP replay through the generated client (header → one
+transaction, identical bodies), the embedded twin, and codegen emission tests both ways.

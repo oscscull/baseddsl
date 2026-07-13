@@ -542,3 +542,34 @@ fn graceful_shutdown_drains_and_returns() {
         .join()
         .expect("serve thread should return after drain");
 }
+
+/// A guard is a host function this standalone listener cannot register, so a guarded
+/// schema is refused at startup — the loud build-time failure, never a request-time
+/// silent pass. (A guarded schema embeds the engine via `Engine::with_guards`.)
+#[tokio::test]
+async fn listener_refuses_a_guarded_schema_at_startup() {
+    const GUARDED: &str = r#"
+        Order { status: text, total: int }
+        shape OrderCard from Order { status, total }
+        mutation close_order(id) -> OrderCard guard caller_can_close {
+            update Order where (id = $id) { status = "closed" };
+        }
+    "#;
+    let sf = parse_file(GUARDED, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb);
+
+    let err = based_runtime::http::serve(
+        compiled,
+        MockBackend::new(vec![]),
+        TrustedHeaderContext::default(),
+        ServeConfig {
+            listen: "127.0.0.1:0".to_string(),
+        },
+    )
+    .await
+    .err()
+    .expect("a guarded schema must not come up on the listener");
+    assert!(err.to_string().contains("caller_can_close"), "{err}");
+    assert!(err.to_string().contains("Engine::with_guards"), "{err}");
+}

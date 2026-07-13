@@ -68,7 +68,7 @@ impl Backend for MockBackend {
 
 /// Start the axum listener on a free loopback port (in this test's runtime) and
 /// return its `host:port`. The server task lives until the test process exits.
-async fn start(backend: MockBackend) -> String {
+async fn start(backend: impl Backend + 'static) -> String {
     let addr = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -156,6 +156,35 @@ impl client::Transport for Http {
         }
     }
 
+    /// The keyed door over HTTP: the idempotency key rides the standard
+    /// `Idempotency-Key` header, out of band — the body is byte-identical to `call`'s.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, client::ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned,
+    {
+        let resp = self
+            .post(route, input, ctx)?
+            .header("Idempotency-Key", key)
+            .send()
+            .await
+            .map_err(client::ClientError::transport)?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.map_err(client::ClientError::transport)?;
+        if status == 200 {
+            serde_json::from_value(body).map_err(client::ClientError::decode)
+        } else {
+            Err(api_error(status, &body))
+        }
+    }
+
     async fn call_stream<I, C, O>(
         &self,
         route: &str,
@@ -197,6 +226,39 @@ fn export_input() -> client::ExportOrdersInput {
 }
 
 // ---------- the gates, over the real socket ---------------------------------
+
+/// The typed keyed door end-to-end over real HTTP: `place_order_with_key` sends the
+/// `Idempotency-Key` header, so a retry with the same key replays the first attempt's
+/// recorded response — two identical typed results, exactly one transaction.
+#[tokio::test]
+async fn keyed_mutation_rides_the_header_and_replays_over_real_http() {
+    // `MockDb` is itself a `Backend` whose checkouts share one state, so the test can
+    // keep a handle and count the transactions the server actually ran.
+    let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
+    let addr = start(db.clone()).await;
+    let api = http_client(&addr);
+    let input = || client::PlaceOrderInput {
+        org: client::Id::from_raw("org-1"),
+        status: "open".into(),
+        total: 7,
+    };
+
+    let first = api
+        .place_order_with_key(input(), (), "key-http-1")
+        .await
+        .expect("the first keyed write runs");
+    let second = api
+        .place_order_with_key(input(), (), "key-http-1")
+        .await
+        .expect("the retry replays");
+    assert_eq!(first.status, second.status);
+    assert_eq!(first.total, second.total);
+    assert_eq!(
+        db.tx_log(),
+        vec!["begin", "commit"],
+        "the retry must never open a second transaction"
+    );
+}
 
 /// Happy path: typed rows in order off the NDJSON body, the terminal `done` consumed
 /// (the stream simply ends Ok), nothing buffered into a Vec by the client machinery.

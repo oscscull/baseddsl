@@ -491,6 +491,10 @@ pub struct RMutation {
     pub name: String,
     pub span: Span,
     pub ret_model: String,
+    /// The `guard <name>` host hook (auth.md Handle 3), or `None`. The name is a
+    /// host-language function's — nothing in the schema defines it; the runtime
+    /// invokes the registered fn before the write body and enforces its verdict.
+    pub guard: Option<String>,
     /// The return shape, or `None` when the return type is a bare model — the twin of
     /// [`RQuery::ret_shape`]. Codegen projects it when re-selecting the written row's
     /// declared shape after the write .

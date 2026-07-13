@@ -37,6 +37,23 @@ A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque curs
 
 The cursor is a typed `Cursor` on the client surface — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
 
+## Idempotency keys
+A mutation retried after a timeout risks running its write twice; an **idempotency key**
+makes the engine run the body at most once per key and replay the first attempt's
+recorded response (runtime semantics: same key + same payload → the recorded response;
+same key + different payload → `422 idempotency_key_reuse`; a concurrent duplicate →
+`409 idempotency_conflict`).
+
+On the typed surface every mutation method has a keyed twin — `place_order(input, ctx)`
+and `place_order_with_key(input, ctx, key)` — so the common no-key call stays clean and
+the retry-safe call is one suffix. The key is **out-of-band request metadata, never an
+input field**: an HTTP transport sends it as the standard `Idempotency-Key` header
+(`Transport::call_with_key` carries it), and the embedded bridge hands it to
+`Engine::call_with_key`. Both transports share the runtime's one dedupe path, so the
+replay contract is identical in-process and over the wire. Like the streaming surface,
+the keyed surface is emitted only when the schema declares a mutation — a query-only
+schema's module is byte-identical to before.
+
 ## Streaming envelope
 A `-> stream` query keeps its one route but answers with an NDJSON body, and its client
 method returns a `Stream` of typed rows instead of a `Vec` (the `Transport` trait carries a
@@ -63,4 +80,4 @@ Every client method returns `Result<Output, ClientError>`. `ClientError` is a re
 - `code()` → a stable machine string: the server's `error.code` for an api failure (e.g. `bad_arg`, `missing_ctx`, `database_error`), else `"transport"` / `"decode"`.
 - `status()` → the HTTP status of an api failure (`None` for transport/decode).
 
-The wire error envelope is `{ error: { code, message } }`; the embedded bridge and any HTTP transport rebuild a `ClientError` from it, preserving the server's status + stable code + message rather than flattening to an opaque string. The codes are those the runtime emits — `PlanError::code()` (boundary: `unknown_query`, `missing_arg`, `bad_arg`, `missing_ctx`, `bad_ctx`, `bad_cursor`, `internal`) and `DbError::code()` (operational: `database_error`, `deadlock`, `pool_exhausted`) — a single source of truth shared by the wire and any in-process consumer.
+The wire error envelope is `{ error: { code, message } }`; the embedded bridge and any HTTP transport rebuild a `ClientError` from it, preserving the server's status + stable code + message rather than flattening to an opaque string. The codes are those the runtime emits — `PlanError::code()` (boundary: `unknown_query`, `missing_arg`, `bad_arg`, `missing_ctx`, `bad_ctx`, `bad_cursor`, `internal`), `DbError::code()` (operational: `database_error`, `deadlock`, `pool_exhausted`), the keyed-mutation outcomes (`idempotency_conflict` 409, `idempotency_key_reuse` 422), and `guard_denied` (403 — a Handle-3 guard rejected the call, auth.md) — a single source of truth shared by the wire and any in-process consumer.

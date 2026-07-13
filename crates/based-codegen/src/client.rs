@@ -4,7 +4,9 @@
 //! plus a `Client` method that posts the input and decodes the output. A `-> stream`
 //! query's method returns a `RowStream<Shape>` (per-item `Result`, drop = cancel)
 //! through the transport's streaming call; the NDJSON decoder is emitted with the
-//! module so every HTTP transport shares one framing implementation.
+//! module so every HTTP transport shares one framing implementation. A mutation
+//! additionally gets a `<name>_with_key` twin carrying a mutation idempotency key
+//! through the transport's keyed call (HTTP: the `Idempotency-Key` header).
 //!
 //! Transport is abstract: `Client<T>` is generic over a `Transport` trait (post JSON to
 //! a route, decode JSON back), which the runtime crate implements. Entity ids map to a
@@ -86,6 +88,9 @@ struct Callable<'a> {
     /// a `-> stream` query: the method calls the transport's streaming door and
     /// returns a `RowStream` instead of a collected value.
     stream: bool,
+    /// a mutation: it additionally gets a `<name>_with_key` method carrying a
+    /// mutation idempotency key through the transport's keyed door.
+    is_mutation: bool,
     /// the output *struct* to emit (name + fields), deduped across callables.
     out_struct: OutStruct,
     /// the `$ctx.<field>`s this callable requires, inferred per callable.
@@ -131,20 +136,26 @@ mod rust {
     pub(super) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions) -> String {
         let callables = collect(schema, decls);
         // The streaming surface (`RowStream`, `decode_ndjson`, `Transport::call_stream`)
-        // is emitted only when a `-> stream` query exists — a schema without one keeps
-        // the module (and the consumer's dependency set) exactly as before.
+        // is emitted only when a `-> stream` query exists, and the idempotency-key
+        // surface (`Transport::call_with_key`, the `_with_key` methods) only when a
+        // mutation exists — a schema that can't use a surface doesn't carry it, so its
+        // module (and the consumer's dependency set) stays exactly as before.
         let has_stream = callables.iter().any(|c| c.stream);
+        let has_mutation = callables.iter().any(|c| c.is_mutation);
 
         let mut out = String::new();
         out.push_str(PREAMBLE);
         if has_stream {
             out.push_str(STREAMING);
         }
-        out.push_str(if has_stream {
-            TRANSPORT_AND_CLIENT_STREAMING
-        } else {
-            TRANSPORT_AND_CLIENT
-        });
+        out.push_str(TRANSPORT_HEAD);
+        if has_mutation {
+            out.push_str(TRANSPORT_CALL_WITH_KEY);
+        }
+        if has_stream {
+            out.push_str(TRANSPORT_CALL_STREAM);
+        }
+        out.push_str(TRANSPORT_TAIL);
 
         // Entity markers — one phantom tag per model, so `Id<entity::User>` and
         // `Id<entity::Org>` are distinct types (the tags are types only, never values).
@@ -209,6 +220,9 @@ mod rust {
         // also implements the streaming door over `Engine::call_stream`.
         if opts.embedded {
             out.push_str(EMBEDDED_HEAD);
+            if has_mutation {
+                out.push_str(EMBEDDED_KEYED_CALL);
+            }
             if has_stream {
                 out.push_str(EMBEDDED_STREAM_CALL);
             }
@@ -249,6 +263,7 @@ mod rust {
                         root,
                         output: query_output(rq, &os.name),
                         stream: rq.stream,
+                        is_mutation: false,
                         out_struct: os,
                         ctx_requires: &rq.ctx_requires,
                         page: page_input(q),
@@ -280,6 +295,7 @@ mod rust {
                         root,
                         output,
                         stream: false,
+                        is_mutation: true,
                         out_struct: os,
                         ctx_requires: &rm.ctx_requires,
                         page: PageInput::None,
@@ -969,7 +985,7 @@ mod rust {
                 konst = route_const(c.name),
             );
         }
-        format!(
+        let mut s = format!(
             "    /// `POST {route}`\n    pub async fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input, &ctx).await\n    }}\n",
             route = c.route,
             name = field_ident(c.name),
@@ -977,7 +993,20 @@ mod rust {
             ctx_ty = ctx_ty,
             output = c.output,
             konst = route_const(c.name),
-        )
+        );
+        if c.is_mutation {
+            s.push_str(&format!(
+                "    /// `POST {route}` carrying `key` as the mutation **idempotency key**: a retry\n    /// with the same key replays the first attempt's response instead of writing again.\n    pub async fn {name}_with_key(\n        &self,\n        input: {input},\n        ctx: {ctx_ty},\n        key: &str,\n    ) -> Result<{output}, ClientError> {{\n        self.transport.call_with_key({konst}, &input, &ctx, key).await\n    }}\n",
+                route = c.route,
+                // The suffix keeps the name clear of Rust keywords, so no raw-ident escape.
+                name = c.name,
+                input = input_name(c.name),
+                ctx_ty = ctx_ty,
+                output = c.output,
+                konst = route_const(c.name),
+            ));
+        }
+        s
     }
 
     /// The context fields for a callable: one per required `$ctx.<field>`, typed by
@@ -1299,10 +1328,11 @@ impl std::error::Error for ClientError {
 }
 "#;
 
-    /// The abstract transport + client for a schema with no `-> stream` query.
-    /// Appended right after [`PREAMBLE`], so the two concatenate into the exact module
-    /// head earlier versions emitted (a non-streaming schema's output is unchanged).
-    const TRANSPORT_AND_CLIENT: &str = r#"
+    /// The abstract transport's head: doc, trait open, and the one `call` every schema
+    /// gets. The optional doors ([`TRANSPORT_CALL_WITH_KEY`], [`TRANSPORT_CALL_STREAM`])
+    /// splice in before [`TRANSPORT_TAIL`], so a schema without them emits the exact
+    /// module head earlier versions did.
+    const TRANSPORT_HEAD: &str = r#"
 /// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
 /// of band as request context), and decode the typed output. A callable with no `$ctx`
 /// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
@@ -1315,30 +1345,31 @@ pub trait Transport {
         I: Serialize + Sync,
         C: Serialize + Sync,
         O: serde::de::DeserializeOwned;
-}
-
-/// The generated client, generic over a `Transport`.
-pub struct Client<T> {
-    pub transport: T,
-}
 "#;
 
-    /// The abstract transport + client for a schema **with** a `-> stream` query: the
-    /// same `call`, plus the streaming door every stream method goes through.
-    const TRANSPORT_AND_CLIENT_STREAMING: &str = r#"
-/// Post a typed input to a route, carry the typed request context (`$ctx`, carried out
-/// of band as request context), and decode the typed output. A callable with no `$ctx`
-/// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
-/// client's socket, or the in-process engine's execution). Codegen only depends on
-/// this shape.
-#[allow(async_fn_in_trait)]
-pub trait Transport {
-    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    /// The keyed mutation door, emitted only for a schema with a mutation: the same
+    /// call carrying an idempotency key out of band. Required (no default body) — a
+    /// transport must decide how to carry the key, never silently drop it.
+    const TRANSPORT_CALL_WITH_KEY: &str = r#"
+    /// Like [`call`](Transport::call), carrying a mutation **idempotency key** out of
+    /// band — an HTTP transport sends it as the `Idempotency-Key` header; the embedded
+    /// transport hands it to `Engine::call_with_key`. A retry with the same key replays
+    /// the first attempt's recorded response instead of running the write again.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, ClientError>
     where
         I: Serialize + Sync,
         C: Serialize + Sync,
         O: serde::de::DeserializeOwned;
+"#;
 
+    /// The streaming door, emitted only for a schema with a `-> stream` query.
+    const TRANSPORT_CALL_STREAM: &str = r#"
     /// Start a `-> stream` query and return its live row stream. An `Err` here means
     /// the call never started — a transport failure or a pre-body rejection carrying
     /// its real HTTP status; a failure after the stream begins arrives as the stream's
@@ -1354,7 +1385,10 @@ pub trait Transport {
         I: Serialize + Sync,
         C: Serialize + Sync,
         O: serde::de::DeserializeOwned + Send + 'static;
-}
+"#;
+
+    /// Closes the `Transport` trait and declares the client struct.
+    const TRANSPORT_TAIL: &str = r#"}
 
 /// The generated client, generic over a `Transport`.
 pub struct Client<T> {
@@ -1516,9 +1550,9 @@ where
     /// bridge an embedder would otherwise hand-copy: serialize the typed input and `$ctx`
     /// to JSON (a non-object ctx → `{}`), call `engine.call`, decode a `200` body into
     /// `O`, map a non-`200` to a `ClientError` from `error.message`. Split so a schema
-    /// with a `-> stream` query can add the streaming door inside the same `impl`
-    /// (head + [`EMBEDDED_STREAM_CALL`] + tail); head + tail alone is the exact
-    /// non-streaming bridge earlier versions emitted.
+    /// can add the keyed and streaming doors inside the same `impl` (head +
+    /// [`EMBEDDED_KEYED_CALL`] + [`EMBEDDED_STREAM_CALL`] + tail); head + tail alone
+    /// is the exact minimal bridge earlier versions emitted.
     const EMBEDDED_HEAD: &str = r#"
 // ---------- embedded bridge (based_runtime::Engine) ----------
 
@@ -1541,6 +1575,43 @@ impl Transport for Embedded<'_> {
             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
             .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx).await;
+        if resp.status == 200 {
+            serde_json::from_value(resp.body).map_err(ClientError::decode)
+        } else {
+            // Preserve the server's structured error: its status + stable code + message.
+            let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            Err(ClientError::api(resp.status, code, message))
+        }
+    }
+"#;
+
+    /// The embedded transport's keyed mutation door, spliced into the `impl Transport
+    /// for Embedded` block when the schema has a mutation.
+    const EMBEDDED_KEYED_CALL: &str = r#"
+    /// The keyed door in-process: the same idempotent-replay contract the HTTP
+    /// `Idempotency-Key` header gets, via `Engine::call_with_key` — no header dance.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned,
+    {
+        let args = serde_json::to_value(input).map_err(ClientError::decode)?;
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map_err(ClientError::decode)?;
+        let resp = self
+            .engine
+            .call_with_key(route, args, ctx, Some(key.to_string()))
+            .await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {

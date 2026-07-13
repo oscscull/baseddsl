@@ -400,6 +400,22 @@ pub trait Transport {
         C: Serialize + Sync,
         O: serde::de::DeserializeOwned;
 
+    /// Like [`call`](Transport::call), carrying a mutation **idempotency key** out of
+    /// band — an HTTP transport sends it as the `Idempotency-Key` header; the embedded
+    /// transport hands it to `Engine::call_with_key`. A retry with the same key replays
+    /// the first attempt's recorded response instead of running the write again.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned;
+
     /// Start a `-> stream` query and return its live row stream. An `Err` here means
     /// the call never started — a transport failure or a pre-body rejection carrying
     /// its real HTTP status; a failure after the stream begins arrives as the stream's
@@ -501,6 +517,16 @@ impl<T: Transport> Client<T> {
     pub async fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError> {
         self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx).await
     }
+    /// `POST /m/place_order` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn place_order_with_key(
+        &self,
+        input: PlaceOrderInput,
+        ctx: (),
+        key: &str,
+    ) -> Result<OrderCard, ClientError> {
+        self.transport.call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key).await
+    }
 }
 
 // ---------- embedded bridge (based_runtime::Engine) ----------
@@ -524,6 +550,39 @@ impl Transport for Embedded<'_> {
             .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
             .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx).await;
+        if resp.status == 200 {
+            serde_json::from_value(resp.body).map_err(ClientError::decode)
+        } else {
+            // Preserve the server's structured error: its status + stable code + message.
+            let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            Err(ClientError::api(resp.status, code, message))
+        }
+    }
+
+    /// The keyed door in-process: the same idempotent-replay contract the HTTP
+    /// `Idempotency-Key` header gets, via `Engine::call_with_key` — no header dance.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        key: &str,
+    ) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned,
+    {
+        let args = serde_json::to_value(input).map_err(ClientError::decode)?;
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map_err(ClientError::decode)?;
+        let resp = self
+            .engine
+            .call_with_key(route, args, ctx, Some(key.to_string()))
+            .await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {

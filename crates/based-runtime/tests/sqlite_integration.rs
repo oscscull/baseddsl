@@ -28,7 +28,7 @@ use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::idempotency::NoStore;
 use based_runtime::run::Backend;
-use based_runtime::{dispatch, Compiled, SeqIdGen, SqliteBackend};
+use based_runtime::{dispatch, Compiled, Guards, SeqIdGen, SqliteBackend};
 use based_sema::check;
 
 /// Load the real commerce example — the same front end (discover → parse → check) +
@@ -78,7 +78,17 @@ async fn call(
 ) -> based_runtime::WireResponse {
     let mut ids = SeqIdGen::default();
     dispatch(
-        compiled, backend, "", &mut ids, &NoStore, method, path, args, ctx, None,
+        compiled,
+        backend,
+        "",
+        &mut ids,
+        &NoStore,
+        &Guards::new(),
+        method,
+        path,
+        args,
+        ctx,
+        None,
     )
     .await
 }
@@ -644,6 +654,7 @@ async fn nested_to_one_query_returns_nested_json() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/order_by_id",
         json!({ "id": "o1" }),
@@ -664,6 +675,7 @@ async fn nested_to_one_query_returns_nested_json() {
         "",
         &mut ids,
         &NoStore,
+        &Guards::new(),
         "POST",
         "/q/orders",
         json!({}),
@@ -1122,4 +1134,108 @@ async fn enum_variant_filter_and_check_constraint_end_to_end() {
         bad.is_err(),
         "DB should reject a non-variant enum value via the CHECK constraint"
     );
+}
+
+/// A host guard (auth.md Handle 3) that genuinely **reads the live database** before
+/// deciding: closing an order is allowed while its row is still open; once the write
+/// lands, the same call is denied because the guard's own SELECT sees the new state.
+/// The whole pass — guard read, denial, and the guarded write — runs through the real
+/// dispatch core against live SQLite.
+#[tokio::test]
+async fn guard_reads_the_live_database_before_the_write() {
+    use based_runtime::{fetch_all, GuardVerdict, SqlValue};
+    use std::sync::Arc;
+
+    const SCHEMA: &str = r#"
+        Order { status: text, total: int }
+        shape OrderCard from Order { status, total }
+        mutation close_order(id) -> OrderCard guard order_still_open {
+            update Order where (id = $id) { status = "closed" };
+        }
+    "#;
+    let sf = parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, diags) = check(&sf.decls);
+    assert!(!diags
+        .iter()
+        .any(|d| d.severity == based_diagnostics::Severity::Error));
+    let c = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = Arc::new(SqliteBackend::in_memory().expect("open in-memory sqlite"));
+    backend
+        .execute_batch(&sql::ddl(&c.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch("INSERT INTO `order` (`id`, `status`, `total`) VALUES ('o-1', 'open', 9);")
+        .await
+        .expect("seed");
+
+    // The guard owns its own resources: it captures the backend and runs its own
+    // SELECT. It checks out before the mutation does, so the single pooled
+    // connection is free during the read.
+    let guard_backend = Arc::clone(&backend);
+    let guards = Guards::new().register("order_still_open", move |req| {
+        let backend = Arc::clone(&guard_backend);
+        async move {
+            let id = req.args["id"].as_str().unwrap_or_default().to_string();
+            let mut conn = match backend.checkout("").await {
+                Ok(conn) => conn,
+                // Fail closed: a guard that cannot decide denies.
+                Err(_) => return GuardVerdict::deny("cannot verify order state"),
+            };
+            let rows = fetch_all(conn.fetch(
+                "SELECT `status` FROM `order` WHERE `id` = ?",
+                &[SqlValue::Text(id)],
+            ))
+            .await;
+            match rows {
+                Ok(rows)
+                    if rows
+                        .first()
+                        .and_then(|r| r.get("status"))
+                        .and_then(|v| v.as_str())
+                        == Some("open") =>
+                {
+                    GuardVerdict::Allow
+                }
+                Ok(_) => GuardVerdict::deny("order is not open"),
+                Err(_) => GuardVerdict::deny("cannot verify order state"),
+            }
+        }
+    });
+
+    let run = |args: serde_json::Value| {
+        let c = &c;
+        let backend = Arc::clone(&backend);
+        let guards = &guards;
+        async move {
+            let mut ids = SeqIdGen::default();
+            dispatch(
+                c,
+                &*backend,
+                "",
+                &mut ids,
+                &NoStore,
+                guards,
+                "POST",
+                "/m/close_order",
+                args,
+                json!({}),
+                None,
+            )
+            .await
+        }
+    };
+
+    // Open row → the guard's SELECT sees 'open' → allowed; the write lands and the
+    // declared-shape re-select returns the closed row.
+    let first = run(json!({ "id": "o-1" })).await;
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    assert_eq!(first.body, json!({ "status": "closed", "total": 9 }));
+
+    // Same call again: the guard's SELECT now sees 'closed' → denied, before any write.
+    let second = run(json!({ "id": "o-1" })).await;
+    assert_eq!(second.status, 403);
+    assert_eq!(second.body["error"]["code"], "guard_denied");
+    assert_eq!(second.body["error"]["message"], "order is not open");
 }

@@ -111,6 +111,27 @@ impl Compiled {
             .any(|q| q.name == name && q.stream)
     }
 
+    /// The guard a mutation declares (`guard <name>`, auth.md Handle 3), or `None` for
+    /// an unguarded mutation or an unknown/query name. Dispatch invokes the registered
+    /// implementation before the write body.
+    pub fn guard_of(&self, name: &str) -> Option<&str> {
+        self.schema
+            .mutations
+            .iter()
+            .find(|m| m.name == name)?
+            .guard
+            .as_deref()
+    }
+
+    /// Every `(mutation, guard)` pair the schema declares — the engine-build check
+    /// walks this to refuse a schema whose guards are not all registered.
+    pub fn declared_guards(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.schema
+            .mutations
+            .iter()
+            .filter_map(|m| m.guard.as_deref().map(|g| (m.name.as_str(), g)))
+    }
+
     pub fn shard_key_field(&self, is_mutation: bool, name: &str) -> Option<&str> {
         if is_mutation {
             self.schema

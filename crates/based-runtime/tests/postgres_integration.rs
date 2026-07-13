@@ -33,7 +33,7 @@ use based_runtime::id::UuidGen;
 use based_runtime::idempotency::{MemStore, NoStore};
 use based_runtime::run::{Backend, Db, DbError, DbErrorKind, DbRead};
 use based_runtime::shard::PoolConfig;
-use based_runtime::{dispatch, fetch_all, Compiled, PgRouter};
+use based_runtime::{dispatch, fetch_all, Compiled, Guards, PgRouter};
 use based_sema::check;
 
 use docker_postgres::PostgresContainer;
@@ -148,7 +148,17 @@ async fn call(
 ) -> based_runtime::WireResponse {
     let mut ids = UuidGen;
     dispatch(
-        compiled, router, "", &mut ids, &NoStore, method, path, args, ctx, None,
+        compiled,
+        router,
+        "",
+        &mut ids,
+        &NoStore,
+        &Guards::new(),
+        method,
+        path,
+        args,
+        ctx,
+        None,
     )
     .await
 }
@@ -315,6 +325,7 @@ async fn idempotency_key_dedupes_a_retried_write() {
         "",
         &mut ids,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "buyer": USER_1, "total": "7.00" }),
@@ -330,6 +341,7 @@ async fn idempotency_key_dedupes_a_retried_write() {
         "",
         &mut ids,
         &store,
+        &Guards::new(),
         "POST",
         "/m/place_order",
         json!({ "buyer": USER_1, "total": "7.00" }),

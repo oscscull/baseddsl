@@ -208,11 +208,36 @@ rows come back*, it is a set of `@scope` alternatives (each an un-forgettable fi
 ## Handle 3 — guard hook into caller code
 For real decisions, we don't evaluate — we invoke the caller's host-language fn at the boundary and respect its verdict.
 ```
-query refund(order: Id, amount: int) -> RefundResult
+mutation refund_order(order: Id, amount: int) -> RefundResult
   guard caller_can_refund
+  scoped Tenant
 { ... }
 ```
-We own that the check runs; they own what it decides.
+We own that the check runs; they own what it decides. `guard <name>` sits on a
+**mutation** (a decision gates a write; a read is confined by Handles 1–2), after the
+return type, before the scope acknowledgement. The name is a host-language function's,
+not a DSL symbol — nothing else in the schema defines it. The contract, end to end:
+
+- **Registration.** The embedding app registers an async fn per guard name when it
+  builds the engine: `Guards::new().register("caller_can_refund", |req| async move { … })`
+  → `Engine::with_guards`. The fn receives the callable's name, its decoded JSON args,
+  and the server-derived `$ctx`, and returns a verdict — **allow**, or **deny with a
+  mandatory reason** (a denial is never silent, principle 6). It is async and owns its
+  own resources: it may read the database through a captured pool, or call the typed
+  client itself.
+- **Enforcement — one point, both doors.** Dispatch — the one core the HTTP edge and
+  the in-process `Engine` both run through — invokes the guard **before the write body,
+  before the idempotency store is consulted** (a denied request never claims a key),
+  and **before argument validation** (a denied caller learns nothing about the
+  request's validity). Deny → `403` with the stable wire code `guard_denied` and the
+  guard's reason.
+- **Fail loudly at build, never quietly at request time.** A schema that declares a
+  guard nobody registered does not come up: `Engine::with_guards` rejects it (and
+  `Engine::new`, the guard-free convenience constructor, panics naming the guard), and
+  `based serve` refuses to start — the standalone listener has no host code to
+  register, so a guarded schema must be embedded. The request-time backstop for a raw
+  dispatch is a loud `500 guard_unregistered`, never a silent pass.
+- **Fail closed.** A guard that cannot decide (its own lookup failed) should deny.
 
 ## Net
 Simple "scope to caller's org" -> Handles 1+2, zero logic. Complex permissions -> caller's code + Handle 3. Never a policy engine.

@@ -27,6 +27,11 @@
 //! response. The key is out-of-band request metadata (the `Idempotency-Key` header),
 //! never the body or a schema field.
 //!
+//! A mutation may declare a **`guard`** ([`guard`]): the embedding app registers the
+//! named host async fn ([`guard::Guards`] → [`embed::Engine::with_guards`]) and dispatch
+//! invokes it before the write body on every door — a denial is a `403`, and a declared
+//! guard nobody registered refuses to build rather than silently not running.
+//!
 //! ## Wire + driver
 //! [`serve::dispatch`] is the wire surface: it routes `POST /q|m/<name>` → the callable,
 //! runs it, and maps every outcome to a [`serve::WireResponse`] — a pure core testable
@@ -57,6 +62,7 @@
 
 pub mod cursor;
 pub mod embed;
+pub mod guard;
 pub mod id;
 pub mod idempotency;
 pub mod load;
@@ -81,6 +87,7 @@ pub mod postgres;
 pub mod http;
 
 pub use embed::Engine;
+pub use guard::{GuardRequest, GuardSetupError, GuardVerdict, Guards};
 pub use id::{IdGen, SeqIdGen};
 pub use idempotency::{Fingerprint, IdempotencyStore, KeyState, MemStore, NoStore};
 pub use load::Compiled;
