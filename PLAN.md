@@ -510,9 +510,21 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     Replay proven through the typed client over a real socket + in-process (one tx, identical
     bodies). OpenAPI documents the key header, 409/422, and the guard 403. Committed generated
     clients regenerated (gate-enforced).
-  - **N3c. Schema + migrations + client.** The helpdesk `.bsl` (by-domain layout), `0001_init` +
-    `0002` `@was` rename, checked-in `src/client.rs` (`--embedded`), seed step via the client's own
-    mutations (D63 pattern; prints demo bearer tokens).
+  - ✅ **N3c. Schema + migrations + client.** The helpdesk `.bsl` (by-domain layout, 26 callables),
+    `0001_init` + `0002` `@was` rename (verify green), checked-in verbatim `src/client.rs`
+    (`--embedded`), seed via the client's own mutations (D63 pattern; prints demo bearer tokens;
+    ran green against live Postgres incl. D87 out-of-order time entries + scope/guard/tx probes).
+    Being the first real consumer of the whole surface, the slice surfaced + fixed six engine
+    bugs: multi-alternative `@scope` ctx/exemptions/lints derived from the *first* alternative
+    instead of the callable's chosen one (`inject_ctx_reqs`); bare `@sort(name)` silently dropped
+    (fmt's own canonical spelling!); enum-annotated params typed/bound as `Id<entity::…>`/uuid;
+    enum param *defaults* bound by variant name, not wire value; absent optional to-one nests
+    decoded as objects-of-nulls (now JSON `null` via a `__present` probe / CASE collapse); decimal
+    inside JSON aggregates rode as a JSON number (now text-cast, keeping the string contract);
+    plus `has`/`in` in per-param bindings lowering non-dialect-aware. Coverage-map deviations to
+    resolve at N3e: `in` has no value-list form (search uses `not`/`or` instead) and raw
+    whole-query bodies don't exist (workload report uses raw correlated-subquery *values* —
+    arguably the better raw.md story).
   - **N3d. The axum service.** Routes/middleware/state per D86; streaming export re-served as
     NDJSON through axum; `ClientError` → HTTP mapping; a live smoke scenario (boot against
     Postgres, drive every route incl. export truncation/idempotent-replay/cross-tenant probes) as

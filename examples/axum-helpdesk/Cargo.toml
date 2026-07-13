@@ -1,0 +1,26 @@
+# A standalone example — deliberately OUTSIDE the workspace (see the root Cargo.toml
+# `exclude`). It depends on the in-repo engine crates *by path*, so it always tracks
+# the current engine, but `cargo test --workspace` never builds it.
+[package]
+name = "axum-helpdesk"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The engine: in-process `Engine`, the `PgRouter`/`PostgresDb` driver, and the
+# production uuid id generator (`serve` pulls in `UuidGen` — Postgres's native
+# `uuid` id columns reject non-uuid ids).
+based-runtime = { path = "../../crates/based-runtime", features = ["postgres", "serve"] }
+# The engine is async; tokio's macro runtime drives `#[tokio::main]`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The generated client derives serde; the embedded bridge serializes the typed input.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The generated client types money as `rust_decimal::Decimal`; the `serde-str`
+# feature (de)serializes it as a JSON string, so the exact value rides the wire.
+rust_decimal = { version = "1", features = ["serde-str"] }
+# The streaming export returns a `RowStream` — a `futures_core::Stream` of typed rows.
+futures-core = "0.3"
+# Load `DATABASE_URL` from `.env` (the conventional 12-factor crate).
+dotenvy = "0.15"

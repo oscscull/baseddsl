@@ -1,0 +1,5 @@
+# based project manifest. `root` points the schema glob at `schema/`, so
+# `migrations/` lives at the project root and `based <cmd>` runs from here.
+dialect = "postgres"
+client  = "rust"
+root    = "schema"
