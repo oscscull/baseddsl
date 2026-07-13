@@ -437,8 +437,8 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
             // resolved by the scope pass — it never reaches here.
             "sort" => {
                 for a in &d.args {
-                    if let DecoArg::Sort(t) = a {
-                        sort_terms.push(t.clone());
+                    if let Some(t) = deco_sort_term(a) {
+                        sort_terms.push(t);
                     }
                 }
             }
@@ -452,6 +452,27 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
         }
     }
     models[mi].sort = sort_terms;
+}
+
+/// A `@sort` decorator argument as a sort term. A bare path carries no direction
+/// token, so the argument scan can't classify it as a sort — it arrives as an
+/// `Ident`/`Path` arg and defaults to ascending here (grammar: the direction is
+/// optional, bare = `asc`).
+fn deco_sort_term(a: &DecoArg) -> Option<SortTerm> {
+    match a {
+        DecoArg::Sort(t) => Some(t.clone()),
+        DecoArg::Ident(id) => Some(SortTerm {
+            path: Path {
+                segments: vec![id.clone()],
+            },
+            dir: SortDir::Asc,
+        }),
+        DecoArg::Path(p) => Some(SortTerm {
+            path: p.clone(),
+            dir: SortDir::Asc,
+        }),
+        DecoArg::Pred(_) | DecoArg::Lit(_) => None,
+    }
 }
 
 /// A decorator's target field, from a bare ident or a single-segment path.
@@ -566,8 +587,8 @@ pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
         // read pass. (`@scope` refs are resolved separately by the scope pass.)
         if d.name.node == "sort" {
             for a in &d.args {
-                if let DecoArg::Sort(t) = a {
-                    resolve::check_sort_term(t, mi, cx, sink);
+                if let Some(t) = deco_sort_term(a) {
+                    resolve::check_sort_term(&t, mi, cx, sink);
                 }
             }
         }

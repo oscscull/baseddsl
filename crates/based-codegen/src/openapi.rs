@@ -697,12 +697,19 @@ fn page_input(q: &Query) -> PageInput {
         .unwrap_or(PageInput::None)
 }
 
-/// A param's JSON-Schema type. Explicit annotation wins (a model type -> a `uuid`
-/// string, the FK the wire carries); otherwise infer from the bound/same-named
-/// column. To-many -> an array.
+/// A param's JSON-Schema type. Explicit annotation wins — an enum name is that
+/// enum's constrained schema, a model type the `uuid` FK string the wire carries —
+/// otherwise infer from the bound/same-named column. To-many -> an array.
 fn param_schema(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> Value {
     match &p.ty {
-        Some(te) => wrap(base_schema(&te.base), te.many),
+        Some(te) => {
+            if let BaseType::Model(name) = &te.base {
+                if schema.enum_(&name.node).is_some() {
+                    return wrap(enum_schema(schema, &name.node), te.many);
+                }
+            }
+            wrap(base_schema(&te.base), te.many)
+        }
         None => infer_param(schema, root, p),
     }
 }

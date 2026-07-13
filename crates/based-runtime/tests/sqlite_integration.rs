@@ -379,7 +379,8 @@ async fn nest_reached_scoped_child_is_confined_cross_tenant() {
     );
 
     // o2: contact c2 is out-of-region → the nest join finds no in-scope row, so the
-    // buyer's name reads NULL instead of leaking "OutRegion"; o2 has no in-region items.
+    // whole nest reads back as JSON null (an absent optional to-one) instead of
+    // leaking "OutRegion"; o2 has no in-region items.
     let o2 = call(
         &c,
         &backend,
@@ -392,8 +393,8 @@ async fn nest_reached_scoped_child_is_confined_cross_tenant() {
     assert_eq!(o2.status, 200, "{:?}", o2.body);
     assert_eq!(
         o2.body,
-        json!({ "total": 200, "contact": { "name": null }, "items": [] }),
-        "cross-scope nested read must not leak the out-of-region contact's name"
+        json!({ "total": 200, "contact": null, "items": [] }),
+        "cross-scope nested read must not leak the out-of-region contact"
     );
 }
 
@@ -687,6 +688,114 @@ async fn nested_to_one_query_returns_nested_json() {
     assert_eq!(
         listed.body,
         json!([{ "total": 500, "placed_by": { "name": "Ada", "email": "a@x.com" } }])
+    );
+}
+
+/// An optional to-one nest whose row is absent comes back as JSON `null` — never an
+/// object of nulls (which a typed client cannot decode into `Option<Shape>`) — while a
+/// present row nests normally and sheds the internal presence probe. Proven at both
+/// levels: a top-level nest (flat-column reassembly) and a nest inside a to-many JSON
+/// aggregate (SQL-built objects).
+#[tokio::test]
+async fn absent_optional_to_one_nest_is_json_null() {
+    let src = r#"
+        User { name: text, email: text }
+        @sort(id asc)
+        Order {
+          placed_by:    User
+          fulfilled_by: User?
+          total:        int
+          items:        Item[] (Item.order)
+        }
+        @sort(id asc)
+        Item { order: Order, checker: User?, qty: int }
+        shape OrderCard from Order {
+          total
+          placed_by { name }
+          fulfilled_by { name, email }
+          items { qty, checker { name } }
+        }
+        query order_by_id(id) -> OrderCard;
+    "#;
+    let sf = parse_file(src, FileId(0)).expect("parse");
+    let (schema, diags) = check(&sf.decls);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != based_diagnostics::Severity::Error),
+        "unexpected sema errors: {diags:#?}"
+    );
+    let c = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend.execute_batch(&ddl).await.unwrap_or_else(|e| {
+        panic!(
+            "generated DDL failed: {e:?}
+{ddl}"
+        )
+    });
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `user` (`id`, `name`, `email`) VALUES ('u1', 'Ada', 'a@x.com');
+            INSERT INTO `order` (`id`, `placed_by_id`, `fulfilled_by_id`, `total`)
+                VALUES ('o1', 'u1', NULL, 500), ('o2', 'u1', 'u1', 700);
+            INSERT INTO `item` (`id`, `order_id`, `checker_id`, `qty`)
+                VALUES ('i1', 'o1', NULL, 3), ('i2', 'o1', 'u1', 4);
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    let mut ids = SeqIdGen::default();
+    let absent = dispatch(
+        &c,
+        &backend,
+        "",
+        &mut ids,
+        &NoStore,
+        &Guards::new(),
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "o1" }),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(absent.status, 200, "{:?}", absent.body);
+    assert_eq!(
+        absent.body,
+        json!({
+            "total": 500,
+            "placed_by": { "name": "Ada" },
+            "fulfilled_by": null,
+            "items": [
+                { "qty": 3, "checker": null },
+                { "qty": 4, "checker": { "name": "Ada" } },
+            ],
+        })
+    );
+
+    let present = dispatch(
+        &c,
+        &backend,
+        "",
+        &mut ids,
+        &NoStore,
+        &Guards::new(),
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "o2" }),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(present.status, 200, "{:?}", present.body);
+    assert_eq!(
+        present.body["fulfilled_by"],
+        json!({ "name": "Ada", "email": "a@x.com" }),
+        "a matched optional nest sheds the presence probe"
     );
 }
 

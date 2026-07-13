@@ -282,8 +282,6 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         }
     }
 
-    let ctx_requires = crate::ctx::collect_query(q, ti, cx);
-
     // The shard key is the target model's `@scope` owner field  — the field the
     // request routes on — but a `unscoped` query  deliberately reads across scopes,
     // so it has no single owning shard and must route by an explicit key instead.
@@ -296,8 +294,13 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
     // The alternative this query injects per touched scoped model  — threaded to
     // codegen so a callable naming one `@scope` alternative filters differently from one
     // naming another. Single-alternative models resolve to the same terms as before.
+    // The `$ctx` requirement derives from the same choice, so the ctx bag always
+    // carries exactly the fields the injected `:ctx_<field>` binds read.
     let scope_inject =
         crate::scope::resolve_inject(q.scoped.as_ref(), q.unscoped.is_some(), &touched, cx);
+    let scope_reqs =
+        crate::scope::inject_ctx_reqs(q.scoped.as_ref(), q.unscoped.is_some(), &touched, cx);
+    let ctx_requires = crate::ctx::collect_query(q, ti, cx, scope_reqs);
 
     Some(RQuery {
         name: q.name.node.clone(),
@@ -538,7 +541,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     // scope column, so the flag rides into every write check.
     let unscoped = m.unscoped.is_some();
     for stmt in &m.body {
-        check_write(stmt, cx, &params, None, unscoped, sink);
+        check_write(stmt, cx, &params, None, m.scoped.as_ref(), unscoped, sink);
     }
 
     // Scope acknowledgement: a mutation touching a scoped
@@ -572,11 +575,14 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
             .and_then(|mi| cx.model(mi).shard_key_ctx_field())
     };
     let scope_inject = crate::scope::resolve_inject(m.scoped.as_ref(), unscoped, &touched, cx);
+    // The `$ctx` requirement derives from the same chosen alternative(s) as the
+    // injection, so the bag always carries exactly the injected `:ctx_<field>`s.
+    let scope_reqs = crate::scope::inject_ctx_reqs(m.scoped.as_ref(), unscoped, &touched, cx);
     Some(RMutation {
         name: m.name.node.clone(),
         span: m.span,
         guard: m.guard.as_ref().map(|g| g.node.clone()),
-        ctx_requires: crate::ctx::collect_mutation(m, ret.shape.as_deref(), &ret.model, cx),
+        ctx_requires: crate::ctx::collect_mutation(m, cx, scope_reqs),
         ret_model: ret.model,
         ret_shape: ret.shape,
         shard_key,
@@ -592,6 +598,7 @@ fn check_write(
     cx: &Cx,
     params: &[String],
     back: Option<usize>,
+    scoped: Option<&Scoped>,
     unscoped: bool,
     sink: &mut Sink,
 ) {
@@ -602,7 +609,7 @@ fn check_write(
                     check_assign(a, mi, cx, params, back, sink);
                 }
                 check_scope_assign(mi, assigns, unscoped, cx, sink);
-                check_create_required(mi, assigns, model, cx, sink);
+                check_create_required(mi, assigns, model, scoped, unscoped, cx, sink);
             }
         }
         WriteStmt::Update {
@@ -641,7 +648,7 @@ fn check_write(
             // `^` reads the immediately preceding `create`; track it as we descend.
             let mut prev = back;
             for s in inner {
-                check_write(s, cx, params, prev, unscoped, sink);
+                check_write(s, cx, params, prev, scoped, unscoped, sink);
                 if let WriteStmt::Create { model, .. } = s {
                     prev = write_model(model, cx, &mut Sink::default());
                 }
@@ -704,10 +711,11 @@ fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, si
     if unscoped {
         return;
     }
-    let m = cx.model(mi);
-    let scope_cols = m.scope_terms();
+    // Every alternative's columns are engine-domain, not just the chosen one:
+    // planting *any* scope column plants the row into an arbitrary scope.
+    let scope_cols = crate::scope::all_scope_cols(mi, cx);
     for a in assigns {
-        if scope_cols.iter().any(|(f, _)| f == &a.col.node) {
+        if scope_cols.iter().any(|f| f == &a.col.node) {
             sink.error_note(
                 code::SCOPE_ASSIGN,
                 a.col.span,
@@ -723,14 +731,29 @@ fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, si
 
 /// A `create` must assign every *required* column: a non-optional, non-defaulted
 /// stored column or forward FK. Engine-managed fields — the `id`, `@created` /
-/// `@updated` timestamps, the `@soft_delete` field, and any `@scope` column
-/// (auto-set from `$ctx` on insert) — are set by the engine, so they are
-/// exempt. Inverse edges own no column here, so they never count. A missing field
-/// is `E0146` (all missing fields reported in one error).
-fn check_create_required(mi: usize, assigns: &[Assign], at: &Ident, cx: &Cx, sink: &mut Sink) {
+/// `@updated` timestamps, the `@soft_delete` field, and the `@scope` columns the
+/// mutation's *chosen* alternative auto-sets from `$ctx` on insert — are set by
+/// the engine, so they are exempt. A scope column outside the chosen alternative
+/// (or any scope column on an `unscoped` create) is nobody's: the engine won't
+/// set it and E0181 forbids assigning it on a scoped create, so it stays required
+/// and shows here. Inverse edges own no column, so they never count. A missing
+/// field is `E0146` (all missing fields reported in one error).
+fn check_create_required(
+    mi: usize,
+    assigns: &[Assign],
+    at: &Ident,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let m = cx.model(mi);
     let assigned: Vec<&str> = assigns.iter().map(|a| a.col.node.as_str()).collect();
-    let scope_cols = m.scope_terms();
+    let scope_cols: Vec<(String, String)> =
+        crate::scope::resolve_inject(scoped, unscoped, &[mi], cx)
+            .into_iter()
+            .flat_map(|si| si.terms)
+            .collect();
     let managed = |name: &str| {
         name == "id"
             || m.created.as_deref() == Some(name)

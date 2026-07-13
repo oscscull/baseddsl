@@ -262,7 +262,10 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
         let (family, optional) = query_param_family(&compiled.schema, root, p);
-        env.insert(p.name.node.clone(), bind_param(p, family, optional, req)?);
+        env.insert(
+            p.name.node.clone(),
+            bind_param(&compiled.schema, p, family, optional, req)?,
+        );
     }
     for c in &rq.ctx_requires {
         env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
@@ -337,7 +340,10 @@ pub fn plan_mutation(
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
         let (family, optional) = mutation_param_family(compiled, ast, p);
-        env.insert(p.name.node.clone(), bind_param(p, family, optional, req)?);
+        env.insert(
+            p.name.node.clone(),
+            bind_param(&compiled.schema, p, family, optional, req)?,
+        );
     }
     for c in &rm.ctx_requires {
         env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
@@ -425,6 +431,7 @@ impl Env {
 /// Bind one signature param: use the supplied arg (coerced to the resolved family),
 /// or its default, or `null` if optional — else it is missing.
 fn bind_param(
+    schema: &CheckedSchema,
     p: &Param,
     family: Family,
     optional: bool,
@@ -434,7 +441,7 @@ fn bind_param(
         Some(v) => coerce(v, family, optional).map_err(|e| bad_arg(&p.name.node, e)),
         None => {
             if let Some(dv) = &p.default {
-                return Ok(default_value(dv, family));
+                return Ok(default_value(schema, p, dv, family));
             }
             if optional {
                 return Ok(SqlValue::Null);
@@ -453,8 +460,9 @@ fn query_param_family(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) 
     if let Some(t) = &p.ty {
         let family = match &t.base {
             BaseType::Primitive(prim) => Family::of(*prim),
-            // A relation param carries the target's key: a uuid.
-            BaseType::Model(_) => Family::Uuid,
+            // An UpperCamel annotation: an enum param carries the enum's wire value
+            // (its storage family); a relation param carries the target's key (uuid).
+            BaseType::Model(name) => enum_or_uuid(schema, &name.node),
         };
         return (family, t.optional || p.default.is_some());
     }
@@ -472,12 +480,23 @@ fn mutation_param_family(compiled: &Compiled, ast: &Mutation, p: &Param) -> (Fam
     if let Some(t) = &p.ty {
         let family = match &t.base {
             BaseType::Primitive(prim) => Family::of(*prim),
-            BaseType::Model(_) => Family::Uuid,
+            BaseType::Model(name) => enum_or_uuid(&compiled.schema, &name.node),
         };
         return (family, t.optional || p.default.is_some());
     }
     let family = param_use_in_stmts(compiled, &ast.body, &p.name.node).unwrap_or(Family::Any);
     (family, p.default.is_some())
+}
+
+/// An UpperCamel param annotation's family: the enum's storage family when the name
+/// resolves to an enum (text for a string enum, int for an int one), else a relation
+/// target's key (uuid).
+fn enum_or_uuid(schema: &CheckedSchema, name: &str) -> Family {
+    match schema.enum_(name) {
+        Some(e) if e.is_int() => Family::Int,
+        Some(_) => Family::Text,
+        None => Family::Uuid,
+    }
 }
 
 /// The field a query param binds against: its `-> edge` / `op col` binding, else its
@@ -686,7 +705,7 @@ fn bad_arg(name: &str, e: CoerceError) -> PlanError {
 /// default on a `timestamp` column still binds typed). A `now()` default has no
 /// request-time value (it is a write-time engine concern) → `Null` here; query params
 /// default to literals in practice.
-fn default_value(dv: &DefaultVal, family: Family) -> SqlValue {
+fn default_value(schema: &CheckedSchema, p: &Param, dv: &DefaultVal, family: Family) -> SqlValue {
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => string_in_family(s.clone(), family),
         DefaultVal::Lit(Literal::Int(i)) => SqlValue::Int(*i),
@@ -699,9 +718,28 @@ fn default_value(dv: &DefaultVal, family: Family) -> SqlValue {
         DefaultVal::Lit(Literal::Bool(b)) => SqlValue::Bool(*b),
         DefaultVal::Lit(Literal::Null) => SqlValue::Null,
         DefaultVal::Func(_) => SqlValue::Null,
-        // An enum default is its wire variant string.
-        DefaultVal::Variant(v) => SqlValue::Text(v.node.clone()),
+        // An enum default binds the variant's WIRE value (an int-enum discriminant, or
+        // a string enum's possibly-renamed value) — never the variant's source name.
+        DefaultVal::Variant(v) => match variant_wire(schema, p, &v.node) {
+            Some(based_sema::EnumValue::Int(i)) => SqlValue::Int(*i),
+            Some(based_sema::EnumValue::Str(s)) => SqlValue::Text(s.clone()),
+            None => SqlValue::Text(v.node.clone()),
+        },
     }
+}
+
+/// The wire value of a variant default: resolve the param's enum annotation
+/// (`status: Status = open`) and look the variant up in it.
+fn variant_wire<'a>(
+    schema: &'a CheckedSchema,
+    p: &Param,
+    variant: &str,
+) -> Option<&'a based_sema::EnumValue> {
+    let ty = p.ty.as_ref()?;
+    let BaseType::Model(name) = &ty.base else {
+        return None;
+    };
+    schema.enum_(&name.node)?.wire_of(variant)
 }
 
 /// Wrap a string literal in the typed variant its family calls for.

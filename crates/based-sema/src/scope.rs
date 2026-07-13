@@ -351,6 +351,63 @@ pub fn resolve_inject(
     out
 }
 
+/// The `$ctx` requirements of the scope terms a callable injects — the
+/// [`resolve_inject`] twin, one `CtxReq` per injected term, typed by the scope decl
+/// (`col: Type = $ctx.field`). Deriving the requirement from the *chosen*
+/// alternative (not the model's first one) keeps sema's ctx bag and codegen's
+/// `:ctx_<field>` binds aligned by construction on a multi-alternative model.
+pub fn inject_ctx_reqs(
+    scoped: Option<&Scoped>,
+    unscoped_present: bool,
+    touched: &[usize],
+    cx: &Cx,
+) -> Vec<CtxReq> {
+    let mut out = Vec::new();
+    for si in resolve_inject(scoped, unscoped_present, touched, cx) {
+        for (_, ctx_field) in &si.terms {
+            if let Some((term, span)) = find_term(ctx_field, cx) {
+                out.push(CtxReq {
+                    field: term.ctx_field.clone(),
+                    ty: term.ty.clone(),
+                    span,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The scope-decl term a `$ctx.<field>` binding came from (any decl binding that
+/// field — coherence makes them one type), with the decl's span for diagnostics.
+fn find_term<'a>(ctx_field: &str, cx: &Cx<'a>) -> Option<(&'a RScopeTerm, Span)> {
+    cx.scopes.iter().find_map(|s| {
+        s.terms
+            .iter()
+            .find(|t| t.ctx_field == ctx_field)
+            .map(|t| (t, s.span))
+    })
+}
+
+/// Every scope column any `@scope` alternative of a model declares — the full set a
+/// scoped `create` may never assign (`E0181`): whichever alternative a mutation
+/// names, a scope column is engine-domain, so planting *any* of them is planting a
+/// row into an arbitrary scope.
+pub fn all_scope_cols(mi: usize, cx: &Cx) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for alt in &cx.model(mi).scope_alts {
+        for axis in alt {
+            if let Some(scope) = cx.scope(axis) {
+                for t in &scope.terms {
+                    if !out.contains(&t.column) {
+                        out.push(t.column.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// `E0186` — every `create` on a scoped model must set a full `@scope` alternative:
 /// the mutation's `scoped …` set must be a superset of ≥1 of the created model's
 /// alternatives, so the engine can auto-set all of that alternative's columns from

@@ -691,6 +691,24 @@ fn model_sort_silences_nondeterministic_lint() {
 }
 
 #[test]
+fn bare_model_sort_term_defaults_to_asc() {
+    // `@sort(name)` — no direction token. The canonical (fmt) spelling of an
+    // ascending sort must register as one, not vanish as an unclassified arg.
+    let (schema, d) = analyze(
+        r#"
+        @sort(name)
+        Product { name: text }
+        shape P from Product { name }
+        query all() -> P[];
+        "#,
+    );
+    assert!(d.is_empty(), "{:?}", codes(&d));
+    let product = &schema.models[0];
+    assert_eq!(product.sort.len(), 1);
+    assert_eq!(product.sort[0].path.segments[0].node, "name");
+}
+
+#[test]
 fn raw_soft_delete_gap_warns() {
     let (_, d) = analyze(
         r#"
@@ -1960,6 +1978,142 @@ fn create_satisfying_an_alternative_has_no_e0186() {
         "#,
     );
     assert!(!codes(&d).contains(&"E0186"), "{:?}", codes(&d));
+}
+
+#[test]
+fn or_model_ctx_follows_the_chosen_alternative() {
+    // The `$ctx` requirement derives from the alternative the callable *chose*,
+    // not the model's first `@scope` line — sema's ctx bag must carry exactly the
+    // `:ctx_<field>` binds codegen injects.
+    let (schema, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page
+        @scope Author
+        @sort(created desc)
+        Post {
+          page:    Page
+          author:  User
+          body:    text
+          created: timestamp
+          @index page
+          @index author
+        }
+        shape PostCard from Post { body }
+        query my_posts() -> PostCard[] scoped Author { list Post order (created desc); }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let q = schema
+        .queries
+        .iter()
+        .find(|q| q.name == "my_posts")
+        .unwrap();
+    assert_eq!(q.ctx_requires.len(), 1, "{:?}", q.ctx_requires);
+    assert_eq!(q.ctx_requires[0].field, "user");
+}
+
+#[test]
+fn or_model_create_naming_both_alternatives_is_clean() {
+    // A create naming several alternatives auto-sets every named axis's column;
+    // none of them is "missing" (E0146), and the ctx bag carries both fields.
+    let (schema, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page
+        @scope Author
+        @sort(created desc)
+        Post {
+          page:    Page
+          author:  User
+          body:    text
+          created: timestamp (default now())
+          @index page
+          @index author
+        }
+        shape PostCard from Post { body }
+        query on_page() -> PostCard[] scoped Page   { list Post; }
+        query mine()    -> PostCard[] scoped Author { list Post; }
+        mutation write_post(body: text) -> PostCard scoped Page, Author {
+          create Post { body = $body };
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let m = schema
+        .mutations
+        .iter()
+        .find(|m| m.name == "write_post")
+        .unwrap();
+    let mut fields: Vec<&str> = m.ctx_requires.iter().map(|c| c.field.as_str()).collect();
+    fields.sort();
+    assert_eq!(fields, ["page", "user"]);
+}
+
+#[test]
+fn scoped_create_assigning_an_unchosen_alternative_column_is_e0181() {
+    // Every alternative's column is engine-domain on a scoped create — assigning
+    // one the callable didn't choose is still planting the row into a scope.
+    let (_, d) = analyze(
+        r#"
+        scope Page   (page:   Page = $ctx.page)
+        scope Author (author: User = $ctx.user)
+        Page { title: text }
+        User { name: text }
+        @scope Page
+        @scope Author
+        @sort(body asc)
+        Post {
+          page:   Page
+          author: User?
+          body:   text
+          @index page
+        }
+        shape PostCard from Post { body }
+        query on_page() -> PostCard[] scoped Page { list Post; }
+        mutation write_post(body: text, author: Id) -> PostCard scoped Page {
+          create Post { body = $body, author = $author };
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0181"), "{:?}", codes(&d));
+}
+
+#[test]
+fn unindexed_annotation_on_an_unscoped_query_is_not_stale() {
+    // An `unscoped` query injects no scope, so a scope column's index cannot make
+    // its annotation "stale" — the pattern is the query's own filter only.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        @sort(created desc)
+        Doc {
+          org:     Org
+          title:   text
+          created: timestamp
+          @index(org, title)
+        }
+        shape D from Doc { title }
+        query docs() -> D[] scoped Tenant { list Doc; }
+        query export(since: timestamp > created) -> D[]
+          unscoped("audit: whole-corpus export")
+          unindexed(unsafe, "deliberate full scan");
+        "#,
+    );
+    assert!(
+        !codes(&d).contains(&"W0105"),
+        "annotation wrongly stale: {:?}",
+        codes(&d)
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
 }
 
 // ---------- @was rename directive -------------------------------------------

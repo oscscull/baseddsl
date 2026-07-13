@@ -118,7 +118,9 @@ fn offset_page_input_carries_offset() {
     // An offset page's input carries an explicit offset, and no cursor (the `pub cursor`
     // in the shared `Page<T>` envelope is the only one in the module).
     assert!(
-        out.contains("pub struct PostsInput {\n    pub offset: Option<i64>,\n}"),
+        out.contains(
+            "pub struct PostsInput {\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub offset: Option<i64>,\n}"
+        ),
         "\n{out}"
     );
 }
@@ -609,6 +611,27 @@ fn enum_emits_a_rust_enum_and_types_the_field() {
     assert!(out.contains("Shipped,"), "\n{out}");
     // The projected field takes the enum type, not String.
     assert!(out.contains("pub status: Status,"), "\n{out}");
+}
+
+#[test]
+fn enum_annotated_param_takes_the_enum_type() {
+    // `status: Status` on a signature is the enum's own type — never an
+    // `Id<entity::Status>` (no such entity tag exists; the module must compile).
+    let src = r#"
+        enum Status { pending, paid, shipped }
+        @sort(total desc)
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query by_status(status: Status) -> OrderRow[] { list Order where (status = $status); }
+        mutation set_status(id: Id, status: Status = pending) -> OrderRow {
+          update Order where (id = $id) { status = $status };
+        }
+    "#;
+    let out = gen(src);
+    assert!(out.contains("pub status: Status,"), "\n{out}");
+    // The defaulted mutation param is optional, still enum-typed.
+    assert!(out.contains("pub status: Option<Status>,"), "\n{out}");
+    assert!(!out.contains("Id<entity::Status>"), "\n{out}");
 }
 
 #[test]

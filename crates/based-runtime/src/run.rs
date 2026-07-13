@@ -479,7 +479,29 @@ fn nest_row(row: Row) -> serde_json::Value {
     for (key, val) in row {
         insert_path(&mut root, &key, val);
     }
-    serde_json::Value::Object(root)
+    let mut value = serde_json::Value::Object(root);
+    collapse_absent_nests(&mut value);
+    value
+}
+
+/// Collapse absent to-one nests. A LEFT-JOINed nest projects a presence probe
+/// (`<field>.__present` = the child's `id`, [`based_codegen::sql::NEST_PRESENT`]):
+/// a NULL probe means the joined row does not exist, so the whole sub-object —
+/// otherwise an indistinguishable object of NULLs — becomes JSON null. A matched
+/// row just sheds the probe. Recurses for nests within nests.
+fn collapse_absent_nests(value: &mut serde_json::Value) {
+    use serde_json::Value as J;
+    if let J::Object(map) = value {
+        if let Some(probe) = map.remove(based_codegen::sql::NEST_PRESENT) {
+            if probe.is_null() {
+                *value = J::Null;
+                return;
+            }
+        }
+        for child in map.values_mut() {
+            collapse_absent_nests(child);
+        }
+    }
 }
 
 /// Parse a to-many array column's value into a JSON array. The DB returns the aggregated

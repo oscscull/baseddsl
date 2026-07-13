@@ -37,12 +37,14 @@ use crate::resolve::Cx;
 
 /// Run inference + lints. Returns the inferred baseline, indexed like `cx.models`
 /// (the caller owns `models` mutably only after `cx` is dropped).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     models_ast: &[&Model],
     queries_ast: &[&Query],
     shapes_ast: &[&Shape],
     mutations_ast: &[&Mutation],
     rqueries: &[RQuery],
+    rmutations: &[RMutation],
     cx: &Cx,
     sink: &mut Sink,
 ) -> Vec<Vec<RIndex>> {
@@ -78,9 +80,15 @@ pub fn run(
     // A mutation's `update`/`delete`/`restore` `where` scans exactly like a query's
     // — feed each into the same pool so W0103 flags an unindexed bulk write and
     // W0104 counts a column a mutation filters on as used.
+    let rmut_by_name: HashMap<&str, &RMutation> =
+        rmutations.iter().map(|m| (m.name.as_str(), m)).collect();
     for mu in mutations_ast {
+        let inject = rmut_by_name
+            .get(mu.name.node.as_str())
+            .map(|rm| rm.scope_inject.as_slice())
+            .unwrap_or(&[]);
         for stmt in &mu.body {
-            collect_write(stmt, &mu.name.node, cx, &mut usage, &mut patterns);
+            collect_write(stmt, &mu.name.node, inject, cx, &mut usage, &mut patterns);
         }
     }
 
@@ -209,9 +217,14 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
         let terms = cx.model(mi).sort.clone();
         pat.note_sort(&terms, mi, cx, usage);
     }
-    // `@scope` rides into every query on the model, filters included.
-    if let Some(scope) = cx.model(mi).scope.clone() {
-        pat.walk(&scope, mi, cx, usage, &mut Vec::new());
+    // The scope this query injects rides into it, filters included — the *chosen*
+    // alternative's columns (an `unscoped` query injects none).
+    for si in &rq.scope_inject {
+        if si.model == cx.model(mi).name {
+            for (col, _) in &si.terms {
+                pat.add(mi, Op::Eq, col, usage);
+            }
+        }
     }
     pat
 }
@@ -223,6 +236,7 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
 fn collect_write(
     stmt: &WriteStmt,
     mut_name: &str,
+    inject: &[ScopeInject],
     cx: &Cx,
     usage: &mut [Usage],
     patterns: &mut Vec<(usize, Pattern)>,
@@ -234,7 +248,7 @@ fn collect_write(
         | WriteStmt::Restore { model, where_ } => (model, where_),
         WriteStmt::Tx(inner) => {
             for s in inner {
-                collect_write(s, mut_name, cx, usage, patterns);
+                collect_write(s, mut_name, inject, cx, usage, patterns);
             }
             return;
         }
@@ -245,7 +259,7 @@ fn collect_write(
     };
     patterns.push((
         mi,
-        write_pattern(mut_name, model.span, where_, mi, cx, usage),
+        write_pattern(mut_name, model.span, where_, mi, inject, cx, usage),
     ));
 }
 
@@ -257,6 +271,7 @@ fn write_pattern(
     span: Span,
     where_: &Predicate,
     mi: usize,
+    inject: &[ScopeInject],
     cx: &Cx,
     usage: &mut [Usage],
 ) -> Pattern {
@@ -271,8 +286,12 @@ fn write_pattern(
         annotation: None,
     };
     pat.walk(where_, mi, cx, usage, &mut Vec::new());
-    if let Some(scope) = cx.model(mi).scope.clone() {
-        pat.walk(&scope, mi, cx, usage, &mut Vec::new());
+    for si in inject {
+        if si.model == cx.model(mi).name {
+            for (col, _) in &si.terms {
+                pat.add(mi, Op::Eq, col, usage);
+            }
+        }
     }
     pat
 }

@@ -351,6 +351,7 @@ pub const MY_ORDERS_ROUTE: &str = "/q/my_orders";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentOrdersInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Cursor>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

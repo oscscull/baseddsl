@@ -413,6 +413,31 @@ fn enum_field_is_a_string_schema_with_enum_list() {
 }
 
 #[test]
+fn enum_annotated_param_is_the_enum_schema() {
+    // `status: Status` on a signature documents as the constrained enum schema,
+    // never as a uuid FK string.
+    let doc = gen(r#"
+        enum Status { pending, paid, shipped }
+        @sort(total desc)
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query by_status(status: Status) -> OrderRow[] { list Order where (status = $status); }
+    "#);
+    let param = &doc["components"]["schemas"]["ByStatusInput"]["properties"]["status"];
+    assert_eq!(
+        param["type"], "string",
+        "
+{doc:#}"
+    );
+    assert_eq!(
+        param["enum"],
+        serde_json::json!(["pending", "paid", "shipped"]),
+        "
+{doc:#}"
+    );
+}
+
+#[test]
 fn string_enum_with_explicit_value_lists_the_wire_values() {
     let doc = gen(r#"
         enum Status { pending, paid = "PAID" }

@@ -189,7 +189,7 @@ mod rust {
         for c in &callables {
             out.push('\n');
             let fields = input_fields(schema, c);
-            out.push_str(&render_struct(&input_name(c.name), &fields));
+            out.push_str(&render_input_struct(&input_name(c.name), &fields));
             // A callable that reads `$ctx.<field>`s gets a typed context struct the
             // method takes; a public callable (no requirements) takes `()`.
             if !c.ctx_requires.is_empty() {
@@ -734,6 +734,20 @@ mod rust {
     /// default.
     fn param_type(schema: &CheckedSchema, c: &Callable, p: &Param) -> String {
         let optional = p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional);
+        // An UpperCamel annotation names an *enum* when it resolves to one:
+        // `status: Status` takes the enum's own generated type, never `Id<entity::…>`.
+        if let Some(te) = &p.ty {
+            if let BaseType::Model(name) = &te.base {
+                if schema.enum_(&name.node).is_some() {
+                    let base = wrap(&name.node, false, te.many);
+                    return if optional {
+                        format!("Option<{base}>")
+                    } else {
+                        base
+                    };
+                }
+            }
+        }
         let base = if let Some(entity) = param_entity(c, p) {
             let many = p.ty.as_ref().is_some_and(|t| t.many);
             wrap(&id_type(&entity), false, many)
@@ -949,6 +963,27 @@ mod rust {
 
     /// A `#[derive(...)] pub struct Name { pub field: Type, … }` block. An empty body
     /// renders as a unit-like struct (a callable with no params posts `{}`).
+    /// An input struct: like [`render_struct`], but an `Option<…>` field is omitted
+    /// from the wire when `None` (`skip_serializing_if`) so the engine applies the
+    /// param's declared default — an explicit JSON `null` would suppress it. The
+    /// `default` twin keeps such a body deserializable with the field absent.
+    fn render_input_struct(name: &str, fields: &[(String, String)]) -> String {
+        let mut s = format!("#[derive(Debug, Clone, Serialize, Deserialize)]\npub struct {name}");
+        if fields.is_empty() {
+            s.push_str(";\n");
+            return s;
+        }
+        s.push_str(" {\n");
+        for (f, ty) in fields {
+            if ty.starts_with("Option<") {
+                s.push_str("    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
+            }
+            s.push_str(&format!("    pub {}: {ty},\n", field_ident(f)));
+        }
+        s.push_str("}\n");
+        s
+    }
+
     fn render_struct(name: &str, fields: &[(String, String)]) -> String {
         let mut s = format!("#[derive(Debug, Clone, Serialize, Deserialize)]\npub struct {name}");
         if fields.is_empty() {

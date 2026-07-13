@@ -41,7 +41,7 @@ use crate::Dialect;
 pub mod dml;
 pub mod mutations;
 
-pub use dml::{lower_queries, LoweredQuery, ARRAY_MARK, KEYSET_PREFIX, NEST_SEP};
+pub use dml::{lower_queries, LoweredQuery, ARRAY_MARK, KEYSET_PREFIX, NEST_PRESENT, NEST_SEP};
 pub use mutations::{lower_mutations, LoweredMutation, LoweredWrite};
 
 /// Render the whole schema as a DDL script (statements separated by blank lines).

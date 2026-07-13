@@ -2,13 +2,17 @@
 //!
 //! `$ctx` is the caller-supplied request context. It is **per-request**,
 //! so there is no single global context type; each callable *requires* exactly the
-//! `$ctx.<field>`s it reads — directly in a `where`, through its target model's
-//! `@scope`, through an expanded filter body, or in a `create`/`update` assign.
+//! `$ctx.<field>`s it reads — directly in a `where`, through an expanded filter
+//! body, in a `create`/`update` assign, or through the scope terms it injects
+//! (the caller passes those in as `scope_reqs`, resolved from the callable's
+//! *chosen* `@scope` alternative by `scope::inject_ctx_reqs`, so the requirement
+//! set always matches the `:ctx_<field>` binds codegen emits).
 //!
-//! A field's type is never declared: it is inferred from the column each use is
-//! compared against (`org = $ctx.org` ⇒ `org` is the FK, so `$ctx.org` is that
-//! model's key). Uses with no column to infer from (a literal, a raw block, a
-//! guard arg) contribute nothing.
+//! A directly-used field's type is never declared: it is inferred from the column
+//! each use is compared against (`org = $ctx.org` ⇒ `org` is the FK, so `$ctx.org`
+//! is that model's key). A scope field's type comes from its `scope` decl. Uses
+//! with no column to infer from (a literal, a raw block, a guard arg) contribute
+//! nothing.
 //!
 //! The one global fact is **coherence**: every callable reads from the same bag
 //! the caller builds per request, so a field *name* must mean one *type* across
@@ -19,271 +23,31 @@ use based_ast::*;
 use crate::ir::*;
 use crate::resolve::{self, Cx, Terminal};
 
-/// The `$ctx` a query requires: its own `where`s + its target model's `@scope`,
-/// each field typed by inference. Deduped (one entry per distinct field+type).
-pub fn collect_query(q: &Query, ti: usize, cx: &Cx) -> Vec<CtxReq> {
-    let mut out = Vec::new();
-    // `@scope` is injected into every query on the model, so a
-    // scope that reads `$ctx` makes that field a requirement of every such query —
-    // unless the query is `unscoped` , which drops the injection and the need.
-    if q.unscoped.is_none() {
-        if let Some(scope) = &cx.model(ti).scope {
-            walk_pred(scope, ti, cx, &mut Vec::new(), &mut out);
-        }
-    }
+/// The `$ctx` a query requires: the scope terms it injects (`scope_reqs` — the
+/// caller resolves them from the query's chosen `@scope` alternative per touched
+/// model, `scope::inject_ctx_reqs`, so the requirement matches the `:ctx_<field>`
+/// binds codegen emits) plus its own `where`s, each field typed by inference.
+/// Deduped (one entry per distinct field+type).
+pub fn collect_query(q: &Query, ti: usize, cx: &Cx, scope_reqs: Vec<CtxReq>) -> Vec<CtxReq> {
+    let mut out = scope_reqs;
     for clause in query_clauses(q) {
         if let Clause::Where(p) = clause {
             walk_pred(p, ti, cx, &mut Vec::new(), &mut out);
         }
     }
-    // Joined *scoped* models : codegen injects a joined model's `@scope` into
-    // its join `ON`, so a query that reaches another scoped tenant through a relation
-    // must *also* require that model's `$ctx` field (else the injected `:ctx_<field>`
-    // bind is unbound at runtime). `unscoped` drops the whole scope machinery, joins
-    // included, so it collects none — mirroring the codegen `with_scope_inject(false)`.
-    if q.unscoped.is_none() {
-        collect_joined_scope(q, ti, cx, &mut out);
-    }
     dedup(out)
 }
 
-/// Collect the `@scope` `$ctx` requirements of every scoped model a query *joins*
-/// . The join sources are exactly codegen's: relation reaches in a `where` path,
-/// the sort path (query `order`, else the model `@sort`), and the return shape's
-/// `out = path` reaches plus its nested sub-objects — a `Nest`/`NestRef` lowers to a
-/// scope-carrying join (to-one) or correlated subquery (to-many), so its child scope's
-/// `$ctx.<field>` must be bound. Sema and codegen stay aligned on which scopes exist.
-fn collect_joined_scope(q: &Query, ti: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
-    // `where` paths.
-    for clause in query_clauses(q) {
-        match clause {
-            Clause::Where(p) => walk_pred_paths(p, ti, cx, out),
-            Clause::Order(terms) => {
-                for t in terms {
-                    walk_path_scope(&t.path, ti, cx, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    // Model `@sort` only applies when the query supplies no `order` (codegen's cascade).
-    let has_query_order = query_clauses(q)
-        .iter()
-        .any(|c| matches!(c, Clause::Order(_)));
-    if !has_query_order {
-        for t in &cx.model(ti).sort {
-            walk_path_scope(&t.path, ti, cx, out);
-        }
-    }
-    // Return shape reaches.
-    if let Some(body) = cx.shape_bodies.get(&q.ret.ty.node) {
-        walk_shape_scope(body, ti, cx, out);
-    }
-}
-
-/// Walk every column path in a predicate, recording joined-model scope for each
-/// relation reach. Filter calls expand against the call site , guarded against
-/// self-reference. (`walk_pred` above collects *direct* `$ctx` uses; this collects
-/// the *joined-model* scope those same paths traverse — a separate concern.)
-fn walk_pred_paths(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
-    walk_pred_paths_in(pred, model, cx, &mut Vec::new(), out);
-}
-
-fn walk_pred_paths_in(
-    pred: &Predicate,
-    model: usize,
-    cx: &Cx,
-    in_filters: &mut Vec<String>,
-    out: &mut Vec<CtxReq>,
-) {
-    match pred {
-        Predicate::And(a, b) | Predicate::Or(a, b) => {
-            walk_pred_paths_in(a, model, cx, in_filters, out);
-            walk_pred_paths_in(b, model, cx, in_filters, out);
-        }
-        Predicate::Not(p) => walk_pred_paths_in(p, model, cx, in_filters, out),
-        Predicate::Cmp { path, value, .. } => {
-            walk_path_scope(path, model, cx, out);
-            if let Value::Path(p) = value {
-                walk_path_scope(p, model, cx, out);
-            }
-        }
-        Predicate::Bare(path) => {
-            if path.segments.len() == 1 {
-                if let Some(def) = cx.filters.get(&path.segments[0].node) {
-                    walk_filter_paths(def, model, cx, in_filters, out);
-                    return;
-                }
-            }
-            walk_path_scope(path, model, cx, out);
-        }
-        Predicate::FilterCall { name, .. } => {
-            if let Some(def) = cx.filters.get(&name.node) {
-                walk_filter_paths(def, model, cx, in_filters, out);
-            }
-        }
-        Predicate::Raw(_) => {}
-    }
-}
-
-fn walk_filter_paths(
-    def: &NamedFilter,
-    model: usize,
-    cx: &Cx,
-    in_filters: &mut Vec<String>,
-    out: &mut Vec<CtxReq>,
-) {
-    if in_filters.iter().any(|n| n == &def.name.node) {
-        return;
-    }
-    in_filters.push(def.name.node.clone());
-    walk_pred_paths_in(&def.pred, model, cx, in_filters, out);
-    in_filters.pop();
-}
-
-/// Walk a return shape body, collecting the `$ctx` requirements of every scoped model
-/// its reaches and nests touch: an `out = path` reach may join; a nested sub-object
-/// (`field { … }` or `field -> Shape`) lowers to a join (to-one) or correlated subquery
-/// (to-many) whose child `@scope` codegen injects, so its `$ctx.<field>` must be bound.
-/// `stack` guards a `NestRef` cycle. Kept byte-for-byte parallel with
-/// `scope::walk_shape_join`.
-fn walk_shape_scope(body: &[ShapeField], model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
-    walk_shape_scope_in(body, model, cx, &mut Vec::new(), out);
-}
-
-fn walk_shape_scope_in(
-    body: &[ShapeField],
-    model: usize,
-    cx: &Cx,
-    stack: &mut Vec<String>,
-    out: &mut Vec<CtxReq>,
-) {
-    for f in body {
-        match f {
-            ShapeField::Rename {
-                value: ShapeValue::Path(p),
-                ..
-            } => walk_path_scope(p, model, cx, out),
-            ShapeField::Nest { field, body } => {
-                if let Some(ti) = nest_target(model, &field.node, cx) {
-                    if let Some(scope) = &cx.model(ti).scope {
-                        walk_pred(scope, ti, cx, &mut Vec::new(), out);
-                    }
-                    walk_shape_scope_in(body, ti, cx, stack, out);
-                }
-            }
-            ShapeField::NestRef { field, shape } => {
-                if let Some(ti) = nest_target(model, &field.node, cx) {
-                    if let Some(scope) = &cx.model(ti).scope {
-                        walk_pred(scope, ti, cx, &mut Vec::new(), out);
-                    }
-                    if stack.iter().any(|s| s == &shape.node) {
-                        continue;
-                    }
-                    if let Some(body) = cx.shape_bodies.get(&shape.node) {
-                        stack.push(shape.node.clone());
-                        walk_shape_scope_in(body, ti, cx, stack, out);
-                        stack.pop();
-                    }
-                }
-            }
-            ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
-        }
-    }
-}
-
-/// The model index a nest field reaches through its relation, or `None` for a scalar
-/// / unresolved field (already reported elsewhere).
-fn nest_target(model: usize, field: &str, cx: &Cx) -> Option<usize> {
-    match cx.model(model).member(field).map(|m| &m.kind) {
-        Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
-            cx.find(target)
-        }
-        _ => None,
-    }
-}
-
-/// Walk a dotted path from `start`, and at every *intermediate* model entered through
-/// a relation hop (a join in codegen), collect that model's `@scope` `$ctx` fields.
-/// The final segment is a terminal column/FK, not a join, so it is skipped. Mirrors
-/// codegen's `Select::resolve` (a join per non-last relation hop).
-fn walk_path_scope(path: &Path, start: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
-    let mut cur = start;
-    let n = path.segments.len();
-    for (i, seg) in path.segments.iter().enumerate() {
-        let Some(mem) = cx.model(cur).member(&seg.node) else {
-            return; // sema already reported the unknown field
-        };
-        if i + 1 == n {
-            return; // terminal segment — a column/FK, never a join
-        }
-        match &mem.kind {
-            MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
-                let Some(mi) = cx.find(target) else { return };
-                // The join into `target` carries `target`'s `@scope` .
-                if let Some(scope) = &cx.model(mi).scope {
-                    walk_pred(scope, mi, cx, &mut Vec::new(), out);
-                }
-                cur = mi;
-            }
-            MemberKind::Scalar { .. } => return, // can't traverse a scalar
-        }
-    }
-}
-
-/// The `$ctx` a mutation requires: each write statement's `where` + its model's
-/// `@scope` (update/delete/restore inject it) + `create`/`update` assigns, plus
-///  any scoped model a write `where` or the create's declared-shape re-select
-/// *joins*. `ret_shape`/`ret_model` describe that re-select's projection.
-pub fn collect_mutation(
-    m: &Mutation,
-    ret_shape: Option<&str>,
-    ret_model: &str,
-    cx: &Cx,
-) -> Vec<CtxReq> {
-    let mut out = Vec::new();
-    // `unscoped`  drops both the injected write guard and the create-time auto-set,
-    // so a scoped model contributes no `$ctx` requirement to an unscoped mutation.
-    let unscoped = m.unscoped.is_some();
+/// The `$ctx` a mutation requires: the scope terms it injects (`scope_reqs`, from
+/// the mutation's chosen `@scope` alternative per touched model — write guards,
+/// the create-time auto-set, and the re-select's joined scopes alike) plus each
+/// write statement's `where` and `create`/`update` assigns.
+pub fn collect_mutation(m: &Mutation, cx: &Cx, scope_reqs: Vec<CtxReq>) -> Vec<CtxReq> {
+    let mut out = scope_reqs;
     for stmt in &m.body {
-        walk_write(stmt, cx, unscoped, &mut out);
-    }
-    // Joined-model scope , unless `unscoped` (which drops all scope handling).
-    if !unscoped {
-        for stmt in &m.body {
-            collect_write_joined_scope(stmt, cx, &mut out);
-        }
-        // The declared-shape re-select  projects `ret_shape` from `ret_model`,
-        // so its relation reaches join scoped models exactly like a query's shape.
-        if let (Some(name), Some(mi)) = (ret_shape, cx.find(ret_model)) {
-            if let Some(body) = cx.shape_bodies.get(name) {
-                walk_shape_scope(body, mi, cx, &mut out);
-            }
-        }
+        walk_write(stmt, cx, &mut out);
     }
     dedup(out)
-}
-
-/// A write's `where` paths reach through relations (update/delete/restore); each
-/// non-terminal hop into a scoped model is a scope-injected join . A `create`
-/// has no `where`; a `tx` recurses.
-fn collect_write_joined_scope(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
-    match stmt {
-        WriteStmt::Update { model, where_, .. }
-        | WriteStmt::Delete { model, where_ }
-        | WriteStmt::HardDelete { model, where_ }
-        | WriteStmt::Restore { model, where_ } => {
-            if let Some(mi) = cx.find(&model.node) {
-                walk_pred_paths(where_, mi, cx, out);
-            }
-        }
-        WriteStmt::Tx(inner) => {
-            for s in inner {
-                collect_write_joined_scope(s, cx, out);
-            }
-        }
-        WriteStmt::Create { .. } | WriteStmt::Raw(_) => {}
-    }
 }
 
 /// Closed-world coherence : a `$ctx.<field>` must carry the same type
@@ -329,14 +93,10 @@ fn query_clauses(q: &Query) -> &[Clause] {
     }
 }
 
-fn walk_write(stmt: &WriteStmt, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) {
+fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
     match stmt {
         WriteStmt::Create { model, assigns } => {
             if let Some(mi) = cx.find(&model.node) {
-                // A create on a scoped model auto-sets the scope column from `$ctx`
-                // , so it *requires* that field — the create-time twin of the
-                // read/write injection. An explicit assign may also set one from ctx.
-                scope_ctx(mi, cx, unscoped, out);
                 for a in assigns {
                     record_assign(a, mi, cx, out);
                 }
@@ -348,7 +108,6 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) 
             assigns,
         } => {
             if let Some(mi) = cx.find(&model.node) {
-                scope_ctx(mi, cx, unscoped, out);
                 walk_pred(where_, mi, cx, &mut Vec::new(), out);
                 for a in assigns {
                     record_assign(a, mi, cx, out);
@@ -359,25 +118,15 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) 
         | WriteStmt::HardDelete { model, where_ }
         | WriteStmt::Restore { model, where_ } => {
             if let Some(mi) = cx.find(&model.node) {
-                scope_ctx(mi, cx, unscoped, out);
                 walk_pred(where_, mi, cx, &mut Vec::new(), out);
             }
         }
         WriteStmt::Tx(inner) => {
             for s in inner {
-                walk_write(s, cx, unscoped, out);
+                walk_write(s, cx, out);
             }
         }
         WriteStmt::Raw(_) => {} // opaque — no column to infer against
-    }
-}
-
-fn scope_ctx(mi: usize, cx: &Cx, unscoped: bool, out: &mut Vec<CtxReq>) {
-    if unscoped {
-        return;
-    }
-    if let Some(scope) = &cx.model(mi).scope {
-        walk_pred(scope, mi, cx, &mut Vec::new(), out);
     }
 }
 

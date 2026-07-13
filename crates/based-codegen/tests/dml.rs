@@ -413,6 +413,60 @@ fn nested_to_one_forward_projects_prefixed_columns() {
 }
 
 #[test]
+fn optional_to_one_nest_projects_a_presence_probe() {
+    // A LEFT-JOINed to-one nest (optional relation) can come back all-NULL when the
+    // row is absent; the child's `id` is projected once more as `<field>.__present`
+    // so the runtime can collapse the sub-object to JSON null. A required nest
+    // inner-joins and needs no probe.
+    let ddl = gen(r#"
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text, email: text }
+        @soft_delete(deleted_at)
+        @sort(placed_at desc)
+        Order {
+          deleted_at: timestamp?
+          placed_by:  User
+          courier:    User?
+          total:      int
+          placed_at:  timestamp
+        }
+        shape OrderCard from Order { total, placed_by { name }, courier { name, email } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        ddl.contains("`j_courier`.`id` AS `courier.__present`"),
+        "\n{ddl}"
+    );
+    assert!(!ddl.contains("`placed_by.__present`"), "\n{ddl}");
+}
+
+#[test]
+fn optional_to_one_nest_inside_a_json_array_null_collapses() {
+    // Inside a to-many JSON aggregate the sub-object is built in SQL, so the absent
+    // row collapses there: CASE WHEN the child's id IS NULL THEN NULL.
+    let ddl = gen(r#"
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text }
+        @soft_delete(deleted_at)
+        @sort(placed_at desc)
+        Order {
+          deleted_at: timestamp?
+          total:      int
+          placed_at:  timestamp
+          items:      OrderItem[] (OrderItem.order)
+        }
+        @soft_delete(deleted_at)
+        OrderItem { deleted_at: timestamp?, order: Order, checker: User?, qty: int }
+        shape OrderCard from Order { total, items { qty, checker { name } } }
+        query order_by_id(id) -> OrderCard;
+        "#);
+    assert!(
+        ddl.contains("CASE WHEN `j_checker`.`id` IS NULL THEN NULL ELSE"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
 fn nested_to_one_recurses_and_reaches_inside_nest() {
     // Nested-within-nested (`placed_by { org { name } }`) chains joins and deepens the
     // alias prefix (`placed_by.org.name`); a `=`-reach inside a nest resolves from the

@@ -185,7 +185,14 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         // 6. Index inference + lints. Last on purpose: it
         // reasons over the *whole* resolved access layer (closed world).
         let inferred = indexes::run(
-            &models, &queries, &shapes, &mutations, &rqueries, &cx, &mut sink,
+            &models,
+            &queries,
+            &shapes,
+            &mutations,
+            &rqueries,
+            &rmutations,
+            &cx,
+            &mut sink,
         );
         (rshapes, rqueries, rmutations, rfilters, inferred)
     };

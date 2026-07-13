@@ -87,6 +87,13 @@ pub const ARRAY_MARK: &str = "[]";
 /// emits it, the runtime (`run.rs`) reads + strips it.
 pub const KEYSET_PREFIX: &str = "__keyset_";
 
+/// Presence probe for a to-one nest whose row may be absent (a LEFT-JOINed edge:
+/// an optional forward relation, or a to-one inverse). The child's `id` is projected
+/// once more as `<field>.__present`; the runtime collapses the nested object to JSON
+/// `null` when it is NULL (an all-null sub-object would otherwise be indistinguishable
+/// from a matched row) and strips the probe. `__` cannot begin a BSL identifier.
+pub const NEST_PRESENT: &str = "__present";
+
 /// Render every query in the schema as a parameterized SELECT (mutations join in a
 /// later increment). Statements are separated by blank lines, in declaration order.
 pub fn dml(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> String {
@@ -465,6 +472,13 @@ fn project_nest<'a>(
         sel.enter_to_one(&field.node, alias, prefix, model)
     {
         let nested_out = format!("{out_prefix}{}{NEST_SEP}", field.node);
+        if to_one_absent_possible(model, &field.node) {
+            cols.push(format!(
+                "{} AS {}",
+                sel.qcol(&child_alias, "id"),
+                sel.q(&format!("{nested_out}{NEST_PRESENT}"))
+            ));
+        }
         project_body(
             sel,
             body,
@@ -478,6 +492,17 @@ fn project_nest<'a>(
         let arr = sel.json_array_subquery(body, child_model, &via_fk, alias, edge_sort);
         let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
         cols.push(format!("{arr} AS {}", sel.q(&out)));
+    }
+}
+
+/// Whether a to-one nest's joined row can be absent: an optional forward relation
+/// or a to-one inverse — the LEFT-JOINed edges. A required forward edge inner-joins,
+/// so its row always exists. Mirrors the client emitter's `Option<…>` typing.
+fn to_one_absent_possible(model: &RModel, field: &str) -> bool {
+    match model.member(field).map(|m| &m.kind) {
+        Some(MemberKind::Forward { optional, .. }) => *optional,
+        Some(MemberKind::Inverse { .. }) => true,
+        _ => false,
     }
 }
 
@@ -520,10 +545,20 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
             let (alias, col) = sel.resolve(&single(&edge.node), root);
             format!("{} = {ph}", sel.qcol(&alias, &col))
         }
-        // `since: timestamp > created_at`: explicit column + operator.
+        // `since: timestamp > created_at`: explicit column + operator. The collection
+        // ops mirror the predicate lowering — `in` takes a value list, `has` is JSON
+        // containment (Postgres `col @> value`, MySQL-family `value MEMBER OF(col)`).
         Some(ParamBinding::ColOp { op, col }) => {
             let (alias, c) = sel.resolve(&single(&col.node), root);
-            format!("{} {} {ph}", sel.qcol(&alias, &c), sql_op(*op))
+            let lhs = sel.qcol(&alias, &c);
+            match op {
+                Op::In => format!("{lhs} IN ({ph})"),
+                Op::Has => match sel.dialect {
+                    Dialect::Postgres => format!("{lhs} @> {ph}"),
+                    _ => format!("{ph} MEMBER OF({lhs})"),
+                },
+                _ => format!("{lhs} {} {ph}", sql_op(*op)),
+            }
         }
         // same-name equality on the mapped column (a relation field maps to its FK).
         None => {
@@ -1001,13 +1036,16 @@ impl<'a> Select<'a> {
         for f in body {
             match f {
                 ShapeField::Bare(id) => {
-                    let (a, col) = self.resolve_from(&single(&id.node), alias, prefix, model);
-                    pairs.push(format!("'{}', {}", id.node, self.qcol(&a, &col)));
+                    let path = single(&id.node);
+                    let (a, col) = self.resolve_from(&path, alias, prefix, model);
+                    let expr = self.json_scalar(&a, &col, &path, model);
+                    pairs.push(format!("'{}', {expr}", id.node));
                 }
                 ShapeField::Rename { out, value } => match value {
                     ShapeValue::Path(p) => {
                         let (a, col) = self.resolve_from(p, alias, prefix, model);
-                        pairs.push(format!("'{}', {}", out.node, self.qcol(&a, &col)));
+                        let expr = self.json_scalar(&a, &col, p, model);
+                        pairs.push(format!("'{}', {expr}", out.node));
                     }
                     ShapeValue::Raw(raw) => {
                         pairs.push(format!(
@@ -1031,6 +1069,25 @@ impl<'a> Select<'a> {
         format!("{}({})", self.dialect.json_object_fn(), pairs.join(", "))
     }
 
+    /// One scalar column inside a JSON element body. A `decimal` column is cast to
+    /// text first: the wire contract carries a decimal as its exact JSON *string*, but
+    /// a SQL-built JSON object would render the native numeric as a JSON number and
+    /// lose the contract (SQLite already stores decimal as TEXT — no cast needed).
+    fn json_scalar(&self, alias: &str, col: &str, path: &Path, model: &RModel) -> String {
+        let qcol = self.qcol(alias, col);
+        if !matches!(
+            path_primitive(self.schema, model, path),
+            Primitive::Decimal { .. }
+        ) {
+            return qcol;
+        }
+        match self.dialect {
+            Dialect::Postgres => format!("({qcol})::text"),
+            Dialect::MariaDb => format!("CAST({qcol} AS CHAR)"),
+            Dialect::Sqlite => qcol,
+        }
+    }
+
     /// One relation nest inside a JSON element body: a to-one edge becomes a nested
     /// JSON object, a to-many edge a nested correlated-subquery array.
     fn json_nest_pair(
@@ -1046,6 +1103,16 @@ impl<'a> Select<'a> {
             self.enter_to_one(&field.node, alias, prefix, model)
         {
             let nested = self.json_object_expr(body, child_model, &child_alias, &child_prefix);
+            // An absent LEFT-JOINed row must surface as JSON null, not an object of
+            // nulls — probe the child's `id` (never NULL on a matched row).
+            let nested = if to_one_absent_possible(model, &field.node) {
+                format!(
+                    "CASE WHEN {} IS NULL THEN NULL ELSE {nested} END",
+                    self.qcol(&child_alias, "id")
+                )
+            } else {
+                nested
+            };
             pairs.push(format!("'{}', {}", field.node, nested));
         } else if let Some((child_model, via_fk, edge_sort)) = self.to_many_edge(&field.node, model)
         {
