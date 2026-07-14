@@ -6,6 +6,8 @@ name = "axum-helpdesk"
 version = "0.0.0"
 edition = "2021"
 publish = false
+# `cargo run` boots the service; `--bin seed` / `--bin smoke` are the setup + gate.
+default-run = "axum-helpdesk"
 
 [dependencies]
 # The engine: in-process `Engine`, the `PgRouter`/`PostgresDb` driver, and the
@@ -13,7 +15,15 @@ publish = false
 # `uuid` id columns reject non-uuid ids).
 based-runtime = { path = "../../crates/based-runtime", features = ["postgres", "serve"] }
 # The engine is async; tokio's macro runtime drives `#[tokio::main]`.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+# The HTTP surface: the app's own axum listener embedding the engine.
+axum = "0.8"
+# The app's own connection pool — the engine runs over it (`PgRouter::from_pool`),
+# so the app's settings govern and both share one set of connections.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+# Re-framing the typed export stream as NDJSON lines.
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false }
 # The generated client derives serde; the embedded bridge serializes the typed input.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,3 +34,5 @@ rust_decimal = { version = "1", features = ["serde-str"] }
 futures-core = "0.3"
 # Load `DATABASE_URL` from `.env` (the conventional 12-factor crate).
 dotenvy = "0.15"
+# The live smoke (`cargo run --bin smoke`) drives the service over real HTTP.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }

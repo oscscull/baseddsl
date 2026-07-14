@@ -525,12 +525,33 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
     resolve at N3e: `in` has no value-list form (search uses `not`/`or` instead) and raw
     whole-query bodies don't exist (workload report uses raw correlated-subquery *values* —
     arguably the better raw.md story).
-  - **N3d. The axum service.** Routes/middleware/state per D86; streaming export re-served as
-    NDJSON through axum; `ClientError` → HTTP mapping; a live smoke scenario (boot against
-    Postgres, drive every route incl. export truncation/idempotent-replay/cross-tenant probes) as
-    a `make` target.
+  - ✅ **N3d. The axum service.** `src/{main,app,auth,routes}.rs`: the D86 architecture live —
+    the app's own sqlx `PgPool` → `PgRouter::from_pool` → `Engine::with_guards` in axum state;
+    bearer middleware resolving tokens through the typed client (`session_by_token`) into a
+    request-extension `SessionCtx` (role-gates the desk/ops routes); ~20 routes, each handler one
+    typed call; `Idempotency-Key` on `POST /tickets` via the `_with_key` twin; the export
+    re-served as NDJSON (row/done/error framing mirroring the wire) from `RowStream`; one
+    `ApiError` passing the engine's status + stable code + envelope through untouched. Close
+    policy chosen for `caller_can_close`: *only a resolved ticket, visible in the caller's
+    workspace, can be closed* — host code on the app's own pool (the D88-proven pattern), denying
+    by default when it can't verify. Live gate: `make ci-example-helpdesk` (in `ci-examples`) —
+    reset → migrate → seed → boot in-process → drive the whole surface over real HTTP (401s,
+    disjoint tenants, role 403, search/status/bad-cursor 400, queue, ordered nests, cross-tenant
+    404, keyed replay + 422 reuse, guard 403→allow, archive/restore, AND-scope drafts, tags/
+    per-param bindings, workload raw SQL, unscoped offset admin, NDJSON checksum + dropped-stream
+    recovery). **Notes for N3e (library gaps hit, each wants its own slice):** (i) a guard
+    calling the typed client over its *own* engine deadlocks — `Engine::call` holds the id-gen
+    lock across dispatch, so the D88 doc's "or call the typed client itself" only works against
+    a second engine; narrow the lock. (ii) `mutation … -> Shape { hard delete … }` is
+    undecodable through the typed client (wire returns `{}`, client expects the shape) — the
+    purge-comment route is omitted; sema should reject the pairing or the re-select should run
+    pre-delete. (iii) `with count`'s `total` is dropped by the generated `Page<T>` (no field) —
+    the admin route serves rows+cursor only. (iv) a zero-row update (e.g. cross-tenant id) is
+    a `200 null` body → typed decode error, deserves a `not_found` outcome. (v) `~` takes a
+    verbatim LIKE pattern — the handler wraps `%…%`; fine, but worth a docs line.
   - **N3e. README + re-audit + CI.** The re-pitch README (walks the `.bsl` surfaces first), a final
-    first-look appeal pass over the real artifact, example wired into `make check`/CI.
+    first-look appeal pass over the real artifact, example wired into CI (`make check` already
+    runs it via `ci-examples`); plus the N3c/N3d deviation list above.
 
 ## Track T — core DB feature parity (owner-approved 2026-07-09; PAUSED behind Track N)
 

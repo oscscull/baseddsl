@@ -11,7 +11,7 @@
 #   make dev-db-up         # throwaway mariadb:11.4 + postgres:16 for local runs
 #   make ci-live-mariadb   # migrate-apply + live MariaDB suite against $(MARIADB_URL)
 #   make ci-live-postgres  # live Postgres suite against $(POSTGRES_URL)
-#   make ci-examples       # build + run the three quickstart scenarios
+#   make ci-examples       # build + run the quickstart scenarios + the helpdesk smoke
 #   make dev-db-down       # stop the throwaway servers
 #
 # `make ci` runs the infra-free gates (workspace + extension). The DB targets are separate
@@ -39,7 +39,7 @@ SQLITE_DB    ?= quickstart.db
 
 .PHONY: ci check check-fast ci-workspace ci-coloring ci-extension ci-image ci-live \
         ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
-        ci-example-mariadb ci-example-postgres based-cli dev-db-up dev-db-down
+        ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-down
 
 # The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
 # facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
@@ -125,10 +125,11 @@ ci-live-sqlx:
 	  $(CARGO) test -p based-runtime --features docker-tests \
 	  --test sqlx_spike -- --test-threads=1 --nocapture
 
-## The three example scenarios: `based migrate apply` then `cargo run`, each end-to-end green.
+## The example scenarios: `based migrate apply` then `cargo run`, each end-to-end green.
 ## Each expects an empty DB (a fresh CI service container / throwaway); the SQLite one resets
-## its own file. This is the example half of DoD #4 (the copyable quickstarts never rot).
-ci-examples: ci-example-sqlite ci-example-mariadb ci-example-postgres
+## its own file, and the helpdesk smoke resets the shared Postgres itself (so it runs last).
+## This is the example half of DoD #4 (the copyable examples never rot).
+ci-examples: ci-example-sqlite ci-example-mariadb ci-example-postgres ci-example-helpdesk
 
 ci-example-sqlite: based-cli
 	cd examples/sqlite-quickstart && rm -f "$(SQLITE_DB)" && \
@@ -146,6 +147,17 @@ ci-example-postgres: based-cli
 	cd examples/postgres-quickstart && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(BASED) migrate apply --database-url "$(POSTGRES_URL)" && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run
+
+## The flagship axum service, end to end over real HTTP: reset the database (drop +
+## recreate `public`, so a shared throwaway server is fine), migrate, seed, then boot
+## the service and drive every route (auth, scoping, guard, idempotency, NDJSON export).
+ci-example-helpdesk: based-cli
+	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
+	cd examples/axum-helpdesk && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke -- reset && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(BASED) migrate apply --database-url "$(POSTGRES_URL)" && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin seed && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke
 
 ## Local convenience: throwaway mariadb:11.4 + postgres:16 matching the default URLs above.
 ## CI provisions these as service containers instead (see .github/workflows/ci.yml).
