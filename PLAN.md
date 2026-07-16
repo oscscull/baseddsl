@@ -410,6 +410,203 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   body; the typed client fails decoding instead of reporting the miss. Seam: `run_mutation`'s
   re-select outcome in based-runtime. Fix: a `not_found` outcome (404, stable code) when a
   surviving-write mutation matched zero rows.
+- **NF7. `@was` lifecycle is a rough edge (owner-flagged 2026-07-16; design decision, priority).**
+  Symptom: `@was` is a one-shot gen-time hint, so after `migrate gen` it is dead weight —
+  either it lingers (W0107 cruft, a second commit to remove) or the author strips it
+  pre-commit and no PR ever shows the gesture, so users never learn it and hand-write
+  drop+add instead. Worse: renaming *without* `@was` yields a destructive drop+add with no
+  "did you mean a rename?" anywhere (gen output, W0108 note, apply's destructive gate all
+  silent). The durable record (`rename column` step in `up.mig` + snapshot) is fine; the
+  authoring flow around it is not. Candidate direction (not yet decided): (a) gen
+  self-consumes the spent `@was` from the `.bsl` after writing the migration — one command,
+  no cruft; (b) teach at the checkpoint — when a diff drops column X and adds same-typed Y
+  on one table, gen/W0108/destructive-gate output says `if this is a rename, declare
+  @was("X") and re-gen` (this is the load-bearing piece: it gives `@was` the interactive
+  prompt's self-revealing-at-the-moment-of-ambiguity property with zero prior knowledge,
+  delivered over the run→read→edit→re-run loop agents actually have); (c) LSP quick-fix on
+  W0107; (d) LSP `textDocument/rename` on a field inserts `@was("old")` as part of the
+  rename edit — the LSP knows the old name, making the correct gesture the default for
+  editor renames. Alternatives considered and rejected: interactive gen prompts (non-TTY
+  harnesses hang; headless fallbacks default to drop+add; session answers make gen
+  non-reproducible, breaking the drift re-check), keep-forever Terraform-`moved`-style
+  hints (the `migrations/` ledger already holds transition history — pure changelog cost),
+  rename only by hand-editing `up.mig` (stays legal as escape hatch). Spec seam:
+  migrations.md E5 + decisions entry when resolved.
+
+- **NF8. `up.mig` hand-edit contract is misleading + invisible (owner-flagged 2026-07-16; priority).**
+  The header says "edit if needed, then apply", but the model is snapshot-authoritative:
+  `apply`/`render` re-derive structural SQL from the `schema.snap` chain and only *parse*
+  `raw(<dialect>)` lines out of `up.mig` (based-runtime migrate::load_migrations). So a
+  hand edit to a *neutral* step line is **silently ignored at apply** — executed SQL comes
+  from the snapshots; only offline `based migrate verify` catches the byte-drift, and only
+  if it runs. The genuinely editable surface is: add `raw(dialect)` lines + hand-author
+  `down.mig`. Nothing in the artifact says this. Compounding subtleties: (1) raw steps
+  execute *after* all structural steps of their migration regardless of where the line sits
+  in the file — position looks meaningful and isn't; (2) `.mig`/`.snap` have zero editor
+  support — the VS Code extension contributes only `.bsl` (editors/vscode/package.json), so
+  the one artifact users are invited to hand-edit is plain text with no highlighting and no
+  diagnostics. Candidate fixes (not yet decided, cheap→deep): (a) rewrite the generated
+  header to state the real contract ("structural steps derive from schema.snap; meaningful
+  edits are raw(dialect) lines and down.mig; raw runs after structural steps"); (b)
+  apply-time drift check — `load_migrations` already reads both `up.mig` and `schema.snap`
+  per migration, so the verify byte-compare is nearly free there; refuse (or loudly warn)
+  on a neutral-line edit instead of silently ignoring it, closing the verify-didn't-run
+  hole; (c) a `.mig` tmLanguage grammar + language contribution (steps, `raw(dialect)`,
+  destructive markers; embedded SQL inside raw backticks), optionally `.snap` too; (d) the
+  already-open spec question (migrations.md, raw structural effects: `produces:` note vs
+  paired neutral step) — raw touching objects the snapshot *models* (tables/columns/indexes)
+  makes the snapshot blind with no shadow-DB to catch it, while raw on unmodeled objects
+  (views, triggers, extensions) is safe blindness; document that boundary at minimum.
+  Owner-added 2026-07-16, same theme: (e) raw SQL ergonomics — `parse_raw_steps` is
+  line-based, so a raw step is **single-line only** today; the spec's own cited use (the
+  sqlite table-rebuild, migrations.md) is unwritable readably. Options: multi-line backtick
+  blocks in `.mig` (keeps the one-file artifact + ledger hash contract; pair with the
+  tmLanguage SQL injection from (c)) vs. sidecar files (`NNNN_slug/raw.postgres.sql`
+  referenced from `up.mig`) which get free IDE SQL support but require extending the ledger
+  `up_hash` + `verify` to cover sidecars, else post-apply edits to them dodge the tamper
+  check. (f) **down.mig placeholder (owner-endorsed: without an invitation in the artifact,
+  down migrations will simply never be written).** Gen writes only {up.mig, schema.snap};
+  candidate: gen also emits `down.mig` prefilled — diff knows the steps and most are
+  mechanically reversible (add⇄drop, rename⇄rename, create⇄drop table), so prefill real
+  reverse SQL for the manifest dialect and mark irreversible steps with a loud
+  `-- drop column X is irreversible; write your own or delete this file` comment; at
+  minimum a commented template so the file exists and invites completion.
+
+- **NF9. Exotic column types need a passthrough seam (owner-flagged 2026-07-16; design decision, priority).**
+  Problem: the primitive set (`text int bool timestamp date json uuid float decimal`) is
+  closed — a column whose DB type we don't model (PostGIS `geometry`, `tsvector`, `inet`,
+  vendor JSON variants) **cannot be declared at all**. First-class geo support is not
+  warranted (niche, per-dialect), but the current cliff is total: the user's only move is a
+  raw migration adding the column behind the schema's back, which (1) makes the snapshot
+  blind on a modeled table, (2) gets the column silently DROPPED by any future sqlite
+  table-rebuild (rebuild recreates from snapshot), (3) excludes it from every generated
+  surface. That is the "throw the whole system away" failure mode for one field. Candidate
+  direction (not yet decided): a Prisma-`Unsupported("…")`-style opaque column type — e.g.
+  `location: sqltype("geometry(Point,4326)")?` (spelling TBD; likely per-dialect map since
+  type names differ) where the engine stores the literal type string in DDL + snapshot
+  (diff = string compare, migrations/rebuilds/`@was` all work), the typed client treats the
+  value as opaque (bytes/string, or excluded from create/update unless nullable/defaulted —
+  Prisma's rule), filters/sorts on it are rejected except via the existing raw predicate
+  hatch, and functions over it (`ST_Area(...)`) go through raw-value-in-shape / raw query
+  (raw.md — already sufficient for the *read* side today). Result: one opaque field
+  degrades gracefully — CRUD on the rest of the model, migrations, and the drift check all
+  stay in-system; raw stays at the leaves (principle: raw at the leaves, never the
+  structure). **Indexes are in scope (owner, 2026-07-16): an opaque column you can't index
+  is dead weight** — a geometry column without GIST is unusable, same for `tsvector`+GIN.
+  Today `@index` is columns+`unique` only and `IndexSnap` records `{name, columns, unique,
+  inferred}` — no access method, expressions, opclasses, or predicates — so an exotic index
+  hits the identical cliff, and a raw-migration index is the same trap as a raw column
+  (orphaned on model drop, lost on sqlite table-rebuild, invisible to the index lints).
+  Same seam, two tiers: (i) `@index(location) using gist` — a `using <method>` token
+  (gist/gin/brin/hash…; MariaDB `FULLTEXT`/`SPATIAL`), snapshot-recorded, per-dialect
+  validity checked loudly (sqlite lacks most methods → error at gen, not silent skip);
+  (ii) an opaque index form for the long tail (expression indexes, opclasses, partial
+  `WHERE`) recorded in the snapshot as a literal string, diffed by string compare — exactly
+  the opaque-column treatment, so create/drop/rebuild lifecycle stays in-system. Spec seam:
+  models.md Types + indexing.md + raw.md + migrations.md; decisions entry when resolved.
+
+- **NF10. Hover facts anchored at whole-decl spans bleed into every hover inside the decl
+  (owner-observed 2026-07-16; bug, priority).** `based_facts::facts` anchors each
+  `InferredIndex` fact at `model.span` (based-facts lib.rs) and the ctx-requirement /
+  resolved-query facts at `q.span`/`m.span` — and those spans cover the **entire
+  declaration** (parser sets decl spans keyword→body-end). The LSP hover appends every fact
+  whose span contains the cursor (based-lsp main.rs `hover`), so hovering *any* token inside
+  the ticket model shows "inferred index `inf_ticket_deleted_at_duplicate_of` …" regardless
+  of relevance; the same class hits query/mutation bodies (irrelevant `requires […]` /
+  `resolved query` sections on every hover inside them). Inlay hints are unaffected (they
+  render at span start). Fix: anchor narrowly — an index fact at the relation member that
+  induces it (or the model-name ident), callable facts at the name ident — keeping inlay
+  placement intact. Note NF11, if adopted, removes the inferred-index fact entirely; the
+  anchoring fix is still needed for the ctx/resolved-query facts.
+
+- **NF11. Inferred indexes + implicit `id`: silent derivation → explicit-in-source with
+  error + autofix (owner-flagged 2026-07-16; design decision, priority — touches
+  principles.md).** Owner position: silent engine-created DDL disobeys principles — an
+  index has real write/disk cost and is invisible in a PR (hard priority 3: reviewer
+  confirms design by reading; editor-only facts never reach review), and principle 2
+  ("nothing consequential is true by omission") outranks principle 8's "show, don't write"
+  carve-out, which today *names inferred indexes as its example*. Same verdict on the
+  implicit `id` field (models.md "id implicit", D1-era): same silence, same fix. Direction:
+  stop inferring — a traversed relation join-key with no covering `@index`, and a model with
+  no declared `id`, become **compiler errors** (not IDE-only, so the CLI is equally honest)
+  with an **LSP code-action autofix** that inserts the exact line (`@index <field>` / `id`
+  line), so the add is zero-thought; the index error gets an explicit opt-out token for the
+  deliberate no-index case (unindexed-flavored, visible-dangerous per principle 1).
+  Consequences: principle 8 needs rewording (its inferred-index example inverts); the
+  `IndexSnap.inferred` tier + `inf_` naming and the InferredIndex fact/inlay retire;
+  models.md Defaults + the implicit-fields decision revisit; conformance goldens + examples
+  gain the explicit lines. Boundary: inferred *inverse pairing* stays as-is — the inverse
+  field is written in source and only the unambiguous pairing is derived (passes principle
+  2's elision test), so it remains a shown fact. Spec seam: principles.md, models.md,
+  indexing.md; decisions entry when resolved.
+
+- **NF12. Inline raw SQL has no SQL highlighting in `.bsl` (owner-observed 2026-07-16).**
+  The tmLanguage `#raw` rule scopes backtick bodies as one string
+  (`string.quoted.other.raw.bsl`, editors/vscode/syntaxes/bsl.tmLanguage.json) — no embedded
+  grammar, so ``sql`concat(first, ' ', last)` `` renders as a flat string. **Requirement
+  (owner, 2026-07-16): the SQL highlighting dialect must match what the user defines as the
+  dialect in `based.toml`** — not a generic-SQL guess, no fallback layering. Mechanism
+  consequence: a tmLanguage grammar is static and cannot read project config, so the
+  grammar alone cannot satisfy this; the component that already knows the manifest dialect
+  is the LSP (it walks up to `based.toml` and compiles per-project — compile.rs
+  `find_manifest_root`/`compile_manifest`). Direction: **LSP semantic tokens** over the raw
+  backtick interiors — based-lsp tokenizes the embedded SQL with a per-dialect table
+  (keywords, string/identifier quoting — where dialects genuinely differ, e.g. MariaDB
+  backtick identifiers vs postgres double-quotes and `$$` strings — comments, numbers,
+  `${param}` interp as its own token) and the editor renders those over the TextMate
+  baseline; works in any LSP editor, keeps the extension a thin client. `.mig` raw lines:
+  same semantic-token treatment once NF8(c) gives `.mig` a language contribution — there
+  each line's `raw(dialect)` token names its dialect explicitly (agrees with the manifest
+  in a single-dialect project; the line token is the more specific signal if they ever
+  differ). See NF14 for the marker spelling.
+
+- **NF14. Rename the `.bsl` raw marker `sql` → `raw` (owner-flagged 2026-07-16; syntax
+  polish).** The backtick escape hatch is spelled ``sql`…` `` today (grammar.ebnf
+  `raw_sql = 'sql' '`' … '`'`; parser `at_kw("sql")`), but the feature is named **raw**
+  everywhere else — raw.md, the principle ("raw at the leaves"), and the `.mig` step form
+  `raw(dialect)`. Owner: the marker should be `raw` by logic and convention. One spelling
+  across both surfaces; greppability guarantee (raw.md: backtick form = greppable inventory)
+  carries over unchanged (``raw` ``). Touches: grammar.ebnf `raw_sql`, parser keyword,
+  raw.md + shapes.md + queries.md + soft-delete.md examples, tmLanguage keyword/raw rules,
+  conformance goldens.
+
+- **NF15. Param bindings are invisible to the editor (owner-observed 2026-07-16 on
+  `tag: json has tags`; the rename part is a bug, priority).** A signature binding's column
+  ident (`ParamBinding::ColOp.col` / `::Edge`) is collected nowhere: `field_paths()`
+  (based-lsp compile.rs) covers shape bodies, query clauses, and mutation writes only, and
+  hover / go-to-definition / `references_of` all walk it. Consequences, worst first:
+  (a) **LSP rename of a model field silently skips its binding uses** — rename `Ticket.tags`
+  and `tag: json has tags` still says `tags`, schema broken; find-references same hole.
+  (b) Hovering `tags` resolves nothing (is it a field? which model?), hovering `has`
+  explains nothing — the IDE gives no way to learn what `has tags` *is* (owner: "is `has
+  tags` itself a particle? is tags a field?"). Fix direction: fold binding idents into
+  `field_paths()` rooted at the query's target model (`query_root` already resolves it,
+  including bare-body queries) — hover/def/rename then come free from the existing walk;
+  plus a resolved-binding hover at the binding span stating the predicate it generates,
+  e.g. "binds `tags has $tag` — containment (array/json); the column is the left operand"
+  (queries.md op table), and the same fact on *unbound* params for the derived same-name
+  equality binding (`status: text` → `status = $status`) so the default is discoverable.
+  (c) tmLanguage keyword gaps (observed while verifying): binding ops `has`/`in` absent
+  from the keyword rules, `scoped` absent (its sibling `unscoped` is present), and the
+  primitive-type rule lacks `float`/`decimal` — audit the grammar's keyword/type lists
+  against grammar.ebnf rather than patching one-by-one. (The irrelevant resolved-query/ctx
+  sections on these same hovers are NF10's whole-decl-span bleed, filed there.)
+
+- **NF13. `^` back-reference → named step bindings in `tx` (owner-flagged 2026-07-16;
+  design decision).** Today a `tx` step back-references the prior step only via `^`
+  (`create Comment { ticket = ^.id, … }`, mutations.md). Owner: the tx form is neat and
+  stays, but `^.id` oversteps the keystrokes-vs-intuition line — unintuitive, ungreppable,
+  and it only reaches the *immediately preceding* step, so a 3-step tx referencing step 1
+  is unwritable. Proposal: named bindings — bind a step's produced row and reference it as
+  `$name`, unifying `$` as "a value bound in this callable" (params + step bindings; a
+  binding shadowing a param is an error). Spelling note: the bare trailing form
+  (`create Ticket { … } ticket;`) is two adjacent bare tokens where the gap is the syntax —
+  banned by principle 3 — so it wants a keyword, e.g. `create Ticket { … } as ticket;`.
+  No Turing-creep: single assignment, no rebinding, reference is field-access only
+  (`$ticket.id`) — principle 5 intact. Decide `^`'s fate: leaning **remove** (one way to
+  say it; bindings strictly subsume it) with a parse error suggesting `as`. Spec seam:
+  mutations.md Atomic groups + grammar.ebnf; parser/sema/codegen + helpdesk example
+  (`open_ticket`) + conformance goldens follow.
 
 ## Track T — core DB feature parity (owner-approved 2026-07-09; resumes at T3)
 
