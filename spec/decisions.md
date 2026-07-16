@@ -95,7 +95,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   C4 feature-parity complete), D77 (editor gravy names symbols: trimmed scope/`$ctx` hovers +
   dropped duplicate `$ctx` inlay), D78 (`based fmt` canonical formatter + `formatting` LSP directive —
   one printer shared by CLI and editor), D80 (comprehensive rename: params, `$ctx` fields, callable
-  names, `@was`-aware physical rename)
+  names, `@was`-aware physical rename), D90 (signature param bindings are field references:
+  go-to-def/find-refs/rename see `-> edge` / `op col` idents; binding hover states the generated
+  predicate; tmLanguage keyword/type audit)
 - **Formatter / tooling** — D78 (`based-fmt` canonical `.bsl` printer: AST pretty-print + verbatim
   comment reattachment; deterministic/idempotent; `based fmt [--check]` + LSP `formatting`)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
@@ -3797,3 +3799,41 @@ undecodable; `Page<T>` missing `total`; zero-row update → `200` null body → 
 command run-verified live), queries.md operand-side + verbatim-LIKE lines, the auth.md guard
 re-entry correction, and the CI workflow's examples-job comment now naming the helpdesk smoke
 (the job itself already ran it via `make ci-examples`).
+
+## D90 — signature param bindings are first-class editor references + binding hover (NF15)
+
+The owner-observed hole (2026-07-16, on `tag: json has tags`): a signature binding's column/edge
+ident was collected nowhere — the LSP's `field_paths()` reference walk covered shape bodies, query
+clauses, and mutation writes only — so **renaming a model field silently skipped its binding
+uses** (rename `Ticket.tags` and `has tags` kept the old name: a broken schema from a refactor
+that reported success), find-references had the same blind spot, and hover / go-to-def on the
+binding resolved nothing.
+
+- **Binding idents are field references.** `field_paths()` now also yields each query param's
+  binding ident (`-> edge` / `op col`), rooted at the query's target model (a block statement's
+  model, else the return-derived root — the same model sema checks bindings against). Go-to-def,
+  find-references, rename, and the field-signature hover all come free from the existing
+  reference walk; no new index.
+- **Binding hover.** Hovering a binding states the predicate it generates, anchored at the
+  binding itself — the column/edge ident (led by the bound field's signature) and the operator
+  token between the param head and the ident: `` binds `tags has $tag` — containment
+  (array/json); the column is the left operand ``. Per-op gloss: `~` SQL LIKE (pattern
+  verbatim), `in` membership, `has` containment; every `op col` gloss names the column as the
+  left operand — the operand rule D89 documented in queries.md, now discoverable at the cursor.
+  An `-> edge` binding reads `` binds `author = $user` — via the `author` relation edge ``.
+- **The derived default is discoverable.** An *unbound* param of a bare/inline query hovers as
+  `` binds `name = $name` — an unbound param binds its same-named column `` (block-query params
+  are `$`-referenced in the body, so no fact there). The same-name-equality convention now
+  reveals itself at the moment it applies, with zero prior knowledge.
+- **tmLanguage audit against grammar.ebnf** (the NF15(c) sweep): the keyword/type lists now
+  match the grammar — added `scope enum guard scoped offset read sql`, the word operators
+  `and or not in has` (a new `keyword.operator.word` rule), the modifiers `unique column`, and
+  `float`/`decimal` to the primitive-type rule; moved `tx` to the statement row; dropped
+  `model` (a model decl is bare `Name {`, D8 contextual keywords), `raw` (the `.bsl` marker is
+  `sql` today — NF14 owns that rename), and `reason` (`unscoped` takes a bare string).
+
+Out of scope, deliberately: renaming a field an *unbound* param derive-binds to does not rewrite
+the param — the param name is wire contract (renaming it changes the generated client API), and
+the miss is a loud sema error (`E0111`, the param maps to a column that no longer exists), not
+silent corruption; the hover fact makes the coupling visible. Unit-proven in based-lsp compile.rs
+(`binding_column_navigates_and_renames`, `binding_hover_states_generated_predicate`).

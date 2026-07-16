@@ -570,27 +570,15 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   raw.md + shapes.md + queries.md + soft-delete.md examples, tmLanguage keyword/raw rules,
   conformance goldens.
 
-- **NF15. Param bindings are invisible to the editor (owner-observed 2026-07-16 on
-  `tag: json has tags`; the rename part is a bug, priority).** A signature binding's column
-  ident (`ParamBinding::ColOp.col` / `::Edge`) is collected nowhere: `field_paths()`
-  (based-lsp compile.rs) covers shape bodies, query clauses, and mutation writes only, and
-  hover / go-to-definition / `references_of` all walk it. Consequences, worst first:
-  (a) **LSP rename of a model field silently skips its binding uses** — rename `Ticket.tags`
-  and `tag: json has tags` still says `tags`, schema broken; find-references same hole.
-  (b) Hovering `tags` resolves nothing (is it a field? which model?), hovering `has`
-  explains nothing — the IDE gives no way to learn what `has tags` *is* (owner: "is `has
-  tags` itself a particle? is tags a field?"). Fix direction: fold binding idents into
-  `field_paths()` rooted at the query's target model (`query_root` already resolves it,
-  including bare-body queries) — hover/def/rename then come free from the existing walk;
-  plus a resolved-binding hover at the binding span stating the predicate it generates,
-  e.g. "binds `tags has $tag` — containment (array/json); the column is the left operand"
-  (queries.md op table), and the same fact on *unbound* params for the derived same-name
-  equality binding (`status: text` → `status = $status`) so the default is discoverable.
-  (c) tmLanguage keyword gaps (observed while verifying): binding ops `has`/`in` absent
-  from the keyword rules, `scoped` absent (its sibling `unscoped` is present), and the
-  primitive-type rule lacks `float`/`decimal` — audit the grammar's keyword/type lists
-  against grammar.ebnf rather than patching one-by-one. (The irrelevant resolved-query/ctx
-  sections on these same hovers are NF10's whole-decl-span bleed, filed there.)
+- **NF15. ✅ done (D90). Param bindings are first-class editor references.** Binding idents
+  (`-> edge` / `op col`) folded into the LSP reference walk rooted at the query's target
+  model — rename (the bug: a field rename silently skipped `has tags`), find-references,
+  go-to-def, and field hover all see them; hovering a binding (ident or operator token)
+  states the predicate it generates, op-glossed; an unbound bare/inline param hovers its
+  derived same-name equality; tmLanguage keyword/type lists audited against grammar.ebnf.
+  Out of scope on purpose (detail: D90): rename does not rewrite an unbound param's name
+  (wire contract; the miss is a loud E0111, not silent). The irrelevant resolved-query/ctx
+  hover sections remain NF10's whole-decl-span bleed, filed there.
 
 - **NF13. `^` back-reference → named step bindings in `tx` (owner-flagged 2026-07-16;
   design decision).** Today a `tx` step back-references the prior step only via `^`

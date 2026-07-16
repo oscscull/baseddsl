@@ -14,9 +14,9 @@
 
 use based_ast::{
     Assign, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member, Model, Modifier,
-    Mutation, NamedFilter, Param, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart,
-    RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value, VariantValue,
-    WriteStmt,
+    Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate, Primitive, Query,
+    QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value,
+    VariantValue, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -667,6 +667,12 @@ impl Snapshot {
                 return Some(h);
             }
         }
+        // A signature param binding (or an unbound bare/inline param) → the
+        // predicate it generates, with the bound field's signature when the cursor
+        // is on the column/edge ident itself.
+        if let Some(h) = self.binding_hover(fid, offset) {
+            return Some(h);
+        }
         // A field reference (path segment) → the field's signature.
         if let Some(f) = self.field_ref_at(fid, offset) {
             return Some(field_hover(f));
@@ -704,6 +710,90 @@ impl Snapshot {
         None
     }
 
+    /// The predicate a signature param binding generates, when the cursor sits on
+    /// the binding — the column/edge ident or the operator/arrow between it and the
+    /// param head. On the ident itself the bound field's signature leads. An
+    /// *unbound* param of a bare/inline query carries the derived same-name
+    /// equality (`status: text` → `status = $status`), anchored at the param name.
+    fn binding_hover(&self, fid: usize, offset: u32) -> Option<String> {
+        let within = |sp: Span| sp.file.0 as usize == fid && sp.start <= offset && offset < sp.end;
+        for d in &self.decls {
+            let Decl::Query(q) = d else { continue };
+            let root = match &q.body {
+                QueryBody::Block(stmt) => Some(stmt.model.node.as_str()),
+                _ => self.query_root(q),
+            };
+            let Some(root) = root else { continue };
+            for p in &q.params {
+                // The binding region runs from the end of the param head (its type
+                // annotation, or the bare name) through the bound ident, so the
+                // `->` / operator token between them is hoverable too.
+                let head_end = p.ty.as_ref().map(|t| t.span.end).unwrap_or(p.name.span.end);
+                match &p.binding {
+                    Some(ParamBinding::Edge(edge)) => {
+                        if edge.span.file.0 as usize == fid
+                            && head_end <= offset
+                            && offset < edge.span.end
+                        {
+                            let line = format!(
+                                "binds `{} = ${}` — via the `{}` relation edge",
+                                edge.node, p.name.node, edge.node
+                            );
+                            return Some(self.with_field_sig(root, edge, within, line));
+                        }
+                    }
+                    Some(ParamBinding::ColOp { op, col }) => {
+                        if col.span.file.0 as usize == fid
+                            && head_end <= offset
+                            && offset < col.span.end
+                        {
+                            let line = format!(
+                                "binds `{} {} ${}` — {}",
+                                col.node,
+                                op_str(*op),
+                                p.name.node,
+                                op_gloss(*op)
+                            );
+                            return Some(self.with_field_sig(root, col, within, line));
+                        }
+                    }
+                    // Bare/inline queries bind an unbound param to its same-named
+                    // column; block queries reference params via `$`, so no fact.
+                    None => {
+                        if within(p.name.span) && !matches!(q.body, QueryBody::Block(_)) {
+                            let slice = std::slice::from_ref(&p.name);
+                            if self.walk_path(root, slice).is_some() {
+                                let line = format!(
+                                    "binds `{n} = ${n}` — an unbound param binds its same-named column",
+                                    n = p.name.node
+                                );
+                                return Some(self.with_field_sig(root, &p.name, within, line));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Prepend `ident`'s field signature to `line` when the cursor is on the ident
+    /// and it resolves against `root`; the bare binding line otherwise.
+    fn with_field_sig(
+        &self,
+        root: &str,
+        ident: &Ident,
+        within: impl Fn(Span) -> bool,
+        line: String,
+    ) -> String {
+        if within(ident.span) {
+            if let Some(f) = self.walk_path(root, std::slice::from_ref(ident)) {
+                return format!("{}\n\n{line}", field_hover(f));
+            }
+        }
+        line
+    }
+
     /// Resolve a path prefix against `root`, returning the field its last segment
     /// names. Intermediate segments must be relation edges (they advance the model);
     /// the final segment may be a scalar or relation. `None` if any segment is not a
@@ -728,31 +818,47 @@ impl Snapshot {
     }
 
     /// Every field-reference path in the project, each paired with the model it is
-    /// rooted at. Covers shape bodies, query `where`/`order` clauses, and mutation
-    /// write `where`/assign columns — the contexts whose root model is statically
-    /// known. (Filters are omitted: their root is the polymorphic call site.)
+    /// rooted at. Covers shape bodies, query `where`/`order` clauses, signature
+    /// param bindings (`-> edge` / `op col`), and mutation write `where`/assign
+    /// columns — the contexts whose root model is statically known. (Filters are
+    /// omitted: their root is the polymorphic call site.)
     fn field_paths(&self) -> Vec<(&str, &[Ident])> {
         let mut out = Vec::new();
         for d in &self.decls {
             match d {
                 Decl::Shape(s) => self.shape_paths(s.from.node.as_str(), &s.body, &mut out),
-                Decl::Query(q) => match &q.body {
-                    // A block's clauses root at the explicit statement target.
-                    QueryBody::Block(stmt) => {
-                        for c in &stmt.clauses {
-                            clause_paths(c, stmt.model.node.as_str(), &mut out);
+                Decl::Query(q) => {
+                    // Clauses and bindings both root at the query's target model:
+                    // the explicit statement target of a block, else the inferred
+                    // target (its return).
+                    let root = match &q.body {
+                        QueryBody::Block(stmt) => Some(stmt.model.node.as_str()),
+                        _ => self.query_root(q),
+                    };
+                    let Some(root) = root else { continue };
+                    for p in &q.params {
+                        match &p.binding {
+                            Some(ParamBinding::Edge(id))
+                            | Some(ParamBinding::ColOp { col: id, .. }) => {
+                                out.push((root, std::slice::from_ref(id)))
+                            }
+                            None => {}
                         }
                     }
-                    // Inline clauses root at the query's inferred target (its return).
-                    QueryBody::Inline(clauses) => {
-                        if let Some(root) = self.query_root(q) {
+                    match &q.body {
+                        QueryBody::Block(stmt) => {
+                            for c in &stmt.clauses {
+                                clause_paths(c, root, &mut out);
+                            }
+                        }
+                        QueryBody::Inline(clauses) => {
                             for c in clauses {
                                 clause_paths(c, root, &mut out);
                             }
                         }
+                        QueryBody::Bare => {}
                     }
-                    QueryBody::Bare => {}
-                },
+                }
                 Decl::Mutation(m) => write_paths(&m.body, &mut out),
                 _ => {}
             }
@@ -1987,6 +2093,31 @@ fn paramref_str(pr: &ParamRef) -> String {
         s.push_str(&seg.node);
     }
     s
+}
+
+/// A binding operator's DSL spelling.
+fn op_str(op: Op) -> &'static str {
+    match op {
+        Op::Eq => "=",
+        Op::Ne => "!=",
+        Op::Gt => ">",
+        Op::Lt => "<",
+        Op::Ge => ">=",
+        Op::Le => "<=",
+        Op::Like => "~",
+        Op::In => "in",
+        Op::Has => "has",
+    }
+}
+
+/// What a binding operator means, for the binding hover.
+fn op_gloss(op: Op) -> &'static str {
+    match op {
+        Op::Has => "containment (array/json); the column is the left operand",
+        Op::In => "membership; the column is the left operand",
+        Op::Like => "SQL `LIKE`, pattern passed verbatim; the column is the left operand",
+        _ => "the column is the left operand",
+    }
 }
 
 /// A field's hover: its `name: Type` signature, plus a cardinality note for relations.
@@ -3823,6 +3954,113 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
         let vh = (src.find("status = paid").unwrap() + "status = ".len()) as u32;
         let h = snap.hover_at(fid, vh).expect("variant hover");
         assert!(h.contains("variant of enum `Status`"), "{h}");
+    }
+
+    /// The shared fixture for signature-binding navigation: a bound edge
+    /// (`user -> author`), two `op col` bindings, and an unbound same-name param.
+    fn binding_snapshot(tag: &str) -> (TempWorkspace, Snapshot) {
+        let ws = TempWorkspace::new(tag);
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "User { name: text }\n\
+             Post {\n  author: User\n  tags: json\n  created_at: timestamp\n}\n\
+             query by_author(user -> author) -> Post[];\n\
+             query search(tag: json has tags, since: timestamp > created_at) -> Post[];\n\
+             query by_name(name) -> User[];\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        (ws, snap)
+    }
+
+    /// A signature binding's column/edge ident is a field reference like any other:
+    /// go-to-def resolves it, find-references lists it, and renaming the field
+    /// rewrites it (the NF-observed hole: a rename that skipped `has tags` silently
+    /// broke the schema).
+    #[test]
+    fn binding_column_navigates_and_renames() {
+        let (ws, snap) = binding_snapshot("binding_nav");
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = snap.sources[fid].1.clone();
+
+        // Go-to-def on `tags` in `has tags` → the field declaration.
+        let bind_off = (src.find("has tags").unwrap() + "has ".len()) as u32;
+        let def = snap
+            .definition_at(fid, bind_off)
+            .expect("binding column resolves");
+        assert_eq!(def.start as usize, src.find("tags: json").unwrap());
+
+        // Go-to-def on `author` in `user -> author` → the relation declaration.
+        let edge_off = (src.find("-> author").unwrap() + "-> ".len()) as u32;
+        let edge_def = snap
+            .definition_at(fid, edge_off)
+            .expect("binding edge resolves");
+        assert_eq!(edge_def.start as usize, src.find("author: User").unwrap());
+
+        // Find-references from the field decl lists the binding site.
+        let refs = snap.references_at(fid, def.start, false);
+        assert!(
+            refs.iter().any(|s| s.start == bind_off),
+            "binding site listed: {refs:?}"
+        );
+
+        // Renaming the field rewrites its declaration AND the binding use.
+        let changes = snap
+            .rename_edits(fid, def.start, "labels")
+            .expect("field is renameable");
+        let texts = rename_texts(&snap, &changes);
+        assert_eq!(texts.len(), 2, "decl + binding: {texts:?}");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        assert!(out.contains("labels: json"), "{out}");
+        assert!(out.contains("tag: json has labels"), "{out}");
+    }
+
+    /// Hovering a binding states the predicate it generates — on the column/edge
+    /// ident (led by the field's signature), on the operator token itself, and on
+    /// an unbound param (the derived same-name equality).
+    #[test]
+    fn binding_hover_states_generated_predicate() {
+        let (ws, snap) = binding_snapshot("binding_hover");
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = snap.sources[fid].1.clone();
+
+        // The bound column: field signature + generated predicate.
+        let bind_off = (src.find("has tags").unwrap() + "has ".len()) as u32;
+        let h = snap.hover_at(fid, bind_off).expect("column hover");
+        assert!(h.contains("tags: json"), "{h}");
+        assert!(h.contains("binds `tags has $tag`"), "{h}");
+        assert!(h.contains("containment (array/json)"), "{h}");
+
+        // The operator token alone still explains the binding.
+        let has_off = src.find("has tags").unwrap() as u32;
+        let h = snap.hover_at(fid, has_off).expect("operator hover");
+        assert!(h.contains("binds `tags has $tag`"), "{h}");
+
+        // An ordered op: the rendered predicate shows the column as left operand.
+        let gt_off = src.find("> created_at").unwrap() as u32;
+        let h = snap.hover_at(fid, gt_off).expect("ordered-op hover");
+        assert!(h.contains("binds `created_at > $since`"), "{h}");
+        assert!(h.contains("the column is the left operand"), "{h}");
+
+        // An edge binding: relation signature + the FK equality it generates.
+        let edge_off = (src.find("-> author").unwrap() + "-> ".len()) as u32;
+        let h = snap.hover_at(fid, edge_off).expect("edge hover");
+        assert!(h.contains("author: User"), "{h}");
+        assert!(h.contains("binds `author = $user`"), "{h}");
+
+        // An unbound param: the derived same-name equality is discoverable.
+        let name_off = (src.find("by_name(name)").unwrap() + "by_name(".len()) as u32;
+        let h = snap.hover_at(fid, name_off).expect("unbound param hover");
+        assert!(h.contains("name: text"), "{h}");
+        assert!(h.contains("binds `name = $name`"), "{h}");
     }
 
     /// The URI of file `fid` in a snapshot — a test convenience for indexing rename edits.

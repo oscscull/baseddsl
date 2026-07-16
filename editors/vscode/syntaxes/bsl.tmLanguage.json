@@ -37,15 +37,19 @@
     "keywords": {
       "patterns": [
         {
-          "match": "\\b(model|shape|query|mutation|filter|tx|raw)\\b",
+          "match": "\\b(shape|scope|enum|query|mutation|filter)\\b",
           "name": "keyword.control.declaration.bsl"
         },
         {
-          "match": "\\b(create|update|delete|restore|hard|list|get|stream|from|where|order|page|with|count|unscoped|unindexed|unsafe)\\b",
+          "match": "\\b(create|update|delete|restore|hard|tx|list|get|stream|from|where|order|page|offset|with|count|guard|scoped|unscoped|unindexed|unsafe|read|sql)\\b",
           "name": "keyword.control.bsl"
         },
         {
-          "match": "\\b(default|now|asc|desc|max_rows|reason|on|true|false|null)\\b",
+          "match": "\\b(and|or|not|in|has)\\b",
+          "name": "keyword.operator.word.bsl"
+        },
+        {
+          "match": "\\b(default|unique|column|now|asc|desc|max_rows|on|true|false|null)\\b",
           "name": "constant.language.bsl"
         }
       ]
@@ -53,7 +57,7 @@
     "types": {
       "patterns": [
         {
-          "match": "\\b(text|int|bool|timestamp|date|json|uuid|Id)\\b",
+          "match": "\\b(text|int|bool|timestamp|date|json|uuid|Id|float|decimal)\\b",
           "name": "support.type.primitive.bsl"
         },
         {
