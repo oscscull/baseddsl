@@ -766,6 +766,16 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   through `include!`), `mod client` just `include!`s it, and a new `generated_client_is_current` test
   regenerates from `SCHEMA` via `based_codegen::client::client_with` and asserts byte-equality — the
   real gate, so the mirror can never silently rot again.
+- **H10. CI-infra hardening (surfaced 2026-07-16: the Docker VM disk filled — 5,943 anonymous
+  volumes / 658GB leaked across historical CI runs — and the mariadb CI container died instantly
+  on start while `make check` hung or failed opaquely).** Three fixes:
+  (a) Makefile teardown must use `docker rm -fv` (not `-f`) so each run's anonymous DB volumes
+  are removed with the container instead of leaking one per run;
+  (b) the runtime test suites' in-process `wait_ready` poll retries forever — give it a deadline
+  so a dead DB fails the suite fast with a clear message instead of hanging it;
+  (c) `ci/wait-for-db.sh`'s TCP-accept readiness check can pass spuriously right after a container
+  dies (observed with OrbStack port forwarding) — verify the container is still running (or use a
+  protocol-level ping) before declaring ready.
 
 ## Pipeline (data flow)
 
