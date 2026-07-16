@@ -109,7 +109,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D86 (Track N3 design: flagship `examples/axum-helpdesk` — multi-tenant support desk on Postgres,
   BYO-pool embedded engine, bearer→`$ctx` middleware via an `unscoped` session query, total-feature
   coverage map + syntax-appeal audit verdicts — zero grammar changes; prereqs: ordered to-many nests,
-  `guard` runtime seam, typed-client idempotency key)
+  `guard` runtime seam, typed-client idempotency key), D89 (Track N3e: final syntax-appeal re-audit
+  on the shipped helpdesk artifact — zero grammar changes upheld; in-situ verdict list; final
+  coverage-map deltas vs D86 — no `in` value list, raw-at-leaves instead of whole-query raw, purge
+  route omitted, three additive triage mutations; library gaps promoted to PLAN items)
 - **Source hygiene / conventions** — D69 (Track F1 comment-hygiene sweep: source reads as finished, no
   build-time/WIP narration, TODOs live in the roadmap `.md`s — the standing Conventions rule enforced),
   D74 (H4/H5 hygiene: positive framing over define-by-negation; `based-codegen` D#-refs + overlong
@@ -3724,3 +3727,73 @@ verbatim again. OpenAPI now documents the wire it always had plus the new code: 
 `Idempotency-Key` header parameter on mutations, `409`/`422` keyed outcomes, and a `403` denial on
 guarded mutations. Proven: real-HTTP replay through the generated client (header → one
 transaction, identical bodies), the embedded twin, and codegen emission tests both ways.
+
+## D89 — flagship re-audit on the shipped artifact + final coverage map (Track N3e)
+
+Closes Track N3: the D86 syntax-appeal audit re-run as an outside evaluator over the *real*
+artifact — every `examples/axum-helpdesk` `.bsl` file, the service code, and the call sites —
+plus the final feature-coverage reconciliation against D86's map. Headline: **zero grammar
+changes upheld.** The schema surfaces D86 judged on paper hold up in situ — the scope
+declaration/reference pair, stacked-`@scope` OR vs one-line AND, `priority >= high` on an int
+enum, `-> stream`, `unscoped("reason")`, `guard`, `field -> UserRef` nests, and the bare query
+form all read at first look exactly as pitched. What the paper audit missed is small, and none
+of it is a spelling the grammar should change.
+
+**In-situ verdicts (new findings, each accepted or promoted):**
+- **Per-param `op column` binding reads side-ambiguous on first contact.**
+  `since: timestamp > created_at` lowers with the **column as the left operand**
+  (`created_at > $since`), but a first read can parse it as `$since > created_at` — the
+  opposite inequality. The shipped schema glosses it in a comment, and queries.md now states
+  the operand rule explicitly (doc fix landed with this entry). Accepted, no respelling: the
+  fragment is `op column` ("binds `>` against `created_at`"), the doc line makes it
+  single-meaning, and a mirrored spelling would silently flip the meaning of every existing
+  schema. Re-open only on repeated design-partner misreads.
+- **`query my_tickets() -> TicketRow[] scoped Requester { list Ticket; }` carries a body the
+  bare form doesn't need** (verified: the zero-param bare form checks clean). Accepted: the
+  explicit `list Ticket` names the target model at the portal's entry query, and five sibling
+  queries already demonstrate the bare form — the redundancy is documentation, not noise.
+- **Zero-param callables still take a unit input struct** (`api.my_tickets(client::MyTicketsInput,
+  ctx)`). Generated-surface ceremony, not grammar. Accepted: the uniform `(input, ctx)` shape
+  keeps every call site the same and params can be added without changing call arity; revisit
+  only if partner feedback names it.
+- **Enum params ride the wire by value, not variant name** (`?status=waiting_on_customer`
+  where the schema spells `waiting`). Accepted: that *is* the enums.md contract — name is the
+  source-level spelling, value is the stored/wire spelling — and the example's smoke asserts it
+  deliberately.
+- **`~` is verbatim LIKE**, so the search handler wraps `%…%` itself. Accepted (the operator
+  stays honest about SQL); queries.md now says so in one line, and the example README notes it.
+
+**Final coverage map (deltas vs D86 §4; everything not listed shipped as mapped):**
+- **`in` — not demonstrated.** The operator exists but only as `col IN ($param)` (one bound
+  value, degenerate); there is **no literal value-list form** (`status in (open, waiting)` does
+  not parse), so the search query composes `not (status = resolved or status = closed)` instead.
+  Promoted to a PLAN item.
+- **Raw whole query — not demonstrated; raw-at-leaves shipped instead.** Whole-query raw bodies
+  (raw.md's third level) are specified but not implemented. The workload report uses raw
+  correlated-subquery **value leaves** over an engine-owned row set — arguably the better raw.md
+  story (the engine keeps scope/soft-delete/ordering; the raw text owns only itself). PLAN item:
+  implement the third level or amend raw.md.
+- **Comment purge route omitted.** `purge_comment` (the `hard delete` site) is declared in the
+  schema — the syntax is shown — but no route calls it: a `hard delete` with a declared return
+  shape is undecodable through the typed client (the wire returns `{}` per the delete-shape rule;
+  the client expects the shape), and the grammar's mandatory `-> ret_type` on mutations leaves no
+  legal shapeless spelling. Promoted to a PLAN item (sema-reject the pairing, re-select
+  pre-delete, or allow a shapeless return).
+- **Three additive triage mutations** (`set_status`, `tag_ticket`, `mark_duplicate`) beyond the
+  D86 route list — the desk needed them; each is an ordinary scoped update, no new surface.
+- **`with count` declared but `total` unserved.** The generated `Page<T>` has no `total` field,
+  so `/admin/tickets` serves rows + cursor only. PLAN item.
+- Deliberate exceptions (D86: `based serve`/image, `(column …)`/`@table`/`on:`, `shape full`)
+  stand unchanged.
+
+**Runtime/library gaps the build surfaced (not syntax; promoted to PLAN.md "Track N follow-ups"
+with symptom/seam/fix each):** the `in` value-list form; whole-query raw reads; guard re-entry
+deadlock (`Engine::call` holds the id-gen lock across dispatch, so a guard can only use a
+*second* engine — auth.md now tells that truth; narrow the lock); `hard delete` + declared shape
+undecodable; `Page<T>` missing `total`; zero-row update → `200` null body → client decode error
+(deserves a `not_found` outcome).
+
+**Docs landed with this entry:** the example README (`examples/axum-helpdesk/README.md`, every
+command run-verified live), queries.md operand-side + verbatim-LIKE lines, the auth.md guard
+re-entry correction, and the CI workflow's examples-job comment now naming the helpdesk smoke
+(the job itself already ran it via `make ci-examples`).

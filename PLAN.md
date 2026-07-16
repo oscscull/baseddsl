@@ -47,7 +47,7 @@ resumes it:
 - **Pause** after 3 items in a batch, or when a subagent hits a genuine blocker (it stops
   WITHOUT committing and reports), or when the unstarted items are exhausted.
 
-**Where things stand (as of D66):** the architecture milestones (M2–M6) are done, all three target
+**Where things stand (as of D89):** the architecture milestones (M2–M6) are done, all three target
 dialects (SQLite/MariaDB/Postgres) clear the real-DB bar — including symmetric live coverage of
 keyset/offset pagination + soft-delete/restore (D59) — **Track L — the language — is feature-complete**
 (nested/relation projection D55/D57, keyset-cursor pagination D56, update/delete declared-shape re-select
@@ -73,8 +73,10 @@ source-hygiene pass (**F1/D69**), swept every `crates/**/*.rs` and confirmed the
 was fully done per the Definition of Done** — every DoD item met, no open features, no open hygiene.
 Post-completion, **Track L4 — named nested projection (shape-in-nest) — is now done (D79)**: a nest may
 reference a named shape (`placed_by -> UserRef`) for consumer-side type identity.
-**2026-07-10 strategic pivot: Track N — async-native core → streaming → flagship axum example — is now
-TOP PRIORITY (owner decision, design-partner driven); Track T resumes after N1.**
+The 2026-07-10 strategic pivot — **Track N: async-native core → streaming → flagship axum example —
+is now COMPLETE (N0–N3, D84–D89)** on the `async-native` branch, with the merge-to-main confidence
+bar met (`make check` green end-to-end). **Next: the Track N follow-ups (NF1–NF6, owner-ordered),
+then Track T resumes at T3** on the async core.
 Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
@@ -343,222 +345,78 @@ path — worked when it won't preempt A/B/D/E).**
     architecture docs (their deferred items already sit in the Deferred list). Comment-only; gate green
     (`test --workspace --all-features` + `fmt --check` + `clippy`). The standing rule is in Conventions.
 
-## Track N — async-native pivot (owner decision 2026-07-10; TOP PRIORITY)
+## Track N — async-native pivot (owner decision 2026-07-10). ✅ COMPLETE (N0–N3, D84–D89)
 
-**Strategic context.** The first real adoption target (the owner's workplace, the project's proving
-ground) reviewed the pitch: the syntax landed well, **native async was repeatedly named the core
-required feature**, streaming reads are wanted immediately, and they need the engine to plug into an
-app's *existing* async connection pool (a `spawn_blocking` facade was judged a hassle by their backend
-owner). The Rust web-backend market is effectively all tokio — axum and every runner-up run on it — so
-async-native is the market, not a variant. Decision: recolor the execution core to native async, no
-sync facade. The pure front end (parse → sema → codegen → plan/SQL lowering) stays sync and
-runtime-free; coloring touches execution only. **All Track N work lands on a single long-lived branch
-(`async-native`), merged to `main` only at demonstrated confidence** — full gate + all three live
-suites + the examples green on the async core (owner, 2026-07-10). Worked in order.
+**Strategic context.** The first real adoption target (the owner's workplace, the project's
+proving ground) reviewed the pitch: the syntax landed well, **native async was repeatedly named
+the core required feature**, streaming reads were wanted immediately, and the engine had to plug
+into an app's *existing* async connection pool. The Rust web-backend market is effectively all
+tokio, so the execution core was recolored to native async (no sync facade); the pure front end
+(parse → sema → codegen → lowering) stays sync and runtime-free, CI-enforced. **All Track N work
+is on the `async-native` branch; merge to `main` is the owner's call at demonstrated confidence**
+(the bar — full gate + all three live suites + all examples green on the async core — is met:
+`make check` green end-to-end). Delivery narration: `PLAN-archive.md`.
 
-- **N0. ✅ done (D84). Async architecture design — the elegance mitigation, settled before recolor
-  code.** Every guarantee the sync design gave by construction is restated as an invariant with a
-  named enforcement (type system > test > review). Owner-settled: **sqlx is the driver layer**
-  (principle 7 — reuse hardened tx-drop/codec/pool/streaming machinery, delete our own driver stacks;
-  executor/pool layer only — `Db`/`Backend` stay our traits, sqlx never appears in the trait surface);
-  transactions become a consuming **typestate** (`begin(self) → Tx`, `commit(self)`;
-  drop-without-commit = rollback-or-discard, an open-tx connection is never pooled — cancel-safety by
-  construction, not vigilance); **`fetch` returns a row stream, always** (one-shot = collect at
-  dispatch; N2 adds a wire surface, not a second execution path); the **coloring boundary is
-  CI-enforced** (front-end crates provably tokio/sqlx-free via a `cargo tree` check); retry ×
-  cancellation composes via per-attempt `Tx` (no double-write window; idempotency keys unchanged).
-  Full design, trait sketch, invariant table, de-risk spike scope: **D84**.
-- **N1. ✅ COMPLETE. Native async execution core (implements D84).** All four slices landed;
-  N2 streaming is next.
-  - ✅ **First step — the D84 de-risk spike** (`tests/sqlx_spike.rs`; live gate `ci-live-sqlx`):
-    all three dialects codec-faithful through sqlx. Decimal feature = **`bigdecimal`**
-    (`rust_decimal` silently truncates past ~28 digits, disqualified; `pg_numeric` stays, decoding
-    sqlx's byte-exact raw numeric); Postgres binds must be **native-typed** — sqlx's all-binary
-    parameters kill the coerce-wire-text trick, so `SqlValue` grows typed text-riding variants;
-    MariaDB-via-MySql-driver confirmed (binary-charset uuid/json decode + `CLIENT_FOUND_ROWS`
-    affected-rows quirk noted). Full findings: D84 addendum.
-  - ✅ **The bulk recolor shipped.** Traits are the D84 shapes — `DbRead` (stream-only `fetch` +
-    `execute`) / `Db` (`begin(self)` → `Tx`) / `Tx` (`commit(self)`, drop = rollback) / async
-    `Backend` — with `dispatch`/`run_query`/`run_mutation`/`migrate apply` recolored on top
-    (dispatch now owns checkout-per-call: it takes `Backend` + shard key). `SqlValue` grew the
-    typed text-riding variants (uuid/timestamp/date/decimal); the planner types every bind site
-    from the schema (params via their bound column, `$ctx` via inference, gen-ids as uuid, keyset
-    cursor re-binds via the sort columns' primitives threaded through `LoweredQuery.keyset`); raw-SQL
-    params stay text binds. All three hand-rolled driver stacks retired for sqlx 0.9
-    executors/pools (statement timeouts via `after_connect`; `acquire_timeout` →
-    `PoolExhausted` fast-503; deadlock retry = fresh checkout + fresh `Tx` per attempt; `pg_numeric`
-    survives decode-only on raw bytes). `based serve` moved tiny_http → axum (healthz/readyz/drain
-    kept; the worker-count knob retired — the pool is the concurrency ceiling). The `RefCell`
-    `Engine` retired for a `Send + Sync` checkout-per-call handle over `Arc<dyn Backend>`. The
-    generated client + `Transport` are async; the CLI wraps at `#[tokio::main]`; `MockDb` implements
-    the async traits (Clone, shared state, drop-records-rollback). Execution tests are
-    `#[tokio::test]`; the three quickstarts are async-integrated, minimal (the SQLite one lost its
-    rusqlite plumbing — `SqliteBackend::open` is the whole wiring). The coloring boundary is
-    CI-enforced: `make ci-coloring` (in `ci-workspace`) walks `cargo tree` for every front-end crate
-    and fails on tokio/sqlx/futures/axum. **`make check` green** — full workspace suite + fmt +
-    clippy + live MariaDB/Postgres suites + all three quickstart scenarios on the async core.
-    Landing the gate surfaced + fixed two real recolor bugs (D84 implementation notes): the drain
-    window (`/readyz` must observably 503 before the axum listener stops accepting) and the keyset
-    `id` tiebreaker binding as uuid for a model that declares `id: text`.
-  - ✅ **Cancel-safety acceptance gate (I2) shipped** (`tests/cancel_safety.rs`; runs in
-    `check-fast`). A gate wrapper numbers every driver-seam op on the mutation path (checkout,
-    begin, each execute, the re-select fetch, commit) and parks the future at each — once just
-    *before* the op, once just *after* it completes; the test drops it there against a live
-    file-backed SQLite (single-connection pool) and asserts: all-or-nothing row state (writes
-    survive only a drop after the completed commit — in full), the pooled connection is in
-    autocommit (explicit `BEGIN IMMEDIATE` probe), and the same pool serves the next mutation
-    green. Await points *inside* one driver call are sqlx's own cancel-safety (delegated,
-    principle 7). The gate caught + fixed a real bug: a cancelled **keyed** mutation stranded its
-    idempotency claim `InFlight` forever (every retry → 409 Conflict); `run_mutation` now holds
-    the claim in an abandon-on-drop guard, disarmed only once the response is recorded (D84 notes).
-  - ✅ **BYO-pool seam shipped (the design-partner embed — the last N1 item).**
-    `ShardRouter::from_pool(MySqlPool)` / `PgRouter::from_pool(PgPool)` /
-    `SqliteBackend::from_pool(SqlitePool)` build the `Backend` over a caller's *existing* sqlx
-    pool (cheap-cloned; one physical shard), sharing the codec/tx path with the URL-built
-    constructors. Contract (D84 notes): **their pool, their settings** — the engine installs
-    nothing on a supplied pool (the session statement timeouts our constructors apply ride
-    `after_connect`, a builder-only hook; reconfiguring sessions the app's own queries share
-    would be wrong anyway); pool-exhaustion fast-503 classification + deadlock retry work
-    unchanged. Proven live on MariaDB + Postgres (`byo_sqlx_pool_backs_the_engine`: the app's
-    own sqlx queries and the engine's scoped read + transactional mutation interleave on one
-    pool) plus a SQLite unit twin.
-  - Gate held throughout: full workspace suite + fmt + clippy + all three live-DB suites green.
-- **N2. ✅ COMPLETE. Streaming reads (claims N1's payoff immediately).** The driver seam already
-  streams — `fetch` returns a sqlx-backed row stream on all three dialects (D84 decision 3); N2
-  surfaced it end to end: signature form → sema → runtime dispatch → NDJSON wire → generated
-  client → OpenAPI, with the acceptance gates live. N3 is next.
-  - ✅ **Spec/design slice (D85, `spec/syntax/streaming.md`).** Opt-in is the signature return form
-    `-> stream Shape` (grammar extended; contract lives where the client surface is generated from);
-    wire = NDJSON envelope-per-line with a mandatory terminal `done`/`error` line (no terminal line
-    = truncation = transport error; pre-body failures keep real statuses); client = same-named
-    method returning `Result<RowStream<Shape>, ClientError>` with per-item `Result`, drop = cancel;
-    `page` forbidden (E0201), `get`/mutations can't stream (E0200/E0202), everything else (filters,
-    sorts, shapes, scope, soft-delete, index lint) composes unchanged on the single read path.
-  - ✅ **Front-end slice.** `RetType.stream` parses (`stream X[]` is a parse error — `stream`
-    already means many), sema infers `list` and rejects the three misuses (E0200 get / E0201 page /
-    E0202 mutation), the flag rides `RQuery.stream` (with `many = true`, so SQL lowering is the
-    `[]` form, untouched); fmt round-trips, LSP hover/completion/facts surface the form;
-    conformance goldens (parser positive + no-brackets negative, sema positive + errors bundle).
-  - ✅ **Runtime streaming dispatch + NDJSON wire.** `run_query_stream` (plan → owned
-    `ShapedStream` of shaped rows over the checked-out connection; drop = cancel, connection back
-    to the pool) + `dispatch_stream` (the streaming twin of `dispatch`: pre-body failures are the
-    ordinary `WireResponse` with real statuses) + `Engine::call_stream` (in-process door). The
-    axum edge branches on `Compiled::is_stream_query`: `200` + `application/x-ndjson`,
-    `{"row":…}` per line, mandatory terminal `{"done":{"rows":N}}` or in-band `{"error":…}`;
-    non-stream traffic byte-for-byte unchanged. Proven mock + live SQLite (rows in sort order,
-    terminal framing over a real socket, mid-stream error line, drop-mid-stream returns the
-    single pooled connection healthy).
-  - ✅ **Generated client + OpenAPI.** A `-> stream` query's method keeps its name and returns
-    `Result<RowStream<Shape>, ClientError>` (`RowStream<O>` = boxed `futures_core` stream of
-    per-item `Result`; drop = cancel); `Transport` gains `call_stream` beside `call`; the module
-    emits `decode_ndjson` — the one framing decoder (line reassembly across chunks, in-band
-    `error` → typed `Err` item, no terminal line = truncation `Err`, `done.rows` checksum
-    enforced) any HTTP transport feeds its byte stream through — and the embedded bridge
-    implements the streaming door over `Engine::call_stream` (typed items, no NDJSON
-    round-trip). All of it emitted **only when the schema declares a stream query**, so a
-    non-streaming schema's module (and dependency set) is byte-identical to before — the three
-    quickstart clients needed no regeneration. OpenAPI: the stream query's `200` is
-    `application/x-ndjson` with the row/done/error one-of line schema; pre-body failures keep
-    the JSON error responses.
-  - ✅ **Acceptance gates.** Live MariaDB + Postgres: the full `based serve` NDJSON body over a
-    live router (rows in sort order + terminal `done` count); live Postgres: a raw-SQL
-    divide-by-zero firing mid-pass arrives as the in-band `error` line after delivered rows.
-    Generated-client-over-real-HTTP suite (`streaming_client.rs`, reqwest transport): typed
-    rows, the in-band error as a typed `Err` item (code `database_error`, 503), pre-body 400 as
-    the outer `Err`, and a real socket cut mid-body → transport `Err`, never completion (plus
-    pure chunk-stream decoder twins). The I2 cancel gate grew the streaming twin: drop a stream
-    mid-pass on the single-connection pool → connection back in autocommit, next mutation green;
-    the embedded typed client proves the same drop-release end to end.
-- **N3. Flagship axum example + syntax appeal pass (the re-pitch artifact).** A nontrivial
-  `examples/axum-…` service — multiple routes, auth-derived `$ctx`, scoped multi-tenancy, a streaming
-  endpoint, migrations, the typed async client end-to-end — that reads like the app a workplace backend
-  dev would actually write, at quickstart-DX polish (no plumbing). Paired with a deliberate **syntax
-  appeal pass** over every surface the example shows (the `.bsl` files first, then README + client call
-  sites): the syntax is what landed in the pitch — polish it for first-look impact, not just
-  correctness. The example *is* the pitch. **Coverage policy (owner, 2026-07-10):** the three
-  quickstarts stay largely as they are — async-integrated but minimal — and the axum example is the
-  **total-feature-coverage** vehicle: every language/runtime feature demonstrated somewhere in it, so
-  feature-coverage growth lands in one example instead of three.
-  - ✅ **Design gate (D86).** Domain = a multi-tenant **support desk** (`examples/axum-helpdesk`;
-    not commerce — the flagship must show the language generalizes), dialect = **Postgres only**
-    (the modal axum+sqlx pairing; the strictest bind path N1 built). Architecture: the app embeds
-    the engine — its own sqlx `PgPool` → `PgRouter::from_pool` (the BYO-pool seam, demonstrated) →
-    `Engine` in axum state; auth middleware resolves `Authorization: Bearer` through the typed
-    client itself (`session_by_token … unscoped("auth: …")`) into per-request `Ctx { org, user }`.
-    ~12 routes across three audiences (requester portal / agent desk / ops+finance export). Full
-    feature→site coverage map + the deliberate exceptions (`based serve`/image, legacy affordances
-    `(column …)`/`@table`/`on:`, `shape full`) recorded in D86. **Syntax-appeal audit verdict: zero
-    grammar changes** — the drift it found was worked-example/prose level and is fixed (commerce
-    `UserRef` shape-name drift; pagination.md pre-grammar example forms); accepted-as-is list with
-    rationale in D86.
-  - ✅ **N3a (prereq). Ordered to-many nests (D87).** A nest's array now follows the sort
-    cascade for the traversal — relation `@sort` > child model `@sort` > unspecified — as an
-    ORDER BY *inside* the JSON aggregate on all three dialects (one `json_array_agg` seam;
-    subquery shape + single read path unchanged, so streams get it free). Zero new syntax
-    (field `@sort` already parsed + sema-checked; `RMember` now carries it into lowering).
-    Proven by per-dialect codegen assertions + live out-of-order seeds coming back sorted on
-    SQLite (normal gate), MariaDB, and Postgres (both tiers in one response each).
-  - ✅ **N3b (prereq). Two seams (D88).** (i) `guard` runs: `Guards::new().register(name, async fn)`
-    → `Engine::with_guards` (build fails naming any unregistered declared guard; `Engine::new`
-    panics on a guarded schema; `based serve` refuses one); `dispatch` — the one core both doors
-    run through — invokes the guard before the write/idempotency-claim/arg-validation; deny →
-    `403 guard_denied` with the guard's mandatory reason. Proven mock + live SQLite (a guard that
-    reads the DB itself: close allowed once, denied after its own write). (ii) Every generated
-    mutation method gains a `<name>_with_key(input, ctx, key)` twin over a new required
-    `Transport::call_with_key` — `Idempotency-Key` header on HTTP, `Engine::call_with_key`
-    embedded — emitted only when the schema declares a mutation (query-only modules byte-identical).
-    Replay proven through the typed client over a real socket + in-process (one tx, identical
-    bodies). OpenAPI documents the key header, 409/422, and the guard 403. Committed generated
-    clients regenerated (gate-enforced).
-  - ✅ **N3c. Schema + migrations + client.** The helpdesk `.bsl` (by-domain layout, 26 callables),
-    `0001_init` + `0002` `@was` rename (verify green), checked-in verbatim `src/client.rs`
-    (`--embedded`), seed via the client's own mutations (D63 pattern; prints demo bearer tokens;
-    ran green against live Postgres incl. D87 out-of-order time entries + scope/guard/tx probes).
-    Being the first real consumer of the whole surface, the slice surfaced + fixed six engine
-    bugs: multi-alternative `@scope` ctx/exemptions/lints derived from the *first* alternative
-    instead of the callable's chosen one (`inject_ctx_reqs`); bare `@sort(name)` silently dropped
-    (fmt's own canonical spelling!); enum-annotated params typed/bound as `Id<entity::…>`/uuid;
-    enum param *defaults* bound by variant name, not wire value; absent optional to-one nests
-    decoded as objects-of-nulls (now JSON `null` via a `__present` probe / CASE collapse); decimal
-    inside JSON aggregates rode as a JSON number (now text-cast, keeping the string contract);
-    plus `has`/`in` in per-param bindings lowering non-dialect-aware. Coverage-map deviations to
-    resolve at N3e: `in` has no value-list form (search uses `not`/`or` instead) and raw
-    whole-query bodies don't exist (workload report uses raw correlated-subquery *values* —
-    arguably the better raw.md story).
-  - ✅ **N3d. The axum service.** `src/{main,app,auth,routes}.rs`: the D86 architecture live —
-    the app's own sqlx `PgPool` → `PgRouter::from_pool` → `Engine::with_guards` in axum state;
-    bearer middleware resolving tokens through the typed client (`session_by_token`) into a
-    request-extension `SessionCtx` (role-gates the desk/ops routes); ~20 routes, each handler one
-    typed call; `Idempotency-Key` on `POST /tickets` via the `_with_key` twin; the export
-    re-served as NDJSON (row/done/error framing mirroring the wire) from `RowStream`; one
-    `ApiError` passing the engine's status + stable code + envelope through untouched. Close
-    policy chosen for `caller_can_close`: *only a resolved ticket, visible in the caller's
-    workspace, can be closed* — host code on the app's own pool (the D88-proven pattern), denying
-    by default when it can't verify. Live gate: `make ci-example-helpdesk` (in `ci-examples`) —
-    reset → migrate → seed → boot in-process → drive the whole surface over real HTTP (401s,
-    disjoint tenants, role 403, search/status/bad-cursor 400, queue, ordered nests, cross-tenant
-    404, keyed replay + 422 reuse, guard 403→allow, archive/restore, AND-scope drafts, tags/
-    per-param bindings, workload raw SQL, unscoped offset admin, NDJSON checksum + dropped-stream
-    recovery). **Notes for N3e (library gaps hit, each wants its own slice):** (i) a guard
-    calling the typed client over its *own* engine deadlocks — `Engine::call` holds the id-gen
-    lock across dispatch, so the D88 doc's "or call the typed client itself" only works against
-    a second engine; narrow the lock. (ii) `mutation … -> Shape { hard delete … }` is
-    undecodable through the typed client (wire returns `{}`, client expects the shape) — the
-    purge-comment route is omitted; sema should reject the pairing or the re-select should run
-    pre-delete. (iii) `with count`'s `total` is dropped by the generated `Page<T>` (no field) —
-    the admin route serves rows+cursor only. (iv) a zero-row update (e.g. cross-tenant id) is
-    a `200 null` body → typed decode error, deserves a `not_found` outcome. (v) `~` takes a
-    verbatim LIKE pattern — the handler wraps `%…%`; fine, but worth a docs line.
-  - **N3e. README + re-audit + CI.** The re-pitch README (walks the `.bsl` surfaces first), a final
-    first-look appeal pass over the real artifact, example wired into CI (`make check` already
-    runs it via `ci-examples`); plus the N3c/N3d deviation list above.
+- **N0. ✅ (D84).** Async architecture design gate — every sync-era guarantee restated as an
+  invariant with a named enforcement; sqlx as the driver layer; consuming-typestate `Tx`;
+  stream-first `fetch`; CI-enforced coloring boundary.
+- **N1. ✅ (D84 impl).** Native async execution core — the recolor (traits/dispatch/serve/client
+  on sqlx 0.9), the cancel-safety acceptance gate (I2), and the BYO-pool seam
+  (`from_pool` on all three backends), all proven live.
+- **N2. ✅ (D85).** Streaming reads — `-> stream Shape` end to end: sema (E0200/E0201/E0202),
+  streaming dispatch, NDJSON wire with mandatory terminal line, generated `RowStream` client +
+  OpenAPI, live + cancel gates on all fronts.
+- **N3. ✅ (D86–D89).** Flagship axum example + syntax appeal pass — the re-pitch artifact:
+  design gate + coverage map (D86), ordered to-many nests (D87), guard seam + typed-client
+  idempotency key (D88), the `examples/axum-helpdesk` schema/migrations/client/service (N3c/N3d,
+  six engine bugs surfaced + fixed), and the N3e close-out — README (every command run-verified),
+  final in-situ appeal re-audit (**zero grammar changes upheld**) + final coverage-map deltas
+  (D89), CI wiring verified (`ci-example-helpdesk` runs inside `make ci-examples` / the `examples`
+  CI job). Coverage policy stands: the quickstarts stay minimal; the helpdesk is the
+  total-feature-coverage vehicle.
 
-## Track T — core DB feature parity (owner-approved 2026-07-09; PAUSED behind Track N)
+### Track N follow-ups (library gaps the flagship surfaced; owner picks order)
+
+Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
+
+- **NF1. `in` value-list form.** Symptom: `status in (open, waiting)` doesn't parse — `in`
+  exists only as `col IN ($param)` with one bound value, so the helpdesk search spells
+  `not (status = resolved or status = closed)`. Seam: predicate grammar (value-list RHS) +
+  sema membership/type check per element + lowering to `IN (v, v, …)` (params and literals).
+  Fix: the literal/param value-list RHS for `in`, all three dialects.
+- **NF2. Whole-query raw reads.** Symptom: raw.md specifies a third raw level (whole query /
+  raw join) but no grammar or implementation exists; the workload report used raw value leaves
+  instead. Seam: query body alternative (a `sql` backtick block as the whole body), result
+  columns typed by the declared shape, param binding kept. Fix: implement the raw.md contract
+  (param-binding + result-typing survive; W0102 lints the soft-delete gap) — or, if declined,
+  amend raw.md to stop promising it.
+- **NF3. Guard re-entry deadlocks on the id-gen lock.** Symptom: a guard calling the typed
+  client over its *own* engine hangs — `Engine::call` holds the id-generator mutex across
+  dispatch (guards run inside dispatch). Seam: `Engine::call*` / the id-gen lock scope in
+  based-runtime. Fix: narrow the lock to the id-minting site so dispatch never holds it across
+  await points; then un-write auth.md's second-engine caveat.
+- **NF4. `hard delete` with a declared shape is undecodable.** Symptom: a real DELETE returns
+  `{}` on the wire (no surviving row to re-select) but the generated method's return type is
+  the shape — decode error on every call; the helpdesk's `purge_comment` is declared but
+  unrouted. The grammar's mandatory `-> ret_type` leaves no legal shapeless spelling. Fix
+  (pick one): sema-reject the pairing, re-select *before* the delete, or a shapeless/ack
+  return form for destructive mutations.
+- **NF5. `Page<T>` drops `with count`'s total.** Symptom: the wire carries `total` for a
+  `with count` page but the generated `Page<T>` has no field, so `/admin/tickets` serves
+  rows + cursor only. Seam: client codegen's `Page` struct (+ OpenAPI schema). Fix:
+  `total: Option<i64>`, populated exactly when the query declares `with count`.
+- **NF6. Zero-row update → `200` null → client decode error.** Symptom: an update whose
+  `where` matches nothing (e.g. a cross-tenant id under scope) returns `200` with a null
+  body; the typed client fails decoding instead of reporting the miss. Seam: `run_mutation`'s
+  re-select outcome in based-runtime. Fix: a `not_found` outcome (404, stable code) when a
+  surviving-write mutation matched zero rows.
+
+## Track T — core DB feature parity (owner-approved 2026-07-09; resumes at T3)
 
 A confirmed 6-item queue closing the gap to a general DB-first DSL (commerce is only a *named*
-example, not the domain). **Paused at T3 behind Track N — N1 recolors the execution paths T3–T6 build
-on (recolor first, then resume T3 on the async core).** Worked in order; each iteration marks its
-item + D#. Tier-2 follow-ons below.
+example, not the domain). **Was paused at T3 behind Track N; Track N is complete, so T3 is next
+here — after the Track N follow-ups (NF1–NF6), whose ordering vs T3 is the owner's call.** Worked
+in order; each iteration marks its item + D#. Tier-2 follow-ons below.
 
 - **T1. ✅ done (D82). Enum type — string + numeric kinds.** `enum Name { … }` first-class scalar; a field
   typed by an enum name is a stored column (not a relation), referenced in value position by variant **name**

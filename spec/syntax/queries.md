@@ -30,7 +30,7 @@ A param carries its own binding, locally, inside the brackets. Mix freely; equal
 query posts(user -> author, company -> owner) -> PostShape[];
 query posts(user -> author, since: timestamp > created_at) -> PostShape[];
 ```
-`->` = "binds via" (consistent with relation-arrow: "connects to"). Ceiling: one binding per param, equality-AND across params. Anything needing `or`, a cross-param condition, ordering, pagination, or a non-default projection -> drop to the body.
+`->` = "binds via" (consistent with relation-arrow: "connects to"). In the `op column` form the **column is the left operand**: `since: timestamp > created_at` binds `created_at > $since` — rows created *after* `$since`. Ceiling: one binding per param, equality-AND across params. Anything needing `or`, a cross-param condition, ordering, pagination, or a non-default projection -> drop to the body.
 
 ## Full body form
 ```
@@ -74,7 +74,7 @@ query orders_in_org(org) -> OrderCard[] unscoped("admin: cross-org order lookup"
 ```
 
 ## Filters
-- Operators (small, closed): `= != > < >= <=`, `~` (like), `in`, `has` (array/json containment).
+- Operators (small, closed): `= != > < >= <=`, `~` (like), `in`, `has` (array/json containment). `~` passes its pattern verbatim to SQL `LIKE` — the caller supplies any `%` wildcards.
 - Compose `and`/`or`/`not` + parens. `and` binds tighter than `or`. No other precedence.
 - `get` must be keyed on a unique field (else lint-error).
 - Filter paths and projection paths share the same dotted traversal. Forward-edge traversal needs no inverse declaration; only backward traversal does (relations.md).

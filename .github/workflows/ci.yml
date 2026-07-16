@@ -78,8 +78,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: make ci-live-postgres POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
 
-  # The three quickstart scenarios end-to-end: `based migrate apply` then `cargo run`, each
-  # against a fresh service container (SQLite runs on a throwaway file, no service needed).
+  # The example scenarios end-to-end: the three quickstarts (`based migrate apply` then
+  # `cargo run`) plus the axum-helpdesk smoke (reset -> migrate -> seed -> drive every route
+  # over real HTTP), each against a fresh service container (SQLite runs on a throwaway file,
+  # no service needed; the helpdesk resets the shared Postgres itself, so it runs last).
   examples:
     runs-on: ubuntu-latest
     services:

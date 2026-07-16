@@ -223,8 +223,9 @@ not a DSL symbol — nothing else in the schema defines it. The contract, end to
   → `Engine::with_guards`. The fn receives the callable's name, its decoded JSON args,
   and the server-derived `$ctx`, and returns a verdict — **allow**, or **deny with a
   mandatory reason** (a denial is never silent, principle 6). It is async and owns its
-  own resources: it may read the database through a captured pool, or call the typed
-  client itself.
+  own resources: it may read the database through a captured pool. It must **not** call
+  back into the engine that invoked it — a guard re-entering its own engine deadlocks;
+  a guard that wants the typed client needs a second engine over the same pool.
 - **Enforcement — one point, both doors.** Dispatch — the one core the HTTP edge and
   the in-process `Engine` both run through — invokes the guard **before the write body,
   before the idempotency store is consulted** (a denied request never claims a key),
