@@ -32,7 +32,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
-  resolution)
+  resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
+  success)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
@@ -65,7 +66,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   failure 1; reuses D71's typed errors as the cause instead of re-stringifying; `anyhow` dropped),
   D75 (HTTP listener edge `EdgeError` registry: shared `code()`/`status()`, pool checkout reuses the
   driver's classified `DbError::code()`), D76 (example `main.rs` as a `?`-based error-handling reference
-  matching on `ClientError::kind()`/`code()`)
+  matching on `ClientError::kind()`/`code()`), D92 (`RunError::NotFound` → 404 `not_found`: a
+  surviving-write mutation whose `where` matched no row)
 - **Polyglot / OpenAPI** — D23 (OpenAPI over gRPC, rationale), D24 (OpenAPI emitter shape)
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out — execution model superseded by D84), D22 (in-process `embed`
@@ -3867,3 +3869,33 @@ multiple inferred indexes no longer stack on one line. Regression-proven in base
 (`inferred_index_anchors_on_the_inducing_forward_edge`, `callable_facts_anchor_on_the_name_ident`,
 `mutation_ctx_fact_anchors_on_the_name_ident`) and in-situ via `based facts` on the helpdesk
 schema (index → `ticket/model.bsl:32:3` the member, ctx → callable name idents).
+
+## D92 — zero-row surviving-write mutation is a 404 `not_found`, never a null success (NF6)
+
+The flagship-surfaced bug (D89/NF6): a mutation whose `where` matched nothing — canonically a
+cross-tenant id the injected `@scope` filter excludes — returned `200` with a `null` body (the
+declared-shape re-select found no row, `apply_once` defaulted to `J::Null`), and the generated
+client, whose mutation methods return the bare shape (not an `Option`), failed with a `Decode`
+error instead of reporting the miss.
+
+Resolution — the miss is a first-class outcome, decided at the re-select inside the transaction:
+
+- **`apply_once` returns `Ok(None)` when the re-select reads back no row**, *before* commit — the
+  transaction drops → rollback, so in a `tx` body a sibling write (e.g. an audit-log `create`)
+  never survives a miss. All-or-nothing already was the mutation promise; this extends it to
+  "the target row must exist". A zero-match single UPDATE wrote nothing anyway; rollback is free.
+- **`RunError::NotFound(callable)`** (code `not_found`, `Display` "matched no row (no such row, or
+  it is out of scope)") raised by `run_mutation` on the `None`; `serve::dispatch` maps it to
+  **404** with the same stable `not_found` code the router uses. The response is identical for an
+  absent row and an out-of-scope row, so existence never leaks across a scope boundary.
+- **Idempotency:** a not-found releases the key claim (same path as a write failure — nothing was
+  written, nothing recorded), so a retry may run once the row exists.
+- **Unaffected:** a real DELETE (no re-select — returns `{}`, NF4's separate problem) and `get`
+  queries (they return `Option<Shape>`; a query miss stays `200 null` by design).
+
+Spec: mutations.md "Return shape (read-back)" now states the not-found contract; calling.md's
+error-code list gains `not_found` (404). Proven: unit (`mutation.rs` rollback + `RunError`,
+`serve.rs` wire 404), live SQLite (cross-tenant + absent id → 404, row unchanged), and the
+helpdesk smoke gains the cross-tenant status-update → 404 assertion (previously the decode
+failure that filed NF6). The helpdesk needed no route changes — its `ApiError` already passes
+the engine's status + code through.

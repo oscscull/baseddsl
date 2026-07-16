@@ -270,6 +270,36 @@ async fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
 }
 
 #[tokio::test]
+async fn zero_row_update_is_not_found_and_rolls_back() {
+    let c = compile(UPDATE_SCHEMA);
+    let mut ids = SeqIdGen::default();
+    // The write's `where` (id + injected scope) matches nothing — e.g. a cross-tenant
+    // id — so the declared-shape re-select reads back no row. The mock answers the
+    // re-select fetch with zero rows.
+    let db = MockDb::new(vec![vec![]]);
+    let err = run_mutation(
+        &c,
+        &db,
+        "",
+        &mut ids,
+        &NoStore,
+        &Request::new(
+            "set_status",
+            json!({ "id": "ord-9", "status": "shipped" }),
+            json!({ "org": "org-7" }),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    // The outcome is a stable not-found, never a `null` success.
+    assert_eq!(err, RunError::NotFound("set_status".into()));
+    assert_eq!(err.code(), "not_found");
+    // Nothing survives the miss: the transaction rolled back, never committed.
+    assert_eq!(db.tx_log(), vec!["begin", "rollback"]);
+}
+
+#[tokio::test]
 async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     let c = compile(
         r#"

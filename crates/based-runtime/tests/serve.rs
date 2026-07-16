@@ -142,6 +142,42 @@ async fn mutation_route_returns_the_created_rows_declared_shape() {
     assert!(calls[1].0.starts_with("SELECT"), "{}", calls[1].0);
 }
 
+/// A mutation whose `where` matched no row (a wrong or out-of-scope id) is a 404
+/// `not_found` — never a `200` with a null body the typed client cannot decode.
+#[tokio::test]
+async fn zero_row_mutation_maps_to_404_not_found() {
+    let c = compile(
+        r#"
+        Order { status: text, total: int }
+        shape OrderCard from Order { status, total }
+        mutation set_status(id: Id, status: text) -> OrderCard {
+            update Order where (id = $id) { status = $status };
+        }
+        "#,
+    );
+    // The UPDATE matches nothing, so the declared-shape re-select reads back no row.
+    let db = MockDb::new(vec![vec![]]);
+    let mut ids = SeqIdGen::default();
+    let resp = dispatch(
+        &c,
+        &db,
+        "",
+        &mut ids,
+        &NoStore,
+        &Guards::new(),
+        "POST",
+        "/m/set_status",
+        json!({ "id": "no-such", "status": "shipped" }),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, 404);
+    assert_eq!(resp.body["error"]["code"], "not_found");
+    // The miss rolled the transaction back.
+    assert_eq!(db.tx_log(), vec!["begin", "rollback"]);
+}
+
 /// `$ctx` arrives as the server-supplied context (not the body); a required one that
 /// is missing is a 400 `missing_ctx`.
 #[tokio::test]

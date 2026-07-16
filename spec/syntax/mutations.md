@@ -44,10 +44,13 @@ A mutation's `-> Shape` is the row it wrote, read back in that shape after the w
 same transaction (read-your-writes). A `create` reads back the created row; an `update` / soft
 `delete` / `restore` reads back the row it touched (an update sees the new values). The read-back
 projects the declared shape exactly as a `get` would — nested sub-objects and arrays included — and
-applies the same scope/soft-delete guards, so a row that lands or lives out of scope reads back as
-absent. A **real DELETE** (a plain-model `delete` or `hard delete`) removes the row, so there is no
-surviving row to return: those mutations return `{}` even if they declare a shape. (Implementation:
-D12 + D58.)
+applies the same scope/soft-delete guards. When the read-back finds **no row** — the `where` (with
+those guards) matched nothing: a wrong id, or an id another scope owns — the mutation fails with
+`not_found` (`404`) and the whole transaction rolls back, so nothing in the body survives the miss;
+the caller gets a typed error, never an empty success. The response is identical whether the row is
+absent or out of scope, so existence never leaks across a scope boundary. A **real DELETE** (a
+plain-model `delete` or `hard delete`) removes the row, so there is no surviving row to return:
+those mutations return `{}` even if they declare a shape. (Implementation: D12 + D58 + D92.)
 
 ## Read-decide-write
 Not in the DSL. Use the host-language `transaction(closure)` seam: engine owns the boundary (commit on Ok, rollback on Err/panic, always release); caller writes logic; inside, queries are the same safe queries bound to the tx. See architecture docs.

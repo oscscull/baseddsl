@@ -309,6 +309,81 @@ async fn update_mutation_reselects_full_declared_shape_end_to_end() {
     );
 }
 
+/// An update whose `where` matches no row — a wrong id, or a cross-tenant id the scope
+/// filter excludes — is a 404 `not_found` with nothing written, never a `200` with a
+/// null body the typed client cannot decode.
+#[tokio::test]
+async fn zero_row_update_is_404_and_writes_nothing_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        @updated(updated_at)
+        Order { updated_at: timestamp, org: Org, status: text }
+        shape OrderCard from Order { status }
+        mutation set_status(id: Id, status: text) -> OrderCard scoped Tenant {
+          update Order where (id = $id) { status = $status };
+        }
+        query order_by_id(id) -> OrderCard scoped Tenant;
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-a', 'A'), ('org-b', 'B');
+            INSERT INTO `order` (`id`, `updated_at`, `org_id`, `status`)
+                VALUES ('o1', '2020-01-01 00:00:00', 'org-a', 'pending');
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    // Another tenant names org-a's row: the scope filter makes the UPDATE match nothing.
+    let cross = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/set_status",
+        json!({ "id": "o1", "status": "shipped" }),
+        json!({ "org": "org-b" }),
+    )
+    .await;
+    assert_eq!(cross.status, 404, "{:?}", cross.body);
+    assert_eq!(cross.body["error"]["code"], "not_found");
+
+    // A genuinely absent id under the owning tenant: same 404.
+    let absent = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/set_status",
+        json!({ "id": "no-such", "status": "shipped" }),
+        json!({ "org": "org-a" }),
+    )
+    .await;
+    assert_eq!(absent.status, 404, "{:?}", absent.body);
+    assert_eq!(absent.body["error"]["code"], "not_found");
+
+    // Nothing was written: the owner still reads the original status.
+    let got = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/order_by_id",
+        json!({ "id": "o1" }),
+        json!({ "org": "org-a" }),
+    )
+    .await;
+    assert_eq!(got.body, json!({ "status": "pending" }));
+}
+
 /// A scoped child reached **only** through a nested shape sub-object is confined by its
 /// `@scope`, so a cross-scope nested read can't leak rows the caller's `$ctx` excludes —
 /// mirroring D34's Ticket→Contact but through nests. Here the parent `Order` is scoped on

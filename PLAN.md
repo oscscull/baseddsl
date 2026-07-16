@@ -405,11 +405,12 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   `with count` page but the generated `Page<T>` has no field, so `/admin/tickets` serves
   rows + cursor only. Seam: client codegen's `Page` struct (+ OpenAPI schema). Fix:
   `total: Option<i64>`, populated exactly when the query declares `with count`.
-- **NF6. Zero-row update → `200` null → client decode error.** Symptom: an update whose
-  `where` matches nothing (e.g. a cross-tenant id under scope) returns `200` with a null
-  body; the typed client fails decoding instead of reporting the miss. Seam: `run_mutation`'s
-  re-select outcome in based-runtime. Fix: a `not_found` outcome (404, stable code) when a
-  surviving-write mutation matched zero rows.
+- **NF6. ✅ done (D92). Zero-row surviving-write mutation → 404 `not_found`.** A re-select
+  that reads back no row (wrong id, or a cross-tenant id under scope) now rolls the whole
+  transaction back and surfaces `RunError::NotFound` → wire 404, stable code `not_found` —
+  never a `200 null` the typed client can't decode. Same response for absent vs out-of-scope
+  (no existence leak); a not-found releases the idempotency claim. Proven unit + live SQLite +
+  the helpdesk smoke's new cross-tenant status-update assertion.
 - **NF7. `@was` lifecycle is a rough edge (owner-flagged 2026-07-16; design decision, priority).**
   Symptom: `@was` is a one-shot gen-time hint, so after `migrate gen` it is dead weight —
   either it lingers (W0107 cruft, a second commit to remove) or the author strips it

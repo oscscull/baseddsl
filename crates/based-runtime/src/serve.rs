@@ -117,6 +117,11 @@ pub async fn dispatch(
         // overwhelmingly operational, not a query bug → a retryable 503 (the client /
         // LB can retry, another shard's traffic is unaffected).
         Err(RunError::Db(e)) => WireResponse::error(503, e.code(), e.message),
+        // The mutation's `where` (with its scope/soft-delete guards) matched no row —
+        // nothing was written. 404: the caller named a row that does not exist for them
+        // (same response whether the row is absent or out of scope, so existence never
+        // leaks across a scope boundary).
+        Err(e @ RunError::NotFound(_)) => WireResponse::error(404, e.code(), e.to_string()),
         // A concurrent mutation retry with the same idempotency key is still in flight.
         // Rejecting rather than running a second write is what makes the key safe;
         // 409 is retryable once the first attempt settles.

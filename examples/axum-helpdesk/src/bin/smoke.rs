@@ -150,6 +150,19 @@ async fn main() {
     assert_eq!(body["error"]["code"], "not_found");
     println!("ok - cross-tenant ticket read -> 404");
 
+    // ---- cross-tenant write: an update that matches no row is a clean 404 -----
+    let (status, body) = desk
+        .post(
+            Some(GUS),
+            &format!("/tickets/{t1}/status"),
+            json!({ "status": "waiting_on_customer" }),
+            None,
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+    println!("ok - cross-tenant status update -> 404, nothing written");
+
     // ---- idempotent open: one key, one row -------------------------------------
     let open = json!({ "subject": "Printer on fire", "body": "Actual flames.", "priority": 3 });
     let (status, first) = desk

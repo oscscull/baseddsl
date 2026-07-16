@@ -203,6 +203,13 @@ fn path_item(schema: &CheckedSchema, c: &Callable) -> Value {
         error_response("Retryable database error."),
     );
     if c.is_mutation {
+        // A surviving-write mutation whose `where` matches no row is also a 404.
+        responses.insert(
+            "404".to_string(),
+            error_response(
+                "No such mutation, or the write matched no row (absent or out of scope).",
+            ),
+        );
         // Mutations may carry the idempotency key; the 409/422 outcomes exist only
         // for a keyed write.
         parameters.push(json!({ "$ref": "#/components/parameters/IdempotencyKey" }));

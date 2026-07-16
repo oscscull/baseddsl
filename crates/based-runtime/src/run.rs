@@ -129,13 +129,20 @@ impl std::error::Error for DbError {}
 
 /// Why running a request failed: a boundary [`PlanError`] (bad/missing input, unknown
 /// callable — the caller can fix it), a [`DbError`] (the database failed — an
-/// operational, retryable failure), or an idempotency [`Conflict`](RunError::Conflict)
+/// operational, retryable failure), a [`NotFound`](RunError::NotFound) (the mutation's
+/// `where` matched no row), or an idempotency [`Conflict`](RunError::Conflict)
 /// (a concurrent attempt with the same key is still in flight). The wire maps each to its
 /// HTTP status.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunError {
     Plan(PlanError),
     Db(DbError),
+    /// A surviving-write mutation (update / soft delete / restore) matched no row: its
+    /// `where` — with the scope and soft-delete guards it carries — found nothing to
+    /// write, so nothing was written and there is no row to read back. Surfaced as a
+    /// `404` rather than a `200 null` the typed client cannot decode. Carries the
+    /// callable name.
+    NotFound(String),
     /// A mutation retry arrived while a prior attempt with the same idempotency key is
     /// still running. Running a second write would risk the double-insert the key exists to
     /// prevent, so the retry is rejected as a retryable conflict (`409`): the client retries
@@ -167,6 +174,7 @@ impl RunError {
         match self {
             RunError::Plan(e) => e.code(),
             RunError::Db(e) => e.code(),
+            RunError::NotFound(_) => "not_found",
             RunError::Conflict(_) => "idempotency_conflict",
             RunError::KeyReuse(_) => "idempotency_key_reuse",
         }
@@ -178,6 +186,10 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::Plan(e) => write!(f, "{e}"),
             RunError::Db(e) => write!(f, "{e}"),
+            RunError::NotFound(name) => write!(
+                f,
+                "`{name}` matched no row (no such row, or it is out of scope)"
+            ),
             RunError::Conflict(key) => {
                 write!(
                     f,
@@ -197,7 +209,7 @@ impl std::error::Error for RunError {
         match self {
             RunError::Plan(e) => Some(e),
             RunError::Db(e) => Some(e),
-            RunError::Conflict(_) | RunError::KeyReuse(_) => None,
+            RunError::NotFound(_) | RunError::Conflict(_) | RunError::KeyReuse(_) => None,
         }
     }
 }
@@ -330,7 +342,11 @@ pub async fn run_mutation(
     // No key → the plain path (run every time). This is also what `NoStore` yields, but
     // short-circuiting here means a keyless request never touches the store at all.
     let key = match &req.idempotency_key {
-        None => return Ok(apply(backend, shard_key, &plan).await?),
+        None => {
+            return apply(backend, shard_key, &plan)
+                .await?
+                .ok_or_else(|| RunError::NotFound(req.callable.clone()))
+        }
         Some(k) => k,
     };
 
@@ -344,9 +360,10 @@ pub async fn run_mutation(
         // Same key, *different* payload: reject — replaying would answer the wrong request.
         KeyState::Mismatch => Err(RunError::KeyReuse(key.clone())),
         // Fresh: we hold the claim. Run the write, then record its response. The guard
-        // releases the claim on any exit that records nothing — a write failure, or the
-        // caller dropping this future mid-write (cancellation) — so a later retry (same
-        // key) may try again instead of hitting a stranded in-flight claim forever.
+        // releases the claim on any exit that records nothing — a write failure, a
+        // not-found (nothing was written, so a retry may run once the row exists), or
+        // the caller dropping this future mid-write (cancellation) — so a later retry
+        // (same key) may try again instead of hitting a stranded in-flight claim forever.
         KeyState::Fresh => {
             let mut claim = Claim {
                 store,
@@ -354,7 +371,9 @@ pub async fn run_mutation(
                 key,
                 armed: true,
             };
-            let response = apply(backend, shard_key, &plan).await?;
+            let response = apply(backend, shard_key, &plan)
+                .await?
+                .ok_or_else(|| RunError::NotFound(req.callable.clone()))?;
             claim.armed = false;
             store.record(&req.callable, key, response.clone());
             Ok(response)
@@ -406,11 +425,12 @@ fn deadlock_backoff(attempt: u32) -> std::time::Duration {
 /// server-side; each retry is a fresh checkout + fresh [`Tx`], so re-running usually
 /// succeeds once the contending transaction commits. A bounded [`TX_RETRY_LIMIT`] then a
 /// `503` prevents a hot row retrying forever. Every other failure surfaces immediately.
+/// `Ok(None)` is [`apply_once`]'s matched-no-row outcome, passed through.
 async fn apply(
     backend: &dyn Backend,
     shard_key: &str,
     plan: &MutationPlan,
-) -> Result<serde_json::Value, DbError> {
+) -> Result<Option<serde_json::Value>, DbError> {
     let mut attempt = 0u32;
     loop {
         let db = backend.checkout(shard_key).await?;
@@ -433,9 +453,15 @@ async fn apply(
 /// The response is the written row read back in the mutation's declared shape: when the
 /// plan carries a re-select, it runs inside the same transaction (read-your-writes, atomic
 /// with the writes) and its single row is the response — matching the client's decoded
-/// output type. Only a mutation whose row does not survive the write (a real DELETE) has no
+/// output type. A re-select that finds **no row** means the write's `where` (with its
+/// scope/soft-delete guards) matched nothing: the transaction is dropped (rollback, so a
+/// sibling write in the same body never survives the miss) and `Ok(None)` reports the
+/// not-found. Only a mutation whose row does not survive the write (a real DELETE) has no
 /// re-select and falls back to `{ id }` / `{}`.
-async fn apply_once(db: Box<dyn Db>, plan: &MutationPlan) -> Result<serde_json::Value, DbError> {
+async fn apply_once(
+    db: Box<dyn Db>,
+    plan: &MutationPlan,
+) -> Result<Option<serde_json::Value>, DbError> {
     use serde_json::Value as J;
     let mut tx = db.begin().await?;
     for stmt in &plan.stmts {
@@ -446,7 +472,10 @@ async fn apply_once(db: Box<dyn Db>, plan: &MutationPlan) -> Result<serde_json::
     let response = match &plan.ret_select {
         Some(stmt) => {
             let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
-            rows.into_iter().next().map(nest_row).unwrap_or(J::Null)
+            match rows.into_iter().next() {
+                Some(row) => nest_row(row),
+                None => return Ok(None),
+            }
         }
         // No declared-shape re-select (the row did not survive — a real DELETE): identify
         // the created row by its engine `id`, or an empty object when nothing was created.
@@ -460,7 +489,7 @@ async fn apply_once(db: Box<dyn Db>, plan: &MutationPlan) -> Result<serde_json::
         },
     };
     tx.commit().await?;
-    Ok(response)
+    Ok(Some(response))
 }
 
 /// Reassemble a flat result row into the response object, nesting sub-objects/arrays.
