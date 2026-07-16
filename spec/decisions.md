@@ -97,7 +97,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   one printer shared by CLI and editor), D80 (comprehensive rename: params, `$ctx` fields, callable
   names, `@was`-aware physical rename), D90 (signature param bindings are field references:
   go-to-def/find-refs/rename see `-> edge` / `op col` idents; binding hover states the generated
-  predicate; tmLanguage keyword/type audit)
+  predicate; tmLanguage keyword/type audit), D91 (derived facts anchor narrowly — inferred-index
+  fact at the inducing forward member, callable ctx/resolved-query facts at the name ident — so
+  hover facts no longer bleed across the whole decl)
 - **Formatter / tooling** — D78 (`based-fmt` canonical `.bsl` printer: AST pretty-print + verbatim
   comment reattachment; deterministic/idempotent; `based fmt [--check]` + LSP `formatting`)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
@@ -3837,3 +3839,31 @@ the param — the param name is wire contract (renaming it changes the generated
 the miss is a loud sema error (`E0111`, the param maps to a column that no longer exists), not
 silent corruption; the hover fact makes the coupling visible. Unit-proven in based-lsp compile.rs
 (`binding_column_navigates_and_renames`, `binding_hover_states_generated_predicate`).
+
+## D91 — derived facts anchor narrowly, never at a whole declaration (NF10)
+
+The owner-observed bug (2026-07-16, on the helpdesk `Ticket` model): three fact kinds anchored
+at whole-declaration spans (`model.span` / `q.span` / `m.span`, keyword→body-end), and the LSP
+hover appends every fact whose span contains the cursor — so hovering *any* token inside the
+model showed the inferred-index fact, and any token inside a query/mutation body dragged in the
+irrelevant `requires […]` / `resolved query` sections.
+
+Fix, in `based_facts::facts` (the hover handler is untouched — span containment stays the right
+rule once anchors are narrow):
+
+- **InferredIndex** anchors at the forward relation member whose FK column the index covers
+  (`model.member(idx.columns[0])` — member spans are the name ident), i.e. where the write cost
+  is incurred; fallback the model-name ident, then `model.span`. On the helpdesk schema the
+  `inf_ticket_deleted_at_duplicate_of` fact now sits on `duplicate_of`, not the whole `Ticket`.
+- **ResolvedQuery + CtxRequirement** anchor at the callable's name ident (one lookup serves
+  queries and mutations — they share the wire namespace); fallback the decl span.
+- **InferredInverse and Scope facts already anchored narrowly** (member span / name idents) —
+  unchanged, and the find-references walk that matches on the inverse fact's span is unaffected.
+
+Inlay placement: callable inlays render at end-of-line of the anchor, and the name ident shares
+the signature line — placement unchanged. The index inlay moves from the model's first line
+(a decorator line, when decorated) to the inducing member's line — where the fact is about, and
+multiple inferred indexes no longer stack on one line. Regression-proven in based-facts tests
+(`inferred_index_anchors_on_the_inducing_forward_edge`, `callable_facts_anchor_on_the_name_ident`,
+`mutation_ctx_fact_anchors_on_the_name_ident`) and in-situ via `based facts` on the helpdesk
+schema (index → `ticket/model.bsl:32:3` the member, ctx → callable name idents).

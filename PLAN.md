@@ -505,19 +505,11 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   the opaque-column treatment, so create/drop/rebuild lifecycle stays in-system. Spec seam:
   models.md Types + indexing.md + raw.md + migrations.md; decisions entry when resolved.
 
-- **NF10. Hover facts anchored at whole-decl spans bleed into every hover inside the decl
-  (owner-observed 2026-07-16; bug, priority).** `based_facts::facts` anchors each
-  `InferredIndex` fact at `model.span` (based-facts lib.rs) and the ctx-requirement /
-  resolved-query facts at `q.span`/`m.span` — and those spans cover the **entire
-  declaration** (parser sets decl spans keyword→body-end). The LSP hover appends every fact
-  whose span contains the cursor (based-lsp main.rs `hover`), so hovering *any* token inside
-  the ticket model shows "inferred index `inf_ticket_deleted_at_duplicate_of` …" regardless
-  of relevance; the same class hits query/mutation bodies (irrelevant `requires […]` /
-  `resolved query` sections on every hover inside them). Inlay hints are unaffected (they
-  render at span start). Fix: anchor narrowly — an index fact at the relation member that
-  induces it (or the model-name ident), callable facts at the name ident — keeping inlay
-  placement intact. Note NF11, if adopted, removes the inferred-index fact entirely; the
-  anchoring fix is still needed for the ctx/resolved-query facts.
+- **NF10. ✅ done (D91). Derived facts anchor narrowly, never at a whole decl.** The
+  inferred-index fact anchors at the forward member whose FK it covers; ctx-requirement /
+  resolved-query facts at the callable's name ident — so hover facts no longer bleed into
+  every token inside the decl. NF11, if adopted, retires the inferred-index fact; the
+  narrow ctx/resolved-query anchoring stands regardless.
 
 - **NF11. Inferred indexes + implicit `id`: silent derivation → explicit-in-source with
   error + autofix (owner-flagged 2026-07-16; design decision, priority — touches

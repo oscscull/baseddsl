@@ -67,11 +67,14 @@ pub struct Fact {
 
 /// Compute every derived fact worth surfacing for a checked schema.
 ///
-/// `decls` is the same declaration set `check()` consumed; it is consulted only to
+/// `decls` is the same declaration set `check()` consumed; it is consulted to
 /// distinguish an *inferred* inverse pairing (author wrote `[]`) from an explicit
 /// one (author wrote `(Model.field)`) — an explicit pairing is already in source,
-/// so it is not a "show, don't write" fact. Output is sorted by span so the caller
-/// (and goldens) see a stable order.
+/// so it is not a "show, don't write" fact — and to anchor callable facts at the
+/// declaration's name ident. Every fact anchors at a *narrow* span (a name ident
+/// or the inducing member), never a whole declaration, so a hover elsewhere in the
+/// decl body doesn't surface it. Output is sorted by span so the caller (and
+/// goldens) see a stable order.
 pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
     let mut out = Vec::new();
 
@@ -104,11 +107,20 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
             }
         }
 
-        // Inferred join-key indexes the DDL will emit (name + columns match `sql::ddl`).
+        // Inferred join-key indexes the DDL will emit (name + columns match `sql::ddl`),
+        // anchored at the forward edge whose FK column they index — the member that
+        // incurs the write cost — falling back to the model-name ident.
         for idx in &model.inferred_indexes {
             let (name, cols) = inferred_index(model, &idx.columns);
+            let anchor = idx
+                .columns
+                .first()
+                .and_then(|f| model.member(f))
+                .map(|m| m.span)
+                .or_else(|| model_name_span(decls, &model.name))
+                .unwrap_or(model.span);
             out.push(Fact {
-                span: model.span,
+                span: anchor,
                 kind: FactKind::InferredIndex,
                 label: format!("index {name} ({})", cols.join(", ")),
                 detail: format!(
@@ -123,17 +135,19 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
     }
 
     // Per-query facts: the resolved shape and the `$ctx` requirement bag — neither
-    // is written in the signature.
+    // is written in the signature. Anchored at the name ident, not the whole decl.
     for q in &schema.queries {
-        out.push(resolved_query_fact(q));
-        if let Some(fact) = ctx_fact(q.span, &q.ctx_requires, "query") {
+        let anchor = callable_name_span(decls, &q.name).unwrap_or(q.span);
+        out.push(resolved_query_fact(q, anchor));
+        if let Some(fact) = ctx_fact(anchor, &q.ctx_requires, "query") {
             out.push(fact);
         }
     }
     // Mutations carry no inferred shape (their write model is explicit), but they do
     // require context the same way.
     for m in &schema.mutations {
-        if let Some(fact) = ctx_fact(m.span, &m.ctx_requires, "mutation") {
+        let anchor = callable_name_span(decls, &m.name).unwrap_or(m.span);
+        if let Some(fact) = ctx_fact(anchor, &m.ctx_requires, "mutation") {
             out.push(fact);
         }
     }
@@ -233,7 +247,7 @@ fn scope_detail(schema: &CheckedSchema, scope: &RScope) -> String {
 }
 
 /// The `$ctx` bag a callable requires, as one aggregate fact anchored at its
-/// declaration — `None` when it needs no context. Each field's type is inferred
+/// name ident — `None` when it needs no context. Each field's type is inferred
 /// from the column its use compares against.
 fn ctx_fact(span: Span, reqs: &[CtxReq], kind: &str) -> Option<Fact> {
     if reqs.is_empty() {
@@ -280,9 +294,27 @@ fn prim(p: Primitive) -> String {
     }
 }
 
+/// The name-ident span of the query/mutation declaring `name` (they share one wire
+/// namespace, so a single lookup serves both).
+fn callable_name_span(decls: &[Decl], name: &str) -> Option<Span> {
+    decls.iter().find_map(|d| match d {
+        Decl::Query(q) if q.name.node == name => Some(q.name.span),
+        Decl::Mutation(m) if m.name.node == name => Some(m.name.span),
+        _ => None,
+    })
+}
+
+/// The name-ident span of the model declaring `name`.
+fn model_name_span(decls: &[Decl], name: &str) -> Option<Span> {
+    decls.iter().find_map(|d| match d {
+        Decl::Model(m) if m.name.node == name => Some(m.name.span),
+        _ => None,
+    })
+}
+
 /// The resolved shape of a query: verb + target + cardinality + pagination, none of
-/// which appears in the signature.
-fn resolved_query_fact(q: &RQuery) -> Fact {
+/// which appears in the signature. Anchored at the query's name ident.
+fn resolved_query_fact(q: &RQuery, anchor: Span) -> Fact {
     let verb = match q.verb {
         Verb::Get => "get",
         Verb::List => "list",
@@ -299,7 +331,7 @@ fn resolved_query_fact(q: &RQuery) -> Fact {
         label.push_str(" paginated");
     }
     Fact {
-        span: q.span,
+        span: anchor,
         kind: FactKind::ResolvedQuery,
         label,
         detail: format!(

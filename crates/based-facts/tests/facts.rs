@@ -54,6 +54,62 @@ fn inferred_index_matches_ddl_naming() {
     assert_eq!(idx[0].label, "index inf_order_item_order (order_id)");
 }
 
+// Facts anchor at narrow spans (a name ident / the inducing member), never a whole
+// declaration — a whole-decl anchor would make the hover surface the fact on every
+// token inside the decl body.
+
+#[test]
+fn inferred_index_anchors_on_the_inducing_forward_edge() {
+    let fs = facts_of(TRAVERSAL);
+    let idx = of_kind(&fs, FactKind::InferredIndex);
+    assert_eq!(idx.len(), 1, "{fs:#?}");
+    // The `order` field ident in `OrderItem { order: Order, … }` — the FK the
+    // index covers — not the whole `OrderItem` decl.
+    let at = TRAVERSAL.find("order: Order").unwrap() as u32;
+    assert_eq!(idx[0].span.start, at, "{:#?}", idx[0]);
+    assert_eq!(idx[0].span.end, at + "order".len() as u32, "{:#?}", idx[0]);
+}
+
+#[test]
+fn callable_facts_anchor_on_the_name_ident() {
+    let src = r#"
+        Org { name: text }
+        Product { org: Org, name: text, @index org }
+        shape P from Product { name }
+        query my_products() -> P[] where (org = $ctx.org) order (name);
+    "#;
+    let fs = facts_of(src);
+    let at = src.find("my_products").unwrap() as u32;
+    let end = at + "my_products".len() as u32;
+    for kind in [FactKind::ResolvedQuery, FactKind::CtxRequirement] {
+        let f = of_kind(&fs, kind);
+        assert_eq!(f.len(), 1, "{fs:#?}");
+        assert_eq!((f[0].span.start, f[0].span.end), (at, end), "{:#?}", f[0]);
+    }
+}
+
+#[test]
+fn mutation_ctx_fact_anchors_on_the_name_ident() {
+    let src = r#"
+        Org { name: text }
+        Product { org: Org, name: text }
+        shape P from Product { name }
+        mutation add_product(name: text) -> P {
+          create Product { name = $name, org = $ctx.org };
+        }
+    "#;
+    let fs = facts_of(src);
+    let ctx = of_kind(&fs, FactKind::CtxRequirement);
+    assert_eq!(ctx.len(), 1, "{fs:#?}");
+    let at = src.find("add_product").unwrap() as u32;
+    assert_eq!(
+        (ctx[0].span.start, ctx[0].span.end),
+        (at, at + "add_product".len() as u32),
+        "{:#?}",
+        ctx[0]
+    );
+}
+
 #[test]
 fn explicit_inverse_pairing_is_not_shown() {
     // Author wrote `(OrderItem.order)` — the pairing is in source, so it is not a
