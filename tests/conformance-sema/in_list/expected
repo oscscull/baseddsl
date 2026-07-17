@@ -1,0 +1,15 @@
+DIAGNOSTICS
+  E0151: cannot compare `int` to a text value
+  E0154: `low` is not a variant of enum `Status` (expected one of: open, waiting, closed)
+SCHEMA
+model Ticket  table=ticket
+  id: Id
+  status: Status
+  priority: Priority
+  total: int
+  index(status)
+  index(total)
+shape TicketRow from Ticket
+query active  target=Ticket verb=list many  shape=TicketRow
+query bad_variant  target=Ticket verb=list many  shape=TicketRow
+query bad_family  target=Ticket verb=list many  shape=TicketRow

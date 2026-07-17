@@ -75,6 +75,7 @@ query orders_in_org(org) -> OrderCard[] unscoped("admin: cross-org order lookup"
 
 ## Filters
 - Operators (small, closed): `= != > < >= <=`, `~` (like), `in`, `has` (array/json containment). `~` passes its pattern verbatim to SQL `LIKE` — the caller supplies any `%` wildcards.
+- `in` takes either a single bound value (`status in $status` — one `$param`) or a parenthesized value list: `status in (open, waiting, $other)`. List elements are ordinary values — literals, enum variants, `$param` references, columns — each checked against the left column's type (an enum column checks variant membership per element, `E0154`; a family mismatch like `total in (1, "x")` is the same error an `=` comparison gives). Lowers to SQL `IN (v, v, …)` with `$param` elements bound as parameters.
 - Compose `and`/`or`/`not` + parens. `and` binds tighter than `or`. No other precedence.
 - `get` must be keyed on a unique field (else lint-error).
 - Filter paths and projection paths share the same dotted traversal. Forward-edge traversal needs no inverse declaration; only backward traversal does (relations.md).

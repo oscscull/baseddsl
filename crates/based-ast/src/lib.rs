@@ -482,6 +482,13 @@ pub enum Predicate {
         op: Op,
         value: Value,
     },
+    /// `path in (v, v, …)` — membership over an explicit value list. Each element
+    /// is an ordinary `Value` (literal, enum variant, `$param`, column). The single
+    /// bare-value form `path in $param` stays `Cmp { op: Op::In, .. }`.
+    InList {
+        path: Path,
+        values: Vec<Value>,
+    },
     /// bare bool column, e.g. `active`
     Bare(Path),
     FilterCall {

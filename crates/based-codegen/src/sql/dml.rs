@@ -1310,6 +1310,21 @@ impl<'a> Select<'a> {
                     _ => format!("{lhs} {} {rhs}", sql_op(*op)),
                 }
             }
+            // `path in (v, v, …)`: each element lowers like an equality RHS — an
+            // enum variant to its wire value, a `$param` to its own placeholder
+            // (bound positionally), a literal per-dialect.
+            Predicate::InList { path, values } => {
+                let (alias, col) = self.resolve(path, model);
+                let lhs = self.qcol(&alias, &col);
+                let mut items = Vec::with_capacity(values.len());
+                for v in values {
+                    let item = self
+                        .enum_variant_lit(model, path, v)
+                        .unwrap_or_else(|| self.value(v, model));
+                    items.push(item);
+                }
+                format!("{lhs} IN ({})", items.join(", "))
+            }
             // A bare atom is either a zero-arg named filter or a plain bool column.
             Predicate::Bare(path) => {
                 if path.segments.len() == 1 {
@@ -1477,6 +1492,10 @@ fn subst_pred(p: &Predicate, binds: &HashMap<&str, &Value>) -> Predicate {
             path: path.clone(),
             op: *op,
             value: subst_value(value, binds),
+        },
+        Predicate::InList { path, values } => Predicate::InList {
+            path: path.clone(),
+            values: values.iter().map(|v| subst_value(v, binds)).collect(),
         },
         Predicate::Bare(path) => Predicate::Bare(path.clone()),
         Predicate::FilterCall { name, args } => Predicate::FilterCall {

@@ -29,7 +29,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D88 (Handle-3 `guard` runtime seam: registered host async fns, deny → 403 `guard_denied`,
   unregistered fails at engine build / listener startup)
 - **SQL codegen — DDL** — D10 (type mapping)
-- **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution)
+- **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution),
+  D93 (`in` value-list form: `Predicate::InList`, per-element sema check, `IN (v, v, …)` lowering)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
@@ -3899,3 +3900,57 @@ error-code list gains `not_found` (404). Proven: unit (`mutation.rs` rollback + 
 helpdesk smoke gains the cross-tenant status-update → 404 assertion (previously the decode
 failure that filed NF6). The helpdesk needed no route changes — its `ApiError` already passes
 the engine's status + code through.
+
+## D93 — `in` value-list form: explicit membership lists in predicates (NF1)
+
+The flagship-surfaced gap (D89/NF1): `in` existed only as `col IN ($param)` — one bound
+value, degenerate membership — so `status in (open, waiting)` did not parse and the helpdesk
+spelled its open-states filter `not (status = resolved or status = closed)`.
+
+**Grammar.** `comparison` gains a second alternative: `path 'in' value_list` with
+`value_list = '(' value { ',' value } ')'` (≥ 1 element; `in ()` is a parse error). After
+`in`, `(` unambiguously opens the list — a bare `value` never starts with `(` — so the
+single-bind form `col in $param` keeps parsing exactly as before. Elements are ordinary
+`value`s: literals, enum variants (bare identifiers), `$param` references, columns.
+
+**AST.** A distinct `Predicate::InList { path, values: Vec<Value> }`, mirroring the grammar
+alternative — not a `Value::List` (a list is meaningless in every other value position:
+assigns, function args, filter args) and not a widened `Cmp` (its `value` stays single).
+The single-bind form remains `Cmp { op: Op::In }`.
+
+**Sema — per-element checking, reusing the existing codes.** The LHS path resolves as any
+comparison LHS. Against an enum-typed column each bare element is membership-checked via the
+E0154 machinery (`check_enum_operand` — a borrowed variant from another enum is the same
+E0154); a `$param` element is name-checked. Otherwise each element is family-checked against
+the column with `=` semantics (`check_in_element_type`, the per-element twin of
+`check_cmp_types` step 2): `total in (1, "two")` is the same E0151 that `total = "two"`
+raises; numeric-family rules per D83 (int/float/decimal inter-compare); `null` elements are
+unconstrained (consistent with `= null`). No new diagnostic code was needed. Ripple walkers
+extended: `$ctx` inference (a `$ctx.f` element types by the column), joined-scope reach,
+index-lint eq-bucketing (`in` already counted as an equality lead), custom-join `on:` (list
+allowed, request-bound elements rejected as JOIN_FORM — same as `Cmp`).
+
+**Lowering + runtime.** All three dialects emit `col IN (v, v, …)`: variants as their wire
+values (`IN ('open', 'waiting_on_customer')`, integers for an int enum), literals per-dialect,
+`$param` elements as their own named placeholders — the existing positional rewrite +
+bind machinery handles them (a mutation `where` types the param by the column via
+`param_use_in_pred`). Named-filter inlining substitutes bound args through list elements
+(`subst_pred`). No runtime code paths changed beyond param typing.
+
+**Editor surface.** In-list variants are first-class variant uses (go-to-def /
+find-references / rename ride `pred_variant_sites`), the LHS and column elements are field
+references (`pred_paths`), `$param` elements are param references, and `based fmt` emits the
+canonical `status in (open, waiting, $extra)` (deterministic + idempotent + reparse-stable).
+The tmLanguage already word-scoped `in` (D90).
+
+**Used in the example.** The helpdesk `open_states` filter is now
+`not status in (resolved, closed)` — the D89 symptom site — keeping its "excluding the
+terminal states stays correct when an active status is added" property.
+
+**Verified:** parser unit (list vs single-bind AST forms, empty-list error) + sema unit
+(enum membership incl. cross-enum E0154, family E0151, `$param` elements, unknown-param
+E0113) + a sema conformance golden (`in_list`); codegen unit — MariaDB/Postgres/SQLite
+string-enum wire values + `$param` placeholder + int-enum integers + numeric literals; fmt
+canonical/idempotent case; LSP in-list variant go-to-def; **live** SQLite (seeded three
+statuses, `status in (pending, $extra)` with `$extra = "PAID"` returns exactly the two
+listed rows); full `make check` green (all three live suites + all example scenarios).

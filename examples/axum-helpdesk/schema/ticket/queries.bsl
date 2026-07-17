@@ -2,9 +2,10 @@
 # callable names the alternative that confines it — `scoped Tenant` for the
 # agent desk, `scoped Requester` for the portal — or opts out with a reason.
 
-# Open means "not settled" — `not` over the two terminal states keeps this true
-# if a new active status is ever added.
-filter open_states = not (status = resolved or status = closed);
+# Open means "not settled" — excluding the two terminal states keeps this true
+# if a new active status is ever added. `in` takes a value list; each variant is
+# membership-checked against Status.
+filter open_states = not status in (resolved, closed);
 
 # Raw predicate leaf: interval math the DSL doesn't model. It composes as one
 # boolean term; scope and soft-delete still wrap the query around it.

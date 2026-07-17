@@ -1325,6 +1325,18 @@ impl<'a> Parser<'a> {
         let path = self.path_from(first);
         if self.at_op() {
             let op = self.op()?;
+            // `in (` opens a value list; `in` with a bare value stays a plain Cmp.
+            if op == Op::In && self.eat(Tok::LParen) {
+                let mut values = Vec::new();
+                loop {
+                    values.push(self.value()?);
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen, "`)`")?;
+                return Ok(Predicate::InList { path, values });
+            }
             let value = self.value()?;
             Ok(Predicate::Cmp { path, op, value })
         } else {

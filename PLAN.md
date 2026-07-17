@@ -379,11 +379,12 @@ is on the `async-native` branch; merge to `main` is the owner's call at demonstr
 
 Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
 
-- **NF1. `in` value-list form.** Symptom: `status in (open, waiting)` doesn't parse — `in`
-  exists only as `col IN ($param)` with one bound value, so the helpdesk search spells
-  `not (status = resolved or status = closed)`. Seam: predicate grammar (value-list RHS) +
-  sema membership/type check per element + lowering to `IN (v, v, …)` (params and literals).
-  Fix: the literal/param value-list RHS for `in`, all three dialects.
+- **NF1. ✅ done (D93). `in` value-list form.** `status in (open, waiting, $extra)` parses
+  (`Predicate::InList`; the single-bind `in $param` form unchanged), sema checks each element
+  against the column (enum membership E0154, family E0151 — no new codes), and all three
+  dialects lower to `IN (v, v, …)` with variants as wire values and `$param` elements bound.
+  Variant nav/rename + fmt cover the new form. The helpdesk `open_states` filter now spells
+  `not status in (resolved, closed)`. Proven unit + golden + live SQLite.
 - **NF2. Whole-query raw reads.** Symptom: raw.md specifies a third raw level (whole query /
   raw join) but no grammar or implementation exists; the workload report used raw value leaves
   instead. Seam: query body alternative (a `sql` backtick block as the whole body), result
@@ -846,7 +847,8 @@ holds `&mut`.
 **Implemented checks**
 
 - Operand type-checking: op/operand applicability + operand family compatibility in `Cmp`
-  (`E0150`/`E0151`); param annotation vs. mapped column (`E0152`, D1).
+  (`E0150`/`E0151`); `in` value-list elements checked per element against the column (enum
+  membership `E0154`, family `E0151`, D93); param annotation vs. mapped column (`E0152`, D1).
 - Name resolution: relation targets, inverse pairings (explicit `(M.field)` and inferred from
   the unique forward edge), shape `from`, return types, statement models, mutation write models,
   dotted paths (forward + backward traversal), index columns, `$param` refs (`$ctx.<field>`

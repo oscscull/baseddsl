@@ -438,6 +438,20 @@ mod rust {
                     map.insert(pr.name.node.clone(), entity);
                 }
             }
+            // A `$param` listed in `col in (…)` binds one key, same as `col = $param`.
+            Predicate::InList { path, values } if path.segments.len() == 1 => {
+                for v in values {
+                    if let Value::Param(pr) = v {
+                        if pr.path.is_empty() {
+                            if let Some(entity) =
+                                model.and_then(|m| member_entity(m, &path.segments[0].node))
+                            {
+                                map.insert(pr.name.node.clone(), entity);
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

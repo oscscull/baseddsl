@@ -57,6 +57,8 @@ A variant that is not a member of the column's enum — including a variant borr
 
 **Operators by kind.** A string enum allows `= != in` (equality only — its values have no order). An int enum additionally allows the ordered comparisons `< > <= >=` (it is numeric). An ordered comparison on a *string* enum column is `E0158`.
 
+`in` with a value list checks each element: `status in (open, waiting)` membership-checks every bare variant against the column's enum (a non-member is `E0154`), and each variant lowers to its wire value — `IN ('open', 'waiting')`, or the integers for an int enum. A `$param` element binds one wire value at run time.
+
 ## Wire representation
 
 - String enum → the string (`"paid"`, or the explicit `"PAID"`).

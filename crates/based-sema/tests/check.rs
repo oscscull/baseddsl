@@ -2280,6 +2280,67 @@ fn where_on_member_variant_has_no_errors() {
 }
 
 #[test]
+fn in_list_on_enum_column_checks_each_variant() {
+    // Members + a `$param` element are clean; one borrowed variant is E0154.
+    let (_, d) = analyze(
+        r#"
+        enum Status { pending, paid, shipped }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query open(extra: Status) -> OrderRow[] {
+          list Order where (status in (pending, paid, $extra)) order (total);
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+
+    let (_, d) = analyze(
+        r#"
+        enum Status { pending, paid }
+        enum Priority { low = 1, high = 2 }
+        Order { status: Status, total: int }
+        shape OrderRow from Order { status, total }
+        query open() -> OrderRow[] { list Order where (status in (pending, low)); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0154"), "{:?}", codes(&d));
+}
+
+#[test]
+fn in_list_elements_are_family_checked() {
+    // A text element in a numeric column's list is the same E0151 an `=` gives.
+    let (_, d) = analyze(
+        r#"
+        Order { total: int, note: text }
+        shape OrderRow from Order { total }
+        query cheap() -> OrderRow[] { list Order where (total in (1, 2, "three")); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0151"), "{:?}", codes(&d));
+
+    let (_, d) = analyze(
+        r#"
+        Order { total: int, note: text }
+        shape OrderRow from Order { total }
+        query cheap(x: int) -> OrderRow[] { list Order where (total in (1, 2, $x)); }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn in_list_with_unknown_param_is_reported() {
+    let (_, d) = analyze(
+        r#"
+        Order { total: int }
+        shape OrderRow from Order { total }
+        query cheap() -> OrderRow[] { list Order where (total in (1, $nope)); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0113"), "{:?}", codes(&d));
+}
+
+#[test]
 fn create_with_non_member_variant_is_e0154() {
     let (_, d) = analyze(
         r#"

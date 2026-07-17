@@ -544,6 +544,57 @@ async fn enum_round_trip_string_and_int_end_to_end() {
     assert!(bad_str.is_err(), "string-enum CHECK must reject 'bogus'");
 }
 
+/// `in` value-list live: variants lower to their wire values, a `$param` element
+/// binds at run time (its wire value on the wire), and rows outside the list are
+/// excluded.
+#[tokio::test]
+async fn in_value_list_filters_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        enum Status { pending, paid = "PAID", shipped }
+        Ticket { status: Status, title: text, @index(status) }
+        shape TicketRow from Ticket { status, title }
+        query active(extra: Status) -> TicketRow[] {
+          list Ticket where (status in (pending, $extra)) order (title);
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            "INSERT INTO `ticket` (`id`, `status`, `title`) VALUES
+               ('a', 'pending', 'first'),
+               ('b', 'PAID', 'second'),
+               ('c', 'shipped', 'third');",
+        )
+        .await
+        .expect("seed");
+
+    // `$extra` carries the wire value ("PAID"); `shipped` is outside the list.
+    let got = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/active",
+        json!({ "extra": "PAID" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    assert_eq!(
+        got.body,
+        json!([
+            { "status": "pending", "title": "first" },
+            { "status": "PAID", "title": "second" }
+        ])
+    );
+}
+
 #[tokio::test]
 async fn decimal_and_float_round_trip_end_to_end() {
     let c = compile_sqlite(

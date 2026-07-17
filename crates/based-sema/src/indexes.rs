@@ -341,6 +341,14 @@ impl Pattern {
                     self.note_path(p, mi, Op::Eq, cx, usage);
                 }
             }
+            Predicate::InList { path, values } => {
+                self.note_path(path, mi, Op::In, cx, usage);
+                for v in values {
+                    if let Value::Path(p) = v {
+                        self.note_path(p, mi, Op::Eq, cx, usage);
+                    }
+                }
+            }
             Predicate::Bare(path) => {
                 // A single-segment bare atom may be a zero-arg named filter.
                 if path.segments.len() == 1 {

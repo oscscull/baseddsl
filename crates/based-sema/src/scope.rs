@@ -566,6 +566,14 @@ fn walk_pred_join(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<usize>)
                 walk_path_join(p, model, cx, out);
             }
         }
+        Predicate::InList { path, values } => {
+            walk_path_join(path, model, cx, out);
+            for v in values {
+                if let Value::Path(p) = v {
+                    walk_path_join(p, model, cx, out);
+                }
+            }
+        }
         Predicate::Bare(path) => walk_path_join(path, model, cx, out),
         // Filter bodies join at the call site too, but codegen does not walk them for
         // scope , so we mirror codegen and don't walk them here.

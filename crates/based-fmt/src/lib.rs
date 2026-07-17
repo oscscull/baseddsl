@@ -713,6 +713,14 @@ fn predicate(p: &Predicate, min: u8) -> String {
             op,
             value: v,
         } => (4, format!("{} {} {}", path(pa), op_str(*op), value(v))),
+        Predicate::InList { path: pa, values } => (
+            4,
+            format!(
+                "{} in ({})",
+                path(pa),
+                values.iter().map(value).collect::<Vec<_>>().join(", ")
+            ),
+        ),
         Predicate::Bare(pa) => (4, path(pa)),
         Predicate::FilterCall { name, args } => (
             4,

@@ -256,7 +256,13 @@ atom        = '(' predicate ')'
             | path                      (* bool column used directly: `active` *)
             | filter_call               (* reuse a named filter                *)
             | raw_sql ;                  (* raw predicate term (raw.md)          *)
-comparison  = path op value ;
+(* `in` takes either a single bare value (`col in $param` — one bound value) or a *)
+(* parenthesized value list (`status in (open, waiting, $other)`) — elements are   *)
+(* literals, enum variants, `$param` refs, or columns, each checked against the    *)
+(* left column's type (queries.md).                                                *)
+comparison  = path 'in' value_list
+            | path op value ;
+value_list  = '(' value { ',' value } ')' ;
 filter_call = filter_name [ '(' [ value { ',' value } ] ')' ] ;
 
 op          = '=' | '!=' | '>' | '<' | '>=' | '<='

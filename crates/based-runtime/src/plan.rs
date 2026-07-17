@@ -598,6 +598,12 @@ fn param_use_in_pred(
             }
             _ => None,
         },
+        // A `$name` listed in `col in (…)` binds one value of the column's family.
+        Predicate::InList { path, values } => values
+            .iter()
+            .any(|v| matches!(v, Value::Param(pr) if pr.name.node == name))
+            .then(|| member_family(schema, model, &path_segments(path)))
+            .flatten(),
         Predicate::FilterCall { name: fname, args } => {
             let filter = find_filter(&compiled.decls, &fname.node)?;
             // Positional mapping: the i-th call arg that is `$name` types as the

@@ -266,6 +266,47 @@ fn or_binds_looser_than_and() {
 }
 
 #[test]
+fn in_value_list_and_single_bind_forms() {
+    // `in (…)` is a value list; `in $param` stays a single-bind comparison.
+    let sf = parse_ok(
+        r#"
+        filter f = status in (open, "closed", 3, $extra) and status in $one;
+        "#,
+    );
+    let nf = match &sf.decls[0] {
+        Decl::Filter(f) => f,
+        other => panic!("expected filter, got {other:?}"),
+    };
+    let Predicate::And(l, r) = &nf.pred else {
+        panic!("expected and, got {:?}", nf.pred);
+    };
+    match &**l {
+        Predicate::InList { path, values } => {
+            assert_eq!(path.segments[0].node, "status");
+            assert_eq!(values.len(), 4);
+            assert!(matches!(&values[0], Value::Path(p) if p.segments[0].node == "open"));
+            assert!(matches!(&values[1], Value::Lit(Literal::Str(s)) if s == "closed"));
+            assert!(matches!(&values[2], Value::Lit(Literal::Int(3))));
+            assert!(matches!(&values[3], Value::Param(pr) if pr.name.node == "extra"));
+        }
+        other => panic!("expected in-list, got {other:?}"),
+    }
+    assert!(matches!(
+        &**r,
+        Predicate::Cmp {
+            op: Op::In,
+            value: Value::Param(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn in_empty_list_is_a_parse_error() {
+    assert!(parse_file("filter f = status in ();", FileId(0)).is_err());
+}
+
+#[test]
 fn shape_bare_rename_and_nest() {
     let sf = parse_ok(
         r#"

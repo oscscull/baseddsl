@@ -1032,6 +1032,17 @@ impl Snapshot {
                     }
                 }
             }
+            Predicate::InList { path, values } => {
+                if let Some(en) = self.enum_of_path(root, &path.segments) {
+                    for v in values {
+                        if let Value::Path(vp) = v {
+                            if vp.segments.len() == 1 {
+                                out.push((&vp.segments[0], en));
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1830,7 +1841,10 @@ fn pred_filter_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a Ident>) {
         }
         Predicate::Not(inner) => pred_filter_refs(inner, out),
         Predicate::FilterCall { name, .. } => out.push(name),
-        Predicate::Cmp { .. } | Predicate::Bare(_) | Predicate::Raw(_) => {}
+        Predicate::Cmp { .. }
+        | Predicate::InList { .. }
+        | Predicate::Bare(_)
+        | Predicate::Raw(_) => {}
     }
 }
 
@@ -1898,6 +1912,12 @@ fn pred_paths<'a>(p: &'a Predicate, root: &'a str, out: &mut Vec<(&'a str, &'a [
         Predicate::Cmp { path, value, .. } => {
             out.push((root, &path.segments));
             value_paths(value, root, out);
+        }
+        Predicate::InList { path, values } => {
+            out.push((root, &path.segments));
+            for v in values {
+                value_paths(v, root, out);
+            }
         }
         Predicate::Bare(path) => out.push((root, &path.segments)),
         Predicate::FilterCall { args, .. } => {
@@ -2023,6 +2043,7 @@ fn pred_param_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a ParamRef>) {
         }
         Predicate::Not(inner) => pred_param_refs(inner, out),
         Predicate::Cmp { value, .. } => value_param_refs(value, out),
+        Predicate::InList { values, .. } => values.iter().for_each(|v| value_param_refs(v, out)),
         Predicate::FilterCall { args, .. } => args.iter().for_each(|v| value_param_refs(v, out)),
         Predicate::Raw(r) => raw_param_refs(r, out),
         Predicate::Bare(_) => {}
@@ -3835,6 +3856,7 @@ enum Grade { pending, top }\n\
 Order { status: Status (default pending)  total: int }\n\
 shape OrderRow from Order { status  total }\n\
 query paid_orders() -> OrderRow[] { list Order where (status = paid) order (total); }\n\
+query open_orders() -> OrderRow[] { list Order where (status in (paid, shipped)) order (total); }\n\
 mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shipped } }\n";
 
     fn enum_nav_snapshot() -> (Snapshot, usize) {
@@ -3888,6 +3910,24 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
             .definition_at(fid, asg)
             .expect("assign variant resolves");
         assert_eq!(d.start as usize, ship_decl);
+    }
+
+    #[test]
+    fn goto_def_on_a_variant_inside_an_in_list_resolves() {
+        let (snap, fid) = enum_nav_snapshot();
+        let src = &snap.sources[fid].1;
+        let decl = src.find("pending, paid, shipped").unwrap() + "pending, ".len();
+        // `where (status in (paid, shipped))` → the `paid` variant declaration.
+        let use_off = (src.find("status in (paid").unwrap() + "status in (".len()) as u32;
+        let d = snap
+            .definition_at(fid, use_off)
+            .expect("in-list variant use resolves");
+        assert_eq!(
+            d.start as usize,
+            decl,
+            "{}",
+            &src[d.start as usize..d.end as usize]
+        );
     }
 
     #[test]

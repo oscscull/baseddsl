@@ -288,6 +288,44 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
     }
 }
 
+/// Type-check one `in` value-list element: unlike the single-bind `in $param`
+/// form (whose RHS the engine can't see into), a listed element is compared to
+/// the column with `=` semantics, so it must share the column's family — the
+/// per-element twin of `check_cmp_types` step 2.
+fn check_in_element_type(path: &Path, value: &Value, mi: usize, cx: &Cx, sink: &mut Sink) {
+    let Some(lhs) = resolve_quiet(path, mi, cx) else {
+        return;
+    };
+    let Some(seg) = path.segments.last() else {
+        return;
+    };
+    let rf = match value {
+        Value::Lit(l) => match lit_family(l) {
+            Some(f) => f,
+            None => return, // null: no constraint
+        },
+        Value::Path(p) => match resolve_quiet(p, mi, cx) {
+            Some(t) => terminal_family(&t),
+            None => return, // unresolved element: name error already reported
+        },
+        // Same skips as the single-value comparison: params are typed at their
+        // declaration, `$ctx` by inference, functions are unmodelled, and a `^`
+        // back-reference is rejected by `check_value`.
+        Value::Param(_) | Value::Func(_) | Value::Back(_) => return,
+    };
+    if !compatible(terminal_family(&lhs), rf) {
+        sink.error(
+            code::CMP_TYPE,
+            seg.span,
+            format!(
+                "cannot compare {} to a {} value",
+                terminal_name(&lhs),
+                family_name(rf)
+            ),
+        );
+    }
+}
+
 /// The family a column accepts on assignment: a scalar's primitive family, or a
 /// forward relation FK's key. An inverse edge owns no column, so it can't be
 /// assigned — `None` skips the check (the misuse, if any, is out of scope here).
@@ -542,6 +580,25 @@ fn check_predicate_in(
                 }
             }
         }
+        Predicate::InList { path, values } => {
+            let en = if let Some(mi) = model {
+                resolve_path(path, mi, cx, sink);
+                cx.terminal_enum(path, mi)
+            } else {
+                None
+            };
+            for value in values {
+                // Against an enum column, a bare element is a variant — membership-
+                // checked (E0154) instead of resolved as a column path.
+                if en.is_some_and(|en| check_enum_operand(value, en, params, sink)) {
+                    continue;
+                }
+                check_value(value, model, cx, params, sink);
+                if let Some(mi) = model {
+                    check_in_element_type(path, value, mi, cx, sink);
+                }
+            }
+        }
         Predicate::Bare(path) => {
             // A bare atom is a bool column or a zero-arg named-filter reference.
             if path.segments.len() == 1 {
@@ -738,24 +795,12 @@ pub fn check_relation_on(pred: &Predicate, near: usize, far: usize, cx: &Cx, sin
         Predicate::Not(p) => check_relation_on(p, near, far, cx, sink),
         Predicate::Cmp { path, value, .. } => {
             resolve_join_path(path, near, far, cx, sink);
-            match value {
-                Value::Path(p) => resolve_join_path(p, near, far, cx, sink),
-                Value::Lit(_) => {}
-                Value::Param(pr) => sink.error(
-                    code::JOIN_FORM,
-                    pr.name.span,
-                    "a custom join is static structure — `$` params aren't bound in an `on:` condition",
-                ),
-                Value::Func(f) => sink.error(
-                    code::JOIN_FORM,
-                    f.name.span,
-                    "a custom join is static structure — functions aren't allowed in an `on:` condition",
-                ),
-                Value::Back(b) => sink.error(
-                    code::JOIN_FORM,
-                    b.span,
-                    "`^` back-reference is only valid in a `tx` write, not a custom join",
-                ),
+            check_join_value(value, near, far, cx, sink);
+        }
+        Predicate::InList { path, values } => {
+            resolve_join_path(path, near, far, cx, sink);
+            for v in values {
+                check_join_value(v, near, far, cx, sink);
             }
         }
         Predicate::Bare(path) => resolve_join_path(path, near, far, cx, sink),
@@ -766,6 +811,31 @@ pub fn check_relation_on(pred: &Predicate, near: usize, far: usize, cx: &Cx, sin
         ),
         // A raw join fragment is an escape hatch the engine can't resolve — leave it.
         Predicate::Raw(_) => {}
+    }
+}
+
+/// One value in a custom `on:` join: a column resolves table-qualified, a literal
+/// (a constant discriminator) is fine, and anything request-bound is rejected —
+/// a join is static structure.
+fn check_join_value(value: &Value, near: usize, far: usize, cx: &Cx, sink: &mut Sink) {
+    match value {
+        Value::Path(p) => resolve_join_path(p, near, far, cx, sink),
+        Value::Lit(_) => {}
+        Value::Param(pr) => sink.error(
+            code::JOIN_FORM,
+            pr.name.span,
+            "a custom join is static structure — `$` params aren't bound in an `on:` condition",
+        ),
+        Value::Func(f) => sink.error(
+            code::JOIN_FORM,
+            f.name.span,
+            "a custom join is static structure — functions aren't allowed in an `on:` condition",
+        ),
+        Value::Back(b) => sink.error(
+            code::JOIN_FORM,
+            b.span,
+            "`^` back-reference is only valid in a `tx` write, not a custom join",
+        ),
     }
 }
 

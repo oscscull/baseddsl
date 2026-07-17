@@ -189,6 +189,19 @@ fn predicate_precedence_parenthesizes_minimally() {
 }
 
 #[test]
+fn in_value_list_formats_canonically() {
+    // Elements one-space separated; `not` needs no parens around the atom; the
+    // single-bind form stays bare.
+    let got = fmt("filter f = status in (open,waiting,  $extra) and id in $ids;");
+    assert_eq!(
+        got,
+        "filter f = status in (open, waiting, $extra) and id in $ids;\n"
+    );
+    let got = fmt("filter g = not (status in (resolved, closed));");
+    assert_eq!(got, "filter g = not status in (resolved, closed);\n");
+}
+
+#[test]
 fn comments_preserved_including_between_decorators() {
     let src = "# header\n@soft_delete(deleted_at)\n# between decorators\n@scope Tenant\nOrder {\n  deleted_at: timestamp?\n}\n";
     assert_eq!(fmt(src), src);

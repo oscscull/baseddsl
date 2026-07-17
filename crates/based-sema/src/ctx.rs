@@ -146,18 +146,10 @@ fn walk_pred(
             walk_pred(b, model, cx, in_filters, out);
         }
         Predicate::Not(p) => walk_pred(p, model, cx, in_filters, out),
-        Predicate::Cmp { path, value, .. } => {
-            if let Value::Param(pr) = value {
-                if let Some(field) = ctx_field(pr) {
-                    if let Some(term) = resolve::resolve_path(path, model, cx, &mut Sink::default())
-                    {
-                        out.push(CtxReq {
-                            field,
-                            ty: term_to_ctx(&term),
-                            span: pr.path[0].span,
-                        });
-                    }
-                }
+        Predicate::Cmp { path, value, .. } => record_ctx_use(path, value, model, cx, out),
+        Predicate::InList { path, values } => {
+            for v in values {
+                record_ctx_use(path, v, model, cx, out);
             }
         }
         Predicate::Bare(path) => {
@@ -176,6 +168,19 @@ fn walk_pred(
             }
         }
         Predicate::Raw(_) => {}
+    }
+}
+
+/// Record one `$ctx.<field>` value compared to `path`, typed by the column.
+fn record_ctx_use(path: &Path, value: &Value, model: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
+    let Value::Param(pr) = value else { return };
+    let Some(field) = ctx_field(pr) else { return };
+    if let Some(term) = resolve::resolve_path(path, model, cx, &mut Sink::default()) {
+        out.push(CtxReq {
+            field,
+            ty: term_to_ctx(&term),
+            span: pr.path[0].span,
+        });
     }
 }
 
