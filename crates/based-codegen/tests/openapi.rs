@@ -579,3 +579,25 @@ fn guarded_mutation_documents_the_403_denial() {
     // An unguarded mutation documents no 403.
     assert!(doc["paths"]["/m/open_order"]["post"]["responses"]["403"].is_null());
 }
+
+#[test]
+fn raw_bodied_query_documents_like_any_query() {
+    // Raw is invisible on the wire surface: the route, annotated input, and shape
+    // response schema are identical to an engine-built query's.
+    let doc = gen(r#"
+        User { name: text, email: text, total: int }
+        shape UserRow from User { name, email }
+        query heavy_users(min: int) -> UserRow[] {
+          sql`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
+        }
+        "#);
+    let op = &doc["paths"]["/q/heavy_users"]["post"];
+    let input = &doc["components"]["schemas"]["HeavyUsersInput"];
+    assert_eq!(input["properties"]["min"]["type"], "integer", "{input}");
+    let resp = &op["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(resp["type"], "array", "{resp}");
+    assert_eq!(
+        resp["items"]["$ref"], "#/components/schemas/UserRow",
+        "{resp}"
+    );
+}

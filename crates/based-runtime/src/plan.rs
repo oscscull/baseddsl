@@ -765,7 +765,7 @@ fn offset_paginated(ast: &Query) -> bool {
     let clauses: &[Clause] = match &ast.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => &[],
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
     };
     clauses
         .iter()
@@ -778,7 +778,7 @@ fn page_size(ast: &Query) -> Option<u64> {
     let clauses: &[Clause] = match &ast.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => &[],
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
     };
     clauses.iter().find_map(|c| match c {
         Clause::Page(p) => Some(p.size),

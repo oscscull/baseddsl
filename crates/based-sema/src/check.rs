@@ -202,12 +202,14 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
     }
 
     // Bare/inline queries map each param onto a same-named column (the filter);
-    // block queries reference params via `$`, so no same-name mapping is required.
-    let infer = !matches!(q.body, QueryBody::Block(_));
+    // block and raw queries reference params via `$`, so no same-name mapping is
+    // required.
+    let infer = matches!(q.body, QueryBody::Bare | QueryBody::Inline(_));
     for p in &q.params {
         check_param(p, ti, infer, cx, sink);
     }
 
+    let is_raw = matches!(q.body, QueryBody::Raw(_));
     let mut has_order = false;
     match &q.body {
         QueryBody::Bare => {}
@@ -216,9 +218,10 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
             let smi = cx.find(&s.model.node).unwrap_or(ti);
             has_order = check_clauses(&s.clauses, smi, cx, &params, sink);
         }
+        QueryBody::Raw(raw) => check_raw_query(q, raw, ti, cx, &params, sink),
     }
 
-    if verb == Verb::Get && !q.ret.stream && !get_is_keyed(q, ti, cx) {
+    if verb == Verb::Get && !q.ret.stream && !is_raw && !get_is_keyed(q, ti, cx) {
         sink.error_note(
             code::GET_NOT_UNIQUE,
             q.span,
@@ -243,7 +246,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
             "paginate for random access, stream for the full pass — drop one",
         );
     }
-    if verb == Verb::List && !has_order && cx.model(ti).sort.is_empty() {
+    if verb == Verb::List && !is_raw && !has_order && cx.model(ti).sort.is_empty() {
         sink.warn(
             code::NONDET_SORT,
             q.span,
@@ -425,6 +428,142 @@ fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
     if let Some(d) = &p.default {
         resolve::check_default(d, sink);
     }
+}
+
+/// Check a whole-query raw body (raw.md's third level). The engine keeps only
+/// param-binding and shape-typed results through this hatch, so everything it cannot
+/// deliver is rejected loudly here rather than silently dropped: params must be typed
+/// bind values (no column to infer a type from, no engine-built WHERE for a binding
+/// to ride), `$ctx` has no type source, `scoped` would promise an injection that
+/// never happens, streaming and nested shapes lean on engine-built SQL. Soft-delete
+/// is the one gap that stays legal — linted (`W0102`), never silent.
+fn check_raw_query(
+    q: &Query,
+    raw: &RawSql,
+    ti: usize,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    for p in &q.params {
+        if p.ty.is_none() {
+            sink.error_note(
+                code::RAW_QUERY_PARAM,
+                p.name.span,
+                format!(
+                    "param `{}` of raw-bodied query `{}` needs a type annotation",
+                    p.name.node, q.name.node
+                ),
+                "a raw body gives no column to infer the type from",
+            );
+        }
+        if p.binding.is_some() {
+            sink.error_note(
+                code::RAW_QUERY_PARAM,
+                p.name.span,
+                format!(
+                    "param `{}` of raw-bodied query `{}` can't carry a binding",
+                    p.name.node, q.name.node
+                ),
+                "the raw SQL is the whole filter — reference the param as `${…}` inside it",
+            );
+        }
+    }
+    for part in &raw.parts {
+        if let RawPart::Param(pr) = part {
+            if pr.name.node == "ctx" {
+                sink.error_note(
+                    code::RAW_QUERY_CTX,
+                    pr.name.span,
+                    "`${ctx.…}` in a raw query body has no type source",
+                    "declare a typed param and pass the context value through it",
+                );
+            } else {
+                resolve::check_param_ref(pr, params, sink);
+            }
+        }
+    }
+    if q.ret.stream {
+        sink.error_note(
+            code::RAW_QUERY_STREAM,
+            q.ret.ty.span,
+            format!("raw-bodied query `{}` can't `stream`", q.name.node),
+            "collect with `-> Shape[]`, or write an engine-built `list` body",
+        );
+    }
+    if let Some(s) = &q.scoped {
+        sink.error_note(
+            code::RAW_QUERY_SCOPED,
+            s.span,
+            format!(
+                "`scoped` on raw-bodied query `{}` — the engine can't inject a scope predicate into raw SQL",
+                q.name.node
+            ),
+            "write the scope filter in the SQL yourself and mark the query `unscoped(\"…\")`",
+        );
+    }
+    // The declared shape types the result columns by name; a nested sub-object
+    // depends on engine-built projections (join aliases / JSON aggregation) that a
+    // raw statement does not get.
+    if let Some(body) = cx.shape_bodies.get(&q.ret.ty.node) {
+        if body
+            .iter()
+            .any(|f| matches!(f, ShapeField::Nest { .. } | ShapeField::NestRef { .. }))
+        {
+            sink.error_note(
+                code::RAW_QUERY_NEST,
+                q.ret.ty.span,
+                format!(
+                    "raw-bodied query `{}` returns shape `{}`, which nests a sub-object",
+                    q.name.node, q.ret.ty.node
+                ),
+                "a raw body can't build nested projections — return a flat shape",
+            );
+        }
+    }
+    // Soft-delete: the engine can't inject the tombstone filter into SQL it didn't
+    // build. Lint the target model, plus any other soft-delete model whose table the
+    // raw text mentions (the joined-table case).
+    let text: String = raw
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            RawPart::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    for (mi, m) in cx.models.iter().enumerate() {
+        let Some(sd) = &m.soft_delete else { continue };
+        if mi == ti || mentions_table(&text, &m.table) {
+            sink.warn(
+                code::RAW_SOFT_DELETE_GAP,
+                raw.span,
+                format!(
+                    "raw SQL on soft-delete model `{}`: engine can't verify the `{}` tombstone filter — confirm it",
+                    m.name, sd.field
+                ),
+            );
+        }
+    }
+}
+
+/// Whether raw SQL text contains `table` as a standalone word (identifier-boundary
+/// match, so `user` never fires on `user_event`).
+fn mentions_table(text: &str, table: &str) -> bool {
+    let bytes = text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut from = 0;
+    while let Some(i) = text[from..].find(table) {
+        let start = from + i;
+        let end = start + table.len();
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_ident(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// Resolve a member by name to its `Mapped` type, reporting an unknown-field error

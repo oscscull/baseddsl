@@ -741,3 +741,28 @@ fn embedded_bridge_keys_through_engine_call_with_key() {
         "\n{out}"
     );
 }
+
+#[test]
+fn raw_bodied_query_generates_an_ordinary_method() {
+    // Raw is an implementation detail behind the typed surface: the method, input
+    // struct (from the mandatory annotations), and shape output are identical to an
+    // engine-built query of the same signature.
+    let out = gen(r#"
+        User { name: text, email: text, total: int }
+        shape UserRow from User { name, email }
+        query heavy_users(min: int) -> UserRow[] {
+          sql`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
+        }
+        "#);
+    assert!(
+        out.contains("pub async fn heavy_users(&self, input: HeavyUsersInput, ctx: ()) -> Result<Vec<UserRow>, ClientError>"),
+        "\n{out}"
+    );
+    // The input carries exactly the annotated param — no page/cursor input leaks
+    // in, and the param stays a plain scalar (the same-name entity convention
+    // doesn't apply to a raw body).
+    assert!(
+        out.contains("pub struct HeavyUsersInput {\n    pub min: i64,\n}"),
+        "\n{out}"
+    );
+}

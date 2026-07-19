@@ -758,9 +758,11 @@ impl Snapshot {
                         }
                     }
                     // Bare/inline queries bind an unbound param to its same-named
-                    // column; block queries reference params via `$`, so no fact.
+                    // column; block/raw queries reference params via `$`, so no fact.
                     None => {
-                        if within(p.name.span) && !matches!(q.body, QueryBody::Block(_)) {
+                        if within(p.name.span)
+                            && matches!(q.body, QueryBody::Bare | QueryBody::Inline(_))
+                        {
                             let slice = std::slice::from_ref(&p.name);
                             if self.walk_path(root, slice).is_some() {
                                 let line = format!(
@@ -856,7 +858,8 @@ impl Snapshot {
                                 clause_paths(c, root, &mut out);
                             }
                         }
-                        QueryBody::Bare => {}
+                        // A raw body is opaque SQL — no field paths inside.
+                        QueryBody::Bare | QueryBody::Raw(_) => {}
                     }
                 }
                 Decl::Mutation(m) => write_paths(&m.body, &mut out),
@@ -975,7 +978,7 @@ impl Snapshot {
                     let root = match &q.body {
                         QueryBody::Block(stmt) => Some(stmt.model.node.as_str()),
                         QueryBody::Inline(_) => self.query_root(q),
-                        QueryBody::Bare => None,
+                        QueryBody::Bare | QueryBody::Raw(_) => None,
                     };
                     if let Some(root) = root {
                         match &q.body {
@@ -989,7 +992,7 @@ impl Snapshot {
                                     self.clause_variant_sites(c, root, &mut out);
                                 }
                             }
-                            QueryBody::Bare => {}
+                            QueryBody::Bare | QueryBody::Raw(_) => {}
                         }
                     }
                 }
@@ -1801,7 +1804,7 @@ fn collect_filter_refs(decls: &[Decl]) -> Vec<&Ident> {
                     .clauses
                     .iter()
                     .for_each(|c| clause_filter_refs(c, &mut out)),
-                QueryBody::Bare => {}
+                QueryBody::Bare | QueryBody::Raw(_) => {}
             },
             Decl::Mutation(m) => write_filter_refs(&m.body, &mut out),
             Decl::Filter(f) => pred_filter_refs(&f.pred, &mut out),
@@ -1999,6 +2002,7 @@ fn callable_param_refs(d: &Decl) -> Vec<&ParamRef> {
                 .clauses
                 .iter()
                 .for_each(|c| clause_param_refs(c, &mut out)),
+            QueryBody::Raw(r) => raw_param_refs(r, &mut out),
             QueryBody::Bare => {}
         },
         Decl::Mutation(m) => write_param_refs(&m.body, &mut out),
@@ -4131,6 +4135,57 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, contents).unwrap();
         }
+    }
+
+    /// A raw-bodied query is inert editor surface: hover walks it without crashing,
+    /// find-references lists a `${param}` use (at the raw block), and renaming the
+    /// param rewrites only sites literally spelling the name — the opaque raw text
+    /// is never corrupted.
+    #[test]
+    fn raw_query_body_is_inert_but_param_refs_resolve() {
+        let ws = TempWorkspace::new("raw_query_body");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "User { name: text, total: int }\n\
+             shape UserRow from User { name }\n\
+             query heavy(min: int) -> UserRow[] {\n\
+               sql`SELECT name FROM user WHERE total >= ${min}`;\n\
+             }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // Hover across the whole raw line never panics.
+        let line_start = src.find("sql`").unwrap() as u32;
+        let line_end = src.find("`;").unwrap() as u32 + 1;
+        for off in line_start..line_end {
+            let _ = snap.hover_at(fid, off);
+        }
+
+        // The `${min}` use references the declared param (the raw block anchors it).
+        let decl_off = (src.find("heavy(min").unwrap() + "heavy(".len()) as u32;
+        let refs = snap.references_at(fid, decl_off, false);
+        assert!(!refs.is_empty(), "raw `${{min}}` use should be listed");
+
+        // Rename rewrites the decl only — the raw text spells `${min}` inside a
+        // block whose span text is not `min`, so it is left alone (the miss is a
+        // loud E0113 on recompile, not silent corruption).
+        let changes = snap
+            .rename_edits(fid, decl_off, "floor")
+            .expect("param is renameable");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        assert!(out.contains("query heavy(floor: int)"), "{out}");
+        assert!(out.contains("${min}"), "raw text must be untouched: {out}");
     }
 
     impl Drop for TempWorkspace {

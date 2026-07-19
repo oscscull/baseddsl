@@ -328,6 +328,11 @@ pub enum QueryBody {
     Inline(Vec<Clause>),
     /// `{ get|list ... ; }`
     Block(Statement),
+    /// `{ sql`…`; }` — the whole body is one raw SQL statement (raw.md's whole-query
+    /// level). The engine still binds `${param}` interpolations and types the result
+    /// by the declared return shape; everything else (soft-delete, scope, ordering,
+    /// dialect portability) is the SQL author's.
+    Raw(RawSql),
 }
 
 #[derive(Debug, Clone, PartialEq)]

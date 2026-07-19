@@ -671,7 +671,7 @@ fn query_clauses(q: &Query) -> &[Clause] {
     match &q.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => &[],
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
     }
 }
 

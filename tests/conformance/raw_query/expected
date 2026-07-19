@@ -1,0 +1,4 @@
+OK
+model User  decorators=[]  fields=3  indexes=0
+shape UserRow from User  fields=2
+query heavy_users  params=1  ret=UserRow[]  body=raw

@@ -385,12 +385,14 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   dialects lower to `IN (v, v, …)` with variants as wire values and `$param` elements bound.
   Variant nav/rename + fmt cover the new form. The helpdesk `open_states` filter now spells
   `not status in (resolved, closed)`. Proven unit + golden + live SQLite.
-- **NF2. Whole-query raw reads.** Symptom: raw.md specifies a third raw level (whole query /
-  raw join) but no grammar or implementation exists; the workload report used raw value leaves
-  instead. Seam: query body alternative (a `sql` backtick block as the whole body), result
-  columns typed by the declared shape, param binding kept. Fix: implement the raw.md contract
-  (param-binding + result-typing survive; W0102 lints the soft-delete gap) — or, if declined,
-  amend raw.md to stop promising it.
+- **NF2. ✅ done (D94). Whole-query raw reads.** `{ sql`…`; }` as a query's whole body
+  (`QueryBody::Raw`): the raw text IS the statement — `${param}` binds positionally,
+  `{table}`/`{id}` interpolate the target, the declared (flat) shape types result columns
+  by name, and the client/OpenAPI surface is identical to an engine-built query. W0102
+  lints the soft-delete gap on the target *and* any soft-delete table the SQL mentions;
+  un-composable combinations rejected loudly (E0210 untyped/bound params, E0211 `scoped`,
+  E0212 `stream`, E0213 nested shape, E0214 `${ctx.…}`). fmt reprints the block
+  byte-exactly; raw.md now spells the shipped contract. Proven unit + golden + live SQLite.
 - **NF3. Guard re-entry deadlocks on the id-gen lock.** Symptom: a guard calling the typed
   client over its *own* engine hangs — `Engine::call` holds the id-generator mutex across
   dispatch (guards run inside dispatch). Seam: `Engine::call*` / the id-gen lock scope in

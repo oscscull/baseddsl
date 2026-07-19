@@ -15,4 +15,27 @@ Raw goes where the engine needs only a value. Forbidden where it needs meaning (
 - All raw marked with the sql backtick form = greppable inventory of where guarantees stop.
 - Engine detects raw touching a `@soft_delete` table and lints the gap ("can't verify tombstone filter — confirm"). Never silent.
 
-Example (raw whole query): a `sql` backtick block selecting users joined to order_items, where you write `u.deleted_at is null` yourself because the engine won't inject it.
+## Whole-query raw
+The query's block body is one `sql` backtick block — the block IS the statement:
+```
+query heavy_users(min: int) -> UserRow[] {
+  sql`SELECT u.name AS name, u.email AS email
+      FROM {table} u JOIN order_item oi ON oi.user_id = u.id
+      WHERE u.total >= ${min} AND u.deleted_at IS NULL`;
+}
+```
+What survives the hatch: `${param}` binds positionally (never concat); `{table}`/`{id}`
+interpolate the target model's table/key; the declared shape types the result columns
+**by name** (the engine trusts the SQL to produce them — a missing column is a decode
+error at the caller, not a silent null); the generated client/OpenAPI surface is
+identical to an engine-built query of the same signature. What you own: soft-delete
+predicates (`u.deleted_at IS NULL` above — linted W0102 on the target model and on any
+soft-delete table the SQL mentions, never injected), scope filters, ordering, and
+dialect portability.
+
+Composition is enforced, not implied: params must carry explicit types and no binding
+(no column to infer from, no engine-built WHERE — E0210); `${ctx.…}` has no type
+source (E0214 — pass a typed param); a scoped target requires `unscoped("reason")`
+(`scoped` would promise an injection that can't happen, E0211); `-> stream` is
+rejected (E0212); the return shape must be flat (nests need engine-built projections,
+E0213). No sort cascade, no `page`, no index lint — the SQL owns all of it.

@@ -42,6 +42,10 @@ query products(org: Id, active: bool = true) -> OrderCard[] {
 }
 ```
 
+A block body may instead be one `sql` backtick block — the whole-query raw level
+(raw.md): the SQL is the statement, `${param}` stays bound, the declared shape types
+the result columns.
+
 ## Body skeleton (delimited, not space-runs)
 Each clause's argument is bounded by `()`, same as field modifiers. Statement ends `;`.
 - verb: `get` (one) / `list` (many)

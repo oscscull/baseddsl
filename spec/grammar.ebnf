@@ -196,7 +196,12 @@ type_ref    = shape_name | model_ref ;  (* a shape or a model's `full`         *
 (* Inline tail clauses allowed on an otherwise-bare query (e.g. `order (...)`). *)
 query_inline = clause { clause } ';' ;
 
-query_block = '{' statement '}' ;       (* one read statement, ';'-terminated  *)
+(* A query block holds one engine-built read statement, or — the whole-query raw
+   level (raw.md) — one `sql` backtick block that IS the statement. A raw body's
+   params must carry explicit types and no binding; `${param}` stays a bound
+   parameter and the declared shape types the result columns (sema E021x).       *)
+query_block = '{' ( statement | raw_body ) '}' ;
+raw_body    = raw_sql ';' ;
 
 (* ---------- Mutations ----------------------------------------------------- *)
 

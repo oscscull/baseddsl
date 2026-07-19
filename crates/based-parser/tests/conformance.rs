@@ -113,6 +113,7 @@ fn summarize_decl(decl: &Decl) -> String {
                 QueryBody::Bare => "bare",
                 QueryBody::Inline(_) => "inline",
                 QueryBody::Block(_) => "block",
+                QueryBody::Raw(_) => "raw",
             };
             format!(
                 "query {}  params={}  ret={}{}{}  body={body}",

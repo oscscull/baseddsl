@@ -267,7 +267,13 @@ mod rust {
                         out_struct: os,
                         ctx_requires: &rq.ctx_requires,
                         page: page_input(q),
-                        param_entities: query_param_entities(root, &q.params),
+                        // A raw body voids the same-name column convention: its params
+                        // are pure bind values, typed by their (mandatory) annotations.
+                        param_entities: if matches!(q.body, QueryBody::Raw(_)) {
+                            std::collections::HashMap::new()
+                        } else {
+                            query_param_entities(root, &q.params)
+                        },
                     });
                 }
                 Decl::Mutation(m) => {
@@ -728,7 +734,7 @@ mod rust {
         let clauses: &[Clause] = match &q.body {
             QueryBody::Inline(cs) => cs,
             QueryBody::Block(s) => &s.clauses,
-            QueryBody::Bare => return PageInput::None,
+            QueryBody::Bare | QueryBody::Raw(_) => return PageInput::None,
         };
         clauses
             .iter()

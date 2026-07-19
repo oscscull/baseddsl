@@ -183,6 +183,13 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
         annotation: None,
     };
 
+    // A raw body is opaque SQL: no filter pattern to reason about, so the
+    // missing-index lint stays silent (same treatment as a raw predicate atom).
+    if matches!(q.body, QueryBody::Raw(_)) {
+        pat.opaque = true;
+        return pat;
+    }
+
     // Params are filters on bare/inline queries (same-name / `-> edge` / `op col`).
     // On a block query they only enter through `$refs` inside the predicate.
     if !matches!(q.body, QueryBody::Block(_)) {
@@ -196,7 +203,7 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
     }
 
     let clauses: &[Clause] = match &q.body {
-        QueryBody::Bare => &[],
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
     };

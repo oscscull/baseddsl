@@ -89,7 +89,9 @@ fn query_clauses(q: &Query) -> &[Clause] {
     match &q.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => &[],
+        // A raw body has no clauses; `${ctx.…}` inside it is rejected in sema
+        // (no type source), so it contributes no requirement here either.
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
     }
 }
 

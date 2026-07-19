@@ -200,6 +200,21 @@ fn lower_query(
     dialect: Dialect,
 ) -> LoweredQuery {
     let root = schema.model(&rq.target).expect("target resolved by sema");
+
+    // A whole-query raw body IS the statement: text verbatim, `${param}` → `:param`
+    // (bound like any placeholder), `{table}`/`{id}` → the target model's table.
+    // Nothing engine-built composes — no injected soft-delete/scope, no sort
+    // cascade, no pagination; the declared shape types the result columns by name.
+    if let QueryBody::Raw(raw) = &q.body {
+        let body = render_raw(dialect, raw, &root.table, &root.table);
+        let body = body.trim_end().trim_end_matches(';').trim_end();
+        return LoweredQuery {
+            name: q.name.node.clone(),
+            sql: format!("{body};\n"),
+            count_sql: None,
+            keyset: None,
+        };
+    }
     // `unscoped` opts the whole query out of scope handling — the joined
     // tables' `@scope` as well as the root's, kept in one decision.
     let mut sel = Select::new(schema, decls, root, dialect)
@@ -518,7 +533,7 @@ fn out_alias(prefix: &str, name: &str) -> String {
 /// same-name equality (or its per-param binding); block/inline queries also carry
 /// explicit `where` clauses referencing params via `$`.
 fn collect_filter(sel: &mut Select, q: &Query, root: &RModel, out: &mut Vec<String>) {
-    let is_block = matches!(q.body, QueryBody::Block(_));
+    let is_block = matches!(q.body, QueryBody::Block(_) | QueryBody::Raw(_));
     if !is_block {
         for p in &q.params {
             out.push(param_condition(sel, p, root));
@@ -527,7 +542,7 @@ fn collect_filter(sel: &mut Select, q: &Query, root: &RModel, out: &mut Vec<Stri
     let clauses: &[Clause] = match &q.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => &[],
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
     };
     for c in clauses {
         if let Clause::Where(pred) = c {
@@ -585,7 +600,7 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
     let query_order: Option<&[SortTerm]> = match &q.body {
         QueryBody::Inline(cs) => cs.iter().find_map(order_of),
         QueryBody::Block(s) => s.clauses.iter().find_map(order_of),
-        QueryBody::Bare => None,
+        QueryBody::Bare | QueryBody::Raw(_) => None,
     };
     let terms: &[SortTerm] = query_order.unwrap_or(&root.sort);
 
@@ -1600,7 +1615,7 @@ fn query_page(q: &Query) -> Option<&PageClause> {
     let clauses: &[Clause] = match &q.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => return None,
+        QueryBody::Bare | QueryBody::Raw(_) => return None,
     };
     clauses.iter().find_map(|c| match c {
         Clause::Page(p) => Some(p),

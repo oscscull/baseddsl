@@ -30,7 +30,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   unregistered fails at engine build / listener startup)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution),
-  D93 (`in` value-list form: `Predicate::InList`, per-element sema check, `IN (v, v, …)` lowering)
+  D93 (`in` value-list form: `Predicate::InList`, per-element sema check, `IN (v, v, …)` lowering),
+  D94 (whole-query raw bodies: `{ sql`…`; }` is the statement — param-binding + shape-typed
+  results survive, W0102 lints the soft-delete gap, un-composable combinations rejected E0210–E0214)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
@@ -3954,3 +3956,66 @@ string-enum wire values + `$param` placeholder + int-enum integers + numeric lit
 canonical/idempotent case; LSP in-list variant go-to-def; **live** SQLite (seeded three
 statuses, `status in (pending, $extra)` with `$extra = "PAID"` returns exactly the two
 listed rows); full `make check` green (all three live suites + all example scenarios).
+
+## D94 — whole-query raw bodies: the third raw level, implemented (NF2)
+
+raw.md always specified three raw levels; the third (whole query / raw join) had no
+grammar or implementation — the flagship's workload report substituted raw value leaves
+(D89). NF2's default path was to implement the contract, and nothing in the
+architecture resisted it: the lowering, binding, and decode seams all already treat a
+query as "one SQL text + named placeholders + rows decoded by output alias".
+
+**Grammar/AST/parser.** `query_block = '{' ( statement | raw_body ) '}'` with
+`raw_body = raw_sql ';'` — the existing `sql` backtick block (NF14 owns the marker
+rename) in body position, mirrored as `QueryBody::Raw(RawSql)`. The `;` is optional in
+the parser (same leniency as a statement's).
+
+**Sema — keep exactly what the hatch promises, reject the rest loudly (P6).** The
+target model still comes from the return shape's `from`; verb from signature
+cardinality. New codes E0210–E0214: params must be explicitly typed and unbound
+(E0210 — no column to infer a type from, no engine-built WHERE for a binding to
+ride); `${ctx.…}` has no type source (E0214 — a typed param is the spelling; note the
+pre-existing raw *leaves* silently contribute nothing to `ctx_requires`, a latent
+UnboundPlaceholder at run time — out of scope here); `scoped` on a raw body is E0211
+(the engine can't inject scope into SQL it didn't build — a scoped target needs
+`unscoped("reason")`, and E0182 still forces that choice); `-> stream` is E0212
+(bounded slice; nothing in the streaming dispatch fundamentally resists it — lift
+later if a partner needs it); a nested return shape is E0213 (nests lean on
+engine-built join aliases / JSON aggregation; the shape must be flat — `out = sql`…``
+leaves are fine, they're just typed columns). Skipped for raw bodies: E0144 (`get`
+unique-keying — the SQL owns it), W0100 (the SQL owns ORDER BY), the W0103 index
+analysis (`opaque`, same treatment as a raw predicate atom). **W0102 widened:** the
+lint fires on the target model *and* on any other `@soft_delete` model whose table
+name the raw text mentions (identifier-boundary match) — raw.md's joined-table
+example, detected not just asserted.
+
+**Lowering/runtime.** `lower_query` short-circuits: the rendered raw text (params →
+`:name`, `{table}`/`{id}` → the target's quoted table/key) IS `LoweredQuery.sql`,
+trailing `;` normalized; no count/keyset. The planner needed zero new code — params
+bind by their (mandatory) annotations through the existing env, the envelope follows
+the verb. Rows decode by column alias exactly as engine-built rows do, so the shape
+contract is "produce these column names".
+
+**Client/OpenAPI.** The generated method/input/response are indistinguishable from an
+engine-built query's (that is the point of the typed surface). One correction: the
+same-name param→entity convention (`Id<entity::M>` inference) is switched off for raw
+bodies — their params are pure bind values, typed by annotation only.
+
+**Editor/fmt.** fmt reprints the backtick interior byte-exactly (single-line raw
+inlines like a one-clause block; multi-line keeps its own layout), idempotent. The
+LSP walks the new node without crashing; `${param}` uses ride the existing
+`raw_param_refs` collector (find-refs lists them at the raw block; rename leaves the
+opaque text alone — the miss is a loud E0113, same stance as D90). The tmLanguage
+`#raw` rule is position-independent, so body-position raw already highlights.
+
+**Not demonstrated in the helpdesk** — its workload report deliberately uses raw
+value leaves over an engine-owned row set (D89 called that the better raw.md story);
+forcing a raw body in would weaken the example. The live proof is the SQLite
+integration test (raw body + bound param + `{table}` + hand-written tombstone filter
+→ shape-typed rows; scalar raw `get`).
+
+**Verified:** parser unit + golden (`raw_query`), sema unit ×9 + golden (clean /
+E0210 both forms / E0113 / E0214 / E0212 / E0211-vs-unscoped-vs-E0182 / E0213 /
+W0102 ×2 incl. the mention scan), codegen dml ×3 dialects + `;`-normalization,
+client + openapi surface tests, fmt canonical/idempotent (single- + multi-line), LSP
+inertness/rename test, live SQLite end-to-end; full `make check` green.

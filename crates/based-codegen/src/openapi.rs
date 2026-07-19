@@ -692,7 +692,7 @@ fn page_input(q: &Query) -> PageInput {
     let clauses: &[Clause] = match &q.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,
-        QueryBody::Bare => return PageInput::None,
+        QueryBody::Bare | QueryBody::Raw(_) => return PageInput::None,
     };
     clauses
         .iter()

@@ -520,7 +520,7 @@ fn unindexed_clause_forms() {
         let clauses = match &q.body {
             QueryBody::Inline(cs) => cs.as_slice(),
             QueryBody::Block(s) => s.clauses.as_slice(),
-            QueryBody::Bare => panic!("expected clauses"),
+            QueryBody::Bare | QueryBody::Raw(_) => panic!("expected clauses"),
         };
         match clauses.iter().find_map(|c| match c {
             Clause::Unindexed(u) => Some(u.clone()),
@@ -627,4 +627,34 @@ fn callable_scoped_and_unscoped_are_exclusive_forms() {
         panic!("expected query");
     };
     assert!(b.unscoped.is_some() && b.scoped.is_none());
+}
+
+#[test]
+fn raw_query_body_parses_with_interpolations() {
+    // The whole body is one `sql` backtick block; `${param}` interpolations are
+    // split out as bound-parameter parts, the SQL text kept verbatim.
+    let sf = parse_ok(
+        r#"
+        query heavy_users(min: int) -> UserRow[] {
+          sql`SELECT u.name AS name FROM user u WHERE u.total >= ${min}`;
+        }
+        "#,
+    );
+    let Decl::Query(q) = &sf.decls[0] else {
+        panic!("expected query");
+    };
+    let QueryBody::Raw(raw) = &q.body else {
+        panic!("expected raw body, got {:?}", q.body);
+    };
+    assert!(matches!(
+        &raw.parts[..],
+        [RawPart::Text(_), RawPart::Param(pr)] if pr.name.node == "min"
+    ));
+
+    // The terminating `;` is optional inside the block (same leniency as a statement).
+    let sf = parse_ok("query all() -> UserRow[] { sql`SELECT 1` }");
+    let Decl::Query(q) = &sf.decls[0] else {
+        panic!("expected query");
+    };
+    assert!(matches!(q.body, QueryBody::Raw(_)));
 }

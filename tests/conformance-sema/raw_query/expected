@@ -1,0 +1,17 @@
+DIAGNOSTICS
+  E0210: param `min` of raw-bodied query `untyped` needs a type annotation
+  E0214: `${ctx.…}` in a raw query body has no type source
+  W0102: raw SQL on soft-delete model `User`: engine can't verify the `deleted_at` tombstone filter — confirm it
+  W0102: raw SQL on soft-delete model `User`: engine can't verify the `deleted_at` tombstone filter — confirm it
+  W0102: raw SQL on soft-delete model `User`: engine can't verify the `deleted_at` tombstone filter — confirm it
+SCHEMA
+model User  table=user  soft_delete=deleted_at(timestamp)
+  id: Id
+  deleted_at: timestamp?
+  name: text
+  email: text
+  total: int
+shape UserRow from User
+query heavy_users  target=User verb=list many  shape=UserRow
+query untyped  target=User verb=list many  shape=UserRow
+query ctx_leak  target=User verb=list many  shape=UserRow

@@ -247,6 +247,18 @@ impl Printer {
                     self.out.push("}".to_string());
                 }
             }
+            // A whole-query raw body: the SQL text is opaque and reprints
+            // byte-exactly; a multi-line block keeps its own layout.
+            QueryBody::Raw(raw) => {
+                let sql = raw_sql(raw);
+                if sql.contains('\n') {
+                    self.out.push(format!("{prefix} {{"));
+                    self.out.push(format!("{INDENT}{sql};"));
+                    self.out.push("}".to_string());
+                } else {
+                    self.out.push(format!("{prefix} {{ {sql}; }}"));
+                }
+            }
         }
     }
 

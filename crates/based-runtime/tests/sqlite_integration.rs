@@ -1474,3 +1474,68 @@ async fn guard_reads_the_live_database_before_the_write() {
     assert_eq!(second.body["error"]["code"], "guard_denied");
     assert_eq!(second.body["error"]["message"], "order is not open");
 }
+
+/// Whole-query raw body live: the raw SELECT is the statement, `${param}` binds
+/// positionally, `{table}` interpolates the target's table, and the rows decode
+/// into the declared shape by column name. The raw text owns soft-delete — the
+/// hand-written tombstone filter excludes the tombstoned row.
+#[tokio::test]
+async fn raw_query_body_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @soft_delete(deleted_at)
+        User { deleted_at: timestamp?, name: text, total: int }
+        shape UserRow from User { name, total }
+        query heavy_users(min: int) -> UserRow[] {
+          sql`SELECT u.name AS name, u.total AS total
+              FROM {table} u
+              WHERE u.total >= ${min} AND u.deleted_at IS NULL
+              ORDER BY u.total DESC`;
+        }
+        query top_user() -> UserRow {
+          sql`SELECT name, total FROM user WHERE deleted_at IS NULL ORDER BY total DESC LIMIT 1`;
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            "INSERT INTO `user` (`id`, `name`, `total`, `deleted_at`) VALUES
+               ('a', 'Ada', 900, NULL),
+               ('b', 'Bob', 500, NULL),
+               ('c', 'Cud', 950, '2026-01-01T00:00:00Z'),
+               ('d', 'Dee', 100, NULL);",
+        )
+        .await
+        .expect("seed");
+
+    // The bound `min` excludes Dee; the hand-written tombstone filter excludes Cud;
+    // the raw ORDER BY holds.
+    let got = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/heavy_users",
+        json!({ "min": 400 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    assert_eq!(
+        got.body,
+        json!([
+            { "name": "Ada", "total": 900 },
+            { "name": "Bob", "total": 500 }
+        ])
+    );
+
+    // A scalar raw `get`: first row in the declared shape.
+    let top = call(&c, &backend, "POST", "/q/top_user", json!({}), json!({})).await;
+    assert_eq!(top.status, 200, "{:?}", top.body);
+    assert_eq!(top.body, json!({ "name": "Ada", "total": 900 }));
+}

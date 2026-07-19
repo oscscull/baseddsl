@@ -103,6 +103,13 @@ pub mod code {
     pub const STREAM_GET: &str = "E0200"; // stream body verb must be `list` (`get` is a cardinality mismatch)
     pub const STREAM_PAGE: &str = "E0201"; // `page` forbidden on a stream query (bounded chunk vs unbounded pass)
     pub const STREAM_MUTATION: &str = "E0202"; // a mutation return never streams
+
+    // whole-query raw bodies (raw.md's third level, E021x)
+    pub const RAW_QUERY_PARAM: &str = "E0210"; // a raw-bodied query's param must be typed and unbound (nothing to infer from / bind against)
+    pub const RAW_QUERY_SCOPED: &str = "E0211"; // `scoped` on a raw-bodied query — the engine can't inject scope into raw SQL
+    pub const RAW_QUERY_STREAM: &str = "E0212"; // `-> stream` with a raw body is unsupported
+    pub const RAW_QUERY_NEST: &str = "E0213"; // a raw-bodied query's return shape must be flat (no nested sub-objects)
+    pub const RAW_QUERY_CTX: &str = "E0214"; // `${ctx.…}` in a raw query body has no type source — pass a typed param
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,

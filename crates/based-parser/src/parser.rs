@@ -863,8 +863,7 @@ impl<'a> Parser<'a> {
             let e = self.bump().unwrap().end;
             (QueryBody::Bare, e)
         } else if self.at(Tok::LBrace) {
-            let (stmt, e) = self.query_block()?;
-            (QueryBody::Block(stmt), e)
+            self.query_block()?
         } else {
             // inline tail clauses on an otherwise-bare query
             let mut clauses = Vec::new();
@@ -968,14 +967,21 @@ impl<'a> Parser<'a> {
         Ok(RetType { ty, many, stream })
     }
 
-    fn query_block(&mut self) -> PResult<(Statement, u32)> {
+    fn query_block(&mut self) -> PResult<(QueryBody, u32)> {
         self.expect(Tok::LBrace, "`{`")?;
+        // Whole-query raw body (raw.md): the block is one `sql`…`` statement.
+        if self.is_raw_start() {
+            let raw = self.raw_sql()?;
+            self.skip_seps(); // the statement-terminating `;`
+            let end = self.expect(Tok::RBrace, "`}`")?.end;
+            return Ok((QueryBody::Raw(raw), end));
+        }
         let verb = if self.eat_kw("get") {
             Verb::Get
         } else if self.eat_kw("list") {
             Verb::List
         } else {
-            self.err("expected `get` or `list`");
+            self.err("expected `get`, `list`, or a raw `sql` body");
             return Err(());
         };
         let model = self.upper_ident("model")?;
@@ -986,11 +992,11 @@ impl<'a> Parser<'a> {
         self.skip_seps(); // the statement-terminating `;`
         let end = self.expect(Tok::RBrace, "`}`")?.end;
         Ok((
-            Statement {
+            QueryBody::Block(Statement {
                 verb,
                 model,
                 clauses,
-            },
+            }),
             end,
         ))
     }
