@@ -995,6 +995,52 @@ async fn keyset_pagination_walks_the_set_end_to_end() {
     assert_eq!(bad.body["error"]["code"], json!("bad_cursor"));
 }
 
+/// `with count`, proven against a real engine: the page envelope carries the live-row
+/// `total` beside the bounded window; a page without `with count` omits the field.
+#[tokio::test]
+async fn with_count_page_carries_total_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @sort(id asc)
+        Item { name: text, rank: int }
+        shape ItemCard from Item { name }
+        query counted() -> ItemCard[] { list Item order (rank asc) page (2) offset with count; }
+        query windowed() -> ItemCard[] { list Item order (rank asc) page (2); }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `item` (`id`, `name`, `rank`) VALUES
+                ('i1', 'a', 10), ('i2', 'b', 20), ('i3', 'c', 30),
+                ('i4', 'd', 40), ('i5', 'e', 50);
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    // The counted page: two rows in the window, the whole live set in `total`.
+    let p = call(&c, &backend, "POST", "/q/counted", json!({}), json!({})).await;
+    assert_eq!(p.status, 200, "{:?}", p.body);
+    assert_eq!(p.body["rows"], json!([{ "name": "a" }, { "name": "b" }]));
+    assert_eq!(p.body["total"], json!(5));
+
+    // Without `with count` the envelope has no `total` key at all.
+    let w = call(&c, &backend, "POST", "/q/windowed", json!({}), json!({})).await;
+    assert_eq!(w.status, 200, "{:?}", w.body);
+    assert!(
+        !w.body.as_object().unwrap().contains_key("total"),
+        "{:?}",
+        w.body
+    );
+}
+
 /// A to-**many** nested shape array (`items { … }`) returns a JSON array of
 /// sub-objects end-to-end: codegen aggregates the child rows into an `items[]` JSON-array
 /// column (correlated subquery + SQLite `json_group_array`), the live SELECT returns it as

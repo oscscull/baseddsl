@@ -349,10 +349,20 @@ async fn main() {
     );
     assert!(subjects.contains(&"Printer on fire"), "{subjects:?}");
     let total = subjects.len();
+    assert_eq!(
+        all["total"].as_i64(),
+        Some(total as i64),
+        "`with count` serves the total: {all}"
+    );
     let (_, offset) = desk.get(Some(MARA), "/admin/tickets?offset=2").await;
     assert_eq!(offset["rows"].as_array().unwrap().len(), total - 2);
     assert_ne!(offset["rows"][0]["id"], all["rows"][0]["id"]);
-    println!("ok - admin listing: cross-tenant (unscoped) + offset pagination");
+    assert_eq!(
+        offset["total"].as_i64(),
+        Some(total as i64),
+        "the total counts the whole live set, not the window: {offset}"
+    );
+    println!("ok - admin listing: cross-tenant (unscoped) + offset pagination + total");
 
     // ---- the NDJSON export ------------------------------------------------------
     let resp = desk

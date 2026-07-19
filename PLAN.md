@@ -405,10 +405,13 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   unrouted. The grammar's mandatory `-> ret_type` leaves no legal shapeless spelling. Fix
   (pick one): sema-reject the pairing, re-select *before* the delete, or a shapeless/ack
   return form for destructive mutations.
-- **NF5. `Page<T>` drops `with count`'s total.** Symptom: the wire carries `total` for a
-  `with count` page but the generated `Page<T>` has no field, so `/admin/tickets` serves
-  rows + cursor only. Seam: client codegen's `Page` struct (+ OpenAPI schema). Fix:
-  `total: Option<i64>`, populated exactly when the query declares `with count`.
+- **NF5. ✅ done (D97). `Page<T>` carries `with count`'s total.** `Page<T>` gains
+  `total: Option<i64>` — `Some` exactly when the query declares `with count` (the wire
+  has the field only then; `skip_serializing_if` keeps a re-served page wire-faithful).
+  OpenAPI advertises `total` (int64) only on a counted query's page schema. Runtime was
+  already correct. All four example clients + the embed-gate mirror regenerated; the
+  helpdesk `/admin/tickets` now serves the total with no route change. Proven unit +
+  typed embed round-trip + live SQLite + the extended helpdesk smoke.
 - **NF6. ✅ done (D92). Zero-row surviving-write mutation → 404 `not_found`.** A re-select
   that reads back no row (wrong id, or a cross-tenant id under scope) now rolls the whole
   transaction back and surfaces `RunError::NotFound` → wire 404, stable code `not_found` —

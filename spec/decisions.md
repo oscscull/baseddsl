@@ -51,7 +51,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   supersedes D57's order-unspecified caveat)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres), D85 (streaming is
-  the non-paginating full pass; `page` on a stream query is E0201)
+  the non-paginating full pass; `page` on a stream query is E0201), D97 (`Page<T>.total: Option<i64>`
+  — `Some` exactly for a `with count` query; OpenAPI advertises `total` only on a counted page schema)
 - **Streaming reads** — D85 (Track N2 design: `-> stream Shape` signature form, NDJSON wire with a
   mandatory terminal `done`/`error` line + truncation-is-failure contract, same-named
   `Stream`-returning client method with two-layer `Result`, drop = cancel, per-row nest
@@ -66,7 +67,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   struct/schema instead of a per-parent anonymous type), D85 (a `-> stream` query's method returns a
   typed row `Stream`; `Transport` gains a streaming call), D88 (`<name>_with_key` mutation twins +
   `Transport::call_with_key`: the `Idempotency-Key` header / `Engine::call_with_key`, emitted only
-  when the schema declares a mutation)
+  when the schema declares a mutation), D97 (`Page<T>` gains `total: Option<i64>`, skipped when
+  serializing `None` so a re-served page mirrors the engine wire)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
@@ -4094,3 +4096,40 @@ Historical decision entries keep the old spelling — they record what was decid
 
 **Verified:** full workspace suites + conformance + fmt idempotence over the migrated
 schemas + helpdesk live smoke; `make check` green end-to-end.
+
+## D97 — `Page<T>` carries `with count`'s total (NF5)
+
+The D89-filed drop: the wire already served `total` for a `with count` page (the second
+COUNT statement, D56-era), but the generated `Page<T>` had no field for it — so
+the helpdesk's `/admin/tickets` decoded rows + cursor and silently discarded the total
+its own query paid for.
+
+**Fix — one optional field, populated exactly when declared.** `Page<T>` gains
+`total: Option<i64>`: `Some` exactly when the query declares `with count` (the wire
+carries the field only then; serde's `Option` handling decodes an absent field to
+`None`, so one shared envelope struct serves counted and uncounted pages alike). The
+field is `#[serde(skip_serializing_if = "Option::is_none")]`, so a consumer re-serving
+a typed `Page` (the helpdesk route does exactly that) mirrors the engine wire — no
+phantom `"total": null` on an uncounted page.
+
+**OpenAPI is per-query honest.** `page_schema` takes the query's `with count` flag
+(read off the AST `Clause::Page`, the same derivation as the request-body page
+controls): a counted query's inlined page schema advertises
+`total: { type: integer, format: int64 }`; an uncounted query's schema doesn't carry
+the property at all. `total` stays out of `required`, matching `cursor`'s treatment.
+
+**Runtime untouched.** `shape()` already emitted `total` exactly for
+`Envelope::Page { with_count: true }` (unit-proven in `tests/query.rs`); no gap found.
+
+**Regenerated consumers.** The embed-gate mirror
+(`based-runtime/tests/support/embedded_client.rs`, its schema gaining a keyset and a
+counted offset page query) and all four checked-in example clients (three quickstarts +
+the helpdesk). The helpdesk route needed no code change — re-serializing the typed
+`Page` now serves the total, which is the user-visible payoff.
+
+**Verified:** client + OpenAPI codegen tests (counted vs uncounted schema), typed
+round-trip embed tests (`total: Some(57)` through the generated client; `None` and no
+cursor on an uncounted short page), a live-SQLite end-to-end test (counted page →
+`total: 5` beside a 2-row window; uncounted envelope has no `total` key), and the
+helpdesk smoke extended to assert both admin pages serve the full live-set total;
+`make check` green end-to-end.

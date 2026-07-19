@@ -317,7 +317,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     route: format!("/q/{}", q.name.node),
                     params: &q.params,
                     root,
-                    response: query_response(rq, &os),
+                    response: query_response(rq, &os, page_with_count(q)),
                     out_schema: os,
                     is_mutation: false,
                     stream: rq.stream,
@@ -363,12 +363,12 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
 /// A query's `200` schema: stream -> the per-line NDJSON envelope, paginated -> the
 /// `Page` envelope, many -> an array, single -> the object (a `get` may miss —
 /// modelled as a nullable object).
-fn query_response(rq: &RQuery, os: &OutSchema) -> Value {
+fn query_response(rq: &RQuery, os: &OutSchema, with_count: bool) -> Value {
     let item = schema_ref(&os.name);
     if rq.stream {
         ndjson_line_schema(&item)
     } else if rq.paginated {
-        page_schema(&item)
+        page_schema(&item, with_count)
     } else if rq.many {
         json!({ "type": "array", "items": item })
     } else {
@@ -424,16 +424,25 @@ fn mutation_response(m: &Mutation, os: &OutSchema) -> Value {
     }
 }
 
-/// The `Page<T>` envelope schema: rows + an opaque cursor. Inlined per
-/// response so the item type is concrete (no `Page<T>` generic in JSON Schema).
-fn page_schema(item: &Value) -> Value {
+/// The `Page<T>` envelope schema: rows + an opaque cursor, plus `total` for a
+/// `with count` query. Inlined per response so the item type is concrete (no
+/// `Page<T>` generic in JSON Schema).
+fn page_schema(item: &Value, with_count: bool) -> Value {
+    let mut props = json!({
+        "rows": { "type": "array", "items": item },
+        "cursor": { "type": ["string", "null"], "description": "Opaque keyset cursor; pass it back for the next page." }
+    });
+    if with_count {
+        props["total"] = json!({
+            "type": "integer",
+            "format": "int64",
+            "description": "Total matching rows (the query declares `with count`)."
+        });
+    }
     json!({
         "type": "object",
         "required": ["rows"],
-        "properties": {
-            "rows": { "type": "array", "items": item },
-            "cursor": { "type": ["string", "null"], "description": "Opaque keyset cursor; pass it back for the next page." }
-        }
+        "properties": props
     })
 }
 
@@ -702,6 +711,19 @@ fn page_input(q: &Query) -> PageInput {
             _ => None,
         })
         .unwrap_or(PageInput::None)
+}
+
+/// Whether a query's `page` clause declares `with count` — its `Page` envelope then
+/// also carries `total`.
+fn page_with_count(q: &Query) -> bool {
+    let clauses: &[Clause] = match &q.body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        QueryBody::Bare | QueryBody::Raw(_) => return false,
+    };
+    clauses
+        .iter()
+        .any(|c| matches!(c, Clause::Page(p) if p.with_count))
 }
 
 /// A param's JSON-Schema type. Explicit annotation wins — an enum name is that

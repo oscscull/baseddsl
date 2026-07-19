@@ -144,6 +144,55 @@ async fn typed_list_round_trips_in_process() {
     assert_eq!(rows[1].status, "open");
 }
 
+/// A `with count` page round-trips its total through the typed client: the engine runs
+/// the second COUNT statement and the decoded `Page` carries `total: Some(n)`.
+#[tokio::test]
+async fn typed_counted_page_carries_total() {
+    // Row batch, then the COUNT batch the `with count` plan runs.
+    let db = MockDb::new(vec![
+        vec![row(json!({ "status": "paid", "total": 9 }))],
+        vec![row(json!({ "count": 57 }))],
+    ]);
+    let engine = Engine::new(compiled(), db, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    let page = api
+        .counted_order_page(
+            client::CountedOrderPageInput {
+                org: client::Id::from_raw("org-1"),
+                offset: None,
+            },
+            (),
+        )
+        .await
+        .expect("call ok");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.total, Some(57));
+}
+
+/// A page without `with count` decodes to `total: None` — the wire omits the field.
+#[tokio::test]
+async fn typed_uncounted_page_has_no_total() {
+    // A short page (1 row < page size 2): no next cursor, and no COUNT statement runs.
+    let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 9 }))]]);
+    let engine = Engine::new(compiled(), db, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    let page = api
+        .order_page(
+            client::OrderPageInput {
+                org: client::Id::from_raw("org-1"),
+                cursor: None,
+            },
+            (),
+        )
+        .await
+        .expect("call ok");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.total, None);
+    assert!(page.cursor.is_none());
+}
+
 /// `$ctx` is a **typed** argument on the generated method: `my_org_orders` takes a
 /// `MyOrgOrdersCtx { org }`, supplied straight in — no header dance and no
 /// untyped side-channel bag. With the required context the `$ctx`-scoped query runs; an

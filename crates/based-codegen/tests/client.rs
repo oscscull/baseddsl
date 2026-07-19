@@ -104,6 +104,14 @@ fn paginated_query_returns_page_envelope() {
         out.contains("#[serde(transparent)]\npub struct Cursor(String);"),
         "\n{out}"
     );
+    // The envelope carries `total`: `Some` exactly for a `with count` query (the wire
+    // has the field only then), absent from re-serialization otherwise.
+    assert!(
+        out.contains(
+            "#[serde(skip_serializing_if = \"Option::is_none\")]\n    pub total: Option<i64>,"
+        ),
+        "\n{out}"
+    );
 }
 
 #[test]

@@ -16,6 +16,10 @@ query order_by_id(id) -> OrderCard;
 query orders_in_org(org) -> OrderCard[];
 query export_orders(org) -> stream OrderCard;
 query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
+query order_page(org) -> OrderCard[] { list Order where (org = $org) page (2); }
+query counted_order_page(org) -> OrderCard[] {
+    list Order where (org = $org) page (2) offset with count;
+}
 
 mutation place_order(org: Id, status, total: int) -> OrderCard {
     create Order { org = $org, status = $status, total = $total };

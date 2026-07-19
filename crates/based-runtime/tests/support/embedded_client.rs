@@ -133,6 +133,10 @@ impl std::fmt::Display for Cursor {
 pub struct Page<T> {
     pub rows: Vec<T>,
     pub cursor: Option<Cursor>,
+    /// Total matching rows. `Some` exactly when the query declares `with count`
+    /// (the wire carries `total` only then).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
 }
 
 /// What went wrong in a client call — lets a caller branch on the class of failure
@@ -485,6 +489,24 @@ pub struct MyOrgOrdersCtx {
 pub const MY_ORG_ORDERS_ROUTE: &str = "/q/my_org_orders";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderPageInput {
+    pub org: Id<entity::Org>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Cursor>,
+}
+/// Wire route for `order_page`.
+pub const ORDER_PAGE_ROUTE: &str = "/q/order_page";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountedOrderPageInput {
+    pub org: Id<entity::Org>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+}
+/// Wire route for `counted_order_page`.
+pub const COUNTED_ORDER_PAGE_ROUTE: &str = "/q/counted_order_page";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderInput {
     pub org: Id<entity::Org>,
     pub status: String,
@@ -512,6 +534,14 @@ impl<T: Transport> Client<T> {
     /// `POST /q/my_org_orders`
     pub async fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError> {
         self.transport.call(MY_ORG_ORDERS_ROUTE, &input, &ctx).await
+    }
+    /// `POST /q/order_page`
+    pub async fn order_page(&self, input: OrderPageInput, ctx: ()) -> Result<Page<OrderCard>, ClientError> {
+        self.transport.call(ORDER_PAGE_ROUTE, &input, &ctx).await
+    }
+    /// `POST /q/counted_order_page`
+    pub async fn counted_order_page(&self, input: CountedOrderPageInput, ctx: ()) -> Result<Page<OrderCard>, ClientError> {
+        self.transport.call(COUNTED_ORDER_PAGE_ROUTE, &input, &ctx).await
     }
     /// `POST /m/place_order`
     pub async fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError> {

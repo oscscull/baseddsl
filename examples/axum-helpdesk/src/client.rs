@@ -133,6 +133,10 @@ impl std::fmt::Display for Cursor {
 pub struct Page<T> {
     pub rows: Vec<T>,
     pub cursor: Option<Cursor>,
+    /// Total matching rows. `Some` exactly when the query declares `with count`
+    /// (the wire carries `total` only then).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
 }
 
 /// What went wrong in a client call — lets a caller branch on the class of failure

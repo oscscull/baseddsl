@@ -35,6 +35,8 @@ hole; turning a raw string into a typed id is an explicit, greppable `Id::from_r
 ## Pagination envelope
 A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque cursor for the next page. Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).
 
+A `with count` query's envelope also carries `total` — the live-row count of the whole set. On the client, `Page<T>.total` is `Option<i64>`: `Some` exactly when the query declares `with count` (the wire has the field only then), `None` otherwise. OpenAPI advertises `total` (an `int64` integer) only on a `with count` query's page schema.
+
 The cursor is a typed `Cursor` on the client surface — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
 
 ## Idempotency keys

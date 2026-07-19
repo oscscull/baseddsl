@@ -14,7 +14,7 @@ list User order (id) page (50) with count;                    # opt into total
 - `order (field)` is the cursor basis. Falls back to model/relation `@sort` if the query gives none (sorting.md).
 - Engine auto-appends a unique tiebreaker (id) when sort key isn't unique (else keyset drops/repeats rows). Shown, not written.
 - Cursor is opaque, engine-derived, validated/signed (no predicate injection). User never assembles keyset mechanics.
-- Total count opt-in (`with count`): second expensive query, meaningless for keyset. Default = page + "more" cursor, no total. Count queries also subject to index lint.
+- Total count opt-in (`with count`): second expensive query, meaningless for keyset. Default = page + "more" cursor, no total. The wire carries `total` only for a `with count` query; the client `Page` surfaces it as an optional field, populated exactly then (calling.md). Count queries also subject to index lint.
 - Page size counts live rows (soft-delete filter applied before limit).
 
 ## Pagination vs streaming

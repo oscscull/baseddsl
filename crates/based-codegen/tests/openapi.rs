@@ -149,6 +149,22 @@ fn paginated_query_response_is_page_envelope() {
             .unwrap_or(false),
         "\n{input}"
     );
+    // Without `with count`, the envelope advertises no `total`.
+    assert!(sch["properties"]["total"].is_null(), "\n{sch}");
+}
+
+#[test]
+fn with_count_page_envelope_carries_total() {
+    let doc = gen(r#"
+        Post { id: Id, title: text }
+        shape PostCard from Post { title }
+        query posts() -> PostCard[] {
+          list Post order (id asc) page (50) offset with count;
+        }
+        "#);
+    let sch = ok_schema(&doc, "/q/posts");
+    assert_eq!(sch["properties"]["total"]["type"], "integer");
+    assert_eq!(sch["properties"]["total"]["format"], "int64");
 }
 
 #[test]
