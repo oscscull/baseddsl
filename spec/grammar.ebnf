@@ -102,7 +102,7 @@ index_decl  = '@index' ( column_name | '(' column_name { ',' column_name } ')' )
               [ 'unique' ] ;
 column_name = lower_ident ;
 
-(* Per-operation soft-delete override (soft-delete.md): `restore: sql`...``    *)
+(* Per-operation soft-delete override (soft-delete.md): `restore: raw`...``    *)
 soft_override = op_name ':' raw_sql ;
 op_name     = 'restore' | 'delete' | 'read' ;
 
@@ -197,7 +197,7 @@ type_ref    = shape_name | model_ref ;  (* a shape or a model's `full`         *
 query_inline = clause { clause } ';' ;
 
 (* A query block holds one engine-built read statement, or — the whole-query raw
-   level (raw.md) — one `sql` backtick block that IS the statement. A raw body's
+   level (raw.md) — one `raw` backtick block that IS the statement. A raw body's
    params must carry explicit types and no binding; `${param}` stays a bound
    parameter and the declared shape types the result columns (sema E021x).       *)
 query_block = '{' ( statement | raw_body ) '}' ;
@@ -290,10 +290,10 @@ literal     = STRING | INT | FLOAT | 'true' | 'false' | 'null' ;
 (* `decimal` default / value is byte-exact — never rounded through an f64.             *)
 
 (* ---------- Raw SQL escape hatch (raw.md) --------------------------------- *)
-(* Backtick `sql` form. `${param}` interpolates as a bound parameter only.     *)
+(* Backtick `raw` form. `${param}` interpolates as a bound parameter only.     *)
 (* `{table}` / `{id}` are engine-provided safe interpolations in overrides.    *)
 
-raw_sql     = 'sql' '`' { raw_char | interp } '`' ;
+raw_sql     = 'raw' '`' { raw_char | interp } '`' ;
 interp      = '${' param_ref '}' | '{' ident '}' ;
 raw_char    = ? any char except '`' and an interp opener ? ;
 

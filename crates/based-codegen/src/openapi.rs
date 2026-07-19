@@ -34,7 +34,7 @@
 //! - A to-**one** nested sub-object (`buyer { … }`) is emitted as an inline nested
 //!   object schema; a to-**many** nest (`items { … }`) as an `array` of that object
 //!   schema — both matching the client + SQL sides.
-//! - A `sql`…`` shape field has no statically known type -> the open-object `Json`.
+//! - A `raw`…`` shape field has no statically known type -> the open-object `Json`.
 //! - A mutation with a declared return shape advertises it; one with no declared shape
 //!   (e.g. a bare-`{ id }` write) responds with the shared `MutationResult` `{ id }`.
 
@@ -494,7 +494,7 @@ fn out_schema(
     }
 }
 
-/// Project a shape body into `(field, schema, required)` triples. A `sql`…`` field
+/// Project a shape body into `(field, schema, required)` triples. A `raw`…`` field
 /// maps to the open-object `Json`; a to-**one** nest (`buyer { … }`) becomes an inline
 /// nested object schema (recursively projected), required unless the relation is
 /// optional. A to-**many** nest (`items { … }`) becomes an `array` of that object
@@ -858,7 +858,7 @@ fn enum_schema(schema: &CheckedSchema, name: &str) -> Value {
     }
 }
 
-/// The open-object `json` schema: any JSON value (a `json` column or a `sql`…`` field).
+/// The open-object `json` schema: any JSON value (a `json` column or a `raw`…`` field).
 fn json_schema() -> Value {
     // `true` is JSON Schema for "anything"; OpenAPI 3.1 accepts it.
     Value::Bool(true)

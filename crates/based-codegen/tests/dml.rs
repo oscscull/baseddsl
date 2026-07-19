@@ -1007,7 +1007,7 @@ fn raw_query_body_is_the_statement_with_bound_params() {
         User { deleted_at: timestamp?, name: text, total: int }
         shape UserRow from User { name }
         query heavy(min: int) -> UserRow[] {
-          sql`SELECT u.name AS name FROM {table} u WHERE u.total >= ${min}`;
+          raw`SELECT u.name AS name FROM {table} u WHERE u.total >= ${min}`;
         }
         "#;
     for (dialect, table) in [
@@ -1034,7 +1034,7 @@ fn raw_query_trailing_semicolon_is_normalized() {
     let out = gen(r#"
         User { name: text }
         shape UserRow from User { name }
-        query all() -> UserRow[] { sql`SELECT name FROM user;`; }
+        query all() -> UserRow[] { raw`SELECT name FROM user;`; }
         "#);
     assert!(out.contains("SELECT name FROM user;\n"), "\n{out}");
     assert!(!out.contains(";;"), "\n{out}");

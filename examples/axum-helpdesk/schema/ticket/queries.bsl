@@ -9,7 +9,7 @@ filter open_states = not status in (resolved, closed);
 
 # Raw predicate leaf: interval math the DSL doesn't model. It composes as one
 # boolean term; scope and soft-delete still wrap the query around it.
-filter overdue = sql`created_at < now() - interval '3 days'`;
+filter overdue = raw`created_at < now() - interval '3 days'`;
 
 # ---- requester portal ------------------------------------------------------
 

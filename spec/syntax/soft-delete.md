@@ -28,7 +28,7 @@ Replace one operation (commonly `restore`) with raw, keep others auto. Raw overr
 @soft_delete(deleted_at)
 Order {
   deleted_at: timestamp?
-  restore: sql`update {table} set deleted_at = null, status = 'active' where {id}`
+  restore: raw`update {table} set deleted_at = null, status = 'active' where {id}`
 }
 ```
 

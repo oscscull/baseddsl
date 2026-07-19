@@ -6,20 +6,20 @@ Principles: 6 (never silent), 1.
 Raw goes where the engine needs only a value. Forbidden where it needs meaning (can't inject soft-delete into joins it didn't build).
 
 ## Levels (smallest scope first)
-- Raw value in a shape: `full_name = sql`concat(first,' ',last)``
+- Raw value in a shape: `full_name = raw`concat(first,' ',last)``
 - Raw predicate term: composes as one boolean leaf with `where`; engine still wraps soft-delete around it.
 - Raw whole query / raw join: full trapdoor. You own soft-delete predicates + dialect portability. Engine still gives param-binding + result-typing.
 
 ## Guarantees through the hatch
 - `${input}` always interpolates as a bound parameter, never string concat.
-- All raw marked with the sql backtick form = greppable inventory of where guarantees stop.
+- All raw marked with the `raw` backtick form = greppable inventory of where guarantees stop.
 - Engine detects raw touching a `@soft_delete` table and lints the gap ("can't verify tombstone filter — confirm"). Never silent.
 
 ## Whole-query raw
-The query's block body is one `sql` backtick block — the block IS the statement:
+The query's block body is one `raw` backtick block — the block IS the statement:
 ```
 query heavy_users(min: int) -> UserRow[] {
-  sql`SELECT u.name AS name, u.email AS email
+  raw`SELECT u.name AS name, u.email AS email
       FROM {table} u JOIN order_item oi ON oi.user_id = u.id
       WHERE u.total >= ${min} AND u.deleted_at IS NULL`;
 }

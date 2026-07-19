@@ -6,13 +6,13 @@ User { deleted_at: timestamp?, name: text, email: text, total: int }
 shape UserRow from User { name, email }
 
 query heavy_users(min: int) -> UserRow[] {
-  sql`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min} AND u.deleted_at IS NULL`;
+  raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min} AND u.deleted_at IS NULL`;
 }
 
 query untyped(min) -> UserRow[] {
-  sql`SELECT name, email FROM user WHERE total >= ${min}`;
+  raw`SELECT name, email FROM user WHERE total >= ${min}`;
 }
 
 query ctx_leak() -> UserRow[] {
-  sql`SELECT name, email FROM user WHERE org = ${ctx.org}`;
+  raw`SELECT name, email FROM user WHERE org = ${ctx.org}`;
 }

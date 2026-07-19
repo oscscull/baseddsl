@@ -385,7 +385,7 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   dialects lower to `IN (v, v, …)` with variants as wire values and `$param` elements bound.
   Variant nav/rename + fmt cover the new form. The helpdesk `open_states` filter now spells
   `not status in (resolved, closed)`. Proven unit + golden + live SQLite.
-- **NF2. ✅ done (D94). Whole-query raw reads.** `{ sql`…`; }` as a query's whole body
+- **NF2. ✅ done (D94). Whole-query raw reads.** `{ raw`…`; }` as a query's whole body
   (`QueryBody::Raw`): the raw text IS the statement — `${param}` binds positionally,
   `{table}`/`{id}` interpolate the target, the declared (flat) shape types result columns
   by name, and the client/OpenAPI surface is identical to an engine-built query. W0102
@@ -540,7 +540,7 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
 - **NF12. Inline raw SQL has no SQL highlighting in `.bsl` (owner-observed 2026-07-16).**
   The tmLanguage `#raw` rule scopes backtick bodies as one string
   (`string.quoted.other.raw.bsl`, editors/vscode/syntaxes/bsl.tmLanguage.json) — no embedded
-  grammar, so ``sql`concat(first, ' ', last)` `` renders as a flat string. **Requirement
+  grammar, so ``raw`concat(first, ' ', last)` `` renders as a flat string. **Requirement
   (owner, 2026-07-16): the SQL highlighting dialect must match what the user defines as the
   dialect in `based.toml`** — not a generic-SQL guess, no fallback layering. Mechanism
   consequence: a tmLanguage grammar is static and cannot read project config, so the
@@ -555,17 +555,13 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   same semantic-token treatment once NF8(c) gives `.mig` a language contribution — there
   each line's `raw(dialect)` token names its dialect explicitly (agrees with the manifest
   in a single-dialect project; the line token is the more specific signal if they ever
-  differ). See NF14 for the marker spelling.
+  differ). The marker is `raw` (NF14, D96).
 
-- **NF14. Rename the `.bsl` raw marker `sql` → `raw` (owner-flagged 2026-07-16; syntax
-  polish).** The backtick escape hatch is spelled ``sql`…` `` today (grammar.ebnf
-  `raw_sql = 'sql' '`' … '`'`; parser `at_kw("sql")`), but the feature is named **raw**
-  everywhere else — raw.md, the principle ("raw at the leaves"), and the `.mig` step form
-  `raw(dialect)`. Owner: the marker should be `raw` by logic and convention. One spelling
-  across both surfaces; greppability guarantee (raw.md: backtick form = greppable inventory)
-  carries over unchanged (``raw` ``). Touches: grammar.ebnf `raw_sql`, parser keyword,
-  raw.md + shapes.md + queries.md + soft-delete.md examples, tmLanguage keyword/raw rules,
-  conformance goldens.
+- **NF14. ✅ done (D96). Raw marker renamed `sql` → `raw`.** The backtick escape hatch is
+  spelled ``raw`…` `` everywhere — grammar.ebnf, parser keyword, fmt printer, LSP keyword
+  completion, tmLanguage keyword list, spec examples (raw.md/queries.md/soft-delete.md),
+  conformance goldens, helpdesk schema. No back-compat alias: `sql` as a marker is now an
+  ordinary parse error. Greppability carries over unchanged (``raw` ``).
 
 - **NF15. ✅ done (D90). Param bindings are first-class editor references.** Binding idents
   (`-> edge` / `op col`) folded into the LSP reference walk rooted at the query's target

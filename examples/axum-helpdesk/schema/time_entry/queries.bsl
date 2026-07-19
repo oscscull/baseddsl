@@ -10,12 +10,12 @@ mutation log_time(ticket: Id, hours: float, amount: decimal(10, 2), note: text, 
 shape AgentWorkload from User {
   name
   rate
-  open_tickets = sql`(select count(*) from ticket t
+  open_tickets = raw`(select count(*) from ticket t
                       where t.assignee_id = {id} and t.deleted_at is null
                         and t.status not in ('resolved', 'closed'))`
-  hours_logged = sql`(select coalesce(sum(e.hours), 0) from time_entry e
+  hours_logged = raw`(select coalesce(sum(e.hours), 0) from time_entry e
                       where e.agent_id = {id})`
-  billed       = sql`(select coalesce(sum(e.amount), 0) from time_entry e
+  billed       = raw`(select coalesce(sum(e.amount), 0) from time_entry e
                       where e.agent_id = {id})`
 }
 

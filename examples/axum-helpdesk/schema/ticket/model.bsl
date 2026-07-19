@@ -76,5 +76,5 @@ shape TicketExport from Ticket {
   created_at
   org       = org.slug
   requester = requester.email
-  age_days  = sql`extract(day from now() - created_at)::int`
+  age_days  = raw`extract(day from now() - created_at)::int`
 }

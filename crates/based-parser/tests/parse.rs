@@ -432,8 +432,8 @@ fn raw_sql_shape_value_with_interpolation() {
     let sf = parse_ok(
         r#"
         shape U from User {
-          full_name = sql`concat(first, ' ', last)`
-          slug = sql`lower(${name})`
+          full_name = raw`concat(first, ' ', last)`
+          slug = raw`lower(${name})`
         }
         "#,
     );
@@ -467,7 +467,7 @@ fn soft_delete_override_member() {
         r#"
         Doc {
           deleted_at: timestamp?
-          restore: sql`update {table} set deleted_at = null where id = {id}`
+          restore: raw`update {table} set deleted_at = null where id = {id}`
         }
         "#,
     );
@@ -631,12 +631,12 @@ fn callable_scoped_and_unscoped_are_exclusive_forms() {
 
 #[test]
 fn raw_query_body_parses_with_interpolations() {
-    // The whole body is one `sql` backtick block; `${param}` interpolations are
+    // The whole body is one `raw` backtick block; `${param}` interpolations are
     // split out as bound-parameter parts, the SQL text kept verbatim.
     let sf = parse_ok(
         r#"
         query heavy_users(min: int) -> UserRow[] {
-          sql`SELECT u.name AS name FROM user u WHERE u.total >= ${min}`;
+          raw`SELECT u.name AS name FROM user u WHERE u.total >= ${min}`;
         }
         "#,
     );
@@ -652,7 +652,7 @@ fn raw_query_body_parses_with_interpolations() {
     ));
 
     // The terminating `;` is optional inside the block (same leniency as a statement).
-    let sf = parse_ok("query all() -> UserRow[] { sql`SELECT 1` }");
+    let sf = parse_ok("query all() -> UserRow[] { raw`SELECT 1` }");
     let Decl::Query(q) = &sf.decls[0] else {
         panic!("expected query");
     };

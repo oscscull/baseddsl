@@ -278,7 +278,7 @@ pub struct Shape {
 pub enum ShapeField {
     /// local same-name column
     Bare(Ident),
-    /// `out = path` or `out = sql`...``
+    /// `out = path` or `out = raw`...``
     Rename { out: Ident, value: ShapeValue },
     /// `field { ... }` — expand a relation into a sub-object
     Nest { field: Ident, body: Vec<ShapeField> },
@@ -328,7 +328,7 @@ pub enum QueryBody {
     Inline(Vec<Clause>),
     /// `{ get|list ... ; }`
     Block(Statement),
-    /// `{ sql`…`; }` — the whole body is one raw SQL statement (raw.md's whole-query
+    /// `{ raw`…`; }` — the whole body is one raw SQL statement (raw.md's whole-query
     /// level). The engine still binds `${param}` interpolations and types the result
     /// by the declared return shape; everything else (soft-delete, scope, ordering,
     /// dialect portability) is the SQL author's.
@@ -569,7 +569,7 @@ pub enum Literal {
 
 // ---------- Raw SQL escape hatch ------------------------------------------
 
-/// `sql`...`` with `${param}` / `{ident}` interpolations preserved as parts so the
+/// `raw`...`` with `${param}` / `{ident}` interpolations preserved as parts so the
 /// engine can bind params and lint soft-delete gaps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawSql {

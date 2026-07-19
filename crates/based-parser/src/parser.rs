@@ -969,7 +969,7 @@ impl<'a> Parser<'a> {
 
     fn query_block(&mut self) -> PResult<(QueryBody, u32)> {
         self.expect(Tok::LBrace, "`{`")?;
-        // Whole-query raw body (raw.md): the block is one `sql`…`` statement.
+        // Whole-query raw body (raw.md): the block is one `raw`…`` statement.
         if self.is_raw_start() {
             let raw = self.raw_sql()?;
             self.skip_seps(); // the statement-terminating `;`
@@ -981,7 +981,7 @@ impl<'a> Parser<'a> {
         } else if self.eat_kw("list") {
             Verb::List
         } else {
-            self.err("expected `get`, `list`, or a raw `sql` body");
+            self.err("expected `get`, `list`, or a `raw` body");
             return Err(());
         };
         let model = self.upper_ident("model")?;
@@ -1154,7 +1154,7 @@ impl<'a> Parser<'a> {
             Ok(WriteStmt::Raw(self.raw_sql()?))
         } else {
             self.err(
-                "expected a write statement (create/update/delete/restore/hard delete/tx/sql)",
+                "expected a write statement (create/update/delete/restore/hard delete/tx/raw)",
             );
             Err(())
         }
@@ -1525,15 +1525,15 @@ impl<'a> Parser<'a> {
     // ---------- raw SQL ----------------------------------------------------
 
     fn is_raw_start(&self) -> bool {
-        self.at_kw("sql") && self.tok_at(1) == Some(Tok::RawSql)
+        self.at_kw("raw") && self.tok_at(1) == Some(Tok::RawSql)
     }
 
     fn raw_sql(&mut self) -> PResult<RawSql> {
-        let sql_kw = self.expect(Tok::LowerIdent, "`sql`")?;
+        let raw_kw = self.expect(Tok::LowerIdent, "`raw`")?;
         let body = self.expect(Tok::RawSql, "a `...` raw SQL body")?;
         let span = Span {
             file: self.file,
-            start: sql_kw.start,
+            start: raw_kw.start,
             end: body.end,
         };
         let inner = self.text(body);

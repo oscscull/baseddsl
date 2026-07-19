@@ -751,7 +751,7 @@ fn raw_bodied_query_generates_an_ordinary_method() {
         User { name: text, email: text, total: int }
         shape UserRow from User { name, email }
         query heavy_users(min: int) -> UserRow[] {
-          sql`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
+          raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
         }
         "#);
     assert!(

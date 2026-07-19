@@ -715,7 +715,7 @@ fn raw_soft_delete_gap_warns() {
         @soft_delete(deleted_at)
         Product { deleted_at: timestamp?, name: text }
         shape P from Product { name }
-        query q() -> P[] { list Product where (sql`name is not null`) order (name); }
+        query q() -> P[] { list Product where (raw`name is not null`) order (name); }
         "#,
     );
     assert_eq!(codes(&d), ["W0102"]);
@@ -2611,7 +2611,7 @@ fn raw_query_body_with_typed_params_is_clean() {
         User { org: Org, name: text, email: text }
         shape UserRow from User { name, email }
         query heavy_users(min: int) -> UserRow[] {
-          sql`SELECT u.name AS name, u.email AS email FROM user u WHERE u.id >= ${min}`;
+          raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.id >= ${min}`;
         }
         "#,
     );
@@ -2629,7 +2629,7 @@ fn raw_query_scalar_return_needs_no_unique_key() {
         r#"
         User { name: text }
         shape UserRow from User { name }
-        query one(who: text) -> UserRow { sql`SELECT name FROM user WHERE name = ${who}`; }
+        query one(who: text) -> UserRow { raw`SELECT name FROM user WHERE name = ${who}`; }
         "#,
     );
     assert!(d.is_empty(), "{:?}", codes(&d));
@@ -2641,7 +2641,7 @@ fn raw_query_param_must_be_typed() {
         r#"
         User { name: text }
         shape UserRow from User { name }
-        query heavy(min) -> UserRow[] { sql`SELECT name FROM user WHERE id >= ${min}`; }
+        query heavy(min) -> UserRow[] { raw`SELECT name FROM user WHERE id >= ${min}`; }
         "#,
     );
     assert!(errors(&d).contains(&"E0210"), "{:?}", codes(&d));
@@ -2653,7 +2653,7 @@ fn raw_query_param_binding_is_rejected() {
         r#"
         User { name: text, created_at: timestamp }
         shape UserRow from User { name }
-        query heavy(since: timestamp > created_at) -> UserRow[] { sql`SELECT name FROM user`; }
+        query heavy(since: timestamp > created_at) -> UserRow[] { raw`SELECT name FROM user`; }
         "#,
     );
     assert!(errors(&d).contains(&"E0210"), "{:?}", codes(&d));
@@ -2665,7 +2665,7 @@ fn raw_query_unknown_param_is_reported() {
         r#"
         User { name: text }
         shape UserRow from User { name }
-        query heavy() -> UserRow[] { sql`SELECT name FROM user WHERE id = ${nope}`; }
+        query heavy() -> UserRow[] { raw`SELECT name FROM user WHERE id = ${nope}`; }
         "#,
     );
     assert!(errors(&d).contains(&"E0113"), "{:?}", codes(&d));
@@ -2677,7 +2677,7 @@ fn raw_query_ctx_ref_is_rejected() {
         r#"
         User { name: text }
         shape UserRow from User { name }
-        query mine() -> UserRow[] { sql`SELECT name FROM user WHERE org = ${ctx.org}`; }
+        query mine() -> UserRow[] { raw`SELECT name FROM user WHERE org = ${ctx.org}`; }
         "#,
     );
     assert!(errors(&d).contains(&"E0214"), "{:?}", codes(&d));
@@ -2689,7 +2689,7 @@ fn raw_query_cannot_stream() {
         r#"
         User { name: text }
         shape UserRow from User { name }
-        query all() -> stream UserRow { sql`SELECT name FROM user`; }
+        query all() -> stream UserRow { raw`SELECT name FROM user`; }
         "#,
     );
     assert!(errors(&d).contains(&"E0212"), "{:?}", codes(&d));
@@ -2705,7 +2705,7 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
         @scope Tenant
         Ticket { org: Org, title: text }
         shape TicketRow from Ticket { title }
-        query all() -> TicketRow[] scoped Tenant { sql`SELECT title FROM ticket`; }
+        query all() -> TicketRow[] scoped Tenant { raw`SELECT title FROM ticket`; }
     "#;
     let (_, d) = analyze(src_scoped);
     assert!(errors(&d).contains(&"E0211"), "{:?}", codes(&d));
@@ -2716,7 +2716,7 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
         @scope Tenant
         Ticket { org: Org, title: text }
         shape TicketRow from Ticket { title }
-        query all() -> TicketRow[] unscoped("admin report") { sql`SELECT title FROM ticket`; }
+        query all() -> TicketRow[] unscoped("admin report") { raw`SELECT title FROM ticket`; }
     "#;
     let (_, d) = analyze(src_unscoped);
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -2728,7 +2728,7 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
         @scope Tenant
         Ticket { org: Org, title: text }
         shape TicketRow from Ticket { title }
-        query all() -> TicketRow[] { sql`SELECT title FROM ticket`; }
+        query all() -> TicketRow[] { raw`SELECT title FROM ticket`; }
     "#;
     let (_, d) = analyze(src_bare);
     assert!(errors(&d).contains(&"E0182"), "{:?}", codes(&d));
@@ -2741,7 +2741,7 @@ fn raw_query_shape_must_be_flat() {
         Org { name: text }
         User { org: Org, name: text }
         shape UserCard from User { name, org { name } }
-        query all() -> UserCard[] { sql`SELECT name FROM user`; }
+        query all() -> UserCard[] { raw`SELECT name FROM user`; }
         "#,
     );
     assert!(errors(&d).contains(&"E0213"), "{:?}", codes(&d));
@@ -2759,7 +2759,7 @@ fn raw_query_soft_delete_gap_is_linted() {
         Order { deleted_at: timestamp?, user: User, total: int }
         shape UserRow from User { name }
         query buyers() -> UserRow[] {
-          sql`SELECT u.name AS name FROM user u JOIN order o ON o.user_id = u.id WHERE u.deleted_at IS NULL`;
+          raw`SELECT u.name AS name FROM user u JOIN order o ON o.user_id = u.id WHERE u.deleted_at IS NULL`;
         }
         "#,
     );

@@ -519,7 +519,7 @@ mod rust {
     }
 
     /// Build one output struct from a shape body: `(field, type)` pairs plus the
-    /// auxiliary structs for its to-one nested sub-objects. A `sql`…`` field maps to
+    /// auxiliary structs for its to-one nested sub-objects. A `raw`…`` field maps to
     /// `Json`; a to-one nest (`buyer { … }`) becomes a nested struct named
     /// `<Parent><Field>` and the field takes that type (`Option<…>` when the relation
     /// is optional). A to-many nest (`items { … }`) becomes a nested struct wrapped in

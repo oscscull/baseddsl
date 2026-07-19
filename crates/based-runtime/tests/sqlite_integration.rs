@@ -1487,13 +1487,13 @@ async fn raw_query_body_end_to_end() {
         User { deleted_at: timestamp?, name: text, total: int }
         shape UserRow from User { name, total }
         query heavy_users(min: int) -> UserRow[] {
-          sql`SELECT u.name AS name, u.total AS total
+          raw`SELECT u.name AS name, u.total AS total
               FROM {table} u
               WHERE u.total >= ${min} AND u.deleted_at IS NULL
               ORDER BY u.total DESC`;
         }
         query top_user() -> UserRow {
-          sql`SELECT name, total FROM user WHERE deleted_at IS NULL ORDER BY total DESC LIMIT 1`;
+          raw`SELECT name, total FROM user WHERE deleted_at IS NULL ORDER BY total DESC LIMIT 1`;
         }
         "#,
     );

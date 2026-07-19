@@ -910,7 +910,7 @@ async fn stream_mid_pass_db_error_is_the_in_band_error_line_live() {
     let Some((c, router, container)) = live_schema(
         r#"
         Item { id: text, label: text, denom: int }
-        shape ItemRow from Item { label, boom = sql`1 / denom` }
+        shape ItemRow from Item { label, boom = raw`1 / denom` }
         query export_items() -> stream ItemRow;
         "#,
     )

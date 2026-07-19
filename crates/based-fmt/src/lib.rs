@@ -860,7 +860,7 @@ fn primitive(p: Primitive) -> String {
 }
 
 fn raw_sql(r: &RawSql) -> String {
-    let mut s = String::from("sql`");
+    let mut s = String::from("raw`");
     for part in &r.parts {
         match part {
             RawPart::Text(t) => s.push_str(t),

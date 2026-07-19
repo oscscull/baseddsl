@@ -1510,7 +1510,7 @@ const KEYWORDS: &[&str] = &[
     "on",
     "full",
     "stream",
-    "sql",
+    "raw",
     "read",
     "max_rows",
     "unsafe",
@@ -4150,7 +4150,7 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
             "User { name: text, total: int }\n\
              shape UserRow from User { name }\n\
              query heavy(min: int) -> UserRow[] {\n\
-               sql`SELECT name FROM user WHERE total >= ${min}`;\n\
+               raw`SELECT name FROM user WHERE total >= ${min}`;\n\
              }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
@@ -4166,7 +4166,7 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
         let src = &snap.sources[fid].1;
 
         // Hover across the whole raw line never panics.
-        let line_start = src.find("sql`").unwrap() as u32;
+        let line_start = src.find("raw`").unwrap() as u32;
         let line_end = src.find("`;").unwrap() as u32 + 1;
         for off in line_start..line_end {
             let _ = snap.hover_at(fid, off);

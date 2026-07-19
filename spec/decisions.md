@@ -34,7 +34,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution),
   D93 (`in` value-list form: `Predicate::InList`, per-element sema check, `IN (v, v, …)` lowering),
   D94 (whole-query raw bodies: `{ sql`…`; }` is the statement — param-binding + shape-typed
-  results survive, W0102 lints the soft-delete gap, un-composable combinations rejected E0210–E0214)
+  results survive, W0102 lints the soft-delete gap, un-composable combinations rejected E0210–E0214),
+  D96 (raw marker renamed `sql` → `raw` — one spelling with the feature name and the `.mig`
+  `raw(dialect)` step; no alias)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
@@ -4062,3 +4064,33 @@ keeps its captured-pool read (a legitimate pattern; it never used a second engin
 engine dispatching the guarded mutation and the write completes (5s timeout so a
 regression fails fast, never hangs the suite), plus the full existing suites; `make
 check` green end-to-end.
+
+## D96 — raw marker renamed `sql` → `raw` (NF14)
+
+The backtick escape hatch was spelled ``sql`…` `` while the feature is named **raw**
+everywhere else — raw.md ("raw at the leaves"), principle 6's greppable-hatch rule, and
+the `.mig` step form `raw(dialect)`. Owner call: one spelling, `raw`, across both
+surfaces.
+
+**Change.** grammar.ebnf `raw_sql = 'raw' '`' … '`'`; parser `is_raw_start` matches
+`raw` (the lexer is untouched — the marker was always a contextual `LowerIdent`, and
+`raw` stays contextual per D8, so `raw` remains legal as a field/param name); fmt
+prints `raw` + backtick body; LSP keyword completion and the tmLanguage keyword list
+offer/scope `raw` exactly as they did `sql` (same `keyword.control.bsl` scope — no
+highlighting regression); parser error text names the `raw` body form.
+
+**No back-compat alias.** Pre-1.0, all in-repo call sites migrate in the same change;
+``sql` `` is now an ordinary parse error (unknown statement/value token), not a
+special-cased hint. The greppability guarantee carries over unchanged: ``raw` `` is
+the single greppable inventory of every site where guarantees stop, and it now also
+greps *as* the feature name.
+
+**Sweep.** Spec examples (raw.md, queries.md, soft-delete.md, grammar.ebnf comments),
+conformance goldens (`raw_query` both suites), the helpdesk schema's raw leaves
+(`ticket/model.bsl`, `ticket/queries.bsl`, `time_entry/queries.bsl`), and every test
+fixture embedding `.bsl` source (parser/sema/codegen/fmt/LSP/runtime-live). Internal
+Rust names (`RawSql`, `raw_sql`, `Tok::RawSql`) already said raw and are unchanged.
+Historical decision entries keep the old spelling — they record what was decided then.
+
+**Verified:** full workspace suites + conformance + fmt idempotence over the migrated
+schemas + helpdesk live smoke; `make check` green end-to-end.

@@ -10,7 +10,7 @@
 //! - FROM the target model's table (aliased by its table name).
 //! - Projection from the return **shape**: bare fields are local columns, `out =
 //!   path` reaches across relations (each relation step becomes a JOIN), `out =
-//!   sql`…`` is an inline expression. A bare-model return projects every stored
+//!   raw`…`` is an inline expression. A bare-model return projects every stored
 //!   column. A to-one relation `field { … }` nests the target's projected columns
 //!   under a `field`-prefixed alias (`field.<col>`, [`NEST_SEP`]-joined), which the
 //!   runtime reassembles into a sub-object. A to-**many** relation `field { … }`

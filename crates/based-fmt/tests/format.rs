@@ -211,15 +211,15 @@ fn comments_preserved_including_between_decorators() {
 fn raw_query_body_reprints_byte_exactly() {
     // A single-line raw body inlines like a one-clause block; the SQL text between
     // the backticks is opaque and never re-wrapped. Idempotent.
-    let got = fmt("query all()   ->  UserRow[] { sql`SELECT name FROM user` }");
+    let got = fmt("query all()   ->  UserRow[] { raw`SELECT name FROM user` }");
     assert_eq!(
         got,
-        "query all() -> UserRow[] { sql`SELECT name FROM user`; }\n"
+        "query all() -> UserRow[] { raw`SELECT name FROM user`; }\n"
     );
     assert_eq!(fmt(&got), got);
 
     // A multi-line raw body expands to a block, its interior untouched.
-    let src = "query heavy(min: int) -> UserRow[] {\n  sql`SELECT u.name AS name\n      FROM user u\n      WHERE u.total >= ${min}`;\n}\n";
+    let src = "query heavy(min: int) -> UserRow[] {\n  raw`SELECT u.name AS name\n      FROM user u\n      WHERE u.total >= ${min}`;\n}\n";
     let got = fmt(src);
     assert_eq!(got, src);
     assert_eq!(fmt(&got), got);

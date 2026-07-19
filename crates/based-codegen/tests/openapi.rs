@@ -588,7 +588,7 @@ fn raw_bodied_query_documents_like_any_query() {
         User { name: text, email: text, total: int }
         shape UserRow from User { name, email }
         query heavy_users(min: int) -> UserRow[] {
-          sql`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
+          raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
         }
         "#);
     let op = &doc["paths"]["/q/heavy_users"]["post"];
