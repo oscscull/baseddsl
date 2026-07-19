@@ -144,12 +144,12 @@ async fn call(
     args: serde_json::Value,
     ctx: serde_json::Value,
 ) -> based_runtime::WireResponse {
-    let mut ids = UuidGen;
+    let ids = UuidGen;
     dispatch(
         compiled,
         router,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         method,
@@ -314,13 +314,13 @@ async fn idempotency_key_dedupes_a_retried_write() {
         return;
     };
     let store = MemStore::default();
-    let mut ids = UuidGen;
+    let ids = UuidGen;
 
     let first = dispatch(
         &c,
         &router,
         "",
-        &mut ids,
+        &ids,
         &store,
         &Guards::new(),
         "POST",
@@ -336,7 +336,7 @@ async fn idempotency_key_dedupes_a_retried_write() {
         &c,
         &router,
         "",
-        &mut ids,
+        &ids,
         &store,
         &Guards::new(),
         "POST",

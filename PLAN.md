@@ -393,11 +393,12 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   un-composable combinations rejected loudly (E0210 untyped/bound params, E0211 `scoped`,
   E0212 `stream`, E0213 nested shape, E0214 `${ctx.…}`). fmt reprints the block
   byte-exactly; raw.md now spells the shipped contract. Proven unit + golden + live SQLite.
-- **NF3. Guard re-entry deadlocks on the id-gen lock.** Symptom: a guard calling the typed
-  client over its *own* engine hangs — `Engine::call` holds the id-generator mutex across
-  dispatch (guards run inside dispatch). Seam: `Engine::call*` / the id-gen lock scope in
-  based-runtime. Fix: narrow the lock to the id-minting site so dispatch never holds it across
-  await points; then un-write auth.md's second-engine caveat.
+- **NF3. ✅ done (D95). Guard re-entry no longer deadlocks.** `IdGen` mints by `&self`
+  (`Send + Sync`; `SeqIdGen` on an atomic, `UuidGen` stateless), so the engine stores the
+  generator bare — no mutex, nothing held across dispatch's awaits, and the deadlock shape
+  is unrepresentable. Guards run before the mutation's connection checkout, so re-entry is
+  pool-safe too. auth.md's second-engine caveat un-written. Proven by an embed test where
+  the guard calls the typed-client path over its own engine (timeout-bounded).
 - **NF4. `hard delete` with a declared shape is undecodable.** Symptom: a real DELETE returns
   `{}` on the wire (no surviving row to re-select) but the generated method's return type is
   the shape — decode error on every call; the helpdesk's `purge_comment` is declared but

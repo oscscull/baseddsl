@@ -331,7 +331,7 @@ pub async fn run_mutation(
     compiled: &Compiled,
     backend: &dyn Backend,
     shard_key: &str,
-    id_gen: &mut dyn IdGen,
+    id_gen: &dyn IdGen,
     store: &dyn IdempotencyStore,
     req: &Request,
 ) -> Result<serde_json::Value, RunError> {

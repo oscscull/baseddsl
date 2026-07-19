@@ -74,7 +74,7 @@ pub async fn dispatch(
     compiled: &Compiled,
     backend: &dyn Backend,
     shard_key: &str,
-    id_gen: &mut dyn IdGen,
+    id_gen: &dyn IdGen,
     store: &dyn IdempotencyStore,
     guards: &Guards,
     method: &str,

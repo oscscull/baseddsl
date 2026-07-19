@@ -51,9 +51,10 @@ use crate::serve::{dispatch, dispatch_stream, resolve_shard_key, route_target, W
 pub struct Engine {
     compiled: Compiled,
     backend: Arc<dyn Backend>,
-    // The id generator is engine-owned mutable state; an async-aware lock so a call
-    // holding it across dispatch's awaits stays `Send`.
-    id_gen: tokio::sync::Mutex<Box<dyn IdGen>>,
+    // Minting is `&self` (the generator synchronizes internally), so no call ever
+    // holds an engine-wide lock across dispatch — a guard may call back into its
+    // own engine.
+    id_gen: Box<dyn IdGen>,
     // An in-process idempotency store for keyed mutation retries via
     // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
     // [`Engine::call`] (no key) never consults it.
@@ -100,7 +101,7 @@ impl Engine {
         Ok(Engine {
             compiled,
             backend: Arc::new(backend),
-            id_gen: tokio::sync::Mutex::new(Box::new(id_gen)),
+            id_gen: Box::new(id_gen),
             store: MemStore::new(),
             guards,
         })
@@ -139,12 +140,11 @@ impl Engine {
                 resolve_shard_key(&self.compiled, is_mutation, name, &ctx, None)
             })
             .unwrap_or_default();
-        let mut id_gen = self.id_gen.lock().await;
         dispatch(
             &self.compiled,
             &*self.backend,
             &shard_key,
-            id_gen.as_mut(),
+            self.id_gen.as_ref(),
             &self.store,
             &self.guards,
             "POST",

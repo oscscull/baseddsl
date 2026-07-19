@@ -268,8 +268,8 @@ async fn run_until_cancelled(
     store: &dyn IdempotencyStore,
     req: &Request,
 ) -> Option<Result<serde_json::Value, RunError>> {
-    let mut ids = SeqIdGen::default();
-    let mut fut = Box::pin(run_mutation(c, backend, "", &mut ids, store, req));
+    let ids = SeqIdGen::default();
+    let mut fut = Box::pin(run_mutation(c, backend, "", &ids, store, req));
     tokio::select! {
         out = &mut fut => Some(out),
         _ = backend.gate.reached.notified() => None, // `fut` drops on return
@@ -323,7 +323,7 @@ async fn dropping_a_mutation_future_at_every_await_point_is_safe() {
         gate: Gate::unlimited(),
         inner: fresh_backend(&c, "discover").await,
     };
-    let out = run_mutation(&c, &backend, "", &mut SeqIdGen::default(), &NoStore, &req)
+    let out = run_mutation(&c, &backend, "", &SeqIdGen::default(), &NoStore, &req)
         .await
         .expect("ungated run");
     assert_eq!(out, json!({ "email": "a@b.c" }));
@@ -355,16 +355,12 @@ async fn dropping_a_mutation_future_at_every_await_point_is_safe() {
             // ungated, runs green on the same pool. (Skipped for the committed case —
             // the deterministic test ids would collide with the committed rows.)
             if !committed {
-                let redo = run_mutation(
-                    &c,
-                    &backend.inner,
-                    "",
-                    &mut SeqIdGen::default(),
-                    &NoStore,
-                    &req,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("{at}: pool must serve after a cancellation: {e}"));
+                let redo =
+                    run_mutation(&c, &backend.inner, "", &SeqIdGen::default(), &NoStore, &req)
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("{at}: pool must serve after a cancellation: {e}")
+                        });
                 assert_eq!(redo, json!({ "email": "a@b.c" }), "{at}");
             }
         }
@@ -387,16 +383,9 @@ async fn cancellation_releases_an_idempotency_claim_for_retry() {
     let outcome = run_until_cancelled(&c, &backend, &store, &req).await;
     assert!(outcome.is_none(), "expected to park at the first INSERT");
 
-    let redo = run_mutation(
-        &c,
-        &backend.inner,
-        "",
-        &mut SeqIdGen::default(),
-        &store,
-        &req,
-    )
-    .await
-    .expect("a retry after a cancelled keyed mutation must run, not conflict");
+    let redo = run_mutation(&c, &backend.inner, "", &SeqIdGen::default(), &store, &req)
+        .await
+        .expect("a retry after a cancelled keyed mutation must run, not conflict");
     assert_eq!(redo, json!({ "email": "a@b.c" }));
 }
 
@@ -412,10 +401,10 @@ async fn dropping_a_stream_mid_pass_leaves_the_pool_clean() {
     let backend = fresh_backend(&c, "stream-drop").await;
 
     // Two committed users so the pass has more rows than we consume.
-    let mut seed_ids = SeqIdGen::default();
+    let seed_ids = SeqIdGen::default();
     for (email, city) in [("a@b.c", "NYC"), ("b@b.c", "SF")] {
         let req = Request::new("signup", json!({ "email": email, "city": city }), json!({}));
-        based_runtime::run_mutation(&c, &backend, "", &mut seed_ids, &NoStore, &req)
+        based_runtime::run_mutation(&c, &backend, "", &seed_ids, &NoStore, &req)
             .await
             .expect("seed mutation");
     }
@@ -447,7 +436,7 @@ async fn dropping_a_stream_mid_pass_leaves_the_pool_clean() {
         json!({}),
     );
     let redo =
-        based_runtime::run_mutation(&c, &backend, "", &mut SeqIdGen::new("post"), &NoStore, &req)
+        based_runtime::run_mutation(&c, &backend, "", &SeqIdGen::new("post"), &NoStore, &req)
             .await
             .expect("pool must serve after a cancelled stream");
     assert_eq!(redo, json!({ "email": "c@b.c" }));

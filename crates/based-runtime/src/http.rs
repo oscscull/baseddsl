@@ -395,13 +395,13 @@ async fn handle(
         };
     }
 
-    let mut id_gen = UuidGen;
+    let id_gen = UuidGen;
     into_response(
         dispatch(
             &shared.compiled,
             &*shared.backend,
             &d.shard_key,
-            &mut id_gen,
+            &id_gen,
             &shared.idempotency,
             &shared.guards,
             method.as_str(),

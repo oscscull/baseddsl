@@ -319,7 +319,7 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
 pub fn plan_mutation(
     compiled: &Compiled,
     req: &Request,
-    id_gen: &mut dyn IdGen,
+    id_gen: &dyn IdGen,
 ) -> Result<MutationPlan, PlanError> {
     let low = compiled
         .mutations

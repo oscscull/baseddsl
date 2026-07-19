@@ -52,13 +52,13 @@ fn plans_the_commerce_place_order_mutation() {
     // `place_order` creates an Order; the engine generates its id, and the response
     // identifies that row (return model = Order). Order is `@scope`d, so `org` comes
     // from `$ctx` (auto-set on create) — never a body arg.
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let r = Request::new(
         "place_order",
         json!({ "buyer": "user-1", "total": "99.00" }),
         json!({ "org": "org-1" }),
     );
-    let plan = plan_mutation(&c, &r, &mut ids).unwrap();
+    let plan = plan_mutation(&c, &r, &ids).unwrap();
     assert_eq!(plan.stmts.len(), 1);
     assert!(
         plan.stmts[0].sql.contains("INSERT INTO `order`"),

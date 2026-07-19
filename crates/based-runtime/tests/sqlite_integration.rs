@@ -76,12 +76,12 @@ async fn call(
     args: serde_json::Value,
     ctx: serde_json::Value,
 ) -> based_runtime::WireResponse {
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     dispatch(
         compiled,
         backend,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         method,
@@ -774,12 +774,12 @@ async fn nested_to_one_query_returns_nested_json() {
         .expect("seed");
 
     // `get`: the nested object rides back under `placed_by`, not as flat `placed_by.*`.
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
         &backend,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -800,7 +800,7 @@ async fn nested_to_one_query_returns_nested_json() {
         &c,
         &backend,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -874,12 +874,12 @@ async fn absent_optional_to_one_nest_is_json_null() {
         .await
         .expect("seed");
 
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let absent = dispatch(
         &c,
         &backend,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -907,7 +907,7 @@ async fn absent_optional_to_one_nest_is_json_null() {
         &c,
         &backend,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -1444,12 +1444,12 @@ async fn guard_reads_the_live_database_before_the_write() {
         let backend = Arc::clone(&backend);
         let guards = &guards;
         async move {
-            let mut ids = SeqIdGen::default();
+            let ids = SeqIdGen::default();
             dispatch(
                 c,
                 &*backend,
                 "",
-                &mut ids,
+                &ids,
                 &NoStore,
                 guards,
                 "POST",

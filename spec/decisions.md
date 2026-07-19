@@ -27,7 +27,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D81 (`@scope` confines a nest-only scoped child: both shape walks recurse into `Nest`/`NestRef`,
   E0185 at compile time + runtime enforcement kept; type optionality mirrors the schema only),
   D88 (Handle-3 `guard` runtime seam: registered host async fns, deny → 403 `guard_denied`,
-  unregistered fails at engine build / listener startup)
+  unregistered fails at engine build / listener startup), D95 (guard re-entry is safe:
+  id minting is `&self`/internally synchronized, dispatch holds no engine-wide lock —
+  a guard may call the typed client over its own engine)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution),
   D93 (`in` value-list form: `Predicate::InList`, per-element sema check, `IN (v, v, …)` lowering),
@@ -78,7 +80,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   key fingerprint), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
   pool-exhaustion→fast-503), D84 (async-native execution architecture: sqlx driver layer, typestate
   tx, stream-first reads, enforced coloring boundary — Track N0 design), D88 (guard registry on
-  the engine; single dispatch enforcement point on both doors)
+  the engine; single dispatch enforcement point on both doors), D95 (`IdGen` mints by
+  `&self` — the engine wraps the generator in no lock, so no call path holds anything
+  across dispatch's awaits; guard re-entry deadlock made unrepresentable)
 - **HTTP listener** — D21 (`based serve` + multi-dialect readiness)
 - **Dialects & drivers** — D27 (SQLite backend), D28 (SQLite DDL), D29 (Postgres dialect + `$n`
   scanner), D38 (Postgres driver + live suite), D61 (Postgres binary-format result decode: uuid/
@@ -4019,3 +4023,42 @@ E0210 both forms / E0113 / E0214 / E0212 / E0211-vs-unscoped-vs-E0182 / E0213 /
 W0102 ×2 incl. the mention scan), codegen dml ×3 dialects + `;`-normalization,
 client + openapi surface tests, fmt canonical/idempotent (single- + multi-line), LSP
 inertness/rename test, live SQLite end-to-end; full `make check` green.
+
+## D95 — guard re-entry: id minting is `&self`, the engine holds no lock across dispatch (NF3)
+
+The D89-filed deadlock: `Engine::call*` locked the id generator (a `tokio::sync::Mutex`
+around `Box<dyn IdGen>`, whose `next_id(&mut self)` forced exclusive access) for the
+whole of `dispatch`. Guards run *inside* dispatch, so a guard calling the typed client
+over its own engine re-locked the same mutex in the same task and hung — auth.md had to
+carry a "use a second engine" caveat.
+
+**Fix — remove the lock class, don't narrow it.** Minting is a sync, await-free
+operation, so the synchronization belongs inside the generator, not around dispatch:
+`IdGen` becomes `Send + Sync` with `next_id(&self)`. `SeqIdGen` counts on an
+`AtomicU64` (same ids in call order); `UuidGen` is stateless. The engine stores a bare
+`Box<dyn IdGen>` — no mutex at all — and `dispatch`/`run_mutation`/`plan_mutation`
+take `&dyn IdGen`. With nothing to hold, the held-across-await shape is
+*unrepresentable*: a regression can't be reintroduced without re-adding a lock. An
+implementor with real shared state (a hi-lo block allocator) synchronizes internally —
+a short std `Mutex` never held across an await, which is exactly the narrow critical
+section the old design should have had.
+
+Re-entry is also pool-safe, not just lock-safe: dispatch runs a mutation's guard
+*before* checking out its connection, so a guard's own engine calls never contend with
+a checkout the outer request already holds.
+
+**Cancel-safety (D84 I2):** strictly improved — there is no lock to strand or poison on
+cancel; the atomic can at worst skip a sequence number.
+
+**Lock audit:** the id-gen mutex was the only held-across-dispatch lock. `MemStore`'s
+internal std `Mutex` is taken per store operation, never across an await — the correct
+shape, unchanged.
+
+**Docs:** auth.md's second-engine caveat un-written — a guard may read through a
+captured pool *or* call the typed client back over its own engine. The helpdesk guard
+keeps its captured-pool read (a legitimate pattern; it never used a second engine).
+
+**Proven:** an embed test where the registered guard calls `order_by_id` over the very
+engine dispatching the guarded mutation and the write completes (5s timeout so a
+regression fails fast, never hangs the suite), plus the full existing suites; `make
+check` green end-to-end.

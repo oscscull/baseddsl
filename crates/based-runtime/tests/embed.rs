@@ -262,6 +262,7 @@ async fn keyed_mutation_replays_in_process() {
 const GUARDED_SCHEMA: &str = r#"
     Order { status: text, total: int }
     shape OrderCard from Order { status, total }
+    query order_by_id(id) -> OrderCard;
     mutation close_order(id) -> OrderCard guard caller_can_close {
         update Order where (id = $id) { status = "closed" };
     }
@@ -315,6 +316,58 @@ async fn registered_guard_allows_and_denies_in_process() {
         "only agents may close orders"
     );
     // Exactly the allowed call's transaction ran; the denial wrote nothing.
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
+}
+
+/// A guard may call back into the engine that invoked it: dispatch holds no
+/// engine-wide lock, so the re-entrant read completes and the guarded write runs.
+/// Bounded by a timeout so a regression fails fast instead of hanging the suite.
+#[tokio::test]
+async fn guard_reenters_its_own_engine() {
+    use std::sync::{Arc, OnceLock};
+
+    // Result set 0 feeds the guard's re-entrant read; set 1 the mutation's re-select.
+    let db = MockDb::new(vec![
+        vec![row(json!({ "status": "resolved", "total": 9 }))],
+        vec![row(json!({ "status": "closed", "total": 9 }))],
+    ]);
+    let slot: Arc<OnceLock<Arc<Engine>>> = Arc::new(OnceLock::new());
+    let guards = Guards::new().register("caller_can_close", {
+        let slot = Arc::clone(&slot);
+        move |req| {
+            let slot = Arc::clone(&slot);
+            async move {
+                let engine = slot.get().expect("engine is set before any call");
+                let read = engine
+                    .call(
+                        "/q/order_by_id",
+                        json!({ "id": req.args["id"].clone() }),
+                        json!({}),
+                    )
+                    .await;
+                if read.status == 200 && read.body["status"] == "resolved" {
+                    GuardVerdict::Allow
+                } else {
+                    GuardVerdict::deny("only a resolved order can be closed")
+                }
+            }
+        }
+    });
+    let engine = Arc::new(
+        Engine::with_guards(guarded_compiled(), db.clone(), SeqIdGen::default(), guards)
+            .expect("every declared guard is registered"),
+    );
+    assert!(slot.set(Arc::clone(&engine)).is_ok());
+
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.call("/m/close_order", json!({ "id": "o-1" }), json!({})),
+    )
+    .await
+    .expect("guard re-entry must complete, not deadlock");
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(resp.body["status"], "closed");
+    // The guard's read ran outside the write's transaction; exactly one tx ran.
     assert_eq!(db.tx_log(), vec!["begin", "commit"]);
 }
 

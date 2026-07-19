@@ -7,17 +7,20 @@
 
 /// Produces fresh ids for engine-generated `id` columns. Called once per `create`
 /// (and once more is never needed — a `^.id` back-reference *reuses* the value the
-/// prior create already generated, it does not draw a new one). `Send` so an engine
-/// holding one stays shareable across tasks.
-pub trait IdGen: Send {
-    fn next_id(&mut self) -> String;
+/// prior create already generated, it does not draw a new one). Minting takes `&self`
+/// and may run from any number of concurrent requests, so an implementation with
+/// state synchronizes it internally (an atomic or a short std `Mutex`) — dispatch
+/// never wraps the generator in a lock of its own, which is what lets a guard call
+/// back into its own engine.
+pub trait IdGen: Send + Sync {
+    fn next_id(&self) -> String;
 }
 
 /// A deterministic generator for tests: `<prefix>-0`, `<prefix>-1`, … in call order.
 /// Not for production (ids must be unpredictable + globally unique).
 pub struct SeqIdGen {
     prefix: String,
-    n: u64,
+    n: std::sync::atomic::AtomicU64,
 }
 
 impl SeqIdGen {
@@ -25,7 +28,7 @@ impl SeqIdGen {
     pub fn new(prefix: impl Into<String>) -> Self {
         SeqIdGen {
             prefix: prefix.into(),
-            n: 0,
+            n: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -38,25 +41,23 @@ impl Default for SeqIdGen {
 }
 
 impl IdGen for SeqIdGen {
-    fn next_id(&mut self) -> String {
-        let id = format!("{}-{}", self.prefix, self.n);
-        self.n += 1;
-        id
+    fn next_id(&self) -> String {
+        let n = self.n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{}-{}", self.prefix, n)
     }
 }
 
 /// The production generator: a fresh random v4 uuid per `create`. Unpredictable and
 /// globally unique — no coordination with the database, so a `create`'s id is known
 /// before the INSERT, which is what lets a `^.id` back-reference bind the same value the
-/// INSERT used. One is built per request in `based serve` (id state is per-request, never
-/// shared across threads).
+/// INSERT used. Stateless, so concurrent mints need no synchronization.
 #[cfg(feature = "serve")]
 #[derive(Default)]
 pub struct UuidGen;
 
 #[cfg(feature = "serve")]
 impl IdGen for UuidGen {
-    fn next_id(&mut self) -> String {
+    fn next_id(&self) -> String {
         uuid::Uuid::new_v4().to_string()
     }
 }

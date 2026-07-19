@@ -58,12 +58,12 @@ const SCHEMA: &str = r#"
 async fn query_route_returns_shaped_response() {
     let c = compile(SCHEMA);
     let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 42 }))]]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -90,12 +90,12 @@ async fn list_route_returns_array() {
         row(json!({ "status": "paid", "total": 1 })),
         row(json!({ "status": "open", "total": 2 })),
     ]]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -117,12 +117,12 @@ async fn mutation_route_returns_the_created_rows_declared_shape() {
     let c = compile(SCHEMA);
     // The re-select of `OrderCard { status, total }` after the INSERT.
     let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -157,12 +157,12 @@ async fn zero_row_mutation_maps_to_404_not_found() {
     );
     // The UPDATE matches nothing, so the declared-shape re-select reads back no row.
     let db = MockDb::new(vec![vec![]]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -183,7 +183,7 @@ async fn zero_row_mutation_maps_to_404_not_found() {
 #[tokio::test]
 async fn ctx_supplied_out_of_band_and_required() {
     let c = compile(SCHEMA);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     // Provided → 200.
     let db = MockDb::new(vec![vec![row(json!({ "status": "paid", "total": 1 }))]]);
@@ -191,7 +191,7 @@ async fn ctx_supplied_out_of_band_and_required() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -213,7 +213,7 @@ async fn ctx_supplied_out_of_band_and_required() {
         &c,
         &db2,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -232,13 +232,13 @@ async fn ctx_supplied_out_of_band_and_required() {
 async fn arg_validation_maps_to_400() {
     let c = compile(SCHEMA);
     let db = MockDb::new(vec![]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     let missing = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -255,7 +255,7 @@ async fn arg_validation_maps_to_400() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -277,13 +277,13 @@ async fn arg_validation_maps_to_400() {
 async fn unknown_and_mismatched_routes_404() {
     let c = compile(SCHEMA);
     let db = MockDb::new(vec![]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     let unknown = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -301,7 +301,7 @@ async fn unknown_and_mismatched_routes_404() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -322,12 +322,12 @@ async fn unknown_and_mismatched_routes_404() {
 async fn db_fault_maps_to_503() {
     let c = compile(SCHEMA);
     let db = MockDb::failing("connection reset by peer");
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -347,14 +347,14 @@ async fn db_fault_maps_to_503() {
 async fn bad_route_and_method() {
     let c = compile(SCHEMA);
     let db = MockDb::new(vec![]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     for path in ["/", "/q", "/q/", "/x/order_by_id", "/q/a/b"] {
         let r = dispatch(
             &c,
             &db,
             "",
-            &mut ids,
+            &ids,
             &NoStore,
             &Guards::new(),
             "POST",
@@ -372,7 +372,7 @@ async fn bad_route_and_method() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "GET",
@@ -396,12 +396,12 @@ async fn idempotency_key_dedupes_a_mutation_retry() {
 
     // First attempt: the INSERT + the shaped re-select run, response recorded.
     let db1 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
-    let mut ids1 = SeqIdGen::default();
+    let ids1 = SeqIdGen::default();
     let first = dispatch(
         &c,
         &db1,
         "",
-        &mut ids1,
+        &ids1,
         &store,
         &Guards::new(),
         "POST",
@@ -418,12 +418,12 @@ async fn idempotency_key_dedupes_a_mutation_retry() {
 
     // Retry with the same key on a fresh connection: replayed, no SQL, no transaction.
     let db2 = MockDb::new(vec![vec![row(json!({ "status": "SHOULD-NOT-BE-READ" }))]]);
-    let mut ids2 = SeqIdGen::default();
+    let ids2 = SeqIdGen::default();
     let retry = dispatch(
         &c,
         &db2,
         "",
-        &mut ids2,
+        &ids2,
         &store,
         &Guards::new(),
         "POST",
@@ -449,12 +449,12 @@ async fn failed_keyed_mutation_is_retryable() {
 
     // First attempt faults mid-write → 503, key abandoned.
     let db1 = MockDb::failing("connection lost");
-    let mut ids1 = SeqIdGen::default();
+    let ids1 = SeqIdGen::default();
     let first = dispatch(
         &c,
         &db1,
         "",
-        &mut ids1,
+        &ids1,
         &store,
         &Guards::new(),
         "POST",
@@ -468,12 +468,12 @@ async fn failed_keyed_mutation_is_retryable() {
 
     // Retry with the same key succeeds — it was not blocked as a duplicate.
     let db2 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
-    let mut ids2 = SeqIdGen::default();
+    let ids2 = SeqIdGen::default();
     let retry = dispatch(
         &c,
         &db2,
         "",
-        &mut ids2,
+        &ids2,
         &store,
         &Guards::new(),
         "POST",
@@ -496,12 +496,12 @@ async fn bad_request_does_not_consume_the_key() {
 
     // A mistyped `total` → 400 before any store interaction.
     let db1 = MockDb::new(vec![]);
-    let mut ids1 = SeqIdGen::default();
+    let ids1 = SeqIdGen::default();
     let bad = dispatch(
         &c,
         &db1,
         "",
-        &mut ids1,
+        &ids1,
         &store,
         &Guards::new(),
         "POST",
@@ -515,12 +515,12 @@ async fn bad_request_does_not_consume_the_key() {
 
     // The corrected request with the same key runs — the key was never claimed.
     let db2 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
-    let mut ids2 = SeqIdGen::default();
+    let ids2 = SeqIdGen::default();
     let ok = dispatch(
         &c,
         &db2,
         "",
-        &mut ids2,
+        &ids2,
         &store,
         &Guards::new(),
         "POST",
@@ -545,12 +545,12 @@ async fn reused_key_with_different_args_is_a_422() {
 
     // First request under the key: runs and records its response.
     let db1 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]);
-    let mut ids1 = SeqIdGen::default();
+    let ids1 = SeqIdGen::default();
     let first = dispatch(
         &c,
         &db1,
         "",
-        &mut ids1,
+        &ids1,
         &store,
         &Guards::new(),
         "POST",
@@ -564,12 +564,12 @@ async fn reused_key_with_different_args_is_a_422() {
 
     // Same key, *different* payload (`total` 999) → 422, no write, no replay.
     let db2 = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 999 }))]]);
-    let mut ids2 = SeqIdGen::default();
+    let ids2 = SeqIdGen::default();
     let reuse = dispatch(
         &c,
         &db2,
         "",
-        &mut ids2,
+        &ids2,
         &store,
         &Guards::new(),
         "POST",
@@ -593,12 +593,12 @@ async fn reused_key_with_different_args_is_a_422() {
     // The genuine retry (same key *and* payload) still replays the first response — the
     // mismatch above didn't disturb the recorded entry.
     let db3 = MockDb::new(vec![]);
-    let mut ids3 = SeqIdGen::default();
+    let ids3 = SeqIdGen::default();
     let retry = dispatch(
         &c,
         &db3,
         "",
-        &mut ids3,
+        &ids3,
         &store,
         &Guards::new(),
         "POST",
@@ -641,13 +641,13 @@ async fn declared_guard_runs_and_allows() {
         *observed.lock().unwrap() = Some(req);
         async { GuardVerdict::Allow }
     });
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &guards,
         "POST",
@@ -677,13 +677,13 @@ async fn guard_denial_is_403_and_runs_no_sql() {
     let guards = Guards::new().register("caller_can_close", |_req| async {
         GuardVerdict::deny("only agents may close orders")
     });
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &guards,
         "POST",
@@ -713,13 +713,13 @@ async fn guard_denial_is_403_and_runs_no_sql() {
 async fn unregistered_declared_guard_is_a_loud_500() {
     let c = compile(GUARDED_SCHEMA);
     let db = MockDb::new(vec![]);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     let resp = dispatch(
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Guards::new(),
         "POST",
@@ -749,7 +749,7 @@ async fn guard_denial_never_claims_the_idempotency_key() {
 
     let c = compile(GUARDED_SCHEMA);
     let store = MemStore::default();
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
 
     let deny = Guards::new().register("caller_can_close", |_req| async {
         GuardVerdict::deny("not yet")
@@ -758,7 +758,7 @@ async fn guard_denial_never_claims_the_idempotency_key() {
         &c,
         &MockDb::new(vec![]),
         "",
-        &mut ids,
+        &ids,
         &store,
         &deny,
         "POST",
@@ -778,7 +778,7 @@ async fn guard_denial_never_claims_the_idempotency_key() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &store,
         &allow,
         "POST",

@@ -58,14 +58,14 @@ const CREATE_SCHEMA: &str = r#"
 #[test]
 fn create_generates_id_and_binds_params_positionally() {
     let c = compile(CREATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let plan = plan_mutation(
         &c,
         &req(
             "place_order",
             json!({ "org": "o-1", "buyer": "u-1", "total": 42 }),
         ),
-        &mut ids,
+        &ids,
     )
     .unwrap();
 
@@ -95,7 +95,7 @@ fn create_generates_id_and_binds_params_positionally() {
 #[tokio::test]
 async fn run_create_reselects_the_declared_shape_inside_the_tx() {
     let c = compile(CREATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     // The mutation returns `OrderCard { total }`, so after the INSERT the engine
     // re-selects the created row in that shape. The mock replies to that fetch
     // with the shaped row — which becomes the response, not a bare `{ id }`.
@@ -104,7 +104,7 @@ async fn run_create_reselects_the_declared_shape_inside_the_tx() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &req(
             "place_order",
@@ -135,17 +135,16 @@ async fn run_create_reselects_the_declared_shape_inside_the_tx() {
 #[test]
 fn missing_required_arg_is_rejected_before_id_gen() {
     let c = compile(CREATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
-    let err =
-        plan_mutation(&c, &req("place_order", json!({ "org": "o-1" })), &mut ids).unwrap_err();
+    let ids = SeqIdGen::default();
+    let err = plan_mutation(&c, &req("place_order", json!({ "org": "o-1" })), &ids).unwrap_err();
     assert_eq!(err, PlanError::MissingArg("buyer".into()));
 }
 
 #[test]
 fn unknown_mutation_is_rejected() {
     let c = compile(CREATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
-    let err = plan_mutation(&c, &req("nope", json!({})), &mut ids).unwrap_err();
+    let ids = SeqIdGen::default();
+    let err = plan_mutation(&c, &req("nope", json!({})), &ids).unwrap_err();
     assert_eq!(err, PlanError::UnknownMutation("nope".into()));
 }
 
@@ -170,13 +169,13 @@ const UPDATE_SCHEMA: &str = r#"
 #[test]
 fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
     let c = compile(UPDATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let r = Request::new(
         "set_status",
         json!({ "id": "ord-9", "status": "shipped" }),
         json!({ "org": "org-7" }),
     );
-    let plan = plan_mutation(&c, &r, &mut ids).unwrap();
+    let plan = plan_mutation(&c, &r, &ids).unwrap();
 
     let s = &plan.stmts[0];
     assert!(s.sql.starts_with("UPDATE `order`"), "{}", s.sql);
@@ -210,11 +209,11 @@ fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
 #[test]
 fn update_missing_ctx_is_rejected() {
     let c = compile(UPDATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let err = plan_mutation(
         &c,
         &req("set_status", json!({ "id": "ord-9", "status": "x" })),
-        &mut ids,
+        &ids,
     )
     .unwrap_err();
     assert_eq!(err, PlanError::MissingCtx("org".into()));
@@ -233,7 +232,7 @@ async fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
         }
         "#,
     );
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     // The soft-deleted row survives (tombstoned), so after the write the engine re-selects
     // it in its declared shape — the mock replies to that fetch with the shaped row.
     let db = MockDb::new(vec![vec![row(json!({ "status": "cancelled" }))]]);
@@ -241,7 +240,7 @@ async fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &req("remove", json!({ "id": "ord-1" })),
     )
@@ -272,7 +271,7 @@ async fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
 #[tokio::test]
 async fn zero_row_update_is_not_found_and_rolls_back() {
     let c = compile(UPDATE_SCHEMA);
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     // The write's `where` (id + injected scope) matches nothing — e.g. a cross-tenant
     // id — so the declared-shape re-select reads back no row. The mock answers the
     // re-select fetch with zero rows.
@@ -281,7 +280,7 @@ async fn zero_row_update_is_not_found_and_rolls_back() {
         &c,
         &db,
         "",
-        &mut ids,
+        &ids,
         &NoStore,
         &Request::new(
             "set_status",
@@ -314,11 +313,11 @@ async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
         }
         "#,
     );
-    let mut ids = SeqIdGen::default();
+    let ids = SeqIdGen::default();
     let plan = plan_mutation(
         &c,
         &req("signup", json!({ "email": "a@b.c", "city": "NYC" })),
-        &mut ids,
+        &ids,
     )
     .unwrap();
 
@@ -361,7 +360,7 @@ async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
         &c,
         &db,
         "",
-        &mut SeqIdGen::default(),
+        &SeqIdGen::default(),
         &NoStore,
         &req("signup", json!({ "email": "a@b.c", "city": "NYC" })),
     )
@@ -458,7 +457,7 @@ async fn mutation_retries_a_deadlocked_transaction_then_commits() {
         &c,
         &db,
         "",
-        &mut SeqIdGen::default(),
+        &SeqIdGen::default(),
         &NoStore,
         &req(
             "place_order",
@@ -482,7 +481,7 @@ async fn mutation_gives_up_after_bounded_deadlock_retries() {
         &c,
         &db,
         "",
-        &mut SeqIdGen::default(),
+        &SeqIdGen::default(),
         &NoStore,
         &req(
             "place_order",
