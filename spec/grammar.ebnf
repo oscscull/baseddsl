@@ -190,7 +190,11 @@ param_binding = '->' field_name                          (* bind via edge      *
 (* Stream-returning client method. `stream` already means many, so no `[]` after  *)
 (* the shape. Query-only (a mutation return never streams, E0202); body verb must *)
 (* be `list` (E0200); `page` is forbidden on a stream query (E0201).              *)
-ret_type    = 'stream' type_ref | type_ref [ '[]' ] ;
+(* `ok` = the shapeless acknowledgement of a destructive mutation (mutations.md): *)
+(* a real DELETE leaves no surviving row, so there is no shape to read back.      *)
+(* Mutation-only (a query returns data, E0222) and only where every write is a    *)
+(* real DELETE (E0221); a real-DELETE mutation may not declare a shape (E0220).   *)
+ret_type    = 'ok' | 'stream' type_ref | type_ref [ '[]' ] ;
 type_ref    = shape_name | model_ref ;  (* a shape or a model's `full`         *)
 
 (* Inline tail clauses allowed on an otherwise-bare query (e.g. `order (...)`). *)
@@ -305,8 +309,8 @@ raw_char    = ? any char except '`' and an interp opener ? ;
 (* columns/tables may also be aliased via (column "...") / @table("...").        *)
 (* Keyword-in-position set additionally includes `scope` (decl head + `@scope`)  *)
 (* and `scoped` (the callable acknowledgement) — D46; both contextual. `enum`     *)
-(* (decl head, enums.md) is likewise contextual, as is `stream` (return-type      *)
-(* position only, streaming.md).                                                   *)
+(* (decl head, enums.md) is likewise contextual, as are `stream` and `ok`          *)
+(* (return-type position only; streaming.md / mutations.md).                       *)
 ident       = lower_ident | upper_ident ;
 lower_ident = lower_alpha { alnum | '_' } ;
 upper_ident = upper_alpha { alnum } ;   (* UpperCamel model references         *)

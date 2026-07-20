@@ -1,0 +1,3 @@
+OK
+model Tag  decorators=[]  fields=1  indexes=0
+mutation drop_tag  params=1  ret=ok  writes=1

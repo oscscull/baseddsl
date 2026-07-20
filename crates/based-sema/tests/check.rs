@@ -2771,3 +2771,156 @@ fn raw_query_soft_delete_gap_is_linted() {
     assert_eq!(warns.len(), 2, "{:?}", codes(&d));
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
 }
+
+// ---------- `-> ok`: the destructive-mutation acknowledgement ----------------
+
+#[test]
+fn ack_hard_delete_resolves_the_deleted_model() {
+    let (schema, d) = analyze(
+        r#"
+        @soft_delete(deleted_at)
+        Comment { deleted_at: timestamp?, body: text }
+        mutation purge_comment(id: Id) -> ok {
+          hard delete Comment where (id = $id);
+        }
+        "#,
+    );
+    assert!(d.is_empty(), "{:?}", codes(&d));
+    let m = &schema.mutations[0];
+    assert!(m.ack);
+    assert_eq!(m.ret_model, "Comment");
+    assert_eq!(m.ret_shape, None);
+}
+
+#[test]
+fn ack_plain_delete_on_plain_model_is_clean() {
+    let (schema, d) = analyze(
+        r#"
+        Tag { label: text }
+        mutation drop_tag(id: Id) -> ok {
+          delete Tag where (id = $id);
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    assert!(schema.mutations[0].ack);
+}
+
+#[test]
+fn shape_on_real_delete_is_rejected() {
+    // No surviving row to read back as the shape → E0220.
+    let (_, d) = analyze(
+        r#"
+        Tag { label: text }
+        shape TagCard from Tag { label }
+        mutation drop_tag(id: Id) -> TagCard {
+          delete Tag where (id = $id);
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0220"), "{:?}", codes(&d));
+}
+
+#[test]
+fn shape_on_hard_delete_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        @soft_delete(deleted_at)
+        Comment { deleted_at: timestamp?, body: text }
+        shape CommentRow from Comment { body }
+        mutation purge_comment(id: Id) -> CommentRow {
+          hard delete Comment where (id = $id);
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0220"), "{:?}", codes(&d));
+}
+
+#[test]
+fn shape_survives_when_a_tx_sibling_creates_the_return_row() {
+    // The delete removes one model's row, but the return model is re-created by a
+    // sibling write — a surviving row exists, so the declared shape stands.
+    let (_, d) = analyze(
+        r#"
+        Tag { label: text }
+        Audit { note: text }
+        shape AuditRow from Audit { note }
+        mutation drop_tag(id: Id, note: text) -> AuditRow {
+          tx {
+            delete Tag where (id = $id);
+            create Audit { note = $note };
+          }
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn ack_on_soft_delete_is_rejected() {
+    // A plain `delete` on a soft-delete model tombstones — the row survives (E0221).
+    let (_, d) = analyze(
+        r#"
+        @soft_delete(deleted_at)
+        Comment { deleted_at: timestamp?, body: text }
+        mutation remove_comment(id: Id) -> ok {
+          delete Comment where (id = $id);
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0221"), "{:?}", codes(&d));
+}
+
+#[test]
+fn ack_on_create_or_update_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Tag { label: text }
+        mutation rename_tag(id: Id, label: text) -> ok {
+          update Tag where (id = $id) { label = $label };
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0221"), "{:?}", codes(&d));
+}
+
+#[test]
+fn ack_without_a_real_delete_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Tag { label: text }
+        mutation noop() -> ok {
+          raw`ANALYZE`;
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0221"), "{:?}", codes(&d));
+}
+
+#[test]
+fn ack_on_a_query_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Tag { label: text }
+        query tags() -> ok;
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0222"), "{:?}", codes(&d));
+}
+
+#[test]
+fn ack_scoped_hard_delete_keeps_scope_ack_checking() {
+    // The ack mutation still owes the scope acknowledgement for the model it deletes.
+    let (_, d) = analyze(
+        r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Comment { org: Org, body: text }
+        mutation purge_comment(id: Id) -> ok {
+          hard delete Comment where (id = $id);
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0182"), "{:?}", codes(&d));
+}

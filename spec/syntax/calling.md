@@ -32,6 +32,13 @@ conversion. There is deliberately **no** blanket `From<String>` — that would r
 hole; turning a raw string into a typed id is an explicit, greppable `Id::from_raw(s)`
 (mirroring how `unscoped(...)` makes the unsafe escape visible, principle 1/6).
 
+## Acknowledgement mutations (`-> ok`)
+A destructive mutation (`-> ok`, mutations.md) has no row to return: the wire success is `{}`, the
+generated method returns **unit** — `purge_comment(input, ctx)` is `Result<(), ClientError>` — and
+OpenAPI advertises the shared empty `Ack` object schema. Its keyed twin returns unit the same way.
+A DELETE matching no row (absent, or another scope's) is the standard `404 not_found` error, so a
+caller always gets a verdict, never an empty success for a miss.
+
 ## Pagination envelope
 A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque cursor for the next page. Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).
 
@@ -82,4 +89,4 @@ Every client method returns `Result<Output, ClientError>`. `ClientError` is a re
 - `code()` → a stable machine string: the server's `error.code` for an api failure (e.g. `bad_arg`, `missing_ctx`, `database_error`), else `"transport"` / `"decode"`.
 - `status()` → the HTTP status of an api failure (`None` for transport/decode).
 
-The wire error envelope is `{ error: { code, message } }`; the embedded bridge and any HTTP transport rebuild a `ClientError` from it, preserving the server's status + stable code + message rather than flattening to an opaque string. The codes are those the runtime emits — `PlanError::code()` (boundary: `unknown_query`, `missing_arg`, `bad_arg`, `missing_ctx`, `bad_ctx`, `bad_cursor`, `internal`), `DbError::code()` (operational: `database_error`, `deadlock`, `pool_exhausted`), `not_found` (404 — a surviving-write mutation's `where`, with its scope/soft-delete guards, matched no row; nothing was written, mutations.md), the keyed-mutation outcomes (`idempotency_conflict` 409, `idempotency_key_reuse` 422), and `guard_denied` (403 — a Handle-3 guard rejected the call, auth.md) — a single source of truth shared by the wire and any in-process consumer.
+The wire error envelope is `{ error: { code, message } }`; the embedded bridge and any HTTP transport rebuild a `ClientError` from it, preserving the server's status + stable code + message rather than flattening to an opaque string. The codes are those the runtime emits — `PlanError::code()` (boundary: `unknown_query`, `missing_arg`, `bad_arg`, `missing_ctx`, `bad_ctx`, `bad_cursor`, `internal`), `DbError::code()` (operational: `database_error`, `deadlock`, `pool_exhausted`), `not_found` (404 — a mutation's `where`, with its scope/soft-delete guards, matched no row: a surviving write's empty read-back or an `-> ok` DELETE affecting zero rows; nothing was written, mutations.md), the keyed-mutation outcomes (`idempotency_conflict` 409, `idempotency_key_reuse` 422), and `guard_denied` (403 — a Handle-3 guard rejected the call, auth.md) — a single source of truth shared by the wire and any in-process consumer.

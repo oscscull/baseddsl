@@ -501,6 +501,11 @@ pub enum Role {
 
 // ---------- output types ----------
 
+/// The empty acknowledgement a `-> ok` mutation answers with (`{}` on the wire —
+/// a real DELETE leaves no row to return). Methods decode it and return `()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ack {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommentRow {
     pub id: Id<entity::Comment>,
@@ -915,9 +920,11 @@ impl<T: Transport> Client<T> {
     ) -> Result<CommentRow, ClientError> {
         self.transport.call_with_key(ADD_COMMENT_ROUTE, &input, &ctx, key).await
     }
-    /// `POST /m/purge_comment`
-    pub async fn purge_comment(&self, input: PurgeCommentInput, ctx: PurgeCommentCtx) -> Result<CommentRow, ClientError> {
-        self.transport.call(PURGE_COMMENT_ROUTE, &input, &ctx).await
+    /// `POST /m/purge_comment` — a `-> ok` mutation: the delete ran (`Ok(())`), or the
+    /// row was absent/out of scope (a `404 not_found` error).
+    pub async fn purge_comment(&self, input: PurgeCommentInput, ctx: PurgeCommentCtx) -> Result<(), ClientError> {
+        let _: Ack = self.transport.call(PURGE_COMMENT_ROUTE, &input, &ctx).await?;
+        Ok(())
     }
     /// `POST /m/purge_comment` carrying `key` as the mutation **idempotency key**: a retry
     /// with the same key replays the first attempt's response instead of writing again.
@@ -926,8 +933,9 @@ impl<T: Transport> Client<T> {
         input: PurgeCommentInput,
         ctx: PurgeCommentCtx,
         key: &str,
-    ) -> Result<CommentRow, ClientError> {
-        self.transport.call_with_key(PURGE_COMMENT_ROUTE, &input, &ctx, key).await
+    ) -> Result<(), ClientError> {
+        let _: Ack = self.transport.call_with_key(PURGE_COMMENT_ROUTE, &input, &ctx, key).await?;
+        Ok(())
     }
     /// `POST /q/my_drafts`
     pub async fn my_drafts(&self, input: MyDraftsInput, ctx: MyDraftsCtx) -> Result<Vec<DraftRow>, ClientError> {

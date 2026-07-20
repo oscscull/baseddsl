@@ -147,8 +147,7 @@ fn hard_delete_emits_real_delete_and_keeps_scope() {
         @soft_delete(deleted_at)
         @scope Tenant
         Order { deleted_at: timestamp?, org: Org, status: text }
-        shape OrderCard from Order { status }
-        mutation purge(id: Id) -> OrderCard scoped Tenant {
+        mutation purge(id: Id) -> ok scoped Tenant {
           hard delete Order where (id = $id);
         }
         "#);
@@ -198,8 +197,7 @@ fn restore_clears_tombstone_without_live_predicate() {
 fn delete_on_plain_model_is_a_real_delete() {
     let out = gen(r#"
         Tag { label: text }
-        shape TagCard from Tag { label }
-        mutation drop_tag(id: Id) -> TagCard {
+        mutation drop_tag(id: Id) -> ok {
           delete Tag where (id = $id);
         }
         "#);
@@ -347,12 +345,11 @@ fn soft_delete_mutation_reselects_without_the_live_predicate() {
 
 #[test]
 fn hard_delete_mutation_emits_no_reselect() {
-    // A real DELETE removes the row — no surviving row to read back, so no re-select
-    // (the response falls back to `{}` at runtime).
+    // A real DELETE removes the row — no surviving row to read back, so an `-> ok`
+    // mutation emits no re-select (the response is `{}` at runtime).
     let out = gen(r#"
         Tag { label: text }
-        shape TagCard from Tag { label }
-        mutation drop_tag(id: Id) -> TagCard {
+        mutation drop_tag(id: Id) -> ok {
           delete Tag where (id = $id);
         }
         "#);
@@ -562,8 +559,7 @@ fn pg_hard_delete_across_relation_uses_using_clause() {
         r#"
         Org { name: text }
         Order { org: Org, status: text }
-        shape OrderCard from Order { status }
-        mutation purge(name: text) -> OrderCard {
+        mutation purge(name: text) -> ok {
           hard delete Order where (org.name = $name);
         }
         "#,

@@ -654,3 +654,70 @@ async fn keyed_mutation_has_no_double_effect_on_live_sqlite() {
         .expect("list runs");
     assert_eq!(rows.len(), 1, "the retry must not insert a second row");
 }
+
+/// The `-> ok` acknowledgement against a real database, through the typed client:
+/// `purge_order` (a `hard delete`) returns `Ok(())` and the row is really gone; the
+/// same call again — the row no longer exists — is the engine's `404 not_found`,
+/// surfaced as a typed `ClientError` with the stable code.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::SqliteBackend;
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES
+                ('o-1', 'org-1', 'open', 10);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    // The purge acknowledges with unit, and the row is really gone.
+    api.purge_order(
+        client::PurgeOrderInput {
+            id: client::Id::from_raw("o-1"),
+        },
+        (),
+    )
+    .await
+    .expect("the hard delete acknowledges");
+    let rows = api
+        .orders_in_org(
+            client::OrdersInOrgInput {
+                org: client::Id::from_raw("org-1"),
+            },
+            (),
+        )
+        .await
+        .expect("list runs");
+    assert!(rows.is_empty(), "the purged row must be gone");
+
+    // Purging it again matches nothing: a typed 404 with the stable code.
+    let err = api
+        .purge_order(
+            client::PurgeOrderInput {
+                id: client::Id::from_raw("o-1"),
+            },
+            (),
+        )
+        .await
+        .expect_err("a missing row is a not-found, never an empty success");
+    assert_eq!(err.status(), Some(404), "{err}");
+    assert_eq!(err.code(), "not_found");
+}

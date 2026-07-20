@@ -120,6 +120,9 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
     let mut schemas = Map::new();
     schemas.insert("Error".to_string(), error_schema());
     schemas.insert("MutationResult".to_string(), mutation_result_schema());
+    if schema.mutations.iter().any(|m| m.ack) {
+        schemas.insert("Ack".to_string(), ack_schema());
+    }
 
     let mut seen: Vec<String> = Vec::new();
     for c in &callables {
@@ -328,24 +331,35 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                 let Some(rm) = mutations.get(m.name.node.as_str()) else {
                     continue;
                 };
-                let root = schema.model(&m.ret.ty.node).or_else(|| {
-                    schema
-                        .shapes
-                        .iter()
-                        .find(|s| s.name == m.ret.ty.node)
-                        .and_then(|s| schema.model(&s.from))
-                });
+                // `-> ok` names no shape/model: the primary written model (sema's
+                // `ret_model`) types the params; the `200` is the shared empty `Ack`.
+                let root = if rm.ack {
+                    schema.model(&rm.ret_model)
+                } else {
+                    schema.model(&m.ret.ty.node).or_else(|| {
+                        schema
+                            .shapes
+                            .iter()
+                            .find(|s| s.name == m.ret.ty.node)
+                            .and_then(|s| schema.model(&s.from))
+                    })
+                };
                 // A mutation only advertises its declared shape when it re-selects one
                 // (a create-returning mutation); a pure update/delete responds
                 // `{ id }`, so it emits no object schema and points at `MutationResult`.
                 let has_reselect = rm.ret_shape.is_some() || schema.model(&m.ret.ty.node).is_some();
-                let os = out_schema(schema, decls, &m.ret, root, !has_reselect);
+                let os = out_schema(schema, decls, &m.ret, root, rm.ack || !has_reselect);
+                let response = if rm.ack {
+                    schema_ref("Ack")
+                } else {
+                    mutation_response(m, &os)
+                };
                 out.push(Callable {
                     name: &m.name.node,
                     route: format!("/m/{}", m.name.node),
                     params: &m.params,
                     root,
-                    response: mutation_response(m, &os),
+                    response,
                     out_schema: os,
                     is_mutation: true,
                     stream: false,
@@ -951,6 +965,18 @@ fn mutation_result_schema() -> Value {
         "properties": { "id": uuid_schema() },
         "description": "A write with no declared-shape re-select responds with the id \
                         of the affected row."
+    })
+}
+
+/// The `-> ok` acknowledgement: an empty object. Registered only when the schema
+/// declares an ack mutation.
+fn ack_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+        "description": "The empty acknowledgement of a `-> ok` mutation: the delete \
+                        ran; a real DELETE leaves no row to return."
     })
 }
 

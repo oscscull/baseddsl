@@ -91,6 +91,9 @@ struct Callable<'a> {
     /// a mutation: it additionally gets a `<name>_with_key` method carrying a
     /// mutation idempotency key through the transport's keyed door.
     is_mutation: bool,
+    /// an `-> ok` mutation: the method returns unit — the wire body is the empty
+    /// acknowledgement (`{}`), decoded through the shared `Ack` type.
+    ack: bool,
     /// the output *struct* to emit (name + fields), deduped across callables.
     out_struct: OutStruct,
     /// the `$ctx.<field>`s this callable requires, inferred per callable.
@@ -176,11 +179,17 @@ mod rust {
         }
 
         // Output structs first (deduped by name; a shape shared by two queries is one
-        // struct). Emitted in first-seen order for deterministic output.
+        // struct). Emitted in first-seen order for deterministic output. An `-> ok`
+        // mutation has no output struct; the shared `Ack` decodes its empty body.
         out.push_str("\n// ---------- output types ----------\n");
+        if callables.iter().any(|c| c.ack) {
+            out.push_str(ACK);
+        }
         let mut seen: Vec<String> = Vec::new();
         for c in &callables {
-            emit_struct(&mut out, &c.out_struct, &mut seen);
+            if !c.ack {
+                emit_struct(&mut out, &c.out_struct, &mut seen);
+            }
         }
 
         // Input structs (+ the per-callable `Ctx` struct, when the callable needs
@@ -264,6 +273,7 @@ mod rust {
                         output: query_output(rq, &os.name),
                         stream: rq.stream,
                         is_mutation: false,
+                        ack: false,
                         out_struct: os,
                         ctx_requires: &rq.ctx_requires,
                         page: page_input(q),
@@ -280,19 +290,37 @@ mod rust {
                     let Some(rm) = mutations.get(m.name.node.as_str()) else {
                         continue;
                     };
-                    let root = schema.model(&m.ret.ty.node).or_else(|| {
-                        // A shape return: resolve the model it projects from.
-                        schema
-                            .shapes
-                            .iter()
-                            .find(|s| s.name == m.ret.ty.node)
-                            .and_then(|s| schema.model(&s.from))
-                    });
-                    let os = out_struct(schema, decls, &m.ret, root);
-                    let output = if m.ret.many {
-                        format!("Vec<{}>", os.name)
+                    // `-> ok` names no shape/model: the primary written model (sema's
+                    // `ret_model`) types the params; the output is unit.
+                    let root = if rm.ack {
+                        schema.model(&rm.ret_model)
                     } else {
-                        os.name.clone()
+                        schema.model(&m.ret.ty.node).or_else(|| {
+                            // A shape return: resolve the model it projects from.
+                            schema
+                                .shapes
+                                .iter()
+                                .find(|s| s.name == m.ret.ty.node)
+                                .and_then(|s| schema.model(&s.from))
+                        })
+                    };
+                    let (os, output) = if rm.ack {
+                        (
+                            OutStruct {
+                                name: String::new(),
+                                fields: Vec::new(),
+                                nested: Vec::new(),
+                            },
+                            "()".to_string(),
+                        )
+                    } else {
+                        let os = out_struct(schema, decls, &m.ret, root);
+                        let output = if m.ret.many {
+                            format!("Vec<{}>", os.name)
+                        } else {
+                            os.name.clone()
+                        };
+                        (os, output)
                     };
                     out.push(Callable {
                         name: &m.name.node,
@@ -302,6 +330,7 @@ mod rust {
                         output,
                         stream: false,
                         is_mutation: true,
+                        ack: rm.ack,
                         out_struct: os,
                         ctx_requires: &rm.ctx_requires,
                         page: PageInput::None,
@@ -1040,6 +1069,27 @@ mod rust {
                 konst = route_const(c.name),
             );
         }
+        if c.ack {
+            // `-> ok`: the wire success is the empty `Ack`; the method returns unit.
+            let mut s = format!(
+                "    /// `POST {route}` — a `-> ok` mutation: the delete ran (`Ok(())`), or the\n    /// row was absent/out of scope (a `404 not_found` error).\n    pub async fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<(), ClientError> {{\n        let _: Ack = self.transport.call({konst}, &input, &ctx).await?;\n        Ok(())\n    }}\n",
+                route = c.route,
+                name = field_ident(c.name),
+                input = input_name(c.name),
+                ctx_ty = ctx_ty,
+                konst = route_const(c.name),
+            );
+            s.push_str(&format!(
+                "    /// `POST {route}` carrying `key` as the mutation **idempotency key**: a retry\n    /// with the same key replays the first attempt's response instead of writing again.\n    pub async fn {name}_with_key(\n        &self,\n        input: {input},\n        ctx: {ctx_ty},\n        key: &str,\n    ) -> Result<(), ClientError> {{\n        let _: Ack = self.transport.call_with_key({konst}, &input, &ctx, key).await?;\n        Ok(())\n    }}\n",
+                route = c.route,
+                // The suffix keeps the name clear of Rust keywords, so no raw-ident escape.
+                name = c.name,
+                input = input_name(c.name),
+                ctx_ty = ctx_ty,
+                konst = route_const(c.name),
+            ));
+            return s;
+        }
         let mut s = format!(
             "    /// `POST {route}`\n    pub async fn {name}(&self, input: {input}, ctx: {ctx_ty}) -> Result<{output}, ClientError> {{\n        self.transport.call({konst}, &input, &ctx).await\n    }}\n",
             route = c.route,
@@ -1385,6 +1435,16 @@ impl std::error::Error for ClientError {
             .map(|e| &**e as &(dyn std::error::Error + 'static))
     }
 }
+"#;
+
+    /// The `-> ok` acknowledgement body, emitted only for a schema with an ack
+    /// mutation: the wire success is `{}`, this decodes it, and the method returns
+    /// unit — the caller never sees the type.
+    const ACK: &str = r#"
+/// The empty acknowledgement a `-> ok` mutation answers with (`{}` on the wire —
+/// a real DELETE leaves no row to return). Methods decode it and return `()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ack {}
 "#;
 
     /// The abstract transport's head: doc, trait open, and the one `call` every schema

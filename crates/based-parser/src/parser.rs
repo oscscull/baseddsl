@@ -946,6 +946,24 @@ impl<'a> Parser<'a> {
     fn ret_type(&mut self) -> PResult<RetType> {
         // `stream` is contextual: a keyword only in return-type position.
         let stream = self.eat_kw("stream");
+        // `ok` is contextual too: the shapeless acknowledgement a destructive
+        // mutation returns (mutations.md). Bare — no `[]`, no `stream`.
+        if !stream && self.at_kw("ok") {
+            let l = self.bump().unwrap();
+            if self.at(Tok::LBracket) {
+                self.err("`ok` is a bare acknowledgement — drop the `[]`");
+                return Err(());
+            }
+            return Ok(RetType {
+                ty: Spanned {
+                    node: "ok".to_string(),
+                    span: self.span(l),
+                },
+                many: false,
+                stream: false,
+                ack: true,
+            });
+        }
         let ty = if self.at_kw("full") {
             let l = self.bump().unwrap();
             Spanned {
@@ -964,7 +982,12 @@ impl<'a> Parser<'a> {
             self.bump();
             self.bump();
         }
-        Ok(RetType { ty, many, stream })
+        Ok(RetType {
+            ty,
+            many,
+            stream,
+            ack: false,
+        })
     }
 
     fn query_block(&mut self) -> PResult<(QueryBody, u32)> {

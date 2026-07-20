@@ -458,15 +458,22 @@ async fn apply(
 /// sibling write in the same body never survives the miss) and `Ok(None)` reports the
 /// not-found. Only a mutation whose row does not survive the write (a real DELETE) has no
 /// re-select and falls back to `{ id }` / `{}`.
+///
+/// An `-> ok` mutation (a real DELETE, no re-select) decides the miss on rows
+/// affected instead: its primary DELETE (`plan.ack_check`) touching zero rows means
+/// the row was absent or out of scope — same rollback, same `Ok(None)` not-found.
 async fn apply_once(
     db: Box<dyn Db>,
     plan: &MutationPlan,
 ) -> Result<Option<serde_json::Value>, DbError> {
     use serde_json::Value as J;
     let mut tx = db.begin().await?;
-    for stmt in &plan.stmts {
+    for (i, stmt) in plan.stmts.iter().enumerate() {
         // An error propagates and drops `tx` → rollback (never a pooled open tx).
-        tx.execute(&stmt.sql, &stmt.params).await?;
+        let affected = tx.execute(&stmt.sql, &stmt.params).await?;
+        if plan.ack_check == Some(i) && affected == 0 {
+            return Ok(None);
+        }
     }
     // Read the written row back in its declared shape, still inside the transaction.
     let response = match &plan.ret_select {
@@ -656,6 +663,8 @@ struct MockState {
     fail: Option<String>,
     /// `fetch` yields its batch, then this failure — the stream-broke-late case.
     fail_mid_stream: Option<String>,
+    /// What every `execute` reports as rows affected (default 0).
+    affected: u64,
 }
 
 /// A test double for the whole driver stack: it is a [`Backend`] (checkout clones the
@@ -700,6 +709,13 @@ impl MockDb {
                 ..MockState::default()
             })),
         }
+    }
+
+    /// Report `rows` as every `execute`'s rows-affected (default 0) — the knob the
+    /// `-> ok` zero-row-DELETE tests turn.
+    pub fn affecting(self, rows: u64) -> Self {
+        self.state.lock().unwrap().affected = rows;
+        self
     }
 
     /// Every executed statement so far, in order — `fetch` and `execute` alike.
@@ -749,7 +765,8 @@ impl DbRead for MockDb {
     }
 
     async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
-        self.record(sql, params).map(|()| 0)
+        self.record(sql, params)?;
+        Ok(self.state.lock().unwrap().affected)
     }
 }
 

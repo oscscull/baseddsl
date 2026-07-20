@@ -136,7 +136,11 @@ substring in `%…%` (`src/routes.rs`).
 **4. One mutation, one transaction** — `open_ticket` creates the ticket and its first
 comment atomically; `^` reads the row the preceding `create` produced. On the wire this is
 `POST /tickets`, and a caller supplying `Idempotency-Key` gets the generated
-`open_ticket_with_key` twin: a retried POST replays the first response.
+`open_ticket_with_key` twin: a retried POST replays the first response. The one
+*destructive* mutation — `purge_comment`, legal/PII removal — is a `hard delete`
+returning the bare `-> ok` acknowledgement: no row survives to read back, so
+`DELETE /admin/comments/{id}` answers `200` with an empty body, and a missing or
+cross-tenant id is the engine's own `404 not_found`.
 
 **5. Real authorization decisions stay in your code** — `close_ticket` declares
 `guard caller_can_close`, and the engine refuses to build until the app registers an
@@ -165,7 +169,7 @@ later pass as `$ctx` is **derived server-side**, never read from a request body.
 | sort cascade (model / relation / query) | `spec/syntax/sorting.md` |
 | keyset + offset pagination | `spec/syntax/pagination.md` |
 | `-> stream`, the NDJSON wire | `spec/syntax/streaming.md` |
-| soft-delete, `restore`, `hard delete` | `spec/syntax/soft-delete.md` |
+| soft-delete, `restore`, `hard delete` + `-> ok` | `spec/syntax/soft-delete.md`, `mutations.md` |
 | `@index`, `unindexed(...)`, the index lints | `spec/syntax/indexing.md` |
 | raw-SQL leaves | `spec/syntax/raw.md` |
 | migrations, `@was` renames | `spec/syntax/migrations.md` |

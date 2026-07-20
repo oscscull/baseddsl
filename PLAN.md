@@ -399,12 +399,16 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   is unrepresentable. Guards run before the mutation's connection checkout, so re-entry is
   pool-safe too. auth.md's second-engine caveat un-written. Proven by an embed test where
   the guard calls the typed-client path over its own engine (timeout-bounded).
-- **NF4. `hard delete` with a declared shape is undecodable.** Symptom: a real DELETE returns
-  `{}` on the wire (no surviving row to re-select) but the generated method's return type is
-  the shape — decode error on every call; the helpdesk's `purge_comment` is declared but
-  unrouted. The grammar's mandatory `-> ret_type` leaves no legal shapeless spelling. Fix
-  (pick one): sema-reject the pairing, re-select *before* the delete, or a shapeless/ack
-  return form for destructive mutations.
+- **NF4. ✅ done (D98). `-> ok`: the shapeless ack return for destructive mutations** (owner
+  pick 2026-07-20 over re-select-before-delete / both-forms / sema-reject-only). A real
+  DELETE declares `-> ok` (contextual, return-position only): wire `{}`, unit-returning
+  client method via a gated shared `Ack` type, OpenAPI `Ack` component. Shape + real DELETE
+  is E0220; `-> ok` + a surviving write is E0221 (read-back stays mandatory where a row
+  survives; raw rides along, first real DELETE is the primary model); `-> ok` on a query is
+  E0222. A zero-row primary DELETE is D92's 404 `not_found` (rollback, claim released, no
+  existence leak). Helpdesk `purge_comment` now `-> ok`, routed
+  (`DELETE /admin/comments/{id}`) and smoke-proven (403/404-cross-tenant/200/404-repurge);
+  typed live-SQLite embed proof included.
 - **NF5. ✅ done (D97). `Page<T>` carries `with count`'s total.** `Page<T>` gains
   `total: Option<i64>` — `Some` exactly when the query declares `with count` (the wire
   has the field only then; `skip_serializing_if` keeps a re-served page wire-faithful).

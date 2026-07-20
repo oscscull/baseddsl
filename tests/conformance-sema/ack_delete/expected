@@ -1,0 +1,12 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model Comment  table=comment  soft_delete=deleted_at(timestamp)  scope
+  id: Id
+  deleted_at: timestamp?
+  org: -> Org  fk=org_id
+  body: text
+mutation purge_comment  ret=Comment ack  ctx=[org: -> Org]

@@ -224,3 +224,12 @@ fn raw_query_body_reprints_byte_exactly() {
     assert_eq!(got, src);
     assert_eq!(fmt(&got), got);
 }
+
+#[test]
+fn ack_return_prints_bare_ok() {
+    let got = fmt("mutation purge(id: Id) -> ok   { hard delete Comment where (id = $id) }");
+    assert_eq!(
+        got,
+        "mutation purge(id: Id) -> ok {\n  hard delete Comment where (id = $id);\n}\n"
+    );
+}

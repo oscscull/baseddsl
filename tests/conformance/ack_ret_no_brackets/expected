@@ -1,0 +1,3 @@
+ERR
+E0002: `ok` is a bare acknowledgement — drop the `[]`
+E0002: expected `{`

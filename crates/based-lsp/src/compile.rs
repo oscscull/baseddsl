@@ -1710,7 +1710,9 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
                 }
             }
             Decl::Query(q) => {
-                out.push(&q.ret.ty);
+                if !q.ret.ack {
+                    out.push(&q.ret.ty);
+                }
                 for p in &q.params {
                     if let Some(ty) = &p.ty {
                         collect_type_expr(ty, &mut out);
@@ -1721,7 +1723,10 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
                 }
             }
             Decl::Mutation(m) => {
-                out.push(&m.ret.ty);
+                // `-> ok` is the ack token, not a type reference.
+                if !m.ret.ack {
+                    out.push(&m.ret.ty);
+                }
                 for p in &m.params {
                     if let Some(ty) = &p.ty {
                         collect_type_expr(ty, &mut out);
@@ -3146,6 +3151,35 @@ mod tests {
         let off = (src.find("export_orders").unwrap() + 1) as u32;
         let h = snap.hover_at(fid, off).expect("query hover");
         assert!(h.contains("-> stream OrderRow"), "{h}");
+    }
+
+    /// An `-> ok` mutation's hover shows the ack return form as written; the `ok`
+    /// token itself is not a type reference (hovering it resolves nothing, no crash).
+    #[test]
+    fn hover_shows_the_ack_return_form() {
+        let ws = TempWorkspace::new("ack_hover");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Tag { label: text }\n\
+             mutation drop_tag(id: Id) -> ok { delete Tag where (id = $id) }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(
+            !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == based_diagnostics::Severity::Error),
+            "{:?}",
+            snap.diagnostics
+        );
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+        let off = (src.find("drop_tag").unwrap() + 1) as u32;
+        let h = snap.hover_at(fid, off).expect("mutation hover");
+        assert!(h.contains("-> ok"), "{h}");
+        let ok_off = (src.find("-> ok").unwrap() + 3) as u32;
+        assert!(snap.hover_at(fid, ok_off).is_none());
     }
 
     /// Field-reference go-to-def reaches beyond shapes: a query block's `where`/`order`

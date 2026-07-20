@@ -7,7 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -40,6 +40,7 @@ pub fn router(app: App) -> Router {
         .route("/export/tickets.ndjson", get(export_tickets))
         .route("/reports/workload", get(workload_report))
         .route("/admin/tickets", get(admin_tickets))
+        .route("/admin/comments/{id}", delete(purge_comment))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             auth::require_session,
@@ -481,6 +482,24 @@ async fn admin_tickets(
         .admin_tickets(client::AdminTicketsInput { offset: p.offset }, ())
         .await?;
     Ok(Json(page))
+}
+
+/// Legal/PII removal: the `-> ok` hard delete. Success has no body to return —
+/// a `200` acknowledgement; a missing (or cross-tenant) comment is the engine's
+/// own `404 not_found`, passed through untouched.
+async fn purge_comment(
+    State(app): State<App>,
+    Extension(s): Extension<SessionCtx>,
+    Path(id): Path<Id<entity::Comment>>,
+) -> Result<StatusCode, ApiError> {
+    require_agent(&s)?;
+    app.api()
+        .purge_comment(
+            client::PurgeCommentInput { id },
+            client::PurgeCommentCtx { org: s.org },
+        )
+        .await?;
+    Ok(StatusCode::OK)
 }
 
 // ---- streaming ---------------------------------------------------------------

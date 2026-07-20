@@ -127,9 +127,10 @@ fn summarize_schema(s: &CheckedSchema) -> String {
     }
     for mu in &s.mutations {
         out.push_str(&format!(
-            "mutation {}  ret={}{}\n",
+            "mutation {}  ret={}{}{}\n",
             mu.name,
             mu.ret_model,
+            if mu.ack { " ack" } else { "" },
             ctx(&mu.ctx_requires),
         ));
     }

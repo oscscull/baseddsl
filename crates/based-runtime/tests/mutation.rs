@@ -501,3 +501,63 @@ async fn mutation_gives_up_after_bounded_deadlock_retries() {
         db.executes()
     );
 }
+
+// ---------- `-> ok`: the destructive-mutation acknowledgement ----------------
+
+const ACK_SCHEMA: &str = r#"
+    @soft_delete(deleted_at)
+    Comment { deleted_at: timestamp?, body: text }
+    mutation purge_comment(id: Id) -> ok {
+        hard delete Comment where (id = $id);
+    }
+"#;
+
+/// An `-> ok` mutation runs its DELETE, commits, and answers the empty `{}` — no
+/// re-select ever runs (there is no surviving row to read).
+#[tokio::test]
+async fn ack_delete_commits_and_answers_the_empty_ack() {
+    let c = compile(ACK_SCHEMA);
+    let ids = SeqIdGen::default();
+    let db = MockDb::default().affecting(1);
+    let out = run_mutation(
+        &c,
+        &db,
+        "",
+        &ids,
+        &NoStore,
+        &req("purge_comment", json!({ "id": "c-1" })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out, json!({}));
+    assert_eq!(db.tx_log(), vec!["begin", "commit"]);
+    // Exactly the DELETE ran: no re-select fetch followed it.
+    let calls = db.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].0.starts_with("DELETE FROM"), "{}", calls[0].0);
+}
+
+/// A DELETE that touches zero rows means the row was absent (or out of scope):
+/// the transaction rolls back and the mutation is the same stable `not_found` a
+/// surviving write's empty re-select yields.
+#[tokio::test]
+async fn ack_delete_of_a_missing_row_is_not_found_and_rolls_back() {
+    let c = compile(ACK_SCHEMA);
+    let ids = SeqIdGen::default();
+    let db = MockDb::default(); // every execute affects 0 rows
+    let err = run_mutation(
+        &c,
+        &db,
+        "",
+        &ids,
+        &NoStore,
+        &req("purge_comment", json!({ "id": "missing" })),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err, RunError::NotFound("purge_comment".into()));
+    assert_eq!(err.code(), "not_found");
+    assert_eq!(db.tx_log(), vec!["begin", "rollback"]);
+}

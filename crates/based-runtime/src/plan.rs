@@ -151,6 +151,12 @@ pub struct MutationPlan {
     /// when the row does not survive the write (a real DELETE), where the response falls
     /// back to `{}`.
     pub ret_select: Option<Stmt>,
+    /// For an `-> ok` mutation, the index (into `stmts`) of the primary DELETE — the
+    /// write on the mutation's primary model. Zero rows affected there means the row
+    /// was absent (or out of scope): the transaction rolls back and the mutation is a
+    /// 404 `not_found`, mirroring a surviving write's empty re-select. `None` for a
+    /// shape-returning mutation.
+    pub ack_check: Option<usize>,
 }
 
 /// Why a request could not be planned — all boundary failures, before any SQL.
@@ -386,11 +392,20 @@ pub fn plan_mutation(
         None => None,
     };
 
+    // 5. An `-> ok` mutation has no re-select; its not-found signal is the primary
+    //    DELETE (the first write on the primary model) affecting zero rows.
+    let ack_check = if rm.ack {
+        low.stmts.iter().position(|w| w.model == rm.ret_model)
+    } else {
+        None
+    };
+
     Ok(MutationPlan {
         name: req.callable.clone(),
         stmts,
         result_id,
         ret_select,
+        ack_check,
     })
 }
 

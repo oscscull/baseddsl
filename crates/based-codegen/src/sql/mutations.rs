@@ -38,7 +38,8 @@
 //!   dropped for a soft delete (the row is tombstoned — we still read it back).
 //!
 //! A **real DELETE** (a plain-model `delete` or `hard delete`) has no surviving row to
-//! re-select, so it emits none and the response falls back to `{}`.
+//! re-select, so it emits none and the response falls back to `{}` — the `-> ok`
+//! acknowledgement contract (sema rejects a declared shape on a real DELETE).
 //!
 //! ## Dialects
 //! A relation-reaching WHERE lowers to the dialect's multi-table form: MySQL/MariaDB's

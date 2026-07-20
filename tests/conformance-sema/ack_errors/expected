@@ -1,0 +1,14 @@
+DIAGNOSTICS
+  E0220: mutation `drop_tag` performs a real DELETE of `Tag` — no row survives to read back as `TagCard`
+  E0221: mutation `remove_comment` returns `ok` but `delete (soft) Comment` leaves a surviving row
+  E0222: query `tags` cannot return `ok`
+SCHEMA
+model Tag  table=tag
+  id: Id
+  label: text
+model Comment  table=comment  soft_delete=deleted_at(timestamp)
+  id: Id
+  deleted_at: timestamp?
+  body: text
+shape TagCard from Tag
+mutation drop_tag  ret=Tag

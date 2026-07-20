@@ -40,7 +40,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
-  success)
+  success), D98 (`-> ok` shapeless ack return for real DELETEs; shape-on-real-DELETE E0220,
+  ack-on-surviving-write E0221, ack-on-query E0222; zero-row DELETE → 404 `not_found`)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
@@ -68,7 +69,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   typed row `Stream`; `Transport` gains a streaming call), D88 (`<name>_with_key` mutation twins +
   `Transport::call_with_key`: the `Idempotency-Key` header / `Engine::call_with_key`, emitted only
   when the schema declares a mutation), D97 (`Page<T>` gains `total: Option<i64>`, skipped when
-  serializing `None` so a re-served page mirrors the engine wire)
+  serializing `None` so a re-served page mirrors the engine wire), D98 (an `-> ok` mutation's
+  method returns `Result<(), ClientError>` via a shared empty `Ack` decode type; OpenAPI `Ack`
+  component — both emitted only when the schema declares an ack mutation)
 - **Errors** — D71 (`ClientError` kind/code/status + `Error`/`Display`/`source()`; `PlanError`/`DbError`/
   `RunError` implement `Error`+`Display` with stable `code()`; single source of truth shared by the wire),
   D72 (CLI: structured `CliError` + `Display`/`source()` chaining + exit-code convention — usage 2 /
@@ -4132,4 +4135,63 @@ round-trip embed tests (`total: Some(57)` through the generated client; `None` a
 cursor on an uncounted short page), a live-SQLite end-to-end test (counted page →
 `total: 5` beside a 2-row window; uncounted envelope has no `total` key), and the
 helpdesk smoke extended to assert both admin pages serve the full live-set total;
+`make check` green end-to-end.
+
+## D98 — `-> ok`: the shapeless acknowledgement of a destructive mutation (NF4)
+
+The D89-filed defect: a real DELETE (plain-model `delete` / `hard delete`) returns `{}` on the
+wire — there is no surviving row to re-select (D58) — but the grammar's mandatory `-> ret_type`
+forced a shape onto the signature, so the generated method's return type could never decode.
+The helpdesk's `purge_comment` was declared but unrouted precisely because it was uncallable.
+
+**Owner decision (2026-07-20): the shapeless ack return form, spelled `-> ok`.** A destructive
+mutation declares `ok` instead of a shape: `mutation purge_comment(id: Id) -> ok scoped Tenant {
+hard delete Comment where (id = $id); }`. `ok` is contextual (return-type position only, like
+`stream`/`full`), so fields/models named `ok` are untouched; `ok[]` and `stream ok` don't parse.
+Rejected alternatives:
+- *Re-select before the delete* — reorders the write pipeline, reads a row the caller asked to
+  destroy, and buys little for what is already the loud destructive opt-out.
+- *Both forms legal* (shape = pre-delete snapshot, `ok` = ack) — two ways to say one thing; the
+  snapshot semantics differ subtly from every other read-back (pre- vs post-write).
+- *Sema-reject only* (no new return form) — leaves real DELETEs inexpressible entirely.
+
+**One way to say each thing (principle 5, conservative call):**
+- Shape + real DELETE is **E0220** (`shape-on-real-delete`): no surviving row on the return model
+  → the declared shape could never decode. A tx sibling that creates/updates the return model
+  keeps the shape legal (a surviving row exists).
+- `-> ok` + any surviving write (create/update/restore/soft `delete`) is **E0221**: a surviving
+  write's declared-shape read-back is the feature (D12/D58) — forfeiting it silently would make
+  the safe contract optional. A **raw** write may ride along (its effect is outside the engine's
+  knowledge — rejecting it would leave raw-write mutations with no legal return), but at least
+  one real DELETE is required. The **first real DELETE's model is the primary model**: sema's
+  `RMutation::ret_model` (scope ack, shard key, param typing) and the 404 check ride on it.
+- `-> ok` on a query is **E0222** (parses, rejected loudly in sema with the fix named).
+
+**Zero-row DELETE → 404 `not_found` (D92 extended to the destructive side).** The plan records
+the primary DELETE's statement index (`MutationPlan::ack_check`); `apply_once` reads its
+rows-affected — zero means the row was absent or out of scope: the transaction rolls back
+(sibling deletes never survive), `RunError::NotFound` → wire 404, stable `not_found`, identical
+for absent vs cross-tenant (no existence leak), and the idempotency claim is released (nothing
+written, a retry may run). Secondary deletes in a tx may legitimately affect zero rows (childless
+parent) — only the primary decides. Drivers already returned rows-affected; `MockDb` gained an
+`affecting(rows)` knob.
+
+**Generated surface.** Codegen already emitted no re-select for a real DELETE (D58) — unchanged.
+Client: an ack mutation's method (and its `_with_key` twin) returns `Result<(), ClientError>`,
+decoding the wire `{}` through a shared `#[derive]`d empty `Ack` struct emitted only when the
+schema declares an ack mutation (a schema without one is byte-identical, embed-gate-verified).
+OpenAPI: the `200` is a shared empty-object `Ack` component (`additionalProperties: false`),
+registered under the same gate. fmt prints the bare `ok`; tmLanguage scopes `ok` after `->` like
+the other return-position keywords; the LSP skips `ok` as a type reference (it is a token, not a
+name — hover shows the signature as written).
+
+**Helpdesk (the motivating symptom).** `purge_comment` is now `-> ok`, the client regenerated,
+and the route wired: `DELETE /admin/comments/{id}` (agent-gated) → `200` bare ack; the smoke
+drives requester → 403, cross-tenant purge → 404 (row untouched), purge → 200, re-purge → 404.
+
+**Verified:** parser unit + goldens (`ack_mutation`, `ack_ret_no_brackets`), sema unit + goldens
+(`ack_delete`, `ack_errors` — E0220/E0221/E0222, scope ack still owed, tx-sibling survival),
+codegen unit (no re-select; unit-returning client + `Ack` gating; OpenAPI component + `$ref`),
+runtime unit (ack commit → `{}`; zero-row → NotFound + rollback), typed live-SQLite embed proof
+(purge → `Ok(())`, row gone, re-purge → typed 404 `not_found`), and the extended helpdesk smoke;
 `make check` green end-to-end.

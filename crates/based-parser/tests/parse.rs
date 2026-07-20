@@ -658,3 +658,48 @@ fn raw_query_body_parses_with_interpolations() {
     };
     assert!(matches!(q.body, QueryBody::Raw(_)));
 }
+
+#[test]
+fn mutation_ret_ok_parses_as_ack() {
+    let sf = parse_ok(
+        r#"
+        mutation purge(id: Id) -> ok {
+          hard delete Comment where (id = $id);
+        }
+        "#,
+    );
+    let Some(Decl::Mutation(m)) = sf.decls.into_iter().next() else {
+        panic!("expected a mutation");
+    };
+    assert!(m.ret.ack);
+    assert!(!m.ret.many);
+    assert!(!m.ret.stream);
+    assert_eq!(m.ret.ty.node, "ok");
+}
+
+#[test]
+fn ret_ok_with_brackets_is_an_error() {
+    let diags = parse_file(
+        "mutation purge(id) -> ok[] { delete Tag where (id = $id); }",
+        FileId(0),
+    )
+    .expect_err("`ok[]` must not parse");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("bare acknowledgement")),
+        "{diags:#?}"
+    );
+}
+
+#[test]
+fn a_shape_field_or_model_named_ok_still_parses() {
+    // `ok` is contextual: a keyword only in return-type position.
+    let sf = parse_ok(
+        r#"
+        Check { ok: bool }
+        query checks() -> Check[];
+        "#,
+    );
+    assert_eq!(sf.decls.len(), 2);
+}

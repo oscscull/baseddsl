@@ -24,3 +24,7 @@ query counted_order_page(org) -> OrderCard[] {
 mutation place_order(org: Id, status, total: int) -> OrderCard {
     create Order { org = $org, status = $status, total = $total };
 }
+
+mutation purge_order(id: Id) -> ok {
+    hard delete Order where (id = $id);
+}

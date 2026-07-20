@@ -774,3 +774,44 @@ fn raw_bodied_query_generates_an_ordinary_method() {
         "\n{out}"
     );
 }
+
+// ---------- `-> ok`: the unit-returning ack mutation -------------------------
+
+#[test]
+fn ack_mutation_method_returns_unit() {
+    let out = gen(r#"
+        @soft_delete(deleted_at)
+        Comment { deleted_at: timestamp?, body: text }
+        mutation purge_comment(id: Id) -> ok {
+          hard delete Comment where (id = $id);
+        }
+        "#);
+    // The shared Ack body decodes the wire `{}`; the method itself returns unit.
+    assert!(out.contains("pub struct Ack {}"), "\n{out}");
+    assert!(
+        out.contains(
+            "pub async fn purge_comment(&self, input: PurgeCommentInput, ctx: ()) -> Result<(), ClientError> {"
+        ),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("let _: Ack = self.transport.call(PURGE_COMMENT_ROUTE, &input, &ctx).await?;"),
+        "\n{out}"
+    );
+    // The keyed twin returns unit too.
+    assert!(out.contains(") -> Result<(), ClientError> {\n        let _: Ack = self.transport.call_with_key(PURGE_COMMENT_ROUTE, &input, &ctx, key).await?;"), "\n{out}");
+    // The param still types as the deleted model's id.
+    assert!(out.contains("pub id: Id<entity::Comment>,"), "\n{out}");
+}
+
+#[test]
+fn schema_without_an_ack_mutation_emits_no_ack_type() {
+    let out = gen(r#"
+        Order { status: text }
+        shape OrderCard from Order { status }
+        mutation set_status(id: Id, status: text) -> OrderCard {
+          update Order where (id = $id) { status = $status };
+        }
+        "#);
+    assert!(!out.contains("struct Ack"), "\n{out}");
+}

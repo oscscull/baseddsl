@@ -37,6 +37,12 @@
     "keywords": {
       "patterns": [
         {
+          "match": "(->)\\s*(ok)\\b",
+          "captures": {
+            "2": { "name": "keyword.control.bsl" }
+          }
+        },
+        {
           "match": "\\b(shape|scope|enum|query|mutation|filter)\\b",
           "name": "keyword.control.declaration.bsl"
         },

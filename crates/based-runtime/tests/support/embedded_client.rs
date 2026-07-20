@@ -450,6 +450,11 @@ pub mod entity {
 
 // ---------- output types ----------
 
+/// The empty acknowledgement a `-> ok` mutation answers with (`{}` on the wire —
+/// a real DELETE leaves no row to return). Methods decode it and return `()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ack {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderCard {
     pub status: String,
@@ -515,6 +520,13 @@ pub struct PlaceOrderInput {
 /// Wire route for `place_order`.
 pub const PLACE_ORDER_ROUTE: &str = "/m/place_order";
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgeOrderInput {
+    pub id: Id<entity::Order>,
+}
+/// Wire route for `purge_order`.
+pub const PURGE_ORDER_ROUTE: &str = "/m/purge_order";
+
 // ---------- client ----------
 
 impl<T: Transport> Client<T> {
@@ -556,6 +568,23 @@ impl<T: Transport> Client<T> {
         key: &str,
     ) -> Result<OrderCard, ClientError> {
         self.transport.call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key).await
+    }
+    /// `POST /m/purge_order` — a `-> ok` mutation: the delete ran (`Ok(())`), or the
+    /// row was absent/out of scope (a `404 not_found` error).
+    pub async fn purge_order(&self, input: PurgeOrderInput, ctx: ()) -> Result<(), ClientError> {
+        let _: Ack = self.transport.call(PURGE_ORDER_ROUTE, &input, &ctx).await?;
+        Ok(())
+    }
+    /// `POST /m/purge_order` carrying `key` as the mutation **idempotency key**: a retry
+    /// with the same key replays the first attempt's response instead of writing again.
+    pub async fn purge_order_with_key(
+        &self,
+        input: PurgeOrderInput,
+        ctx: (),
+        key: &str,
+    ) -> Result<(), ClientError> {
+        let _: Ack = self.transport.call_with_key(PURGE_ORDER_ROUTE, &input, &ctx, key).await?;
+        Ok(())
     }
 }
 

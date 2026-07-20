@@ -155,6 +155,16 @@ struct Resolved {
 }
 
 pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
+    // `-> ok` acknowledges a destructive mutation; a query returns data (E0222).
+    if q.ret.ack {
+        sink.error_note(
+            code::ACK_QUERY,
+            q.ret.ty.span,
+            format!("query `{}` cannot return `ok`", q.name.node),
+            "a query returns data — declare a shape or model; `-> ok` is for destructive mutations",
+        );
+        return None;
+    }
     let params: Vec<String> = q.params.iter().map(|p| p.name.node.clone()).collect();
     let body_model = match &q.body {
         QueryBody::Block(s) => Some(s.model.node.as_str()),
@@ -673,7 +683,13 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
             resolve::check_default(d, sink);
         }
     }
-    let ret = resolve_return(&m.ret, None, cx, sink)?;
+    let ret = if m.ret.ack {
+        resolve_ack_return(m, cx, sink)?
+    } else {
+        let ret = resolve_return(&m.ret, None, cx, sink)?;
+        check_shape_on_real_delete(m, &ret, cx, sink);
+        ret
+    };
     // At the top level there is no enclosing `tx`, so no back-reference is in scope.
     // A mutation may opt out of `@scope` on its write models  — that both drops
     // the injected guard and lets a `create` assign the (otherwise engine-managed)
@@ -723,10 +739,117 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         guard: m.guard.as_ref().map(|g| g.node.clone()),
         ctx_requires: crate::ctx::collect_mutation(m, cx, scope_reqs),
         ret_model: ret.model,
+        ack: m.ret.ack,
         ret_shape: ret.shape,
         shard_key,
         scope_inject,
     })
+}
+
+/// A write's effect on its target row, for the `-> ok` / declared-shape rules.
+enum WriteEffect<'a> {
+    /// A real DELETE — plain-model `delete` or `hard delete`: the row is removed.
+    RealDelete(&'a Ident),
+    /// create / update / restore / soft `delete` (tombstone): a row survives to
+    /// read back. Carries the verb for the diagnostic.
+    Surviving(&'a Ident, &'static str),
+    /// A raw write — its effect is outside the engine's knowledge.
+    Raw,
+}
+
+/// Classify each write of the body ( `tx` blocks flattened, execution order).
+fn write_effects<'a>(body: &'a [WriteStmt], cx: &Cx) -> Vec<WriteEffect<'a>> {
+    let mut out = Vec::new();
+    for stmt in body {
+        match stmt {
+            WriteStmt::Create { model, .. } => out.push(WriteEffect::Surviving(model, "create")),
+            WriteStmt::Update { model, .. } => out.push(WriteEffect::Surviving(model, "update")),
+            WriteStmt::Restore { model, .. } => out.push(WriteEffect::Surviving(model, "restore")),
+            WriteStmt::HardDelete { model, .. } => out.push(WriteEffect::RealDelete(model)),
+            WriteStmt::Delete { model, .. } => {
+                let soft = cx
+                    .find(&model.node)
+                    .is_some_and(|mi| cx.model(mi).soft_delete.is_some());
+                if soft {
+                    out.push(WriteEffect::Surviving(model, "delete (soft)"));
+                } else {
+                    out.push(WriteEffect::RealDelete(model));
+                }
+            }
+            WriteStmt::Tx(inner) => out.extend(write_effects(inner, cx)),
+            WriteStmt::Raw(_) => out.push(WriteEffect::Raw),
+        }
+    }
+    out
+}
+
+/// Resolve an `-> ok` mutation: every write must be a real DELETE (a raw write is
+/// allowed — its effect is the author's), and the primary model — the one scope,
+/// sharding, and the 404-on-zero-rows check ride on — is the first real DELETE's.
+fn resolve_ack_return(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<Resolved> {
+    let mut primary: Option<&Ident> = None;
+    for e in write_effects(&m.body, cx) {
+        match e {
+            WriteEffect::RealDelete(model) => primary = primary.or(Some(model)),
+            WriteEffect::Surviving(model, verb) => {
+                sink.error_note(
+                    code::ACK_SURVIVING,
+                    m.ret.ty.span,
+                    format!(
+                        "mutation `{}` returns `ok` but `{verb} {}` leaves a surviving row",
+                        m.name.node, model.node
+                    ),
+                    "a surviving write reads its row back — declare its shape; `-> ok` is for real DELETEs",
+                );
+                return None;
+            }
+            WriteEffect::Raw => {}
+        }
+    }
+    let Some(model) = primary else {
+        sink.error_note(
+            code::ACK_SURVIVING,
+            m.ret.ty.span,
+            format!(
+                "mutation `{}` returns `ok` but performs no real DELETE",
+                m.name.node
+            ),
+            "`-> ok` acknowledges a destructive write: a plain-model `delete` or `hard delete`",
+        );
+        return None;
+    };
+    // An unknown model is reported by the write check at its own site.
+    cx.find(&model.node)?;
+    Some(Resolved {
+        model: model.node.clone(),
+        shape: None,
+    })
+}
+
+/// A declared shape needs a surviving row. When every write on the return model is
+/// a real DELETE, the re-select has nothing to read — the response could never
+/// decode as the shape (E0220).
+fn check_shape_on_real_delete(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut Sink) {
+    let mut deletes_ret = false;
+    let mut survives_ret = false;
+    for e in write_effects(&m.body, cx) {
+        match e {
+            WriteEffect::RealDelete(model) if model.node == ret.model => deletes_ret = true,
+            WriteEffect::Surviving(model, _) if model.node == ret.model => survives_ret = true,
+            _ => {}
+        }
+    }
+    if deletes_ret && !survives_ret {
+        sink.error_note(
+            code::SHAPE_ON_DELETE,
+            m.ret.ty.span,
+            format!(
+                "mutation `{}` performs a real DELETE of `{}` — no row survives to read back as `{}`",
+                m.name.node, ret.model, m.ret.ty.node
+            ),
+            "a destructive mutation acknowledges instead of reading back: declare `-> ok`",
+        );
+    }
 }
 
 /// Check one write statement. `back` is the model of the immediately preceding

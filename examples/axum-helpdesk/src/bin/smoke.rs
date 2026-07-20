@@ -276,6 +276,33 @@ async fn main() {
     assert_eq!(entry["amount"], "23.75", "decimal rides as an exact string");
     println!("ok - comment + billable time (float hours, exact decimal amount)");
 
+    // ---- purge (the `-> ok` hard delete): ack on success, 404 once gone --------
+    let cid = comment["id"].as_str().unwrap().to_string();
+    // A requester has no purge desk.
+    let (status, _) = desk
+        .delete(Some(ADA), &format!("/admin/comments/{cid}"))
+        .await;
+    assert_eq!(status, 403);
+    // Another tenant's agent gets the same 404 an absent row would — and deletes
+    // nothing (no existence leak across the scope boundary).
+    let (status, body) = desk
+        .delete(Some(GUS), &format!("/admin/comments/{cid}"))
+        .await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+    // The tenant's own agent purges it: a bare 200 acknowledgement, no body.
+    let (status, body) = desk
+        .delete(Some(MARA), &format!("/admin/comments/{cid}"))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    // Purging the same id again matches nothing: the engine's own 404.
+    let (status, body) = desk
+        .delete(Some(MARA), &format!("/admin/comments/{cid}"))
+        .await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+    println!("ok - purge comment: hard delete acks with 200, cross-tenant/re-purge -> 404");
+
     // ---- drafts: the AND scope (org AND author) ---------------------------------
     let (status, drafts) = desk.get(Some(MARA), &format!("/tickets/{t1}/drafts")).await;
     assert_eq!(status, 200, "{drafts}");

@@ -110,6 +110,11 @@ pub mod code {
     pub const RAW_QUERY_STREAM: &str = "E0212"; // `-> stream` with a raw body is unsupported
     pub const RAW_QUERY_NEST: &str = "E0213"; // a raw-bodied query's return shape must be flat (no nested sub-objects)
     pub const RAW_QUERY_CTX: &str = "E0214"; // `${ctx.…}` in a raw query body has no type source — pass a typed param
+
+    // destructive mutations: the `-> ok` acknowledgement (E022x)
+    pub const SHAPE_ON_DELETE: &str = "E0220"; // a real-DELETE mutation declares a shape — no surviving row to read back
+    pub const ACK_SURVIVING: &str = "E0221"; // `-> ok` on a mutation with a surviving write (or no real DELETE at all)
+    pub const ACK_QUERY: &str = "E0222"; // `-> ok` on a query — a query returns data
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
@@ -497,7 +502,12 @@ pub struct RQuery {
 pub struct RMutation {
     pub name: String,
     pub span: Span,
+    /// The primary written model: the declared return's model, or — for an `-> ok`
+    /// acknowledgement — the first real DELETE's model (there is no declared return).
     pub ret_model: String,
+    /// Declared `-> ok`: a destructive mutation with no surviving row. No re-select,
+    /// wire `{}`, unit-returning client method; a zero-row DELETE is a 404 `not_found`.
+    pub ack: bool,
     /// The `guard <name>` host hook (auth.md Handle 3), or `None`. The name is a
     /// host-language function's — nothing in the schema defines it; the runtime
     /// invokes the registered fn before the write body and enforces its verdict.

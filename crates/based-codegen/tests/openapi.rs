@@ -617,3 +617,35 @@ fn raw_bodied_query_documents_like_any_query() {
         "{resp}"
     );
 }
+
+#[test]
+fn ack_mutation_responds_with_the_shared_ack_schema() {
+    let doc = gen(r#"
+        @soft_delete(deleted_at)
+        Comment { deleted_at: timestamp?, body: text }
+        mutation purge_comment(id: Id) -> ok {
+          hard delete Comment where (id = $id);
+        }
+        "#);
+    let resp = &doc["paths"]["/m/purge_comment"]["post"]["responses"]["200"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(resp["$ref"], "#/components/schemas/Ack", "{resp}");
+    let ack = &doc["components"]["schemas"]["Ack"];
+    assert_eq!(ack["type"], "object");
+    assert_eq!(ack["additionalProperties"], false);
+    // The input still types the id param.
+    let input = &doc["components"]["schemas"]["PurgeCommentInput"];
+    assert_eq!(input["properties"]["id"]["format"], "uuid", "{input}");
+}
+
+#[test]
+fn schema_without_an_ack_mutation_has_no_ack_component() {
+    let doc = gen(r#"
+        Order { status: text }
+        shape OrderCard from Order { status }
+        mutation set_status(id: Id, status: text) -> OrderCard {
+          update Order where (id = $id) { status = $status };
+        }
+        "#);
+    assert!(doc["components"]["schemas"].get("Ack").is_none());
+}
