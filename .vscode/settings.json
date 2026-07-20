@@ -5,6 +5,7 @@
   // Note: `linkedProjects` REPLACES auto-discovery — the root "Cargo.toml" must stay.
   "rust-analyzer.linkedProjects": [
     "Cargo.toml",
+    "examples/axum-helpdesk/Cargo.toml",
     "examples/mariadb-quickstart/Cargo.toml",
     "examples/postgres-quickstart/Cargo.toml",
     "examples/sqlite-quickstart/Cargo.toml"

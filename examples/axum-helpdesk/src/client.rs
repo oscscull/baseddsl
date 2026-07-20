@@ -1266,8 +1266,8 @@ impl Transport for Embedded<'_> {
     }
 }
 
-/// A ready-to-use client over an in-process `based_runtime::Engine` — no bridge to write.
-/// `$ctx` is a typed per-call argument the app sets, not the caller; a public callable
+/// A ready-to-use client over an in-process `based_runtime::Engine`.
+/// `$ctx` is a typed per-call argument the app sets. a public callable
 /// passes `()`, which maps to an empty context bag.
 pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
     Client {

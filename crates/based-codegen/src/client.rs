@@ -1709,7 +1709,7 @@ impl Transport for Embedded<'_> {
     /// for Embedded` block when the schema has a mutation.
     const EMBEDDED_KEYED_CALL: &str = r#"
     /// The keyed door in-process: the same idempotent-replay contract the HTTP
-    /// `Idempotency-Key` header gets, via `Engine::call_with_key` — no header dance.
+    /// `Idempotency-Key` header gets, via `Engine::call_with_key`.
     async fn call_with_key<I, C, O>(
         &self,
         route: &str,

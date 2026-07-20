@@ -194,8 +194,7 @@ async fn typed_uncounted_page_has_no_total() {
 }
 
 /// `$ctx` is a **typed** argument on the generated method: `my_org_orders` takes a
-/// `MyOrgOrdersCtx { org }`, supplied straight in — no header dance and no
-/// untyped side-channel bag. With the required context the `$ctx`-scoped query runs; an
+/// `MyOrgOrdersCtx { org }`. With the required context the `$ctx`-scoped query runs; an
 /// empty context (the embedded bridge maps `&()` → `{}`) makes the engine's boundary `400`
 /// surface as the client's `ClientError` (the same non-200 an HTTP client sees).
 #[tokio::test]
