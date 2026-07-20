@@ -146,7 +146,9 @@ cross-tenant id is the engine's own `404 not_found`.
 `guard caller_can_close`, and the engine refuses to build until the app registers an
 implementation (`src/app.rs`). The engine owns *that* the check runs — before the write, on
 every door; the app owns *what it decides* (here: only a resolved, visible ticket closes;
-a check that cannot decide denies).
+a check that cannot decide denies). The decision is host code, but the *state it reads*
+comes back through the schema's own `ticket` query over `req.engine()` — so the workspace
+scope and soft-delete filter are the ones the schema declares, not hand-written SQL.
 
 **6. The export is a stream** — `export_tickets` returns `-> stream TicketExport`: the
 client method yields a typed `RowStream` (rows arrive as the database produces them), and

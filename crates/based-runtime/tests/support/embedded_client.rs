@@ -620,7 +620,7 @@ impl Transport for Embedded<'_> {
     }
 
     /// The keyed door in-process: the same idempotent-replay contract the HTTP
-    /// `Idempotency-Key` header gets, via `Engine::call_with_key` — no header dance.
+    /// `Idempotency-Key` header gets, via `Engine::call_with_key`.
     async fn call_with_key<I, C, O>(
         &self,
         route: &str,

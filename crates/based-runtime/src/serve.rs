@@ -68,7 +68,9 @@ impl WireResponse {
 ///
 /// A caller that wants no idempotency passes a [`crate::idempotency::NoStore`] and a
 /// `None` key; a schema with no guards passes an empty [`Guards`] — one dispatch
-/// path, never a with/without fork.
+/// path, never a with/without fork. `engine` is the re-entry handle a guard reaches
+/// through ([`crate::guard::GuardRequest::engine`]) — `Some` on every [`crate::Engine`]
+/// call, `None` for a raw dispatch (a guarded schema is never served that way).
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     compiled: &Compiled,
@@ -77,6 +79,7 @@ pub async fn dispatch(
     id_gen: &dyn IdGen,
     store: &dyn IdempotencyStore,
     guards: &Guards,
+    engine: Option<&crate::Engine>,
     method: &str,
     path: &str,
     args: serde_json::Value,
@@ -102,7 +105,7 @@ pub async fn dispatch(
             // A declared guard runs first — before the write, before the idempotency
             // store (a denied request never claims a key), before argument validation
             // (a denied caller learns nothing about the request's validity).
-            if let Some(resp) = check_guard(compiled, guards, name, &args, &ctx).await {
+            if let Some(resp) = check_guard(compiled, guards, engine, name, &args, &ctx).await {
                 return resp;
             }
             let req = Request::new(name, args, ctx).with_idempotency_key(idem_key);
@@ -189,6 +192,7 @@ pub async fn dispatch_stream(
 async fn check_guard(
     compiled: &Compiled,
     guards: &Guards,
+    engine: Option<&crate::Engine>,
     name: &str,
     args: &serde_json::Value,
     ctx: &serde_json::Value,
@@ -207,6 +211,7 @@ async fn check_guard(
         callable: name.to_string(),
         args: args.clone(),
         ctx: ctx.clone(),
+        engine: engine.cloned(),
     })
     .await
     {

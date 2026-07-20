@@ -393,12 +393,16 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   un-composable combinations rejected loudly (E0210 untyped/bound params, E0211 `scoped`,
   E0212 `stream`, E0213 nested shape, E0214 `${ctx.…}`). fmt reprints the block
   byte-exactly; raw.md now spells the shipped contract. Proven unit + golden + live SQLite.
-- **NF3. ✅ done (D95). Guard re-entry no longer deadlocks.** `IdGen` mints by `&self`
-  (`Send + Sync`; `SeqIdGen` on an atomic, `UuidGen` stateless), so the engine stores the
-  generator bare — no mutex, nothing held across dispatch's awaits, and the deadlock shape
-  is unrepresentable. Guards run before the mutation's connection checkout, so re-entry is
-  pool-safe too. auth.md's second-engine caveat un-written. Proven by an embed test where
-  the guard calls the typed-client path over its own engine (timeout-bounded).
+- **NF3. ✅ done (D95, D99). Guard re-entry no longer deadlocks — and is first-class.**
+  `IdGen` mints by `&self` (`Send + Sync`; `SeqIdGen` on an atomic, `UuidGen` stateless), so
+  the engine stores the generator bare — no mutex, nothing held across dispatch's awaits, and
+  the deadlock shape is unrepresentable. Guards run before the mutation's connection checkout,
+  so re-entry is pool-safe too. **D99 makes the handle first-class:** `GuardRequest::engine()`
+  hands the dispatching engine to the guard, so a state-reading decision reads through the
+  schema's own scoped/soft-deleted queries (`client::embedded(req.engine())`) instead of a
+  captured pool + hand-written filters — no `OnceLock` back-reference. `Engine` is a `Clone`
+  handle. The helpdesk `caller_can_close` drops sqlx and reads through `ticket`. Proven by the
+  re-entry embed test (rewritten to `req.engine()`, timeout-bounded) + unchanged helpdesk smoke.
 - **NF4. ✅ done (D98). `-> ok`: the shapeless ack return for destructive mutations** (owner
   pick 2026-07-20 over re-select-before-delete / both-forms / sema-reject-only). A real
   DELETE declares `-> ok` (contextual, return-position only): wire `{}`, unit-returning

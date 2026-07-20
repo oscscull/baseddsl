@@ -404,6 +404,9 @@ async fn handle(
             &id_gen,
             &shared.idempotency,
             &shared.guards,
+            // The standalone listener refuses a guarded schema at startup, so no guard
+            // ever runs here — there is no re-entry handle to hand out.
+            None,
             method.as_str(),
             uri.path(),
             d.args,

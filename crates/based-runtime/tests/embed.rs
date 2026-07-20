@@ -367,45 +367,35 @@ async fn registered_guard_allows_and_denies_in_process() {
     assert_eq!(db.tx_log(), vec!["begin", "commit"]);
 }
 
-/// A guard may call back into the engine that invoked it: dispatch holds no
-/// engine-wide lock, so the re-entrant read completes and the guarded write runs.
-/// Bounded by a timeout so a regression fails fast instead of hanging the suite.
+/// A guard reads current state through `req.engine()` — the schema's own query, not
+/// hand-written SQL — and the guarded write then runs: dispatch holds no engine-wide
+/// lock, so the re-entrant read completes. No `OnceLock` back-reference to wire the
+/// engine in after construction; the handle arrives on the request. Bounded by a
+/// timeout so a regression fails fast instead of hanging the suite.
 #[tokio::test]
 async fn guard_reenters_its_own_engine() {
-    use std::sync::{Arc, OnceLock};
-
     // Result set 0 feeds the guard's re-entrant read; set 1 the mutation's re-select.
     let db = MockDb::new(vec![
         vec![row(json!({ "status": "resolved", "total": 9 }))],
         vec![row(json!({ "status": "closed", "total": 9 }))],
     ]);
-    let slot: Arc<OnceLock<Arc<Engine>>> = Arc::new(OnceLock::new());
-    let guards = Guards::new().register("caller_can_close", {
-        let slot = Arc::clone(&slot);
-        move |req| {
-            let slot = Arc::clone(&slot);
-            async move {
-                let engine = slot.get().expect("engine is set before any call");
-                let read = engine
-                    .call(
-                        "/q/order_by_id",
-                        json!({ "id": req.args["id"].clone() }),
-                        json!({}),
-                    )
-                    .await;
-                if read.status == 200 && read.body["status"] == "resolved" {
-                    GuardVerdict::Allow
-                } else {
-                    GuardVerdict::deny("only a resolved order can be closed")
-                }
-            }
+    let guards = Guards::new().register("caller_can_close", |req| async move {
+        let read = req
+            .engine()
+            .call(
+                "/q/order_by_id",
+                json!({ "id": req.args["id"].clone() }),
+                json!({}),
+            )
+            .await;
+        if read.status == 200 && read.body["status"] == "resolved" {
+            GuardVerdict::Allow
+        } else {
+            GuardVerdict::deny("only a resolved order can be closed")
         }
     });
-    let engine = Arc::new(
-        Engine::with_guards(guarded_compiled(), db.clone(), SeqIdGen::default(), guards)
-            .expect("every declared guard is registered"),
-    );
-    assert!(slot.set(Arc::clone(&engine)).is_ok());
+    let engine = Engine::with_guards(guarded_compiled(), db.clone(), SeqIdGen::default(), guards)
+        .expect("every declared guard is registered");
 
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(5),

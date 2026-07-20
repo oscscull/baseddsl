@@ -2,7 +2,6 @@
 //! close policy behind the schema's `guard caller_can_close`.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use based_runtime::guard::{GuardRequest, GuardVerdict, Guards};
 use based_runtime::id::UuidGen;
@@ -11,10 +10,10 @@ use based_runtime::{Compiled, Engine, PgRouter};
 use crate::client;
 
 /// Shared service state: the engine every handler's typed client runs through.
-/// Cheap to clone into axum state (the engine itself is shared).
+/// Cheap to clone into axum state (the engine itself is a shared handle).
 #[derive(Clone)]
 pub struct App {
-    engine: Arc<Engine>,
+    engine: Engine,
 }
 
 impl App {
@@ -35,17 +34,11 @@ impl App {
             .expect("schema checks clean");
 
         // The schema declares `guard caller_can_close`, so the engine refuses to
-        // build until an implementation is registered. The policy is host code on
-        // the app's own pool — the same pool the engine runs over.
-        let guards = Guards::new().register("caller_can_close", {
-            let db = pool.clone();
-            move |req| caller_can_close(db.clone(), req)
-        });
+        // build until an implementation is registered.
+        let guards = Guards::new().register("caller_can_close", |req| caller_can_close(req));
         let engine = Engine::with_guards(compiled, PgRouter::from_pool(pool), UuidGen, guards)
             .expect("every declared guard is registered");
-        App {
-            engine: Arc::new(engine),
-        }
+        App { engine }
     }
 
     /// A typed client over the embedded engine — what every handler calls.
@@ -54,25 +47,20 @@ impl App {
     }
 }
 
-/// The close policy: a ticket must be resolved — and visible in the caller's
-/// workspace — before anyone closes it. The engine guarantees this runs before the
-/// write; the decision itself is app code, reading current state off the app's own
-/// pool (its one SQL line owns its own tombstone filter). A check that cannot
-/// decide denies — fail closed.
-async fn caller_can_close(db: sqlx::PgPool, req: GuardRequest) -> GuardVerdict {
-    let (Some(id), Some(org)) = (req.args["id"].as_str(), req.ctx["org"].as_str()) else {
+/// The close policy: a ticket must be resolved before anyone closes it. The engine
+/// guarantees this runs before the write; the decision is app code — but the *read*
+/// it decides on goes back through the schema's own `ticket` query over `req.engine()`,
+/// so the workspace scope and the soft-delete filter are the ones the schema declares. 
+/// A check that cannot decide denies — fail closed.
+async fn caller_can_close(req: GuardRequest) -> GuardVerdict {
+    let (Ok(input), Ok(ctx)) = (
+        serde_json::from_value::<client::TicketInput>(req.args.clone()),
+        serde_json::from_value::<client::TicketCtx>(req.ctx.clone()),
+    ) else {
         return GuardVerdict::deny("close requires a ticket id and a workspace");
     };
-    let status: Result<Option<String>, _> = sqlx::query_scalar(
-        "select status from ticket \
-         where id = $1::uuid and org_id = $2::uuid and deleted_at is null",
-    )
-    .bind(id)
-    .bind(org)
-    .fetch_optional(&db)
-    .await;
-    match status {
-        Ok(Some(s)) if s == "resolved" => GuardVerdict::Allow,
+    match client::embedded(req.engine()).ticket(input, ctx).await {
+        Ok(Some(t)) if t.status == client::Status::Resolved => GuardVerdict::Allow,
         Ok(Some(_)) => GuardVerdict::deny("only a resolved ticket can be closed"),
         Ok(None) => GuardVerdict::deny("no such ticket in this workspace"),
         Err(_) => GuardVerdict::deny("could not verify the ticket"),

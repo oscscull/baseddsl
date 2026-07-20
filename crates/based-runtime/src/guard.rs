@@ -3,9 +3,12 @@
 //! engine owns *that* the check runs; the app owns what it decides.
 //!
 //! Guards are host code, so they live outside the schema: a guard function receives
-//! the callable's name, its decoded JSON arguments, and the server-derived `$ctx`,
-//! and returns a [`GuardVerdict`]. It is async and owns its own resources — it may
-//! read the database through a captured pool, or call the typed client itself.
+//! the callable's name, its decoded JSON arguments, the server-derived `$ctx`, and a
+//! handle to the engine dispatching it ([`GuardRequest::engine`]), and returns a
+//! [`GuardVerdict`]. It is async and owns its own resources — a decision that reads
+//! current state goes back through the schema's own queries (the typed client over
+//! `req.engine()`, scope + soft-delete injected), while a captured pool or any other
+//! resource stays available for state the schema doesn't model.
 //!
 //! A schema that declares a guard nobody registered must fail when the engine is
 //! *built* ([`Guards::missing_for`] backs that check), never pass silently at request
@@ -16,17 +19,49 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::embed::Engine;
 use crate::load::Compiled;
 
 /// What a guard receives: the callable being invoked, its decoded JSON argument
-/// object, and the server-derived request `$ctx` (never client-supplied). Owned, so a
-/// registered `async move` closure needs no borrow gymnastics.
-#[derive(Debug, Clone)]
+/// object, the server-derived request `$ctx` (never client-supplied), and the engine
+/// dispatching it ([`GuardRequest::engine`]). Owned, so a registered `async move`
+/// closure needs no borrow gymnastics.
+#[derive(Clone)]
 pub struct GuardRequest {
     /// The mutation's name — one registered fn may guard several callables.
     pub callable: String,
     pub args: serde_json::Value,
     pub ctx: serde_json::Value,
+    pub(crate) engine: Option<Engine>,
+}
+
+impl GuardRequest {
+    /// The engine dispatching this guarded mutation — the re-entry handle. A guard
+    /// whose decision reads current state calls the schema's own callables over it
+    /// (wrap it in the generated client: `client::embedded(req.engine())`), so the
+    /// read gets the scope and soft-delete injection the schema declares instead of
+    /// hand-written SQL. Safe by construction: dispatch holds no engine-wide lock,
+    /// and a guard runs before its mutation checks out a connection.
+    ///
+    /// # Panics
+    /// When the guard was invoked outside an [`Engine`] (a raw [`crate::dispatch`]
+    /// call). Every embedded app dispatches through an `Engine`, and the standalone
+    /// listener cannot run guards at all, so a production guard always has the handle.
+    pub fn engine(&self) -> &Engine {
+        self.engine
+            .as_ref()
+            .expect("guard invoked outside an Engine — raw dispatch has no re-entry handle")
+    }
+}
+
+impl std::fmt::Debug for GuardRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardRequest")
+            .field("callable", &self.callable)
+            .field("args", &self.args)
+            .field("ctx", &self.ctx)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A guard's decision. There is no third state: a guard that cannot decide (its own

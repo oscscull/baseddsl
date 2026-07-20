@@ -221,12 +221,16 @@ not a DSL symbol — nothing else in the schema defines it. The contract, end to
 - **Registration.** The embedding app registers an async fn per guard name when it
   builds the engine: `Guards::new().register("caller_can_refund", |req| async move { … })`
   → `Engine::with_guards`. The fn receives the callable's name, its decoded JSON args,
-  and the server-derived `$ctx`, and returns a verdict — **allow**, or **deny with a
-  mandatory reason** (a denial is never silent, principle 6). It is async and owns its
-  own resources: it may read the database through a captured pool, or call the typed
-  client back over the engine that invoked it — dispatch holds no engine-wide lock,
-  and a guard runs before its mutation checks out a connection, so re-entry neither
-  deadlocks nor starves the pool.
+  the server-derived `$ctx`, and a handle to the engine dispatching it (`req.engine()`),
+  and returns a verdict — **allow**, or **deny with a mandatory reason** (a denial is
+  never silent, principle 6). It is async and owns its own resources. A decision that
+  reads current state should read it back **through the schema's own queries** — wrap
+  the handle in the generated client (`client::embedded(req.engine())`) and call a
+  query, so the read inherits the scope and soft-delete injection the schema declares
+  rather than re-deriving those filters in hand-written SQL. (A captured pool or any
+  other resource stays available for state the schema doesn't model.) Re-entry is safe:
+  dispatch holds no engine-wide lock, and a guard runs before its mutation checks out a
+  connection, so it neither deadlocks nor starves the pool.
 - **Enforcement — one point, both doors.** Dispatch — the one core the HTTP edge and
   the in-process `Engine` both run through — invokes the guard **before the write body,
   before the idempotency store is consulted** (a denied request never claims a key),

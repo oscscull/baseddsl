@@ -29,7 +29,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D88 (Handle-3 `guard` runtime seam: registered host async fns, deny → 403 `guard_denied`,
   unregistered fails at engine build / listener startup), D95 (guard re-entry is safe:
   id minting is `&self`/internally synchronized, dispatch holds no engine-wide lock —
-  a guard may call the typed client over its own engine)
+  a guard may call the typed client over its own engine), D99 (the re-entry handle is
+  first-class: `GuardRequest::engine()` hands the dispatching engine to the guard, so a
+  state-reading decision goes through the schema's own scoped/soft-deleted queries — no
+  `OnceLock` back-reference, no hand-written SQL; `Engine` is now a `Clone` handle)
 - **SQL codegen — DDL** — D10 (type mapping)
 - **SQL codegen — query reads** — D11 (query SELECTs), D14 (named-filter body resolution),
   D93 (`in` value-list form: `Predicate::InList`, per-element sema check, `IN (v, v, …)` lowering),
@@ -4195,3 +4198,50 @@ codegen unit (no re-select; unit-returning client + `Ack` gating; OpenAPI compon
 runtime unit (ack commit → `{}`; zero-row → NotFound + rollback), typed live-SQLite embed proof
 (purge → `Ok(())`, row gone, re-purge → typed 404 `not_found`), and the extended helpdesk smoke;
 `make check` green end-to-end.
+
+## D99 — the guard re-entry handle is first-class: `GuardRequest::engine()` (NF3 follow-up)
+
+D95 proved a guard *can* call the typed client over its own engine, but the seam to do
+it was missing: the engine is constructed *after* its guards are registered, so a guard
+closure had nothing to capture. The re-entry test wired the engine in after the fact via
+an `Arc<OnceLock<Arc<Engine>>>`, and the helpdesk guard sidestepped the whole thing by
+reading through a captured sqlx pool — hand-writing the workspace scope (`org_id = $2`)
+and the tombstone filter (`deleted_at is null`) that the schema already declares. That is
+exactly the class of hand-written filter the language exists to make unforgettable: the
+guard is "just doing SQL" against a model the engine owns, so the engine should own it.
+
+**The handle rides the request.** `GuardRequest` gains `pub(crate) engine: Option<Engine>`
+and a `pub fn engine(&self) -> &Engine` accessor; dispatch passes the dispatching engine
+through to `check_guard`, which fills it in. A guard's state-reading decision becomes
+`client::embedded(req.engine()).ticket(input, ctx).await` — the schema's own scoped,
+soft-deleted query, deserializing `req.args`/`req.ctx` straight into the generated input
+and `$ctx` types. No filter is restated; the read can't drift from the model's contract.
+
+- **`Engine` is now a `Clone` handle** over an inner `Arc<EngineInner>` (like a pool
+  handle), so passing `Some(self)` into dispatch and cloning it into `GuardRequest` is
+  cheap and the app can hold the engine directly instead of `Arc<Engine>`. No behavior
+  change: every clone runs the same engine, connection concurrency is still the backend
+  pool's.
+- **`engine()` is infallible in practice.** It is `Some` on every `Engine::call`; the
+  only `None` path is a raw `dispatch` (a test/edge harness), where a guarded schema is
+  never served anyway — the standalone HTTP listener refuses a guarded schema at startup
+  (D88), so it also passes `None`. The accessor panics on the `None` path with a message
+  naming the cause; a production guard always has the handle.
+- **Safety is unchanged from D95.** Dispatch holds no engine-wide lock and a guard runs
+  before its mutation checks out a connection, so re-entry neither deadlocks nor starves
+  the pool — now the *default* path, not a documented-but-awkward capability.
+
+**Docs.** auth.md's registration bullet leads with the re-entry handle (read through the
+schema's queries; captured pool is the fallback for state the schema doesn't model);
+guard.rs mirrors it. D95's captured-pool note is superseded here.
+
+**Helpdesk.** `caller_can_close` drops sqlx entirely — no captured pool, no raw `select
+status … where … deleted_at is null` — and reads through `ticket`, inheriting scope +
+soft-delete. The app stores `Engine` (not `Arc<Engine>`); the smoke's requester→403 /
+cross-tenant→404 / resolved→200 close path is unchanged (the injected filters now come
+from the schema, so the cross-tenant denial is the scope's, not a hand-written `org_id`).
+
+**Verified:** the re-entry unit test rewritten to `req.engine()` (no `OnceLock`) stays
+green under its 5s deadlock timeout; the full guard suite (allow/deny/unregistered/
+build-refusal) green; the helpdesk builds and its smoke path is unchanged; `make check`
+green end-to-end.

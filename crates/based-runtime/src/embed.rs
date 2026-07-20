@@ -30,10 +30,11 @@
 //! to an empty context bag.
 //!
 //! ## Concurrency
-//! `Engine` is `Send + Sync`: every call checks a connection out of the [`Backend`]
-//! for its own duration, so it is safe to `Arc` an engine into shared state (e.g. an
-//! axum router) and call it from any number of tasks — concurrency is bounded by the
-//! backend's pool, exactly like the HTTP edge.
+//! `Engine` is `Send + Sync` and `Clone` — a cheap handle over shared state, like a
+//! connection pool. Clone it into shared state (e.g. an axum router) and call it from
+//! any number of tasks: every call checks a connection out of the [`Backend`] for its
+//! own duration, so concurrency is bounded by the backend's pool, exactly like the
+//! HTTP edge.
 
 use std::sync::Arc;
 
@@ -48,7 +49,15 @@ use crate::serve::{dispatch, dispatch_stream, resolve_shard_key, route_target, W
 /// ready to run callables directly. Build one with [`Engine::new`] (from a
 /// [`Compiled`], via [`Compiled::load`] or [`Compiled::from_checked`]) and call it with
 /// a route, JSON args, and the request `$ctx`.
+///
+/// `Engine` is a cheap handle over shared state (like a connection pool): `Clone` it
+/// into app state, handlers, and tasks freely — every clone runs the same engine.
+#[derive(Clone)]
 pub struct Engine {
+    inner: Arc<EngineInner>,
+}
+
+struct EngineInner {
     compiled: Compiled,
     backend: Arc<dyn Backend>,
     // Minting is `&self` (the generator synchronizes internally), so no call ever
@@ -62,6 +71,12 @@ pub struct Engine {
     // The registered host guard implementations (auth.md Handle 3); construction
     // guarantees every guard the schema declares is present.
     guards: Guards,
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine").finish_non_exhaustive()
+    }
 }
 
 impl Engine {
@@ -99,11 +114,13 @@ impl Engine {
             return Err(GuardSetupError { missing });
         }
         Ok(Engine {
-            compiled,
-            backend: Arc::new(backend),
-            id_gen: Box::new(id_gen),
-            store: MemStore::new(),
-            guards,
+            inner: Arc::new(EngineInner {
+                compiled,
+                backend: Arc::new(backend),
+                id_gen: Box::new(id_gen),
+                store: MemStore::new(),
+                guards,
+            }),
         })
     }
 
@@ -137,16 +154,17 @@ impl Engine {
         // keys to "" and 404s in dispatch).
         let shard_key = route_target(route)
             .map(|(is_mutation, name)| {
-                resolve_shard_key(&self.compiled, is_mutation, name, &ctx, None)
+                resolve_shard_key(&self.inner.compiled, is_mutation, name, &ctx, None)
             })
             .unwrap_or_default();
         dispatch(
-            &self.compiled,
-            &*self.backend,
+            &self.inner.compiled,
+            &*self.inner.backend,
             &shard_key,
-            self.id_gen.as_ref(),
-            &self.store,
-            &self.guards,
+            self.inner.id_gen.as_ref(),
+            &self.inner.store,
+            &self.inner.guards,
+            Some(self),
             "POST",
             route,
             args,
@@ -170,12 +188,12 @@ impl Engine {
     ) -> Result<crate::run::ShapedStream, WireResponse> {
         let shard_key = route_target(route)
             .map(|(is_mutation, name)| {
-                resolve_shard_key(&self.compiled, is_mutation, name, &ctx, None)
+                resolve_shard_key(&self.inner.compiled, is_mutation, name, &ctx, None)
             })
             .unwrap_or_default();
         dispatch_stream(
-            &self.compiled,
-            &*self.backend,
+            &self.inner.compiled,
+            &*self.inner.backend,
             &shard_key,
             "POST",
             route,
@@ -188,7 +206,7 @@ impl Engine {
     /// The compiled schema this engine serves (its lowered queries/mutations + resolved
     /// schema), for callers that want to introspect what routes exist.
     pub fn compiled(&self) -> &Compiled {
-        &self.compiled
+        &self.inner.compiled
     }
 }
 
