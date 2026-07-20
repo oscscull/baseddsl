@@ -18,6 +18,27 @@ mutation place_order(org: Id, buyer: Id) -> OrderCard {
 - `hard delete Model where (...)` — explicit, loud opt-out for real DELETE. A real DELETE
   leaves no row to read back, so the mutation returns `ok` (below).
 
+## Atomic update expressions
+An `update` assignment's right-hand side may be a scalar **arithmetic expression** over the target
+model's own numeric columns, params, and numeric literals — computed in the database as part of the
+write, never read-modify-write:
+```
+mutation adjust_stock(id: Id, delta: int) -> ProductRow scoped Tenant {
+  update Product where (id = $id) { qty = qty + $delta };
+}
+```
+lowers to `SET qty = (qty + ?)` — one statement, no prior read, so concurrent adjustments compose
+correctly (no lost update). Operators are `+ - * /`; `*` and `/` bind tighter than `+` and `-`,
+left-associative, parenthesize to override. Operands are the updated model's numeric columns (a bare
+name is the pre-write value of the row being touched), `$param`s, and numeric literals. Division is the
+database's (integer vs. real per the operand types); the engine adds no zero-guard.
+
+Eligibility is the numeric family (`int`, `float`, `decimal`) end to end: every column operand must be
+numeric (`E0231`) and the assigned column must be numeric (`E0153`, the ordinary assign-type rule). An
+arithmetic RHS is **update-only** — a `create` has no existing row to reference (`E0230`); a plain
+value stays the one form for `create`. This is a leaf-level escape into arithmetic, not a general
+language — no functions, no cross-row references, no conditionals (principle 5).
+
 ## Atomic groups
 `tx { ... }` runs a static set of writes in one transaction; rolls back together. Back-reference a prior step with `^`:
 ```

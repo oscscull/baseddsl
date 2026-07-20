@@ -115,6 +115,10 @@ pub mod code {
     pub const SHAPE_ON_DELETE: &str = "E0220"; // a real-DELETE mutation declares a shape — no surviving row to read back
     pub const ACK_SURVIVING: &str = "E0221"; // `-> ok` on a mutation with a surviving write (or no real DELETE at all)
     pub const ACK_QUERY: &str = "E0222"; // `-> ok` on a query — a query returns data
+
+    // atomic update expressions (E023x)
+    pub const ARITH_CREATE: &str = "E0230"; // an arithmetic assign expression in a `create` — no existing row to reference (update-only)
+    pub const ARITH_OPERAND: &str = "E0231"; // a non-numeric operand in an arithmetic assign expression
 }
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,

@@ -224,7 +224,17 @@ restore_stmt= 'restore' model_ref where_clause ;
 hard_delete_stmt = 'hard' 'delete' model_ref where_clause ;
 
 assign_block = '{' { assign sep } [ assign ] '}' ;
-assign      = column_name '=' value ;
+assign      = column_name '=' assign_rhs ;
+
+(* An update assignment's RHS is a scalar arithmetic expression over the target      *)
+(* model's own numeric columns, params, and numeric literals (mutations.md) — lowered *)
+(* to a real SQL `SET col = <expr>`, never read-modify-write. A bare `value` is the    *)
+(* common (and, for `create`, the only — E0230) case. `*` `/` bind tighter than        *)
+(* `+` `-`; left-associative; parenthesize to override. Numeric family only (E0231).   *)
+assign_rhs   = arith_expr ;
+arith_expr   = arith_term { ( '+' | '-' ) arith_term } ;
+arith_term   = arith_factor { ( '*' | '/' ) arith_factor } ;
+arith_factor = value | '(' arith_expr ')' ;
 
 (* Atomic group; back-reference a prior step's row with `^`.                   *)
 tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;

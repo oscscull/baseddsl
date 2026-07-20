@@ -13,10 +13,10 @@
 //! fallback.
 
 use based_ast::{
-    Assign, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member, Model, Modifier,
-    Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate, Primitive, Query,
-    QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr, Value,
-    VariantValue, WriteStmt,
+    Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member, Model,
+    Modifier, Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate, Primitive,
+    Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr,
+    Value, VariantValue, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -1086,9 +1086,9 @@ impl Snapshot {
         out: &mut Vec<(&'a Ident, &'a str)>,
     ) {
         for a in assigns {
-            if let (Some(en), Value::Path(vp)) = (
+            if let (Some(en), Some(Value::Path(vp))) = (
                 self.enum_of_path(model, std::slice::from_ref(&a.col)),
-                &a.value,
+                a.value.as_value(),
             ) {
                 if vp.segments.len() == 1 {
                     out.push((&vp.segments[0], en));
@@ -1980,7 +1980,19 @@ fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>)
 fn assign_paths<'a>(assigns: &'a [Assign], model: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
     for a in assigns {
         out.push((model, std::slice::from_ref(&a.col)));
-        value_paths(&a.value, model, out);
+        assign_rhs_paths(&a.value, model, out);
+    }
+}
+
+/// Field paths in an assignment RHS: a plain value's path, or every column operand
+/// of an arithmetic expression (each rooted at the write model).
+fn assign_rhs_paths<'a>(rhs: &'a AssignRhs, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    match rhs {
+        AssignRhs::Value(v) => value_paths(v, root, out),
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            assign_rhs_paths(lhs, root, out);
+            assign_rhs_paths(rhs, root, out);
+        }
     }
 }
 
@@ -2026,14 +2038,16 @@ fn clause_param_refs<'a>(c: &'a Clause, out: &mut Vec<&'a ParamRef>) {
 fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
     for w in body {
         match w {
-            WriteStmt::Create { assigns, .. } => {
-                assigns.iter().for_each(|a| value_param_refs(&a.value, out))
-            }
+            WriteStmt::Create { assigns, .. } => assigns
+                .iter()
+                .for_each(|a| assign_rhs_param_refs(&a.value, out)),
             WriteStmt::Update {
                 where_, assigns, ..
             } => {
                 pred_param_refs(where_, out);
-                assigns.iter().for_each(|a| value_param_refs(&a.value, out));
+                assigns
+                    .iter()
+                    .for_each(|a| assign_rhs_param_refs(&a.value, out));
             }
             WriteStmt::Delete { where_, .. }
             | WriteStmt::Restore { where_, .. }
@@ -2056,6 +2070,18 @@ fn pred_param_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a ParamRef>) {
         Predicate::FilterCall { args, .. } => args.iter().for_each(|v| value_param_refs(v, out)),
         Predicate::Raw(r) => raw_param_refs(r, out),
         Predicate::Bare(_) => {}
+    }
+}
+
+/// Every `$param` reference in an assignment RHS (a plain value, or each operand of
+/// an arithmetic expression).
+fn assign_rhs_param_refs<'a>(rhs: &'a AssignRhs, out: &mut Vec<&'a ParamRef>) {
+    match rhs {
+        AssignRhs::Value(v) => value_param_refs(v, out),
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            assign_rhs_param_refs(lhs, out);
+            assign_rhs_param_refs(rhs, out);
+        }
     }
 }
 

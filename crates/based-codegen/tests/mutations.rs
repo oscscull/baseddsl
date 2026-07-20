@@ -90,6 +90,54 @@ fn update_injects_soft_delete_scope_and_bumps_updated() {
 }
 
 #[test]
+fn atomic_update_lowers_to_real_sql_expression() {
+    // `qty = qty + $delta` becomes a computed SET — a real SQL expression over the
+    // row's own column, not a read-modify-write. MariaDB qualifies the SET target.
+    let src = r#"
+        @updated(updated_at)
+        Product { updated_at: timestamp, qty: int, name: text }
+        shape P from Product { qty }
+        mutation adjust(id: Id, delta: int) -> P {
+          update Product where (id = $id) { qty = qty + $delta };
+        }
+        "#;
+    let maria = gen(src);
+    assert!(
+        maria.contains("SET `product`.`qty` = (`product`.`qty` + :delta)"),
+        "\n{maria}"
+    );
+    // Postgres/SQLite take a bare SET target but qualify the RHS column read.
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#"SET "qty" = ("product"."qty" + :delta)"#),
+        "\n{pg}"
+    );
+    let lite = gen_for(src, Dialect::Sqlite);
+    assert!(
+        lite.contains("SET `qty` = (`product`.`qty` + :delta)"),
+        "\n{lite}"
+    );
+}
+
+#[test]
+fn atomic_update_respects_precedence_with_parens() {
+    // `(qty + $base) * $n` — the AST tree already encodes precedence; codegen wraps
+    // each binary node so the SQL evaluates in the same order.
+    let out = gen(r#"
+        @updated(updated_at)
+        Product { updated_at: timestamp, qty: int }
+        shape P from Product { qty }
+        mutation recompute(id: Id, base: int, n: int) -> P {
+          update Product where (id = $id) { qty = (qty + $base) * $n };
+        }
+        "#);
+    assert!(
+        out.contains("SET `product`.`qty` = ((`product`.`qty` + :base) * :n)"),
+        "\n{out}"
+    );
+}
+
+#[test]
 fn update_where_inlines_named_filter() {
     // A named filter used in a mutation `where` is inlined the same way as on the
     // read side — the write chain threads `decls` so the filter body is available.

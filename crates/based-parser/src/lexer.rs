@@ -88,6 +88,16 @@ pub enum Tok {
     Lt,
     #[token("~")]
     Tilde,
+
+    // --- arithmetic (atomic update expressions) ---
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Star,
+    #[token("/")]
+    Slash,
 }
 
 /// A token plus its half-open byte range `[start, end)` in the source.

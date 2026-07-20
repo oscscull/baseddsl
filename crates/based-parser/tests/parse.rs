@@ -389,7 +389,9 @@ fn mutation_with_create_and_param_refs() {
         WriteStmt::Create { model, assigns } => {
             assert_eq!(model.node, "Order");
             assert_eq!(assigns.len(), 2);
-            assert!(matches!(&assigns[0].value, Value::Param(p) if p.name.node == "org"));
+            assert!(
+                matches!(assigns[0].value.as_value(), Some(Value::Param(p)) if p.name.node == "org")
+            );
         }
         other => panic!("expected create, got {other:?}"),
     }
@@ -418,7 +420,7 @@ fn tx_create_with_backreference() {
     match &inner[1] {
         WriteStmt::Create { assigns, .. } => {
             assert!(
-                matches!(&assigns[0].value, Value::Back(b) if b.field.node == "id"),
+                matches!(assigns[0].value.as_value(), Some(Value::Back(b)) if b.field.node == "id"),
                 "expected `^.id` back-reference, got {:?}",
                 assigns[0].value
             );

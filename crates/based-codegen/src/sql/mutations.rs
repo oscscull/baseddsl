@@ -451,9 +451,7 @@ fn lower_create<'a>(
         let col = physical_col(model, &a.col.node);
         cols.push(dialect.quote(&col));
         // An enum column takes a bare variant → its wire string literal.
-        let val = sel
-            .enum_assign_lit(model, &a.col.node, &a.value)
-            .unwrap_or_else(|| sel.value(&a.value, model));
+        let val = sel.assign_rhs(&a.value, model, &a.col.node);
         vals.push(val);
         assigned.push(col);
     }
@@ -528,9 +526,7 @@ fn lower_update<'a>(
 
     for a in assigns {
         let col = physical_col(model, &a.col.node);
-        let val = sel
-            .enum_assign_lit(model, &a.col.node, &a.value)
-            .unwrap_or_else(|| sel.value(&a.value, model));
+        let val = sel.assign_rhs(&a.value, model, &a.col.node);
         sets.push(format!("{} = {val}", set_lhs(&sel, model, &col)));
         assigned.push(col);
     }

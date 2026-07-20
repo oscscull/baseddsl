@@ -204,7 +204,9 @@ fn expand_filter(
 /// `col = $ctx.field` in a `create`/`update`: infer the field's type from the
 /// assigned column (a scalar's primitive, or a forward relation's target key).
 fn record_assign(a: &Assign, mi: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
-    let Value::Param(pr) = &a.value else { return };
+    let Some(Value::Param(pr)) = a.value.as_value() else {
+        return;
+    };
     let Some(field) = ctx_field(pr) else { return };
     let Some(member) = cx.model(mi).member(&a.col.node) else {
         return;

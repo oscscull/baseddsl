@@ -467,7 +467,43 @@ pub enum WriteStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
     pub col: Ident,
-    pub value: Value,
+    pub value: AssignRhs,
+}
+
+/// The right-hand side of an assignment. A plain `value` in the common case (and the
+/// only case a `create` accepts); an arithmetic expression over the target model's own
+/// numeric columns + params for an atomic self-referential `update` (`total = total + $n`),
+/// lowered to a real SQL `SET col = <expr>` rather than a read-modify-write.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignRhs {
+    Value(Value),
+    /// `lhs op rhs`, e.g. `total + $n`. `*`/`/` bind tighter than `+`/`-`; the tree
+    /// already encodes precedence and associativity. `span` covers the whole expression.
+    Arith {
+        lhs: Box<AssignRhs>,
+        op: ArithOp,
+        rhs: Box<AssignRhs>,
+        span: Span,
+    },
+}
+
+impl AssignRhs {
+    /// The plain value, when the RHS is a single `value` (not an arithmetic expression).
+    /// Lets the many sites that only handle the simple form keep their `Value` logic.
+    pub fn as_value(&self) -> Option<&Value> {
+        match self {
+            AssignRhs::Value(v) => Some(v),
+            AssignRhs::Arith { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone, PartialEq)]

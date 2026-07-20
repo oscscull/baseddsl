@@ -310,6 +310,69 @@ async fn update_mutation_reselects_full_declared_shape_end_to_end() {
     );
 }
 
+/// An atomic update expression (`total = total + $delta`) is computed **server-side** in
+/// one statement, not read-modify-write — proven against a real engine: the read-your-writes
+/// re-select shows the arithmetic result, and two sequential adjustments compose off the
+/// stored value (no lost update).
+#[tokio::test]
+async fn atomic_update_expression_computes_server_side_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @updated(updated_at)
+        Order { updated_at: timestamp, status: text, total: int }
+        shape OrderCard from Order { status, total }
+        mutation adjust_total(id: Id, delta: int) -> OrderCard {
+          update Order where (id = $id) { total = total + $delta };
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `order` (`id`, `updated_at`, `status`, `total`)
+                VALUES ('o1', '2020-01-01 00:00:00', 'pending', 100);
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    // First adjustment: 100 + 25 = 125, computed in the database.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/adjust_total",
+        json!({ "id": "o1", "delta": 25 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(
+        resp.body,
+        json!({ "status": "pending", "total": 125 }),
+        "read-your-writes: the re-select sees the server-computed sum"
+    );
+
+    // Second adjustment composes off the stored value: 125 - 5 = 120.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/adjust_total",
+        json!({ "id": "o1", "delta": -5 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(resp.body, json!({ "status": "pending", "total": 120 }));
+}
+
 /// An update whose `where` matches no row — a wrong id, or a cross-tenant id the scope
 /// filter excludes — is a 404 `not_found` with nothing written, never a `200` with a
 /// null body the typed client cannot decode.

@@ -443,7 +443,7 @@ mod rust {
         a: &Assign,
         map: &mut std::collections::HashMap<String, String>,
     ) {
-        if let Value::Param(pr) = &a.value {
+        if let Some(Value::Param(pr)) = a.value.as_value() {
             if pr.path.is_empty() {
                 if let Some(entity) = model.and_then(|m| member_entity(m, &a.col.node)) {
                     map.insert(pr.name.node.clone(), entity);

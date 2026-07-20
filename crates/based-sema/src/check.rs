@@ -868,7 +868,7 @@ fn check_write(
         WriteStmt::Create { model, assigns } => {
             if let Some(mi) = write_model(model, cx, sink) {
                 for a in assigns {
-                    check_assign(a, mi, cx, params, back, sink);
+                    check_assign(a, mi, cx, params, back, /* in_update = */ false, sink);
                 }
                 check_scope_assign(mi, assigns, unscoped, cx, sink);
                 check_create_required(mi, assigns, model, scoped, unscoped, cx, sink);
@@ -882,7 +882,7 @@ fn check_write(
             if let Some(mi) = write_model(model, cx, sink) {
                 resolve::check_predicate(where_, Some(mi), cx, params, sink);
                 for a in assigns {
-                    check_assign(a, mi, cx, params, back, sink);
+                    check_assign(a, mi, cx, params, back, /* in_update = */ true, sink);
                 }
             }
         }
@@ -932,10 +932,26 @@ fn check_assign(
     cx: &Cx,
     params: &[String],
     back: Option<usize>,
+    in_update: bool,
     sink: &mut Sink,
 ) {
     let Some(member) = cx.model(mi).member(&a.col.node) else {
         unknown_field(cx, mi, &a.col, sink);
+        return;
+    };
+    // An arithmetic RHS (`total = total + $n`) is its own world: numeric-only, and
+    // valid only in an `update` (a `create` has no existing row to reference).
+    let Some(value) = a.value.as_value() else {
+        resolve::check_assign_arith(
+            &a.value,
+            &member.kind,
+            &a.col,
+            mi,
+            in_update,
+            cx,
+            params,
+            sink,
+        );
         return;
     };
     // Assigning an enum column takes a bare variant (`status = paid`), not a column
@@ -946,21 +962,21 @@ fn check_assign(
     } = &member.kind
     {
         if let Some(en) = cx.enum_(en_name) {
-            if resolve::check_enum_operand(&a.value, en, params, sink) {
+            if resolve::check_enum_operand(value, en, params, sink) {
                 return;
             }
         }
     }
     // A `^.field` back-reference resolves against the preceding create's model, not
     // the model being assigned; delegate the rest of the value to the shared checker.
-    if let Value::Back(b) = &a.value {
+    if let Value::Back(b) = value {
         check_back(b, back, cx, sink);
     } else {
-        resolve::check_value(&a.value, Some(mi), cx, params, sink);
+        resolve::check_value(value, Some(mi), cx, params, sink);
     }
     // The assigned value's type must agree with the target column (E0153); silent
     // when either side failed to resolve above.
-    resolve::check_assign_type(&member.kind, &a.col, &a.value, mi, back, cx, sink);
+    resolve::check_assign_type(&member.kind, &a.col, value, mi, back, cx, sink);
 }
 
 /// On a scoped model  the `@scope` column is engine-managed on `create`: it is

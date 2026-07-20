@@ -1420,6 +1420,29 @@ impl<'a> Select<'a> {
         }
     }
 
+    /// Lower an assignment RHS: a plain value (an enum column's variant → its wire
+    /// literal, else the ordinary value lowering), or an arithmetic expression
+    /// (`total + $n`) lowered to a real SQL `(a op b)` — a column operand reads the
+    /// row's pre-write value, computed in the database, never read-modify-write.
+    pub(crate) fn assign_rhs(
+        &mut self,
+        rhs: &AssignRhs,
+        model: &RModel,
+        col_field: &str,
+    ) -> String {
+        match rhs {
+            AssignRhs::Value(v) => self
+                .enum_assign_lit(model, col_field, v)
+                .unwrap_or_else(|| self.value(v, model)),
+            AssignRhs::Arith { lhs, op, rhs, .. } => format!(
+                "({} {} {})",
+                self.assign_rhs(lhs, model, col_field),
+                arith_op_sql(*op),
+                self.assign_rhs(rhs, model, col_field)
+            ),
+        }
+    }
+
     pub(crate) fn value(&mut self, v: &Value, model: &RModel) -> String {
         match v {
             Value::Param(pr) => format!(":{}", param_key(pr)),
@@ -1444,12 +1467,13 @@ impl<'a> Select<'a> {
         // Reuse the value the prior create assigned to this field (a caller
         // param/literal the engine already binds), if it set one.
         if let Some(a) = back.assigns.iter().find(|a| a.col.node == b.field.node) {
-            return match &a.value {
-                Value::Param(pr) => format!(":{}", param_key(pr)),
-                Value::Lit(l) => render_lit(self.dialect, l),
-                Value::Func(f) => render_func(f),
-                // A path or nested back-ref in the prior create is not a plain bind;
-                // leave a visible marker rather than emit something unbindable.
+            return match a.value.as_value() {
+                Some(Value::Param(pr)) => format!(":{}", param_key(pr)),
+                Some(Value::Lit(l)) => render_lit(self.dialect, l),
+                Some(Value::Func(f)) => render_func(f),
+                // A path, nested back-ref, or arithmetic RHS in the prior create is not
+                // a plain bind; leave a visible marker rather than emit something
+                // unbindable. (A create never carries arithmetic — sema E0230.)
                 _ => format!("NULL /* ^.{} unresolved */", b.field.node),
             };
         }
@@ -1644,6 +1668,15 @@ pub(crate) fn sql_op(op: Op) -> &'static str {
         Op::Like => "LIKE",
         Op::In => "IN",
         Op::Has => "MEMBER OF", // JSON array containment (MariaDB `x MEMBER OF(json)`)
+    }
+}
+
+pub(crate) fn arith_op_sql(op: ArithOp) -> &'static str {
+    match op {
+        ArithOp::Add => "+",
+        ArithOp::Sub => "-",
+        ArithOp::Mul => "*",
+        ArithOp::Div => "/",
     }
 }
 

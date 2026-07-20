@@ -696,7 +696,7 @@ fn assign_block(assigns: &[Assign]) -> String {
         "{{ {} }}",
         assigns
             .iter()
-            .map(|a| format!("{} = {}", a.col.node, value(&a.value)))
+            .map(|a| format!("{} = {}", a.col.node, assign_rhs(&a.value)))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -766,6 +766,47 @@ fn op_str(op: Op) -> &'static str {
 }
 
 // ---------- values / paths / literals --------------------------------------
+
+/// An assignment RHS: a plain value, or an arithmetic expression with minimal
+/// parentheses (only where precedence/associativity require them).
+fn assign_rhs(r: &AssignRhs) -> String {
+    arith(r, 0)
+}
+
+fn arith(r: &AssignRhs, min: u8) -> String {
+    let (prec, body) = match r {
+        AssignRhs::Value(v) => (3, value(v)),
+        AssignRhs::Arith { lhs, op, rhs, .. } => {
+            let prec = match op {
+                ArithOp::Add | ArithOp::Sub => 1,
+                ArithOp::Mul | ArithOp::Div => 2,
+            };
+            (
+                prec,
+                format!(
+                    "{} {} {}",
+                    arith(lhs, prec),
+                    arith_op(*op),
+                    arith(rhs, prec + 1)
+                ),
+            )
+        }
+    };
+    if prec < min {
+        format!("({body})")
+    } else {
+        body
+    }
+}
+
+fn arith_op(op: ArithOp) -> &'static str {
+    match op {
+        ArithOp::Add => "+",
+        ArithOp::Sub => "-",
+        ArithOp::Mul => "*",
+        ArithOp::Div => "/",
+    }
+}
 
 fn value(v: &Value) -> String {
     match v {

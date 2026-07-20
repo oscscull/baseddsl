@@ -11,8 +11,8 @@
 //! validated inputs and lets [`crate::scan::to_positional`] pull from it in SQL order.
 
 use based_ast::{
-    Assign, BaseType, Decl, DefaultVal, Literal, Mutation, Param, Path, Predicate, Primitive,
-    Query, Value, WriteStmt,
+    Assign, AssignRhs, BaseType, Decl, DefaultVal, Literal, Mutation, Param, Path, Predicate,
+    Primitive, Query, Value, WriteStmt,
 };
 use based_ast::{NamedFilter, Verb};
 use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel};
@@ -584,13 +584,23 @@ fn param_use_in_assigns(
 ) -> Option<Family> {
     let m = schema.model(model)?;
     for a in assigns {
-        if let Value::Param(pr) = &a.value {
-            if pr.name.node == name {
-                return member_family(schema, m, &[&a.col.node]);
-            }
+        // A `$name` used directly, or as an operand of an arithmetic RHS
+        // (`total = total + $name`), binds at the target column's family.
+        if assign_rhs_uses_param(&a.value, name) {
+            return member_family(schema, m, &[&a.col.node]);
         }
     }
     None
+}
+
+fn assign_rhs_uses_param(rhs: &AssignRhs, name: &str) -> bool {
+    match rhs {
+        AssignRhs::Value(Value::Param(pr)) => pr.name.node == name,
+        AssignRhs::Value(_) => false,
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            assign_rhs_uses_param(lhs, name) || assign_rhs_uses_param(rhs, name)
+        }
+    }
 }
 
 /// Find `$name` in a predicate: a `path op $name` comparison types the param by the

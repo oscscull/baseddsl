@@ -394,6 +394,105 @@ pub fn check_assign_type(
     }
 }
 
+/// Type-check an arithmetic assignment RHS (`total = total + $n`, mutations.md).
+/// Numeric-only and update-only: a `create` has no existing row to self-reference
+/// (`E0230`); every column operand must be numeric (`E0231`); and, via the ordinary
+/// assign-type rule, the target column must be numeric too (`E0153`). Params and
+/// functions are typed at their declaration / unmodelled, so they are skipped here —
+/// exactly as on every other write-side family check.
+#[allow(clippy::too_many_arguments)]
+pub fn check_assign_arith(
+    rhs: &AssignRhs,
+    target: &MemberKind,
+    col: &Ident,
+    mi: usize,
+    in_update: bool,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    if !in_update {
+        if let AssignRhs::Arith { span, .. } = rhs {
+            sink.error(
+                code::ARITH_CREATE,
+                *span,
+                "an arithmetic expression needs an existing row — valid only in `update`, \
+                 not `create`"
+                    .to_string(),
+            );
+        }
+        return;
+    }
+    if member_family(target) != Some(Family::Numeric) {
+        let target_desc = match target {
+            MemberKind::Scalar { ty, .. } => format!("a `{}` column", prim_name(*ty)),
+            MemberKind::Forward { target, .. } => format!("relation `{target}`"),
+            MemberKind::Inverse { .. } => return,
+        };
+        sink.error(
+            code::ASSIGN_TYPE,
+            col.span,
+            format!(
+                "cannot assign an arithmetic (numeric) expression to `{}` ({target_desc})",
+                col.node
+            ),
+        );
+    }
+    check_arith_operands(rhs, col, mi, cx, params, sink);
+}
+
+/// Walk an arithmetic RHS: resolve each leaf value (names, params, back-refs) and
+/// require every column / literal operand to be numeric (`E0231`).
+fn check_arith_operands(
+    rhs: &AssignRhs,
+    col: &Ident,
+    mi: usize,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    match rhs {
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            check_arith_operands(lhs, col, mi, cx, params, sink);
+            check_arith_operands(rhs, col, mi, cx, params, sink);
+        }
+        AssignRhs::Value(v) => {
+            check_value(v, Some(mi), cx, params, sink);
+            match v {
+                Value::Path(p) => {
+                    if let Some(t) = resolve_quiet(p, mi, cx) {
+                        if terminal_family(&t) != Family::Numeric {
+                            if let Some(seg) = p.segments.last() {
+                                sink.error(
+                                    code::ARITH_OPERAND,
+                                    seg.span,
+                                    format!(
+                                        "{} is not numeric — an arithmetic update expression \
+                                         takes int/float/decimal operands",
+                                        terminal_name(&t)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                // A literal carries no span, so a non-numeric one (`total + "x"`) is
+                // anchored at the assignment target, like the assign-type error.
+                Value::Lit(l) => {
+                    if matches!(lit_family(l), Some(f) if f != Family::Numeric) {
+                        sink.error(
+                            code::ARITH_OPERAND,
+                            col.span,
+                            "a non-numeric literal in an arithmetic update expression".to_string(),
+                        );
+                    }
+                }
+                Value::Param(_) | Value::Func(_) | Value::Back(_) => {}
+            }
+        }
+    }
+}
+
 /// The column a param maps onto, for annotation agreement .
 pub enum Mapped<'a> {
     Scalar(Primitive),

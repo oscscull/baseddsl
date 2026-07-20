@@ -226,6 +226,21 @@ fn raw_query_body_reprints_byte_exactly() {
 }
 
 #[test]
+fn atomic_update_expr_reprints_with_minimal_parens() {
+    // An arithmetic assignment RHS reprints canonically: one space around each
+    // operator, parentheses only where precedence/associativity require them.
+    let got = fmt(
+        "mutation adjust(id: Id, base: int, n: int) -> P {\n  update Product where (id = $id) { qty=(qty+$base)*$n-1 };\n}\n",
+    );
+    assert_eq!(
+        got,
+        "mutation adjust(id: Id, base: int, n: int) -> P {\n  update Product where (id = $id) { qty = (qty + $base) * $n - 1 };\n}\n"
+    );
+    assert!(based_parser::parse_file(&got, FileId(0)).is_ok());
+    assert_eq!(fmt(&got), got);
+}
+
+#[test]
 fn ack_return_prints_bare_ok() {
     let got = fmt("mutation purge(id: Id) -> ok   { hard delete Comment where (id = $id) }");
     assert_eq!(

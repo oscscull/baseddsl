@@ -44,7 +44,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
   success), D98 (`-> ok` shapeless ack return for real DELETEs; shape-on-real-DELETE E0220,
-  ack-on-surviving-write E0221, ack-on-query E0222; zero-row DELETE → 404 `not_found`)
+  ack-on-surviving-write E0221, ack-on-query E0222; zero-row DELETE → 404 `not_found`),
+  D100 (atomic update expressions: `update … { total = total + $n }` — a self-referential
+  arithmetic SET over the model's numeric columns/params, lowered to real SQL `SET col =
+  (…)`, never read-modify-write; `+ - * /`, numeric family only, update-only; E0230/E0231)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
@@ -4245,3 +4248,50 @@ from the schema, so the cross-tenant denial is the scope's, not a hand-written `
 green under its 5s deadlock timeout; the full guard suite (allow/deny/unregistered/
 build-refusal) green; the helpdesk builds and its smoke path is unchanged; `make check`
 green end-to-end.
+
+## D100 — atomic update expressions: a self-referential arithmetic SET (T3)
+
+**Decision.** An `update` assignment's right-hand side may be a scalar **arithmetic
+expression** over the target model's own numeric columns, `$param`s, and numeric literals —
+`update Product where (id = $id) { qty = qty + $delta }` — lowered to a real SQL
+`SET qty = (qty + ?)`, computed in the database, never a read-modify-write. This closes the
+lost-update gap (two concurrent adjustments compose off the stored value) and is the T3
+item on Track T (core DB feature parity, after enum D82 and decimal/float D83).
+
+**Scope (minimal, principle 5 — no Turing-creep).** Operators are `+ - * /`; `*`/`/` bind
+tighter than `+`/`-`, left-associative, parenthesize to override. Operands are numeric
+columns of the updated model (a bare name = the row's pre-write value), `$param`s, and
+numeric literals. No functions, conditionals, or cross-row references — the expression is a
+leaf-level escape into arithmetic, not a language. A plain value stays the one form for
+`create`.
+
+**Eligibility.** The numeric family (`int`/`float`/`decimal`, D83) end to end: every column
+operand must be numeric (`E0231`) and the assigned column must be numeric (`E0153`, the
+ordinary assign-type rule — a numeric expression assigned to a text column is that error).
+An arithmetic RHS is **update-only** — a `create` has no existing row to self-reference
+(`E0230`). Params and functions are typed at their declaration / unmodelled, so they are
+skipped by the numeric check, exactly as on every other write-side family check.
+
+**Grammar / AST.** `assign = column_name '=' assign_rhs`, where `assign_rhs` is a
+precedence-climbing arithmetic expression whose leaves are the existing `value` production
+(a bare `value` is the common, and for `create` the only, case). New lexer tokens `+ - * /`
+(the `->` arrow still wins the longest match, so `-` is unambiguous). AST: `Assign.value` is
+now `AssignRhs` (`Value(Value)` | `Arith { lhs, op, rhs, span }`) with `ArithOp`; an
+`as_value()` accessor lets the many single-value sites keep their `Value` logic.
+
+**Lowering.** A column operand reads through the ordinary value path (qualified `table.col`,
+which all three dialects accept on a SET RHS — SQLite included, verified); each binary node
+wraps in parens so the SQL evaluates in AST order. The SET target keeps its dialect form
+(MariaDB qualifies, Postgres/SQLite bare — D58). Division is the database's (integer vs.
+real per operand types); no zero-guard. A `$param` operand binds positionally at the target
+column's family (so Postgres numeric text-binding, D59, still holds).
+
+**Editor / fmt.** fmt reprints the RHS with minimal parentheses (idempotent, reparses).
+Field-reference go-to-def / find-refs / rename see every RHS column operand (rooted at the
+update target) and every `$param`. No new keywords, so tmLanguage/completion are untouched.
+
+**Verified.** Sema positive/negative cases (E0230, E0231, E0153) + a conformance-sema
+golden; codegen SQL asserted on all three dialects (`SET \`product\`.\`qty\` = (…)` /
+`SET "qty" = ("product"."qty" + :delta)`); fmt round-trip; and **live SQLite** read-your-
+writes proving the sum is computed server-side and two sequential adjustments compose
+(100 + 25 → 125, 125 − 5 → 120). `make check` green end-to-end.

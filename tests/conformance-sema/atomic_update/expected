@@ -1,0 +1,14 @@
+DIAGNOSTICS
+  E0230: an arithmetic expression needs an existing row — valid only in `update`, not `create`
+  E0231: `text` is not numeric — an arithmetic update expression takes int/float/decimal operands
+SCHEMA
+model Product  table=product
+  id: Id
+  qty: int
+  price: decimal(10, 2)
+  name: text
+shape ProductRow from Product
+mutation adjust_stock  ret=Product
+mutation apply_markup  ret=Product
+mutation bad_create  ret=Product
+mutation bad_operand  ret=Product
