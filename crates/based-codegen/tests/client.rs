@@ -815,3 +815,32 @@ fn schema_without_an_ack_mutation_emits_no_ack_type() {
         "#);
     assert!(!out.contains("struct Ack"), "\n{out}");
 }
+
+#[test]
+fn aggregate_shape_types_each_function() {
+    let out = gen(r#"
+        Buyer { name: text }
+        Order { buyer: Buyer, total: decimal(12, 2), qty: int }
+        shape BuyerStats from Order {
+          who = buyer
+          orders = count()
+          revenue = sum(total)
+          units = sum(qty)
+          avg_qty = avg(qty)
+          biggest = max(total)
+        }
+        query buyer_stats() -> BuyerStats[] { list Order group by (buyer); }
+        "#);
+    // count → non-null i64; sum/min/max keep the column type but nullable; avg → f64.
+    assert!(out.contains("pub orders: i64"), "\n{out}");
+    assert!(
+        out.contains("pub revenue: Option<rust_decimal::Decimal>"),
+        "\n{out}"
+    );
+    assert!(out.contains("pub units: Option<i64>"), "\n{out}");
+    assert!(out.contains("pub avg_qty: Option<f64>"), "\n{out}");
+    assert!(
+        out.contains("pub biggest: Option<rust_decimal::Decimal>"),
+        "\n{out}"
+    );
+}

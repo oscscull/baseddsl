@@ -557,6 +557,14 @@ fn shape_value(v: &ShapeValue) -> String {
     match v {
         ShapeValue::Path(p) => path(p),
         ShapeValue::Raw(r) => raw_sql(r),
+        ShapeValue::Agg(a) => aggregate(a),
+    }
+}
+
+fn aggregate(a: &AggCall) -> String {
+    match &a.arg {
+        Some(p) => format!("{}({})", a.func.node, path(p)),
+        None => format!("{}()", a.func.node),
     }
 }
 
@@ -601,6 +609,11 @@ fn clause(c: &Clause) -> String {
             UnindexedKind::Unsafe(None) => "unindexed(unsafe)".to_string(),
             UnindexedKind::Unsafe(Some(r)) => format!("unindexed(unsafe, \"{}\")", esc(r)),
         },
+        Clause::GroupBy(cols) => format!(
+            "group by ({})",
+            cols.iter().map(path).collect::<Vec<_>>().join(", ")
+        ),
+        Clause::Having(p) => format!("having ({})", predicate(p, 0)),
     }
 }
 

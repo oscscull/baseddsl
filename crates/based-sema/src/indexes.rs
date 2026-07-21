@@ -217,6 +217,9 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
             }
             Clause::Page(_) => {}
             Clause::Unindexed(u) => pat.annotation = Some(u.clone()),
+            // Aggregation clauses don't drive the FK-join index inference (the WHERE row
+            // filter still does, via `Clause::Where` above).
+            Clause::GroupBy(_) | Clause::Having(_) => {}
         }
     }
     // Sort cascade: the model default applies when the query is bare.

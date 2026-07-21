@@ -47,6 +47,32 @@ and is never referenced this way.
 **Reference for a shared type; inline when you mean to trim.** If one shape is forced
 to serve two consumers with different needs, split it into two shapes.
 
+## Aggregate projections
+A `=` value may be an **aggregate** over the shape's rows instead of a reach:
+`count()`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`. A shape with any
+aggregate field is an *aggregate shape* — a projection over **groups** of rows, not
+rows (queries.md pairs it with `group by` / `having`).
+```
+shape BuyerStats from Order {
+  buyer = placed_by        # a group column (a reach)
+  orders = count()         # how many rows in the group
+  revenue = sum(total)     # over the numeric family
+}
+```
+- `count()` takes no argument (rows in the group) → `int`, never null.
+- `sum` / `avg` take one numeric column (`int` / `float` / `decimal`). `sum` keeps the
+  column's numeric type; `avg` is always `float`.
+- `min` / `max` take one *comparable* column (numeric, `timestamp`, `date`, `text`) and
+  keep its type.
+- Every aggregate but `count()` is **nullable** (an all-null or empty group aggregates to
+  null) — the projected type is `T?`.
+
+An aggregate shape is **flat**: it neither nests a relation nor is nested/referenced by
+another shape (a group is not a row, so it has no sub-objects). A non-aggregate projected
+column must be a `group by` column of the query using the shape (queries.md); otherwise the
+shape is only usable as a whole-table aggregate (one row, no `group by`). An aggregate shape
+is never a mutation return (a write reads back a written row, not a group).
+
 ## Inline legal
 `{ name, email, city = address.city.name }`
 

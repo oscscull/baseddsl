@@ -13,10 +13,10 @@
 //! fallback.
 
 use based_ast::{
-    Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member, Model,
-    Modifier, Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate, Primitive,
-    Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span, TypeExpr,
-    Value, VariantValue, WriteStmt,
+    AggCall, Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member,
+    Model, Modifier, Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate,
+    Primitive, Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span,
+    TypeExpr, Value, VariantValue, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -884,7 +884,13 @@ impl Snapshot {
                     value: ShapeValue::Path(p),
                     ..
                 } => out.push((from, &p.segments)),
-                ShapeField::Rename { .. } => {} // raw-SQL value: no field path
+                // An aggregate's argument column is a field reference (navigable /
+                // renamable); a raw-SQL value has no field path.
+                ShapeField::Rename {
+                    value: ShapeValue::Agg(AggCall { arg: Some(p), .. }),
+                    ..
+                } => out.push((from, &p.segments)),
+                ShapeField::Rename { .. } => {}
                 ShapeField::Nest { field, body } => {
                     out.push((from, std::slice::from_ref(field)));
                     if let Some(target) = self.relation_target(from, &field.node) {
@@ -1454,6 +1460,7 @@ impl Snapshot {
         items.extend(
             based_sema::KNOWN_FUNCS
                 .iter()
+                .chain(based_sema::KNOWN_AGGS)
                 .map(|f| item(f, CompletionItemKind::FUNCTION)),
         );
         items.extend(self.model_name_items());
@@ -1491,6 +1498,9 @@ const KEYWORDS: &[&str] = &[
     "hard",
     "where",
     "order",
+    "group",
+    "by",
+    "having",
     "page",
     "unindexed",
     "index",
@@ -1904,7 +1914,15 @@ fn clause_paths<'a>(c: &'a Clause, root: &'a str, out: &mut Vec<(&'a str, &'a [I
                 out.push((root, &t.path.segments));
             }
         }
-        Clause::Page(_) | Clause::Unindexed(_) => {}
+        // `group by` columns are model columns rooted at the query target (navigable /
+        // renamable). A `having` predicate names shape-local aggregate aliases, not model
+        // fields, so it contributes no field references.
+        Clause::GroupBy(cols) => {
+            for p in cols {
+                out.push((root, &p.segments));
+            }
+        }
+        Clause::Page(_) | Clause::Unindexed(_) | Clause::Having(_) => {}
     }
 }
 

@@ -199,6 +199,33 @@ fn compatible(a: Family, b: Family) -> bool {
     }
 }
 
+/// Why a column is ineligible for an aggregate (shapes.md), or `None` when it is fine.
+/// `sum`/`avg` need the numeric family; `min`/`max` need a *comparable* column (numeric,
+/// `timestamp`, `date`, `text`); `count` is arg-less so never reaches here. An enum or a
+/// relation is never a numeric/comparable aggregate operand.
+pub fn agg_operand_reason(func: &str, term: &Terminal, is_enum: bool) -> Option<String> {
+    let numeric = matches!(
+        term,
+        Terminal::Scalar(Primitive::Int | Primitive::Float | Primitive::Decimal { .. })
+    ) && !is_enum;
+    let comparable = numeric
+        || matches!(
+            term,
+            Terminal::Scalar(Primitive::Timestamp | Primitive::Date | Primitive::Text)
+        ) && !is_enum;
+    match func {
+        "sum" | "avg" if !numeric => Some(format!(
+            "`{func}` needs a numeric column (int/float/decimal), not {}",
+            terminal_name(term)
+        )),
+        "min" | "max" if !comparable => Some(format!(
+            "`{func}` needs a comparable column (numeric/timestamp/date/text), not {}",
+            terminal_name(term)
+        )),
+        _ => None,
+    }
+}
+
 /// Resolve a path for its type only, without reporting — name errors are already
 /// surfaced by the caller's `resolve_path`, so the type pass stays silent to avoid
 /// double-reporting.

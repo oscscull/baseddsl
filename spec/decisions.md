@@ -50,6 +50,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
   (…)`, never read-modify-write; `+ - * /`, numeric family only, update-only; E0230/E0231)
 - **Indexing** — D15 (index inference, baseline emission, lints)
 - **Relations** — D17 (custom `on:` join resolution)
+- **Aggregations** — D101 (aggregations + group by + having: an *aggregate shape*
+  `count()`/`sum`/`avg`/`min`/`max` projected over groups, paired with a query's
+  `group by`/`having`/`order`; `GROUP BY`/`HAVING` lowering with row filter before grouping +
+  deterministic decode casts; result typing count→int, sum/min/max→Option<col>, avg→Option<float>;
+  boundaries E0240–E0245)
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
   D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing),
   D79 (named nested projection: `field -> Shape` references a shape decl — same SQL as inline,
@@ -4295,3 +4300,87 @@ golden; codegen SQL asserted on all three dialects (`SET \`product\`.\`qty\` = (
 `SET "qty" = ("product"."qty" + :delta)`); fmt round-trip; and **live SQLite** read-your-
 writes proving the sum is computed server-side and two sequential adjustments compose
 (100 + 25 → 125, 125 − 5 → 120). `make check` green end-to-end.
+
+## D101 — aggregations + group by + having (T4)
+
+**Decision.** A shape may project **aggregates** — `count()`, `sum(col)`, `avg(col)`,
+`min(col)`, `max(col)` — as `= ` values (`orders = count()`, `revenue = sum(total)`); a
+shape carrying any is an *aggregate shape*, a projection over **groups** rather than rows. A
+query pairs it with `group by (cols)` and `having (pred)`. This is the T4 item on Track T
+(core DB feature parity, after enum D82, decimal/float D83, atomic update exprs D100).
+
+**Surface (readable > terse; one way to say a thing).** Aggregates live in shapes because
+that is where projections live; `group by`/`having` live on the query because grouping is an
+engine instruction (the same contract/implementation split as `-> Shape[]` vs `list`). New
+AST: `ShapeValue::Agg(AggCall { func, arg })` and `Clause::GroupBy(Vec<Path>)` /
+`Clause::Having(Predicate)`. `count()` is arg-less (rows in the group); the other four take
+one column. The function set is closed in sema (`KNOWN_AGGS`), so the grammar's open
+`agg_func` degrades to `E0240` on anything else. `having` reuses the ordinary predicate
+grammar untouched — its left operands are the shape's **projected names** (an aggregate alias
+or a group column), so no aggregate node pollutes the shared predicate language; `order` in
+an aggregate query likewise names projected columns.
+
+**Reconciled with the existing `count`.** Pagination's `with count` (NF5/D97) stays the
+`Page<T>.total` row-count metadata; T4's `count()` is a projected aggregate column. Different
+positions, no conflicting spelling — the aggregate-query path never paginates, so they never
+meet.
+
+**Type rules.** `count()` → `int` (non-null). `sum`/`avg` need the numeric family (D83:
+int/float/decimal); `min`/`max` need a *comparable* column (numeric/timestamp/date/text);
+an enum or relation operand is never eligible (`E0241`). Results: `sum` keeps the column's
+numeric type, `avg` is always `float`, `min`/`max` keep the column's type — and all four are
+**nullable** (an empty or all-null group aggregates to null), so the client/OpenAPI type is
+`Option<T>` for them and a bare `i64`/integer for `count`.
+
+**Group-by consistency, enforced (not deferred to the DB).** Every non-aggregate projected
+column must be a `group by` column (`E0242`); with no `group by` the shape must be
+all-aggregate — one whole-table row (a `get`, exempt from the unique-key rule). `group by` /
+`having` are legal **only** on an aggregate query (`E0243`). An aggregate query cannot be
+paginated (`E0244` — grouped keyset paging is deferred) and takes no default model `@sort`
+(an ungrouped sort key isn't a valid grouped column). An aggregate shape is **flat** and
+never nested, referenced, or a mutation return (`E0245`).
+
+**Composition kept correct.** `where` (row filter), soft-delete, and `@scope` all inject into
+the `WHERE` — narrowing rows *before* grouping — so a scoped/soft-deleting model aggregates
+only its live, in-scope rows, and the scope column need not be grouped. `having` filters
+groups *after* (HAVING vs WHERE lowering kept distinct).
+
+**Codegen — deterministic decode via dialect casts (runtime unchanged).** An aggregate query
+lowers to its own `SELECT … GROUP BY … HAVING … ORDER BY …` (no keyset/LIMIT/count query).
+Because drivers decode by the DB's *returned* column type, each aggregate is cast so the wire
+shape is fixed: `count` → the dialect integer (already `int8`/`INTEGER` everywhere, no cast);
+`sum(int)` cast back to an integer where the dialect widens it (Postgres `SUM(bigint)`→numeric,
+MariaDB→decimal — `CAST(… AS BIGINT/SIGNED)`; SQLite keeps it int); `sum(decimal)` stays the
+native `NUMERIC`/`DECIMAL` (exact-string decode) except SQLite, where decimal is `TEXT` and the
+sum is float-degraded, cast to `TEXT` for the string wire form; `avg` cast to the dialect double
+(`DOUBLE`/`DOUBLE PRECISION`/`REAL`); `min`/`max` keep the native type. `HAVING`/`ORDER BY`
+inline the **numeric** aggregate (not the SELECT alias — Postgres forbids it — and not the
+decimal-to-text cast, which would break an ordered comparison). So only codegen changed; the
+plan/scan/value/decode paths were untouched.
+
+**SQLite decimal is degraded (documented, per D83).** `sum`/`avg` over a `decimal` on SQLite
+compute through float (TEXT affinity), and `max`/`min` compare lexicographically — production
+dialects (`DECIMAL`/`NUMERIC`) are exact. The live proof therefore asserts exact values on int
+columns and the honest float-degraded value for the decimal sum.
+
+**Editor / fmt.** fmt reprints `= count()` / `= sum(col)` and `group by (…)` / `having (…)`
+canonically (round-trip stable). `group`/`by`/`having` join the keyword vocabulary
+(tmLanguage + completion) and the aggregate function names complete as functions; group-by
+columns and aggregate-argument columns are go-to-def/find-refs/rename sites (rooted at the
+query target / shape `from`), matching the D90 field-reference precedent — a `having` operand
+names a shape-local alias, so it is not a model-field reference.
+
+**Diagnostics:** `E0240` (unknown aggregate or wrong argument arity), `E0241` (ineligible
+aggregated column), `E0242` (a non-aggregate projected column not grouped, or an `order`/
+`having` name not projected), `E0243` (`group by`/`having` without an aggregate shape),
+`E0244` (`page` on an aggregate query), `E0245` (aggregate-shape composition — nested,
+referenced, or a mutation return).
+
+**Verified.** Sema +/− (E0240–E0245 + the group-by-consistency and global-aggregate-get
+cases); a sema conformance golden; codegen SQL asserted on all three dialects (the cast
+matrix — `COUNT(*)`, `CAST(SUM(int) AS SIGNED/BIGINT)`, native/`TEXT` decimal sum, `CAST(AVG
+… AS DOUBLE/…)`, inlined `HAVING`/`ORDER BY`); client field typing (`i64` / `Option<Decimal>`
+/ `Option<i64>` / `Option<f64>`); fmt round-trip; and **live SQLite** — a real `GROUP BY` /
+`HAVING` query grouping per buyer, excluding a soft-deleted row before grouping, filtering
+groups, and ordering them, with `count`/`sum`/`avg`/`max` decoded to their wire types.
+`make check` green end-to-end. Spec: `spec/syntax/shapes.md` + `spec/syntax/queries.md`.

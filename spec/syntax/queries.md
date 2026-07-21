@@ -84,6 +84,33 @@ query orders_in_org(org) -> OrderCard[] unscoped("admin: cross-org order lookup"
 - `get` must be keyed on a unique field (else lint-error).
 - Filter paths and projection paths share the same dotted traversal. Forward-edge traversal needs no inverse declaration; only backward traversal does (relations.md).
 
+## Aggregations, group by, having
+An **aggregate query** returns an aggregate shape (shapes.md — a shape with
+`count()`/`sum`/`avg`/`min`/`max` fields). Two body clauses pair with it:
+```
+query buyer_stats() -> BuyerStats[] {
+  list Order
+    group by (placed_by)
+    having (revenue > 1000)
+    order (revenue desc);
+}
+```
+- `group by (col, …)` — the grouping columns. Every **non-aggregate** projected column of
+  the return shape must be a `group by` column (the SQL rule, enforced as `E0242`). With no
+  `group by` the shape must be **all aggregates** — one whole-table row (a `get`).
+- `having (predicate)` — filters **groups** by their aggregates, the same predicate language
+  as `where`. Its left operands are the shape's projected names: an aggregate alias
+  (`revenue`) or a `group by` column. `where` filters rows *before* grouping; `having`
+  filters groups *after* — keep the two distinct.
+- `group by` / `having` are legal **only** on an aggregate query (`E0243`).
+
+`where` (row filter), `@scope` injection, and soft-delete all still apply — they narrow the
+rows *before* grouping, so a scoped/soft-deleting model aggregates only its live, in-scope
+rows without the scope column needing to be grouped. An aggregate query's `order` may name
+only `group by` columns; it takes **no** default model `@sort` (an ungrouped sort key is not
+a valid grouped column) and **cannot** be paginated (`page` is `E0244` — grouped keyset
+paging is deferred).
+
 ## Named filters (reuse)
 ```
 filter active = not banned and deleted_at = null;

@@ -127,6 +127,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consume a required positional keyword (`group` `by`), erroring if absent.
+    fn expect_kw(&mut self, kw: &str, what: &str) -> PResult<()> {
+        if self.eat_kw(kw) {
+            Ok(())
+        } else {
+            self.err(format!("expected {what}"));
+            Err(())
+        }
+    }
+
     fn err(&mut self, msg: impl Into<String>) {
         let span = self.here();
         self.diags.push(Diagnostic::error("E0002", msg).at(span));
@@ -830,6 +840,10 @@ impl<'a> Parser<'a> {
         if self.eat(Tok::Eq) {
             let value = if self.is_raw_start() {
                 ShapeValue::Raw(self.raw_sql()?)
+            } else if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::LParen) {
+                // `out = count()` / `out = sum(total)` — an aggregate. A path can't hold
+                // `(`, so `ident (` in a shape value is unambiguously an aggregate call.
+                ShapeValue::Agg(self.aggregate()?)
             } else {
                 ShapeValue::Path(self.path()?)
             };
@@ -1025,7 +1039,12 @@ impl<'a> Parser<'a> {
     }
 
     fn at_clause(&self) -> bool {
-        self.at_kw("where") || self.at_kw("order") || self.at_kw("page") || self.at_kw("unindexed")
+        self.at_kw("where")
+            || self.at_kw("order")
+            || self.at_kw("page")
+            || self.at_kw("unindexed")
+            || self.at_kw("group")
+            || self.at_kw("having")
     }
 
     fn clause(&mut self) -> PResult<Clause> {
@@ -1056,6 +1075,23 @@ impl<'a> Parser<'a> {
                 offset,
                 with_count,
             }))
+        } else if self.eat_kw("group") {
+            self.expect_kw("by", "`by`")?;
+            self.expect(Tok::LParen, "`(`")?;
+            let mut cols = Vec::new();
+            loop {
+                cols.push(self.path()?);
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RParen, "`)`")?;
+            Ok(Clause::GroupBy(cols))
+        } else if self.eat_kw("having") {
+            self.expect(Tok::LParen, "`(`")?;
+            let pred = self.predicate()?;
+            self.expect(Tok::RParen, "`)`")?;
+            Ok(Clause::Having(pred))
         } else if self.at_kw("unindexed") {
             let start = self.bump().unwrap().start;
             self.expect(Tok::LParen, "`(`")?;
@@ -1538,6 +1574,30 @@ impl<'a> Parser<'a> {
             }
         }
         Path { segments }
+    }
+
+    /// `count()` / `sum(total)` — an aggregate call in a shape value. The function name
+    /// is any lower ident (sema restricts it to the closed set); the argument is a single
+    /// optional column path (arg-less for `count()`).
+    fn aggregate(&mut self) -> PResult<AggCall> {
+        let func = self.lower_ident("aggregate function")?;
+        let start = func.span.start;
+        self.expect(Tok::LParen, "`(`")?;
+        let arg = if self.at(Tok::RParen) {
+            None
+        } else {
+            Some(self.path()?)
+        };
+        let end = self.expect(Tok::RParen, "`)`")?.end;
+        Ok(AggCall {
+            func,
+            arg,
+            span: Span {
+                file: self.file,
+                start,
+                end,
+            },
+        })
     }
 
     fn func_call(&mut self) -> PResult<FuncCall> {

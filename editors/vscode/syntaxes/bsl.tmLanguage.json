@@ -47,7 +47,7 @@
           "name": "keyword.control.declaration.bsl"
         },
         {
-          "match": "\\b(create|update|delete|restore|hard|tx|list|get|stream|from|where|order|page|offset|with|count|guard|scoped|unscoped|unindexed|unsafe|read|raw)\\b",
+          "match": "\\b(create|update|delete|restore|hard|tx|list|get|stream|from|where|order|group|by|having|page|offset|with|count|guard|scoped|unscoped|unindexed|unsafe|read|raw)\\b",
           "name": "keyword.control.bsl"
         },
         {

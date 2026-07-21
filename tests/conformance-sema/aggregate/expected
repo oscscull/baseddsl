@@ -1,0 +1,24 @@
+DIAGNOSTICS
+  E0241: `sum` needs a numeric column (int/float/decimal), not `text`
+  E0242: projected column `note` must be a `group by` column
+  E0244: aggregate query `bad_page` can't be paginated
+SCHEMA
+model Buyer  table=buyer
+  id: Id
+  name: text
+model Order  table=order  soft_delete=deleted_at(timestamp)
+  id: Id
+  deleted_at: timestamp?
+  buyer: -> Buyer  fk=buyer_id
+  total: decimal(12, 2)
+  qty: int
+  note: text
+shape BuyerStats from Order
+shape OrderTotals from Order
+shape SumText from Order
+shape Ungrouped from Order
+query buyer_stats  target=Order verb=list many  shape=BuyerStats
+query order_totals  target=Order verb=get  shape=OrderTotals
+query bad_operand  target=Order verb=list many  shape=SumText
+query bad_grouping  target=Order verb=list many  shape=Ungrouped
+query bad_page  target=Order verb=list many  shape=BuyerStats  page

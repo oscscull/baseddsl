@@ -119,7 +119,20 @@ pub mod code {
     // atomic update expressions (E023x)
     pub const ARITH_CREATE: &str = "E0230"; // an arithmetic assign expression in a `create` — no existing row to reference (update-only)
     pub const ARITH_OPERAND: &str = "E0231"; // a non-numeric operand in an arithmetic assign expression
+
+    // aggregations + group by + having (E024x)
+    pub const AGG_CALL: &str = "E0240"; // an aggregate call names an unknown function, or has the wrong argument arity (`count()` takes none; `sum`/`avg`/`min`/`max` take one)
+    pub const AGG_OPERAND: &str = "E0241"; // an aggregate over an ineligible column (`sum`/`avg` need numeric; `min`/`max` need a comparable column; never an enum/relation)
+    pub const AGG_GROUP_BY: &str = "E0242"; // a non-aggregate projected column is not a `group by` column, or an `order`/`having` names something not projected
+    pub const AGG_CONTEXT: &str = "E0243"; // `group by` / `having` on a query whose return shape carries no aggregate
+    pub const AGG_PAGE: &str = "E0244"; // `page` on an aggregate query (grouped keyset paging is unsupported)
+    pub const AGG_COMPOSE: &str = "E0245"; // an aggregate shape nests/references a relation, is nested/referenced, or is a mutation return
 }
+
+/// The closed set of aggregate functions usable in a shape value (shapes.md). `count`
+/// is arg-less; the rest take one column. Sema restricts the grammar's open `agg_func`
+/// to this set (`E0240`).
+pub const KNOWN_AGGS: &[&str] = &["count", "sum", "avg", "min", "max"];
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
 /// just not one the engine understands).

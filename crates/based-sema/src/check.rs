@@ -22,6 +22,20 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
     };
     let mut stack = vec![s.name.node.clone()];
     check_shape_body(&s.body, mi, cx, &mut stack, sink);
+    // An aggregate shape projects groups, not rows: it must be flat (no relation nest or
+    // reference — a group has no sub-objects).
+    if is_agg_shape(&s.body) {
+        for f in &s.body {
+            if let ShapeField::Nest { field, .. } | ShapeField::NestRef { field, .. } = f {
+                sink.error_note(
+                    code::AGG_COMPOSE,
+                    field.span,
+                    format!("aggregate shape `{}` nests `{}`", s.name.node, field.node),
+                    "an aggregate shape is flat — project columns and aggregates, not sub-objects",
+                );
+            }
+        }
+    }
     Some(RShape {
         name: s.name.node.clone(),
         from: s.from.node.clone(),
@@ -53,13 +67,16 @@ fn check_shape_body(
                 ),
                 None => unknown_field(cx, mi, id, sink),
             },
-            // A rename reaches a column via a path, or computes one with raw SQL
-            // (a leaf trapdoor — shapes have no params, so raw is left unchecked).
-            ShapeField::Rename { value, .. } => {
-                if let ShapeValue::Path(p) = value {
+            // A rename reaches a column via a path, computes one with raw SQL (a leaf
+            // trapdoor — shapes have no params, so raw is left unchecked), or aggregates
+            // a column (`= count()` / `= sum(total)`).
+            ShapeField::Rename { value, .. } => match value {
+                ShapeValue::Path(p) => {
                     resolve::resolve_path(p, mi, cx, sink);
                 }
-            }
+                ShapeValue::Raw(_) => {}
+                ShapeValue::Agg(agg) => check_agg_call(agg, mi, cx, sink),
+            },
             ShapeField::Nest { field, body } => {
                 match cx.model(mi).member(&field.node).map(|m| &m.kind) {
                     Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
@@ -91,7 +108,21 @@ fn check_shape_body(
                                     shape.node, field.node
                                 ),
                             ),
-                            Some(_) => check_ref_cycle(&shape.node, shape.span, cx, stack, sink),
+                            Some(_) => {
+                                if cx
+                                    .shape_bodies
+                                    .get(&shape.node)
+                                    .is_some_and(|b| is_agg_shape(b))
+                                {
+                                    sink.error_note(
+                                        code::AGG_COMPOSE,
+                                        shape.span,
+                                        format!("`{}` is an aggregate shape", shape.node),
+                                        "an aggregate shape is a group, not a row — it can't be nested",
+                                    );
+                                }
+                                check_ref_cycle(&shape.node, shape.span, cx, stack, sink)
+                            }
                             None => sink.error(
                                 code::SHAPE_REF_UNKNOWN,
                                 shape.span,
@@ -145,6 +176,133 @@ fn walk_body_refs(fields: &[ShapeField], cx: &Cx, stack: &mut Vec<String>, sink:
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }
     }
+}
+
+// ---------- aggregate shapes ----------------------------------------------
+
+/// True when a shape body carries a top-level aggregate field (`= count()` / `= sum(…)`),
+/// making it an aggregate shape (shapes.md) — a projection over groups, paired with a
+/// query's `group by` / `having`.
+pub fn is_agg_shape(body: &[ShapeField]) -> bool {
+    body.iter().any(|f| {
+        matches!(
+            f,
+            ShapeField::Rename {
+                value: ShapeValue::Agg(_),
+                ..
+            }
+        )
+    })
+}
+
+/// Validate one aggregate call against its shape's model: the function must be known
+/// (`E0240`), its argument arity must match (`count()` takes none, the rest one — `E0240`),
+/// and the aggregated column must be an eligible type (`E0241`).
+fn check_agg_call(agg: &AggCall, mi: usize, cx: &Cx, sink: &mut Sink) {
+    let func = agg.func.node.as_str();
+    if !KNOWN_AGGS.contains(&func) {
+        sink.error(
+            code::AGG_CALL,
+            agg.func.span,
+            format!(
+                "unknown aggregate `{func}` (expected one of: {})",
+                KNOWN_AGGS.join(", ")
+            ),
+        );
+        return;
+    }
+    match (func, &agg.arg) {
+        ("count", Some(_)) => sink.error_note(
+            code::AGG_CALL,
+            agg.span,
+            "`count` takes no argument".to_string(),
+            "`count()` counts rows in the group",
+        ),
+        ("count", None) => {}
+        (_, None) => sink.error(
+            code::AGG_CALL,
+            agg.span,
+            format!("`{func}` needs one column argument, e.g. `{func}(total)`"),
+        ),
+        (_, Some(arg)) => {
+            if let Some(term) = resolve::resolve_path(arg, mi, cx, sink) {
+                let is_enum = cx.terminal_enum(arg, mi).is_some();
+                if let Some(reason) = resolve::agg_operand_reason(func, &term, is_enum) {
+                    let span = arg.segments.last().map(|s| s.span).unwrap_or(agg.span);
+                    sink.error(code::AGG_OPERAND, span, reason);
+                }
+            }
+        }
+    }
+}
+
+/// A projected non-aggregate column of an aggregate shape (`buyer = placed_by`): its
+/// output alias and the column path it projects — the path that must appear in `group by`.
+struct GroupCol {
+    path: Path,
+}
+
+/// Summarize an aggregate shape body: the output names of all projected fields (for
+/// `order`/`having` reference checks) and the non-aggregate columns (which must be
+/// grouped). A raw value is opaque — a projected name, but not a required group column.
+fn summarize_agg_shape(body: &[ShapeField]) -> (Vec<String>, Vec<GroupCol>) {
+    let mut out_names = Vec::new();
+    let mut group_cols = Vec::new();
+    for f in body {
+        match f {
+            ShapeField::Bare(id) => {
+                out_names.push(id.node.clone());
+                group_cols.push(GroupCol {
+                    path: Path {
+                        segments: vec![id.clone()],
+                    },
+                });
+            }
+            ShapeField::Rename { out, value } => {
+                out_names.push(out.node.clone());
+                if let ShapeValue::Path(p) = value {
+                    group_cols.push(GroupCol { path: p.clone() });
+                }
+            }
+            // Nests are rejected on an aggregate shape (E0245); ignore here.
+            ShapeField::Nest { field, .. } | ShapeField::NestRef { field, .. } => {
+                out_names.push(field.node.clone());
+            }
+        }
+    }
+    (out_names, group_cols)
+}
+
+/// Two paths naming the same column (segment-for-segment). Used to match a projected
+/// non-aggregate column against a `group by` term.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.segments.len() == b.segments.len()
+        && a.segments
+            .iter()
+            .zip(&b.segments)
+            .all(|(x, y)| x.node == y.node)
+}
+
+/// The `group by` / `having` clauses of a query body (aggregate queries only). Returns
+/// the group paths and the having predicate, plus whether either clause was written.
+fn agg_clauses(clauses: &[Clause]) -> (Vec<&Path>, Option<&Predicate>, bool) {
+    let mut groups = Vec::new();
+    let mut having = None;
+    let mut present = false;
+    for c in clauses {
+        match c {
+            Clause::GroupBy(cols) => {
+                present = true;
+                groups.extend(cols.iter());
+            }
+            Clause::Having(p) => {
+                present = true;
+                having = Some(p);
+            }
+            _ => {}
+        }
+    }
+    (groups, having, present)
 }
 
 // ---------- queries --------------------------------------------------------
@@ -219,19 +377,41 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         check_param(p, ti, infer, cx, sink);
     }
 
+    // An aggregate return shape turns the query into an aggregate query: `group by` /
+    // `having` become legal (and required for consistency), and the `get`/sort/pagination
+    // rules change (queries.md).
+    let agg_body: Option<&[ShapeField]> = ret
+        .shape
+        .as_deref()
+        .and_then(|n| cx.shape_bodies.get(n).copied())
+        .filter(|b| is_agg_shape(b));
+    let is_agg = agg_body.is_some();
+
     let is_raw = matches!(q.body, QueryBody::Raw(_));
     let mut has_order = false;
     match &q.body {
         QueryBody::Bare => {}
-        QueryBody::Inline(clauses) => has_order = check_clauses(clauses, ti, cx, &params, sink),
+        QueryBody::Inline(clauses) => match agg_body {
+            Some(body) => check_agg_query(q, clauses, ti, body, cx, &params, sink),
+            None => {
+                reject_agg_clauses(q, clauses, sink);
+                has_order = check_clauses(clauses, ti, cx, &params, sink);
+            }
+        },
         QueryBody::Block(s) => {
             let smi = cx.find(&s.model.node).unwrap_or(ti);
-            has_order = check_clauses(&s.clauses, smi, cx, &params, sink);
+            match agg_body {
+                Some(body) => check_agg_query(q, &s.clauses, smi, body, cx, &params, sink),
+                None => {
+                    reject_agg_clauses(q, &s.clauses, sink);
+                    has_order = check_clauses(&s.clauses, smi, cx, &params, sink);
+                }
+            }
         }
         QueryBody::Raw(raw) => check_raw_query(q, raw, ti, cx, &params, sink),
     }
 
-    if verb == Verb::Get && !q.ret.stream && !is_raw && !get_is_keyed(q, ti, cx) {
+    if verb == Verb::Get && !q.ret.stream && !is_raw && !is_agg && !get_is_keyed(q, ti, cx) {
         sink.error_note(
             code::GET_NOT_UNIQUE,
             q.span,
@@ -256,7 +436,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
             "paginate for random access, stream for the full pass — drop one",
         );
     }
-    if verb == Verb::List && !is_raw && !has_order && cx.model(ti).sort.is_empty() {
+    if verb == Verb::List && !is_raw && !is_agg && !has_order && cx.model(ti).sort.is_empty() {
         sink.warn(
             code::NONDET_SORT,
             q.span,
@@ -620,9 +800,175 @@ fn check_clauses(
             // Validated by the index pass (indexes.rs): satisfies W0103, or is
             // itself flagged stale (W0105) when the query turns out indexed.
             Clause::Unindexed(_) => {}
+            // Aggregation clauses: legal only on an aggregate query, where
+            // `check_agg_query` validates them; `reject_agg_clauses` reports them here.
+            Clause::GroupBy(_) | Clause::Having(_) => {}
         }
     }
     has_order
+}
+
+/// `group by` / `having` on a non-aggregate query is `E0243`.
+fn reject_agg_clauses(q: &Query, clauses: &[Clause], sink: &mut Sink) {
+    for c in clauses {
+        match c {
+            Clause::GroupBy(cols) => {
+                let span = cols
+                    .first()
+                    .and_then(|p| p.segments.first())
+                    .map(|s| s.span)
+                    .unwrap_or(q.span);
+                sink.error_note(
+                    code::AGG_CONTEXT,
+                    span,
+                    format!(
+                        "`group by` on query `{}` needs an aggregate return shape",
+                        q.name.node
+                    ),
+                    "add a `count()`/`sum(…)`/… field to the return shape, or drop `group by`",
+                );
+            }
+            Clause::Having(_) => sink.error_note(
+                code::AGG_CONTEXT,
+                q.span,
+                format!(
+                    "`having` on query `{}` needs an aggregate return shape",
+                    q.name.node
+                ),
+                "`having` filters aggregate groups — add aggregate fields, or drop it",
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// Validate an aggregate query's clauses: `where` (rows, before grouping) resolves
+/// normally; every non-aggregate projected column must be a `group by` column (`E0242`);
+/// `order`/`having` name projected columns (`E0242`); `page` is rejected (`E0244`).
+fn check_agg_query(
+    q: &Query,
+    clauses: &[Clause],
+    mi: usize,
+    body: &[ShapeField],
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    let (out_names, group_cols) = summarize_agg_shape(body);
+    let (group_paths, having, _present) = agg_clauses(clauses);
+
+    // Group-by columns must resolve against the model.
+    for p in &group_paths {
+        resolve::resolve_path(p, mi, cx, sink);
+    }
+    // Group-by consistency: every projected non-aggregate column must be grouped.
+    for gc in &group_cols {
+        if !group_paths.iter().any(|gp| same_path(gp, &gc.path)) {
+            let span = gc.path.segments.last().map(|s| s.span).unwrap_or(q.span);
+            sink.error_note(
+                code::AGG_GROUP_BY,
+                span,
+                format!(
+                    "projected column `{}` must be a `group by` column",
+                    join_path(&gc.path)
+                ),
+                "add it to `group by`, or make it an aggregate (`count()`/`sum(…)`/…)",
+            );
+        }
+    }
+
+    for c in clauses {
+        match c {
+            Clause::Where(p) => resolve::check_predicate(p, Some(mi), cx, params, sink),
+            Clause::Order(terms) => {
+                for t in terms {
+                    if t.path.segments.len() != 1 || !out_names.contains(&t.path.segments[0].node) {
+                        let span = t.path.segments.last().map(|s| s.span).unwrap_or(q.span);
+                        sink.error_note(
+                            code::AGG_GROUP_BY,
+                            span,
+                            format!(
+                                "`order` on `{}` must name a projected column of the aggregate shape",
+                                join_path(&t.path)
+                            ),
+                            "order by an aggregate alias or a group column you project",
+                        );
+                    }
+                }
+            }
+            Clause::Page(_) => sink.error_note(
+                code::AGG_PAGE,
+                q.span,
+                format!("aggregate query `{}` can't be paginated", q.name.node),
+                "grouped keyset paging is unsupported — drop `page`",
+            ),
+            Clause::GroupBy(_) | Clause::Having(_) | Clause::Unindexed(_) => {}
+        }
+    }
+
+    if let Some(hp) = having {
+        check_having(hp, &out_names, params, q.span, sink);
+    }
+}
+
+/// Every left operand in a `having` predicate must name a projected column of the
+/// aggregate shape (an aggregate alias or a group column), so it maps to something the
+/// grouped result actually has (`E0242`).
+fn check_having(
+    p: &Predicate,
+    out_names: &[String],
+    params: &[String],
+    qspan: Span,
+    sink: &mut Sink,
+) {
+    match p {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            check_having(a, out_names, params, qspan, sink);
+            check_having(b, out_names, params, qspan, sink);
+        }
+        Predicate::Not(inner) => check_having(inner, out_names, params, qspan, sink),
+        Predicate::Cmp { path, value, .. } => {
+            check_having_path(path, out_names, qspan, sink);
+            if let Value::Param(pr) = value {
+                resolve::check_param_ref(pr, params, sink);
+            }
+        }
+        Predicate::InList { path, values } => {
+            check_having_path(path, out_names, qspan, sink);
+            for v in values {
+                if let Value::Param(pr) = v {
+                    resolve::check_param_ref(pr, params, sink);
+                }
+            }
+        }
+        Predicate::Bare(path) => check_having_path(path, out_names, qspan, sink),
+        // A raw predicate term / named-filter call is a leaf escape — left unchecked.
+        Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
+    }
+}
+
+fn check_having_path(path: &Path, out_names: &[String], qspan: Span, sink: &mut Sink) {
+    let ok = path.segments.len() == 1 && out_names.contains(&path.segments[0].node);
+    if !ok {
+        let span = path.segments.last().map(|s| s.span).unwrap_or(qspan);
+        sink.error_note(
+            code::AGG_GROUP_BY,
+            span,
+            format!(
+                "`having` references `{}`, which the aggregate shape doesn't project",
+                join_path(path)
+            ),
+            "filter on a projected aggregate alias or group column",
+        );
+    }
+}
+
+fn join_path(p: &Path) -> String {
+    p.segments
+        .iter()
+        .map(|s| s.node.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// A `get` is validly keyed if some equality-constrained column is unique.
@@ -688,6 +1034,21 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     } else {
         let ret = resolve_return(&m.ret, None, cx, sink)?;
         check_shape_on_real_delete(m, &ret, cx, sink);
+        // A mutation reads back a written row, not a group — an aggregate shape is not a
+        // mutation return (E0245).
+        if ret
+            .shape
+            .as_deref()
+            .and_then(|n| cx.shape_bodies.get(n).copied())
+            .is_some_and(is_agg_shape)
+        {
+            sink.error_note(
+                code::AGG_COMPOSE,
+                m.ret.ty.span,
+                format!("mutation `{}` returns an aggregate shape", m.name.node),
+                "a write reads back one written row — return a per-row shape",
+            );
+        }
         ret
     };
     // At the top level there is no enclosing `tx`, so no back-reference is in scope.

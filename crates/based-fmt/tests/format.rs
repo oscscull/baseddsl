@@ -248,3 +248,15 @@ fn ack_return_prints_bare_ok() {
         "mutation purge(id: Id) -> ok {\n  hard delete Comment where (id = $id);\n}\n"
     );
 }
+
+#[test]
+fn aggregate_shape_and_group_by_render_canonically() {
+    let src = "shape BuyerStats from Order {\n who = buyer\n orders = count()\n revenue = sum(total)\n}\nquery buyer_stats() -> BuyerStats[] {\n list Order group by (buyer) having (revenue > 100) order (revenue desc);\n}\n";
+    let out = fmt(src);
+    assert_eq!(
+        out,
+        "shape BuyerStats from Order {\n  who     = buyer\n  orders  = count()\n  revenue = sum(total)\n}\nquery buyer_stats() -> BuyerStats[] {\n  list Order\n    group by (buyer)\n    having (revenue > 100)\n    order (revenue desc);\n}\n"
+    );
+    // idempotent
+    assert_eq!(fmt(&out), out);
+}

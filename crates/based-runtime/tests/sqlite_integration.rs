@@ -720,6 +720,84 @@ async fn decimal_and_float_round_trip_end_to_end() {
     );
 }
 
+/// A real `GROUP BY` / `HAVING` aggregate query executes against SQLite: `count()`, `sum`
+/// (int + decimal), `avg`, and `max` group per buyer, soft-deleted rows are excluded before
+/// grouping, `having` filters groups, and `order` sorts them — all computed in the database
+/// and decoded to the declared wire types. `sum`/`max` over a `decimal` is float-degraded
+/// on SQLite (documented — decimal is TEXT affinity there; production dialects DECIMAL/
+/// NUMERIC are exact), so the exact-value proofs use int columns.
+#[tokio::test]
+async fn aggregate_group_by_having_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        Buyer { name: text }
+        @soft_delete(deleted_at)
+        Order {
+          deleted_at: timestamp?
+          buyer:      Buyer
+          total:      decimal(12, 2)
+          qty:        int
+        }
+        shape BuyerStats from Order {
+          buyer   = buyer
+          orders  = count()
+          revenue = sum(total)
+          units   = sum(qty)
+          avg_qty = avg(qty)
+          top_qty = max(qty)
+        }
+        query buyer_stats() -> BuyerStats[] {
+          list Order group by (buyer) having (units > 3) order (units desc);
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            "INSERT INTO `buyer` (`id`, `name`) VALUES ('b1', 'Ada'), ('b2', 'Bo');
+             INSERT INTO `order` (`id`, `buyer_id`, `total`, `qty`, `deleted_at`) VALUES
+               ('o1', 'b1', '100.00',  2, NULL),
+               ('o2', 'b1',  '50.50',  3, NULL),
+               ('o3', 'b1',  '99.99',  9, '2024-01-01 00:00:00'),
+               ('o4', 'b2',  '10.00',  4, NULL);",
+        )
+        .await
+        .expect("seed");
+
+    let got = call(&c, &backend, "POST", "/q/buyer_stats", json!({}), json!({})).await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    // Only Ada's two live orders count (o3 is soft-deleted, so its qty 9 is excluded
+    // *before* grouping). units = 2 + 3 = 5 for b1, 4 for b2 (both > 3, pass `having`);
+    // `order (units desc)` puts b1 first. count = 2/1, avg_qty = 2.5/4.0, max qty = 3/4
+    // (exact on int). revenue is the SQLite float-degraded decimal sum.
+    assert_eq!(
+        got.body,
+        json!([
+            {
+                "buyer": "b1",
+                "orders": 2,
+                "revenue": "150.5",
+                "units": 5,
+                "avg_qty": 2.5,
+                "top_qty": 3
+            },
+            {
+                "buyer": "b2",
+                "orders": 1,
+                "revenue": "10.0",
+                "units": 4,
+                "avg_qty": 4.0,
+                "top_qty": 4
+            }
+        ])
+    );
+}
+
 /// Compile an in-line schema for SQLite (skip disk), mirroring `Compiled::load`.
 fn compile_sqlite(src: &str) -> Compiled {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));

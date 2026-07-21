@@ -291,6 +291,22 @@ pub enum ShapeField {
 pub enum ShapeValue {
     Path(Path),
     Raw(RawSql),
+    /// `out = count()` / `out = sum(total)` — an aggregate over the shape's grouped rows.
+    /// A shape with any such field is an aggregate shape (paired with a query's `group by`
+    /// / `having`). Its type is set by the function: `count()` → `int`, `sum` → the
+    /// column's numeric type, `avg` → `float`, `min`/`max` → the column's type; all but
+    /// `count()` are nullable.
+    Agg(AggCall),
+}
+
+/// One aggregate call in a shape value. `func` is the (contextual) function name —
+/// `count`/`sum`/`avg`/`min`/`max`, validated in sema; `arg` is the aggregated column
+/// (`None` for the arg-less `count()`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggCall {
+    pub func: Ident,
+    pub arg: Option<Path>,
+    pub span: Span,
 }
 
 // ---------- Queries / mutations / filters ---------------------------------
@@ -383,6 +399,12 @@ pub enum Clause {
     Order(Vec<SortTerm>),
     Page(PageClause),
     Unindexed(Unindexed),
+    /// `group by (col, …)` — grouping columns for an aggregate-shape query. Every
+    /// non-aggregate projected column must appear here.
+    GroupBy(Vec<Path>),
+    /// `having (predicate)` — filters groups by their aggregates, after grouping. Its
+    /// left operands name the shape's projected aggregate aliases / group columns.
+    Having(Predicate),
 }
 
 /// `unindexed(...)` — the query is knowingly unindexed: satisfies the missing-index

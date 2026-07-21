@@ -548,6 +548,28 @@ fn shape_fields(
                     fields.push((out.node.clone(), ty, req));
                 }
                 ShapeValue::Raw(_) => fields.push((out.node.clone(), json_schema(), false)),
+                // An aggregate: `count()` → a required integer; `avg` → a nullable number;
+                // `sum`/`min`/`max` → the column's schema, nullable (an empty/all-null
+                // group aggregates to null).
+                ShapeValue::Agg(agg) => {
+                    let (ty, req) = match agg.func.node.as_str() {
+                        "count" => (primitive_schema(Primitive::Int), true),
+                        "avg" => (primitive_schema(Primitive::Float), false),
+                        _ => {
+                            let base = agg
+                                .arg
+                                .as_ref()
+                                .map(|p| {
+                                    let segs: Vec<&str> =
+                                        p.segments.iter().map(|s| s.node.as_str()).collect();
+                                    reach_schema(schema, model, &segs).0
+                                })
+                                .unwrap_or_else(json_schema);
+                            (base, false)
+                        }
+                    };
+                    fields.push((out.node.clone(), ty, req));
+                }
             },
             ShapeField::Nest { field, body } => {
                 if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {

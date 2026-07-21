@@ -117,12 +117,21 @@ shape_body  = '{' { shape_field sep } [ shape_field ] '}' ;
 (* equal the relation's target; the reference is a pure body expansion (`full` is  *)
 (* per-model, so it is never referenced this way).                                 *)
 shape_field = bare_field                       (* local, same-name             *)
-            | out_name '=' shape_value          (* reach-and-rename / raw value *)
+            | out_name '=' shape_value          (* reach-and-rename / raw / agg *)
             | bare_field shape_body             (* nest a relation into subobj  *)
             | bare_field '->' upper_ident ;     (* nest via a named shape (D79) *)
 bare_field  = lower_ident ;
 out_name    = lower_ident ;
-shape_value = path | raw_sql ;                 (* dotted traversal OR raw value*)
+shape_value = path | raw_sql | aggregate ;     (* dotted traversal, raw, or agg *)
+
+(* An aggregate over the shape's grouped rows (queries.md group by / having). A shape *)
+(* carrying any of these is an *aggregate shape*: a projection over groups, not rows.  *)
+(* `count` is arg-less (rows in the group); the others take one column. The function   *)
+(* name set is closed in sema. Result types: count -> int (non-null); sum -> the        *)
+(* column's numeric type; avg -> float; min/max -> the column's type; all but count      *)
+(* nullable.                                                                             *)
+aggregate   = agg_func '(' [ path ] ')' ;
+agg_func    = 'count' | 'sum' | 'avg' | 'min' | 'max' ;   (* contextual, checked in sema *)
 
 (* ---------- Scopes (auth.md Handle 2, D46) -------------------------------- *)
 (* A named row-visibility contract, declared once and referenced by name on the     *)
@@ -244,10 +253,19 @@ tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;
 statement   = verb model_ref { clause } ';' ;
 verb        = 'get' | 'list' ;          (* signature [] vs scalar still drives  *)
                                         (* the client contract independently   *)
-clause      = where_clause | order_clause | page_clause | unindexed_clause ;
+clause      = where_clause | order_clause | page_clause | unindexed_clause
+            | group_clause | having_clause ;
 where_clause= 'where' '(' predicate ')' ;
 order_clause= 'order' '(' sort_term { ',' sort_term } ')' ;
 sort_term   = path [ 'asc' | 'desc' ] ;
+
+(* Aggregation (queries.md): legal only on an aggregate-shape query. `group by` lists      *)
+(* the grouping columns; every non-aggregate projected column must appear here (E0242).    *)
+(* `having` filters groups by their aggregates — same predicate language as `where`, but    *)
+(* its left operands name the shape's projected aggregate aliases / group columns. Both     *)
+(* are E0243 on a non-aggregate query; `page` on an aggregate query is E0244.               *)
+group_clause = 'group' 'by' '(' path { ',' path } ')' ;
+having_clause= 'having' '(' predicate ')' ;
 
 (* Pagination (pagination.md): keyset default; offset / count are loud opt-ins.*)
 page_clause = 'page' '(' INT ')' [ 'offset' ] [ 'with' 'count' ] ;

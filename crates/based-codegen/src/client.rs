@@ -578,6 +578,12 @@ mod rust {
                     }
                     // A raw SQL expression has no statically known type -> `Json`.
                     ShapeValue::Raw(_) => fields.push((out.node.clone(), "Json".to_string())),
+                    // An aggregate: `count()` → `i64`, `avg` → `Option<f64>`, `sum`/`min`/
+                    // `max` → `Option<column-type>` (an empty/all-null group aggregates to
+                    // null).
+                    ShapeValue::Agg(agg) => {
+                        fields.push((out.node.clone(), agg_type(schema, model, agg)))
+                    }
                 },
                 ShapeField::Nest { field, body } => {
                     if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
@@ -893,6 +899,50 @@ mod rust {
             }
         }
         "Json".to_string()
+    }
+
+    /// The Rust type of an aggregate shape field. `count()` is a non-null `i64`; `avg`
+    /// is `Option<f64>`; `sum`/`min`/`max` are `Option<column-type>` — nullable because an
+    /// empty or all-null group aggregates to null.
+    fn agg_type(schema: &CheckedSchema, model: Option<&RModel>, agg: &AggCall) -> String {
+        match agg.func.node.as_str() {
+            "count" => "i64".to_string(),
+            "avg" => "Option<f64>".to_string(),
+            _ => {
+                let base = agg
+                    .arg
+                    .as_ref()
+                    .and_then(|p| col_primitive(schema, model, p))
+                    .map(primitive)
+                    .unwrap_or("Json");
+                format!("Option<{base}>")
+            }
+        }
+    }
+
+    /// The primitive a dotted column path terminates on, walking relations to the target.
+    /// `None` for a path that doesn't land on a scalar (sema already flagged it).
+    fn col_primitive(
+        schema: &CheckedSchema,
+        model: Option<&RModel>,
+        path: &Path,
+    ) -> Option<Primitive> {
+        let mut cur = model?;
+        let n = path.segments.len();
+        for (i, seg) in path.segments.iter().enumerate() {
+            let last = i + 1 == n;
+            match cur.member(&seg.node).map(|m| &m.kind)? {
+                MemberKind::Scalar { ty, .. } if last => return Some(*ty),
+                MemberKind::Scalar { .. } => return None,
+                MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
+                    if last {
+                        return None;
+                    }
+                    cur = schema.model(target)?;
+                }
+            }
+        }
+        None
     }
 
     /// Wrap a base type: to-many -> `Vec<base>`, then optional -> `Option<…>`.
