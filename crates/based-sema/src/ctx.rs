@@ -97,10 +97,19 @@ fn query_clauses(q: &Query) -> &[Clause] {
 
 fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
     match stmt {
-        WriteStmt::Create { model, assigns } => {
+        WriteStmt::Create {
+            model,
+            assigns,
+            conflict,
+        } => {
             if let Some(mi) = cx.find(&model.node) {
                 for a in assigns {
                     record_assign(a, mi, cx, out);
+                }
+                if let Some(oc) = conflict {
+                    for a in &oc.update {
+                        record_assign(a, mi, cx, out);
+                    }
                 }
             }
         }

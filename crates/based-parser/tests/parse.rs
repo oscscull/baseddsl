@@ -386,7 +386,7 @@ fn mutation_with_create_and_param_refs() {
     };
     assert_eq!(mu.params.len(), 2);
     match &mu.body[0] {
-        WriteStmt::Create { model, assigns } => {
+        WriteStmt::Create { model, assigns, .. } => {
             assert_eq!(model.node, "Order");
             assert_eq!(assigns.len(), 2);
             assert!(
@@ -704,4 +704,47 @@ fn a_shape_field_or_model_named_ok_still_parses() {
         "#,
     );
     assert_eq!(sf.decls.len(), 2);
+}
+
+#[test]
+fn upsert_parses_conflict_target_and_update_branch() {
+    let sf = parse_ok(
+        r#"
+        mutation record_hit(path: text) -> PageRow {
+          create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
+        }
+        "#,
+    );
+    let mu = match &sf.decls[0] {
+        Decl::Mutation(m) => m,
+        other => panic!("expected mutation, got {other:?}"),
+    };
+    match &mu.body[0] {
+        WriteStmt::Create {
+            model,
+            assigns,
+            conflict,
+        } => {
+            assert_eq!(model.node, "Page");
+            assert_eq!(assigns.len(), 2);
+            let oc = conflict.as_ref().expect("on conflict clause");
+            assert_eq!(oc.target.len(), 1);
+            assert_eq!(oc.target[0].node, "path");
+            assert_eq!(oc.update.len(), 1);
+            assert_eq!(oc.update[0].col.node, "hits");
+        }
+        other => panic!("expected create, got {other:?}"),
+    }
+}
+
+#[test]
+fn plain_create_has_no_conflict() {
+    let sf = parse_ok("mutation m() -> R { create Page { hits = 1 } }");
+    let Decl::Mutation(mu) = &sf.decls[0] else {
+        panic!("expected mutation")
+    };
+    match &mu.body[0] {
+        WriteStmt::Create { conflict, .. } => assert!(conflict.is_none()),
+        other => panic!("expected create, got {other:?}"),
+    }
 }

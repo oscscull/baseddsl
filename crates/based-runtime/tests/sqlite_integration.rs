@@ -1732,3 +1732,83 @@ async fn raw_query_body_end_to_end() {
     assert_eq!(top.status, 200, "{:?}", top.body);
     assert_eq!(top.body, json!({ "name": "Ada", "total": 900 }));
 }
+
+// ---------- upsert (`create … on conflict update`) live proof --------------
+
+async fn ddl_backend(c: &Compiled) -> SqliteBackend {
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("generated SQLite DDL failed: {e:?}\n{ddl}"));
+    backend
+}
+
+#[tokio::test]
+async fn upsert_inserts_then_composes_on_conflict() {
+    // A page-view counter: the first hit inserts hits = 1, every later hit conflicts on the
+    // unique `path` and increments the *stored* value server-side (the `hits = hits + 1`
+    // atomic arithmetic in the conflict branch). The winning row reads back on both paths.
+    let c = compile_sqlite(
+        r#"
+        Page { path: text (unique), hits: int }
+        shape PageRow from Page { path, hits }
+        mutation record_hit(path: text) -> PageRow {
+          create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
+        }
+        "#,
+    );
+    let backend = ddl_backend(&c).await;
+    // One shared id generator across requests — the real deployment holds a single engine
+    // id gen (a fresh one per call would re-mint the same id and collide on `page.id`).
+    let ids = SeqIdGen::default();
+    let hit = |path: &'static str| {
+        let c = &c;
+        let backend = &backend;
+        let ids = &ids;
+        async move {
+            dispatch(
+                c,
+                backend,
+                "",
+                ids,
+                &NoStore,
+                &Guards::new(),
+                None,
+                "POST",
+                "/m/record_hit",
+                json!({ "path": path }),
+                json!({}),
+                None,
+            )
+            .await
+        }
+    };
+
+    // Insert path.
+    let first = hit("/home").await;
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    assert_eq!(first.body, json!({ "path": "/home", "hits": 1 }));
+
+    // Conflict path — composes on the stored value, read-your-writes.
+    assert_eq!(
+        hit("/home").await.body,
+        json!({ "path": "/home", "hits": 2 })
+    );
+    assert_eq!(
+        hit("/home").await.body,
+        json!({ "path": "/home", "hits": 3 })
+    );
+
+    // A different key is an independent insert.
+    assert_eq!(
+        hit("/about").await.body,
+        json!({ "path": "/about", "hits": 1 })
+    );
+    // The first counter is untouched by the second key.
+    assert_eq!(
+        hit("/home").await.body,
+        json!({ "path": "/home", "hits": 4 })
+    );
+}

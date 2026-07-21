@@ -669,8 +669,24 @@ fn param(p: &Param) -> String {
 
 fn write_line(w: &WriteStmt) -> String {
     match w {
-        WriteStmt::Create { model, assigns } => {
-            format!("create {} {}", model.node, assign_block(assigns))
+        WriteStmt::Create {
+            model,
+            assigns,
+            conflict,
+        } => {
+            let mut s = format!("create {} {}", model.node, assign_block(assigns));
+            if let Some(oc) = conflict {
+                s.push_str(&format!(
+                    " on conflict ({}) update {}",
+                    oc.target
+                        .iter()
+                        .map(|t| t.node.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    assign_block(&oc.update)
+                ));
+            }
+            s
         }
         WriteStmt::Update {
             model,

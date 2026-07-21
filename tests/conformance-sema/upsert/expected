@@ -1,0 +1,23 @@
+DIAGNOSTICS
+  E0250: conflict target (slug) is not a unique key of `Note`
+  E0251: the `on conflict update` branch assigns the conflict column `label`
+  E0253: `on conflict` is not allowed on the @soft_delete model `Tag`
+SCHEMA
+model Page  table=page
+  id: Id
+  path: text  unique
+  hits: int
+model Note  table=note
+  id: Id
+  slug: text
+  body: text
+model Tag  table=tag  soft_delete=deleted_at(timestamp)
+  id: Id
+  deleted_at: timestamp?
+  label: text  unique
+shape PageRow from Page
+shape NoteRow from Note
+shape TagRow from Tag
+mutation record_hit  ret=Page
+mutation upsert_note  ret=Note
+mutation touch_tag  ret=Tag

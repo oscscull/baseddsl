@@ -127,6 +127,13 @@ pub mod code {
     pub const AGG_CONTEXT: &str = "E0243"; // `group by` / `having` on a query whose return shape carries no aggregate
     pub const AGG_PAGE: &str = "E0244"; // `page` on an aggregate query (grouped keyset paging is unsupported)
     pub const AGG_COMPOSE: &str = "E0245"; // an aggregate shape nests/references a relation, is nested/referenced, or is a mutation return
+
+    // --- upsert (`create … on conflict update`) ---
+    pub const UPSERT_TARGET: &str = "E0250"; // the conflict target is not a declared unique key (unique column / `@index (…) unique` / pk)
+    pub const UPSERT_TARGET_SET: &str = "E0251"; // the `on conflict update` branch assigns a conflict-target column (moving the key breaks the read-back)
+    pub const UPSERT_TARGET_UNSET: &str = "E0252"; // a conflict-target column is neither set by the create nor scope-managed (no value to conflict / read back on)
+    pub const UPSERT_SOFT_DELETE: &str = "E0253"; // `on conflict` on a @soft_delete model — a tombstoned row would be silently updated instead of inserted
+    pub const UPSERT_SCOPE: &str = "E0254"; // a scoped model's conflict target omits a scope column — a conflict could match/modify another scope's row
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

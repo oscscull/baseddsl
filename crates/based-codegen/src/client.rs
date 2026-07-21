@@ -406,10 +406,19 @@ mod rust {
         map: &mut std::collections::HashMap<String, String>,
     ) {
         match stmt {
-            WriteStmt::Create { model, assigns } => {
+            WriteStmt::Create {
+                model,
+                assigns,
+                conflict,
+            } => {
                 let m = schema.model(&model.node);
                 for a in assigns {
                     scan_assign(m, a, map);
+                }
+                if let Some(oc) = conflict {
+                    for a in &oc.update {
+                        scan_assign(m, a, map);
+                    }
                 }
             }
             WriteStmt::Update {

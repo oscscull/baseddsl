@@ -47,9 +47,13 @@ relevant entries instead of scanning. A decision may appear under more than one 
   ack-on-surviving-write E0221, ack-on-query E0222; zero-row DELETE → 404 `not_found`),
   D100 (atomic update expressions: `update … { total = total + $n }` — a self-referential
   arithmetic SET over the model's numeric columns/params, lowered to real SQL `SET col =
-  (…)`, never read-modify-write; `+ - * /`, numeric family only, update-only; E0230/E0231)
+  (…)`, never read-modify-write; `+ - * /`, numeric family only, update-only; E0230/E0231),
+  D102 (upsert: `create … on conflict (target) update { … }` — per-dialect `ON CONFLICT DO
+  UPDATE` / `ON DUPLICATE KEY UPDATE`, conflict-key-keyed read-back; E0250-E0254)
 - **Indexing** — D15 (index inference, baseline emission, lints)
-- **Relations** — D17 (custom `on:` join resolution)
+- **Relations** — D17 (custom `on:` join resolution), D102 (many-to-many via explicit
+  junction model — two forward edges + two to-many inverses, no new syntax; far-side
+  flattening + implicit-junction sugar deferred)
 - **Aggregations** — D101 (aggregations + group by + having: an *aggregate shape*
   `count()`/`sum`/`avg`/`min`/`max` projected over groups, paired with a query's
   `group by`/`having`/`order`; `GROUP BY`/`HAVING` lowering with row filter before grouping +
@@ -4384,3 +4388,75 @@ matrix — `COUNT(*)`, `CAST(SUM(int) AS SIGNED/BIGINT)`, native/`TEXT` decimal 
 `HAVING` query grouping per buyer, excluding a soft-deleted row before grouping, filtering
 groups, and ordering them, with `count`/`sum`/`avg`/`max` decoded to their wire types.
 `make check` green end-to-end. Spec: `spec/syntax/shapes.md` + `spec/syntax/queries.md`.
+
+## D102 — many-to-many + upsert (T5)
+
+**Decision.** Two independent T5 features. **(A) Many-to-many** is modeled by an **explicit
+junction model** — a model with a forward edge to each side plus a to-many inverse on each end
+(`Enrollment { student: Student, course: Course }`, `Student.enrollments`, `Course.enrollments`)
+— so m2m needs no new relation syntax: it is the existing forward+inverse machinery, and a shape
+reaches the far side through the junction with the existing to-many nesting (D57). **(B) Upsert**
+is `create <Model> { … } on conflict (target) update { … }`: on a unique-key collision the
+`update` branch runs over the existing row instead of inserting. This is the T5 item on Track T
+(after enum D82, decimal/float D83, atomic update D100, aggregations D101).
+
+**This iteration ships (B) upsert fully; (A) m2m is specified, and the explicit-junction pattern
+already works** (it is forward+inverse relations, proven by L1/D57). The **far-side flattening
+projection** (`courses = enrollments.course { … }` → a flat `Vec<Course>` skipping the junction)
+and any **implicit-junction sugar** (`courses: Course[] <-> students`) are the deferred next T5
+slice — held on principle: an engine-generated join table is real, write/disk-costing DDL a
+reviewer must see in the PR (principle 2 / the NF11 tension the owner is weighing for inferred
+indexes), so it wants explicit-in-source resolution, not a silent default. Spec: relations.md.
+
+**Upsert surface (mutations.md).** `on conflict (col[, col]) update { assigns }` is an optional
+tail of `create` (AST `WriteStmt::Create.conflict: Option<OnConflict>`; grammar `on_conflict`).
+The conflict target names a unique key; the `update` branch is an ordinary update assign block —
+plain values + the same self-referential **arithmetic** D100 gives an `update`, so
+`on conflict update { hits = hits + 1 }` composes on the **stored** value (the canonical
+counter/accumulate use). One way to say a thing: `on conflict` is the only upsert spelling;
+`create`/`update` are otherwise unchanged.
+
+**Validation (safe by default; five stable codes).** `E0250` conflict target is not a declared
+unique key (a `(unique)` column, a `@index (…) unique` matching the set, or the pk — a conflict
+needs a key the DB enforces). `E0251` the `update` branch assigns a conflict column (moving the
+key breaks the conflict + the read-back). `E0252` a conflict column is neither set by the create
+nor scope-managed (no value to conflict on / read back by). `E0253` `on conflict` on a
+`@soft_delete` model (a tombstoned row still holds its unique key — an upsert would silently
+update the tombstone, not insert; delete-aware upsert is a separate, explicit feature). `E0254`
+a scoped model's conflict target omits a scope column — else a conflict could match, and the
+update silently modify, **another scope's row**; requiring the scope column in the key confines a
+conflict to the caller's own scope (an `unscoped` mutation forfeits this like every other scope
+guarantee). The update branch is otherwise checked like an ordinary update (E0153 type agreement,
+E0231 arith numeric).
+
+**Lowering (per-dialect over the `Dialect` seam).** Postgres/SQLite emit `INSERT … VALUES (…)
+ON CONFLICT (cols) DO UPDATE SET …`; MariaDB `INSERT … ON DUPLICATE KEY UPDATE …` — its form
+carries **no explicit conflict-target list**, so the validated key's uniqueness is what makes the
+two agree. The conflict-`SET` columns render **bare** on both sides on every dialect (a bare RHS
+column names the existing row; a qualified one is rejected/ambiguous in the conflict clause) — a
+`Select::with_bare_cols` mode reusing the ordinary assign lowering (enum variants → wire literals,
+the D100 arithmetic). `@scope` auto-set on the insert is unchanged.
+
+**Read-back keyed on the conflict target (not the id).** A conflict path keeps the **existing
+row's** id, so the INSERT's generated id would miss it. The declared-shape re-select therefore
+keys on the conflict target's inserted value (`RetKey::Conflict`, built in codegen from the
+create's own value for each target column — a `:param` or the `:ctx_<field>` scope auto-set),
+plus the scope/live guards a `get` applies. The runtime is **unchanged**: the re-select's
+placeholders are params/`$ctx` already in the bind environment (the create-keyed `:result_id` is
+still seeded but unused here). So a plain create keys on its id (D12), an update/soft-delete/
+restore on its `where` (D58), an upsert on its conflict target — three keys, one re-select path.
+
+**Editor / fmt / client.** fmt reprints `create … on conflict (…) update { … }` canonically
+(round-trip stable). The conflict-branch assigns are ordinary write-body references — go-to-def/
+find-refs/rename (rooted at the create model), enum-variant nav, and `$ctx`/param collection all
+walk them, so a param used only in the branch still types the client method and joins the bag.
+No new client/OpenAPI surface — an upsert returns its declared shape exactly like any create.
+
+**Verified.** Parser round-trip (conflict target + update branch); sema +/− for E0250-E0254 + two
+clean cases (single `(unique)`, composite `@index unique` with a scoped model) + a conformance
+golden; codegen SQL asserted on all three dialects (MariaDB `ON DUPLICATE KEY UPDATE`, Postgres/
+SQLite `ON CONFLICT (…) DO UPDATE`, the conflict-keyed re-select, composite+scoped target); fmt
+round-trip; and **live SQLite** — insert path then repeated conflict paths compose on the stored
+value (`hits` 1→2→3→4), a second key is an independent counter, read-your-writes on both paths.
+`make check` green end-to-end. Spec: `spec/syntax/mutations.md` (upsert) + `spec/syntax/relations.md`
+(m2m) + `spec/grammar.ebnf`.

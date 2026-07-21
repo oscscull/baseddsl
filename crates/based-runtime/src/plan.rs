@@ -550,9 +550,15 @@ fn param_use_in_stmts(compiled: &Compiled, stmts: &[WriteStmt], name: &str) -> O
     let schema = &compiled.schema;
     for stmt in stmts {
         let found = match stmt {
-            WriteStmt::Create { model, assigns } => {
-                param_use_in_assigns(schema, &model.node, assigns, name)
-            }
+            WriteStmt::Create {
+                model,
+                assigns,
+                conflict,
+            } => param_use_in_assigns(schema, &model.node, assigns, name).or_else(|| {
+                conflict
+                    .as_ref()
+                    .and_then(|oc| param_use_in_assigns(schema, &model.node, &oc.update, name))
+            }),
             WriteStmt::Update {
                 model,
                 where_,

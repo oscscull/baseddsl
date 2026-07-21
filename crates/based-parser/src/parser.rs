@@ -1170,7 +1170,12 @@ impl<'a> Parser<'a> {
         if self.eat_kw("create") {
             let model = self.upper_ident("model")?;
             let assigns = self.assign_block()?;
-            Ok(WriteStmt::Create { model, assigns })
+            let conflict = self.on_conflict()?;
+            Ok(WriteStmt::Create {
+                model,
+                assigns,
+                conflict,
+            })
         } else if self.eat_kw("update") {
             let model = self.upper_ident("model")?;
             let where_ = self.where_clause()?;
@@ -1228,6 +1233,43 @@ impl<'a> Parser<'a> {
         let pred = self.predicate()?;
         self.expect(Tok::RParen, "`)`")?;
         Ok(pred)
+    }
+
+    /// The optional `on conflict (cols) update { … }` tail of a `create` (upsert). Sits
+    /// directly after the create's assign block; `None` when the next token isn't `on`.
+    fn on_conflict(&mut self) -> PResult<Option<OnConflict>> {
+        if !self.at_kw("on") {
+            return Ok(None);
+        }
+        let start = self.here().start;
+        self.bump(); // `on`
+        if !self.eat_kw("conflict") {
+            self.err("expected `conflict` after `on`");
+            return Err(());
+        }
+        self.expect(Tok::LParen, "`(`")?;
+        let mut target = Vec::new();
+        loop {
+            target.push(self.lower_ident("conflict column")?);
+            if !self.eat(Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen, "`)`")?;
+        if !self.eat_kw("update") {
+            self.err("expected `update` after `on conflict (...)`");
+            return Err(());
+        }
+        let update = self.assign_block()?;
+        Ok(Some(OnConflict {
+            target,
+            update,
+            span: Span {
+                file: self.file,
+                start,
+                end: self.prev_end(),
+            },
+        }))
     }
 
     fn assign_block(&mut self) -> PResult<Vec<Assign>> {

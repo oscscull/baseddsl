@@ -1226,13 +1226,20 @@ fn check_write(
     sink: &mut Sink,
 ) {
     match stmt {
-        WriteStmt::Create { model, assigns } => {
+        WriteStmt::Create {
+            model,
+            assigns,
+            conflict,
+        } => {
             if let Some(mi) = write_model(model, cx, sink) {
                 for a in assigns {
                     check_assign(a, mi, cx, params, back, /* in_update = */ false, sink);
                 }
                 check_scope_assign(mi, assigns, unscoped, cx, sink);
                 check_create_required(mi, assigns, model, scoped, unscoped, cx, sink);
+                if let Some(oc) = conflict {
+                    check_upsert(oc, mi, assigns, scoped, unscoped, cx, params, sink);
+                }
             }
         }
         WriteStmt::Update {
@@ -1419,6 +1426,122 @@ fn check_create_required(
             ),
         );
     }
+}
+
+/// Validate an upsert's `on conflict (target) update { … }` (mutations.md): the target
+/// must be a declared unique key each of whose columns the create sets, the `update`
+/// branch is an ordinary update that may not move the key, and (safety) a soft-delete
+/// model is out and a scoped model's target must carry its scope column(s).
+#[allow(clippy::too_many_arguments)]
+fn check_upsert(
+    oc: &OnConflict,
+    mi: usize,
+    create_assigns: &[Assign],
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    let m = cx.model(mi);
+    let target: Vec<&str> = oc.target.iter().map(|t| t.node.as_str()).collect();
+
+    // A tombstoned row still occupies its unique key, so a conflict would silently
+    // update the tombstone instead of inserting — surprising and unsafe.
+    if m.soft_delete.is_some() {
+        sink.error_note(
+            code::UPSERT_SOFT_DELETE,
+            oc.span,
+            format!(
+                "`on conflict` is not allowed on the @soft_delete model `{}`",
+                m.name
+            ),
+            "a tombstoned row still holds its unique key — an upsert would update it, not insert",
+        );
+    }
+
+    // The conflict target must be a declared unique key (else no collision to define).
+    if !is_unique_key(m, &target) {
+        sink.error_note(
+            code::UPSERT_TARGET,
+            oc.span,
+            format!(
+                "conflict target ({}) is not a unique key of `{}`",
+                target.join(", "),
+                m.name
+            ),
+            "name a `(unique)` column, a `@index (…) unique`, or the pk — a conflict needs a key the database enforces",
+        );
+    }
+
+    // The scope columns this mutation auto-manages on the create (the chosen alternative).
+    let scope_cols: Vec<String> = crate::scope::resolve_inject(scoped, unscoped, &[mi], cx)
+        .into_iter()
+        .flat_map(|si| si.terms)
+        .map(|(field, _)| field)
+        .collect();
+
+    // Every conflict column must have a value on the create — assigned, or engine-managed
+    // as a scope column — so the conflict, and the read-back key, resolve.
+    let assigned: Vec<&str> = create_assigns.iter().map(|a| a.col.node.as_str()).collect();
+    for t in &oc.target {
+        let set = assigned.contains(&t.node.as_str()) || scope_cols.iter().any(|c| c == &t.node);
+        if !set {
+            sink.error_note(
+                code::UPSERT_TARGET_UNSET,
+                t.span,
+                format!("conflict column `{}` is not set by the create", t.node),
+                "assign it in the create block (or let a `@scope` column supply it) so the conflict has a value",
+            );
+        }
+    }
+
+    // A scoped model's conflict target must include its scope column(s): else a conflict
+    // could match — and the update modify — a different scope's row.
+    for sc in &scope_cols {
+        if !target.iter().any(|t| t == sc) {
+            sink.error_note(
+                code::UPSERT_SCOPE,
+                oc.span,
+                format!(
+                    "conflict target on scoped `{}` omits the scope column `{sc}`",
+                    m.name
+                ),
+                "add it to the conflict target so a conflict can only match a row in the caller's own scope",
+            );
+        }
+    }
+
+    // The update branch is an ordinary update — check its assigns — but it may not assign
+    // a conflict column (moving the key would break the conflict + the read-back).
+    for a in &oc.update {
+        check_assign(a, mi, cx, params, None, /* in_update = */ true, sink);
+        if target.iter().any(|t| *t == a.col.node) {
+            sink.error_note(
+                code::UPSERT_TARGET_SET,
+                a.col.span,
+                format!(
+                    "the `on conflict update` branch assigns the conflict column `{}`",
+                    a.col.node
+                ),
+                "the update runs on a conflict *of* this key — don't move it",
+            );
+        }
+    }
+}
+
+/// Whether `target` (field names) is a declared unique key of `m`: a single `(unique)`
+/// column (or the pk `id`, always unique), or a `@index (…) unique` whose columns are
+/// exactly the set (order-insensitive).
+fn is_unique_key(m: &RModel, target: &[&str]) -> bool {
+    if target.len() == 1 && m.is_unique(target[0]) {
+        return true;
+    }
+    m.indexes.iter().any(|ix| {
+        ix.unique
+            && ix.columns.len() == target.len()
+            && ix.columns.iter().all(|c| target.contains(&c.as_str()))
+    })
 }
 
 /// A column the caller must supply on `create`: a non-optional scalar with no

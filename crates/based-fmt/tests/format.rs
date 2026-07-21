@@ -260,3 +260,16 @@ fn aggregate_shape_and_group_by_render_canonically() {
     // idempotent
     assert_eq!(fmt(&out), out);
 }
+
+#[test]
+fn upsert_reprints_conflict_clause() {
+    let got = fmt(
+        "mutation record_hit(path: text) -> R {\n  create Page { path=$path, hits=1 } on conflict (path) update { hits=hits+1 };\n}\n",
+    );
+    assert_eq!(
+        got,
+        "mutation record_hit(path: text) -> R {\n  create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };\n}\n"
+    );
+    assert!(based_parser::parse_file(&got, FileId(0)).is_ok());
+    assert_eq!(fmt(&got), got);
+}

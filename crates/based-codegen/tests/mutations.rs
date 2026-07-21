@@ -693,3 +693,87 @@ fn enum_create_assign_lowers_to_a_string_literal() {
     let sql = gen(src);
     assert!(sql.contains("'paid'"), "\n{sql}");
 }
+
+// ---------- upsert (`create … on conflict update`) -------------------------
+
+const UPSERT: &str = r#"
+    Page {
+      path: text (unique)
+      hits: int
+    }
+    shape PageRow from Page { path, hits }
+    mutation record_hit(path: text) -> PageRow {
+      create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
+    }
+"#;
+
+#[test]
+fn upsert_mariadb_on_duplicate_key_update() {
+    let out = gen(UPSERT);
+    // MariaDB carries no explicit conflict target; bare columns name the existing row.
+    assert!(
+        out.contains(
+            "INSERT INTO `page` (`id`, `path`, `hits`)\nVALUES (:id, :path, 1)\nON DUPLICATE KEY UPDATE `hits` = (`hits` + 1);"
+        ),
+        "\n{out}"
+    );
+    // The declared-shape re-select keys on the conflict target, not the generated id.
+    assert!(out.contains("WHERE `page`.`path` = :path"), "\n{out}");
+    assert!(!out.contains(":result_id"), "\n{out}");
+}
+
+#[test]
+fn upsert_postgres_on_conflict_do_update() {
+    let out = gen_pg(UPSERT);
+    assert!(
+        out.contains(
+            "INSERT INTO \"page\" (\"id\", \"path\", \"hits\")\nVALUES (:id, :path, 1)\nON CONFLICT (\"path\") DO UPDATE SET \"hits\" = (\"hits\" + 1);"
+        ),
+        "\n{out}"
+    );
+    assert!(out.contains("WHERE \"page\".\"path\" = :path"), "\n{out}");
+}
+
+#[test]
+fn upsert_sqlite_on_conflict_do_update() {
+    let out = gen_for(UPSERT, Dialect::Sqlite);
+    assert!(
+        out.contains(
+            "INSERT INTO `page` (`id`, `path`, `hits`)\nVALUES (:id, :path, 1)\nON CONFLICT (`path`) DO UPDATE SET `hits` = (`hits` + 1);"
+        ),
+        "\n{out}"
+    );
+    assert!(out.contains("WHERE `page`.`path` = :path"), "\n{out}");
+}
+
+#[test]
+fn upsert_composite_unique_index_target_and_scope() {
+    // Per-tenant uniqueness: a composite `@index (org, slug) unique`, org scope-managed.
+    let src = r#"
+        Org { name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Doc {
+          org: Org
+          slug: text
+          views: int
+          @index (org, slug) unique
+        }
+        shape DocRow from Doc { slug, views }
+        mutation touch_doc(slug: text) -> DocRow scoped Tenant {
+          create Doc { slug = $slug, views = 1 } on conflict (org, slug) update { views = views + 1 };
+        }
+    "#;
+    let out = gen_pg(src);
+    // `org` is auto-set from $ctx and is part of the conflict target + re-select key.
+    assert!(
+        out.contains(
+            "ON CONFLICT (\"org_id\", \"slug\") DO UPDATE SET \"views\" = (\"views\" + 1)"
+        ),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("\"doc\".\"org_id\" = :ctx_org") && out.contains("\"doc\".\"slug\" = :slug"),
+        "\n{out}"
+    );
+}

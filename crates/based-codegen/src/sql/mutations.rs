@@ -94,6 +94,12 @@ pub struct LoweredWrite {
     /// For a `create` whose `id` the engine generates (no caller-set id), the
     /// bind name that id fills (`id`, or `id_<step>` inside a `tx`); else `None`.
     pub gen_id: Option<String>,
+    /// For an upsert `create … on conflict (…)`, the read-back key: each conflict
+    /// column's `(physical_col, value_sql)` — the value the create sets for it. The
+    /// declared-shape re-select keys on this (not the INSERT's generated id, which a
+    /// conflict path discards), so the winning row reads back on both paths. `None` for
+    /// a plain create / any other write.
+    pub conflict_key: Option<Vec<(String, String)>>,
 }
 
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
@@ -178,10 +184,19 @@ fn lower_mutation<'a>(
         .iter()
         .find(|rm| rm.name == m.name.node)
         .and_then(|rm| {
+            // An upsert (`create … on conflict`) on the return model keys on the conflict
+            // target (a conflict path keeps the existing row's id, so the generated id
+            // won't match); a plain create keys on that id; an update / soft delete /
+            // restore keys on its own `where`.
+            let upsert = stmts
+                .iter()
+                .find(|w| w.conflict_key.is_some() && w.model == rm.ret_model);
             let creates_ret = stmts
                 .iter()
                 .any(|w| w.gen_id.is_some() && w.model == rm.ret_model);
-            let key = if creates_ret {
+            let key = if let Some(w) = upsert {
+                RetKey::Conflict(w.conflict_key.clone().unwrap_or_default())
+            } else if creates_ret {
                 RetKey::CreatedId
             } else {
                 let (pred, live) = surviving_ret_write(&m.body, &rm.ret_model, schema)?;
@@ -215,6 +230,11 @@ enum RetKey<'a> {
     /// the soft-delete live predicate rides along: true for update/restore (the row is
     /// live), false for a soft delete (the row is now tombstoned but must still read back).
     Where { pred: &'a Predicate, live: bool },
+    /// The mutation *upserted* the row (`create … on conflict`) — key on the conflict
+    /// target's inserted value, since a conflict path keeps the existing row's id (so the
+    /// INSERT's generated id won't match it). Each pair is `(physical_col, value_sql)`. The
+    /// row is live (upsert is disallowed on a soft-delete model).
+    Conflict(Vec<(String, String)>),
 }
 
 /// Build the declared-shape re-select for a mutation's written row: the same projection a
@@ -250,6 +270,13 @@ fn lower_ret_select(
             true,
         ),
         RetKey::Where { pred, live } => (vec![sel.predicate(pred, model)], live),
+        RetKey::Conflict(pairs) => (
+            pairs
+                .iter()
+                .map(|(c, v)| format!("{} = {v}", sel.qcol(&sel.root_alias, c)))
+                .collect(),
+            true,
+        ),
     };
     if live {
         if let Some(sd) = &model.soft_delete {
@@ -335,10 +362,23 @@ fn lower_write<'a>(
     out: &mut Vec<LoweredWrite>,
 ) {
     match stmt {
-        WriteStmt::Create { model, assigns } => {
+        WriteStmt::Create {
+            model,
+            assigns,
+            conflict,
+        } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_create(
-                    schema, decls, m, assigns, id_param, back, unscoped, inject, dialect,
+                    schema,
+                    decls,
+                    m,
+                    assigns,
+                    conflict.as_ref(),
+                    id_param,
+                    back,
+                    unscoped,
+                    inject,
+                    dialect,
                 ));
             }
         }
@@ -421,6 +461,7 @@ fn lower_write<'a>(
             sql: format!("{};\n", render_raw(dialect, raw, "", "")),
             model: String::new(),
             gen_id: None,
+            conflict_key: None,
         }),
     }
 }
@@ -433,6 +474,7 @@ fn lower_create<'a>(
     decls: &'a [Decl],
     model: &RModel,
     assigns: &'a [Assign],
+    conflict: Option<&'a OnConflict>,
     id_param: &str,
     back: Option<BackCtx<'a>>,
     unscoped: bool,
@@ -446,12 +488,16 @@ fn lower_create<'a>(
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
+    // field name → the value SQL the INSERT sets for it, for building the conflict key.
+    let mut value_by_field: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     for a in assigns {
         let col = physical_col(model, &a.col.node);
         cols.push(dialect.quote(&col));
         // An enum column takes a bare variant → its wire string literal.
         let val = sel.assign_rhs(&a.value, model, &a.col.node);
+        value_by_field.insert(a.col.node.clone(), val.clone());
         vals.push(val);
         assigned.push(col);
     }
@@ -464,6 +510,9 @@ fn lower_create<'a>(
     // `assigned` never contains it — the guard is defensive. Empty when `unscoped`.
     for (field, ctx_field) in sel.scope_terms_for(&model.name).to_vec() {
         let col = physical_col(model, &field);
+        value_by_field
+            .entry(field.clone())
+            .or_insert_with(|| format!(":ctx_{ctx_field}"));
         if !assigned.contains(&col) {
             cols.push(dialect.quote(&col));
             vals.push(format!(":ctx_{ctx_field}"));
@@ -490,16 +539,80 @@ fn lower_create<'a>(
         }
     }
 
+    // Upsert tail: `ON CONFLICT (cols) DO UPDATE SET …` (Postgres/SQLite) or `ON DUPLICATE
+    // KEY UPDATE …` (MariaDB — no explicit target; the validated key's uniqueness is what
+    // makes the two agree). The conflict key reads the winning row back on both paths.
+    let (tail, conflict_key) = match conflict {
+        Some(oc) => {
+            let sets = conflict_update_sets(schema, decls, model, oc, dialect);
+            let key: Vec<(String, String)> = oc
+                .target
+                .iter()
+                .filter_map(|t| {
+                    value_by_field
+                        .get(&t.node)
+                        .map(|v| (physical_col(model, &t.node), v.clone()))
+                })
+                .collect();
+            (upsert_tail(dialect, oc, model, &sets), Some(key))
+        }
+        None => (String::new(), None),
+    };
+
     LoweredWrite {
         header: format!("-- create {}\n", model.name),
         sql: format!(
-            "INSERT INTO {} ({})\nVALUES ({});\n",
+            "INSERT INTO {} ({})\nVALUES ({}){};\n",
             dialect.quote(&model.table),
             cols.join(", "),
-            vals.join(", ")
+            vals.join(", "),
+            tail
         ),
         model: model.name.clone(),
         gen_id,
+        conflict_key,
+    }
+}
+
+/// The `SET col = value` fragments for an upsert's `update` branch. Columns render **bare**
+/// on both sides (a bare RHS column names the existing row on every dialect; a qualified
+/// one is rejected/ambiguous in the conflict clause), reusing the ordinary assign lowering
+/// (enum variants → wire literals, `hits = hits + 1` → the atomic arithmetic).
+fn conflict_update_sets(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    model: &RModel,
+    oc: &OnConflict,
+    dialect: Dialect,
+) -> Vec<String> {
+    let mut sel = Select::new(schema, decls, model, dialect).with_bare_cols(true);
+    oc.update
+        .iter()
+        .map(|a| {
+            let col = physical_col(model, &a.col.node);
+            let val = sel.assign_rhs(&a.value, model, &a.col.node);
+            format!("{} = {val}", dialect.quote(&col))
+        })
+        .collect()
+}
+
+/// The per-dialect upsert clause appended to the INSERT: Postgres/SQLite carry the explicit
+/// conflict-target column list, MariaDB does not (`ON DUPLICATE KEY UPDATE`).
+fn upsert_tail(dialect: Dialect, oc: &OnConflict, model: &RModel, sets: &[String]) -> String {
+    match dialect {
+        Dialect::MariaDb => format!("\nON DUPLICATE KEY UPDATE {}", sets.join(", ")),
+        Dialect::Postgres | Dialect::Sqlite => {
+            let target: Vec<String> = oc
+                .target
+                .iter()
+                .map(|t| dialect.quote(&physical_col(model, &t.node)))
+                .collect();
+            format!(
+                "\nON CONFLICT ({}) DO UPDATE SET {}",
+                target.join(", "),
+                sets.join(", ")
+            )
+        }
     }
 }
 
@@ -541,6 +654,7 @@ fn lower_update<'a>(
         sql: update_stmt(&sel, model, &sets, &wheres),
         model: model.name.clone(),
         gen_id: None,
+        conflict_key: None,
     }
 }
 
@@ -574,6 +688,7 @@ fn lower_delete(
             sql: update_stmt(&sel, model, &sets, &wheres),
             model: model.name.clone(),
             gen_id: None,
+            conflict_key: None,
         };
     }
 
@@ -590,6 +705,7 @@ fn lower_delete(
         sql: delete_stmt(&sel, model, &wheres),
         model: model.name.clone(),
         gen_id: None,
+        conflict_key: None,
     }
 }
 
@@ -626,6 +742,7 @@ fn lower_restore(
         sql: update_stmt(&sel, model, &sets, &wheres),
         model: model.name.clone(),
         gen_id: None,
+        conflict_key: None,
     }
 }
 

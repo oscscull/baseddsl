@@ -226,7 +226,13 @@ mut_block   = '{' { write_stmt sep } [ write_stmt ] '}' ;
 write_stmt  = create_stmt | update_stmt | delete_stmt
             | restore_stmt | hard_delete_stmt | tx_block | raw_sql ;
 
-create_stmt = 'create' model_ref assign_block ;
+(* A create may name a conflict target (a unique key) + an `update` branch — upsert       *)
+(* (mutations.md). On a unique collision the `update` runs over the existing row (the      *)
+(* same self-referential arithmetic an ordinary `update` allows) instead of inserting;     *)
+(* the winning row reads back keyed on the conflict target. Postgres/SQLite lower to        *)
+(* `ON CONFLICT (cols) DO UPDATE`, MariaDB to `ON DUPLICATE KEY UPDATE`. Sema E0250-E0254.  *)
+create_stmt = 'create' model_ref assign_block [ on_conflict ] ;
+on_conflict = 'on' 'conflict' '(' column_name { ',' column_name } ')' 'update' assign_block ;
 update_stmt = 'update' model_ref where_clause assign_block ;
 delete_stmt = 'delete' model_ref where_clause ;
 restore_stmt= 'restore' model_ref where_clause ;

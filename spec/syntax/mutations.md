@@ -39,6 +39,42 @@ arithmetic RHS is **update-only** — a `create` has no existing row to referenc
 value stays the one form for `create`. This is a leaf-level escape into arithmetic, not a general
 language — no functions, no cross-row references, no conditionals (principle 5).
 
+## Upsert (`create … on conflict update`)
+A `create` may name a **conflict target** — a unique key — and an `update` branch that runs
+instead of the insert when a row with that key already exists:
+```
+mutation record_hit(path: text) -> PageRow {
+  create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
+}
+```
+On the insert path a new row lands; on the conflict path the existing row's `update` branch
+runs. The branch is an ordinary `update` assign block — plain values and the same
+self-referential **arithmetic** an `update` allows (mutations.md above), so `hits = hits + 1`
+composes on the **stored** value in the database (not a read-modify-write), the canonical
+counter/accumulate use. The winning row is read back in the declared shape (below), keyed on
+the **conflict target's value**, so the same shape decodes on both paths.
+
+- **The conflict target must be a declared unique key** (`E0250`): a `(unique)` column, a
+  `@index (…) unique` whose columns are exactly the named set, or the pk. Naming a
+  non-unique column is the error — a conflict can only be defined against a key the database
+  enforces.
+- **Every conflict column must be set by the create** (`E0252`) — assigned in the block, or
+  engine-managed as a `@scope` column — so the conflict, and the read-back key, have a value.
+- **The `update` branch may not assign a conflict column** (`E0251`): moving the key would
+  break the read-back and defeat the conflict.
+- **A `@scope`d model's conflict target must include its scope column(s)** (`E0254`): else a
+  conflict could match — and the `update` silently modify — a *different* scope's row. With
+  the scope column in the key a conflict can only occur within the caller's own scope. (An
+  `unscoped` mutation forfeits this, like every other scope guarantee.)
+- **`on conflict` is not allowed on a `@soft_delete` model** (`E0253`): a tombstoned row still
+  occupies its unique key, so an upsert would silently update the tombstone instead of
+  inserting — surprising and unsafe. Delete-aware upsert is a separate, explicit feature.
+
+Lowering is per-dialect over the `Dialect` seam: Postgres/SQLite `INSERT … ON CONFLICT (cols)
+DO UPDATE SET …`, MariaDB `INSERT … ON DUPLICATE KEY UPDATE …` (its form carries no explicit
+target list — the uniqueness of the validated key is what makes the two agree). `@scope`
+auto-set and the read-back's scope/live guards apply exactly as on a plain `create`.
+
 ## Atomic groups
 `tx { ... }` runs a static set of writes in one transaction; rolls back together. Back-reference a prior step with `^`:
 ```

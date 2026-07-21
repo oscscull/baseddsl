@@ -970,6 +970,11 @@ pub(crate) struct Select<'a> {
     /// with the outer row's alias. Threaded through nested subqueries so siblings stay
     /// unique.
     sub_counter: usize,
+    /// Render column operands **bare** (unqualified) instead of `alias.col`. Set only for
+    /// an upsert's `ON CONFLICT DO UPDATE` / `ON DUPLICATE KEY UPDATE` SET clause, where a
+    /// bare column names the existing row across all three dialects (a qualified reference
+    /// is rejected or ambiguous there). Off everywhere else.
+    bare_cols: bool,
 }
 
 /// What a `^.field` back-reference resolves to: the preceding `create`'s bound `id`
@@ -1017,7 +1022,14 @@ impl<'a> Select<'a> {
             inject_scope: true,
             scope_inject: &[],
             sub_counter: 0,
+            bare_cols: false,
         }
+    }
+
+    /// Render column operands bare (unqualified) — for an upsert conflict-update SET.
+    pub(crate) fn with_bare_cols(mut self, bare: bool) -> Self {
+        self.bare_cols = bare;
+        self
     }
 
     /// Enter a `field -> Shape` expansion: the referenced shape's body, or `None` for
@@ -1225,6 +1237,7 @@ impl<'a> Select<'a> {
             inject_scope: self.inject_scope,
             scope_inject: self.scope_inject,
             sub_counter: self.sub_counter,
+            bare_cols: false,
         };
         let elem = sub.json_object_expr(body, child, &child_alias, "");
         // Sort cascade for the traversal: relation `@sort` on the edge beats the child
@@ -1760,7 +1773,11 @@ impl<'a> Select<'a> {
             Value::Param(pr) => format!(":{}", param_key(pr)),
             Value::Path(p) => {
                 let (alias, col) = self.resolve(p, model);
-                self.qcol(&alias, &col)
+                if self.bare_cols {
+                    self.q(&col)
+                } else {
+                    self.qcol(&alias, &col)
+                }
             }
             Value::Lit(l) => render_lit(self.dialect, l),
             Value::Func(f) => render_func(f),

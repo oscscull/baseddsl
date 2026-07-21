@@ -464,6 +464,8 @@ pub enum WriteStmt {
     Create {
         model: Ident,
         assigns: Vec<Assign>,
+        /// `on conflict (cols) update { … }` — upsert. `None` for a plain insert.
+        conflict: Option<OnConflict>,
     },
     Update {
         model: Ident,
@@ -490,6 +492,20 @@ pub enum WriteStmt {
 pub struct Assign {
     pub col: Ident,
     pub value: AssignRhs,
+}
+
+/// `on conflict (target) update { update }` — the upsert tail of a `create`. On a
+/// unique-key collision on `target` the `update` assigns run over the existing row
+/// (rather than inserting a duplicate). The winning row is read back keyed on the
+/// conflict target, so the mutation's declared shape decodes on both paths.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnConflict {
+    /// The conflict target: the field(s) forming the unique key the collision is on.
+    pub target: Vec<Ident>,
+    /// The `update` branch assigns, applied to the existing row on a conflict — an
+    /// ordinary update assign block (plain values + self-referential arithmetic).
+    pub update: Vec<Assign>,
+    pub span: Span,
 }
 
 /// The right-hand side of an assignment. A plain `value` in the common case (and the

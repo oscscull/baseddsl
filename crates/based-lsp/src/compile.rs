@@ -1063,8 +1063,15 @@ impl Snapshot {
     ) {
         for w in body {
             match w {
-                WriteStmt::Create { model, assigns } => {
-                    self.assign_variant_sites(model.node.as_str(), assigns, out)
+                WriteStmt::Create {
+                    model,
+                    assigns,
+                    conflict,
+                } => {
+                    self.assign_variant_sites(model.node.as_str(), assigns, out);
+                    if let Some(oc) = conflict {
+                        self.assign_variant_sites(model.node.as_str(), &oc.update, out);
+                    }
                 }
                 WriteStmt::Update {
                     model,
@@ -1974,7 +1981,16 @@ fn value_paths<'a>(v: &'a Value, root: &'a str, out: &mut Vec<(&'a str, &'a [Ide
 fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>) {
     for w in body {
         match w {
-            WriteStmt::Create { model, assigns } => assign_paths(assigns, model.node.as_str(), out),
+            WriteStmt::Create {
+                model,
+                assigns,
+                conflict,
+            } => {
+                assign_paths(assigns, model.node.as_str(), out);
+                if let Some(oc) = conflict {
+                    assign_paths(&oc.update, model.node.as_str(), out);
+                }
+            }
             WriteStmt::Update {
                 model,
                 where_,
@@ -2056,9 +2072,18 @@ fn clause_param_refs<'a>(c: &'a Clause, out: &mut Vec<&'a ParamRef>) {
 fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
     for w in body {
         match w {
-            WriteStmt::Create { assigns, .. } => assigns
-                .iter()
-                .for_each(|a| assign_rhs_param_refs(&a.value, out)),
+            WriteStmt::Create {
+                assigns, conflict, ..
+            } => {
+                assigns
+                    .iter()
+                    .for_each(|a| assign_rhs_param_refs(&a.value, out));
+                if let Some(oc) = conflict {
+                    oc.update
+                        .iter()
+                        .for_each(|a| assign_rhs_param_refs(&a.value, out));
+                }
+            }
             WriteStmt::Update {
                 where_, assigns, ..
             } => {
