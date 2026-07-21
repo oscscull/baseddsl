@@ -16,7 +16,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D9 (free layout), D82 (enum type: string + numeric kinds, explicit values, column + CHECK,
   name-resolution disambiguation, variant navigation), D83 (decimal + float: exact `decimal(p,s)`
   string-on-wire via `rust_decimal`/`serde-str`, `float` = f64, numeric family, `Literal::Decimal`
-  exact-text defaults, SQLite TEXT storage, Postgres binary-numeric decode, E0159)
+  exact-text defaults, SQLite TEXT storage, Postgres binary-numeric decode, E0159),
+  D103 (implicit `id` → explicit-in-source, error `E0261` + autofix), D104 (opaque column types
+  via `raw("…")` — literal type-string in DDL+snapshot, opaque client value; `sql` banned as syntax)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
@@ -49,11 +51,18 @@ relevant entries instead of scanning. A decision may appear under more than one 
   arithmetic SET over the model's numeric columns/params, lowered to real SQL `SET col =
   (…)`, never read-modify-write; `+ - * /`, numeric family only, update-only; E0230/E0231),
   D102 (upsert: `create … on conflict (target) update { … }` — per-dialect `ON CONFLICT DO
-  UPDATE` / `ON DUPLICATE KEY UPDATE`, conflict-key-keyed read-back; E0250-E0254)
-- **Indexing** — D15 (index inference, baseline emission, lints)
+  UPDATE` / `ON DUPLICATE KEY UPDATE`, conflict-key-keyed read-back; E0250-E0254),
+  D107 (named `tx` step bindings `create … as name;` + `$name.field`, reaches any prior step;
+  **`^` removed entirely**, `E0170` retired; E0280/E0281 — supersedes D16)
+- **Indexing** — D15 (index inference, baseline emission, lints), D103 (inferred join-key indexes
+  retire → explicit `@index`, error `E0260` + autofix; principle 8 reworded; `inf_`/`IndexSnap.inferred`
+  gone), D104 (exotic indexes: `@index(col) using <method>` + opaque `@index raw("…")`, per-dialect
+  validity `E0272`/`E0274`)
 - **Relations** — D17 (custom `on:` join resolution), D102 (many-to-many via explicit
   junction model — two forward edges + two to-many inverses, no new syntax; far-side
-  flattening + implicit-junction sugar deferred)
+  flattening + implicit-junction sugar deferred), D103 (m2m fork resolved: **no** implicit-junction
+  sugar — a junction's FK columns are explicit `@index`; only the far-side flattening projection
+  remains, as sugar over existing machinery)
 - **Aggregations** — D101 (aggregations + group by + having: an *aggregate shape*
   `count()`/`sum`/`avg`/`min`/`max` projected over groups, paired with a query's
   `group by`/`having`/`order`; `GROUP BY`/`HAVING` lowering with row filter before grouping +
@@ -135,7 +144,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
   comment reattachment; deterministic/idempotent; `based fmt [--check]` + LSP `formatting`)
 - **Migrations** — D37 (migration generation, spec), D39 (snapshot + diff engine), D41 (per-dialect
   renderer), D42 (apply + `_based_migrations` ledger), D67 (`@was` renames + offline drift diagnostic
-  + `raw(dialect)` up step — Track E5, DoD #5 fully met)
+  + `raw(dialect)` up step — Track E5, DoD #5 fully met), D105 (`@was` lifecycle: `gen` self-consumes
+  the spent `@was` from source + teach-at-checkpoint rename hint in gen/`W0108`/destructive-gate;
+  editor-rename insert already D80), D106 (`up.mig` snapshot-authoritative: honest header +
+  apply-time drift **refusal** `MigrateError::UpMigDrift` + multi-line `raw` blocks + prefilled
+  `down.mig` + `.mig` grammar + raw/snapshot boundary doc + `W0109`)
 - **Example projects** — D60 (`examples/` outside the workspace; SQLite quickstart: build-time
   codegen + in-process `Engine` + typed client, end-to-end scenario), D61 (MariaDB + Postgres
   quickstart slices against live Docker servers; Track B / DoD #2 complete), D63 (quickstart DX
@@ -4460,3 +4473,202 @@ round-trip; and **live SQLite** — insert path then repeated conflict paths com
 value (`hits` 1→2→3→4), a second key is an independent counter, read-your-writes on both paths.
 `make check` green end-to-end. Spec: `spec/syntax/mutations.md` (upsert) + `spec/syntax/relations.md`
 (m2m) + `spec/grammar.ebnf`.
+
+---
+
+The next five decisions (D103–D107) resolve the owner-flagged design follow-ups NF11/NF9/NF7/NF8/
+NF13 in one pass (owner-approved each fork, 2026-07-21). They are **decided, not yet implemented** —
+each states the target and its spec seam so a build-loop iteration lands it mechanically. D103 is the
+keystone (it changes a principle); the others reference it.
+
+## D103 — inferred indexes + implicit `id` become explicit-in-source (NF11)
+
+**Decision.** Stop silently deriving structure. The two engine-created facts that carry
+independent, PR-invisible cost — a join-key **index** and a model's **primary key** — move from
+silent derivation to **written in source, enforced by a compiler error with a one-key LSP
+autofix.** (1) A relation join key some query/shape traverses with no covering `@index` is a new
+error **`E0260`** (promoted from the `W0103` lint) — satisfied by `@index <field>` (the autofix
+inserts it) or the existing visible `unindexed(max_rows: N)` / `unindexed(unsafe)` opt-out.
+(2) A model that declares no `id` is a new error **`E0261`** — the autofix inserts the `id` line.
+Both fire in `based check` (CLI), not only the editor, so the compiler is equally honest headless.
+
+**Why — principle 8 is reworded.** Principle 8 (“show, don’t write, for derived facts”) currently
+*names inferred indexes as its example*; this decision inverts that example. An index has real
+write + disk cost and a PK is load-bearing, so both are *consequential* — principle 2 (“nothing
+consequential is true by omission”) governs: their omission is neither single-meaning nor free, so
+they are not elidable, and hard priority 3 (a reviewer confirms design by reading the PR) is the
+clincher — an editor-only inferred fact never reaches the PR. New principle 8: *“Show, don’t write —
+only for cost-free, unambiguous derived facts (an inverse name, fixed by the written forward edge).
+A derived fact a reviewer must weigh — an index, a primary key — is written in source; the engine
+errors when it’s missing and offers a one-key autofix.”*
+
+**What retires.** `IndexSnap.inferred` (`migrate/model.rs`), the `inf_` DDL naming +
+soft-delete-prepend baseline in `sql.rs:88`, `RModel.inferred_indexes` + the `indexes.rs` baseline
+build, and the `FactKind::InferredIndex` fact + its LSP inlay (`based-facts` + `compile.rs:605`) all
+go. The DDL’s indexes become exactly the written set. `W0104`/`W0105` (useless / stale-annotation)
+stay — they lint *declared* `@index`. **Kept:** when a user writes `@index <field>` on a
+`@soft_delete` model, the engine still renders it soft-delete-leading (predicate-equivalent); that
+is a *rendering* of the written index, not a second silent index, and stays (document in
+indexing.md). **Kept:** the inferred *inverse pairing* stays a shown fact (`FactKind::InferredInverse`)
+— the inverse field is written in source and only the unambiguous pairing is derived, which passes
+principle 2’s elision test (one meaning, safe, visible). NF10/D91’s narrow fact anchoring stands.
+
+**Consequence — resolves D102’s deferred m2m fork.** A junction model’s two FK columns each need an
+explicit `@index` (no silent join-table index), and there is **no implicit-junction sugar** (it
+would emit silent DDL, exactly what this decision forbids). So m2m stays the explicit-junction
+pattern; only the far-side flattening projection (`courses = enrollments.course { … }`) remains as
+sugar over existing machinery — approved, queued, no silent-DDL concern.
+
+**Spec seam.** principles.md (P8, reworded now), models.md (Defaults: `id` now required; Types),
+indexing.md (Inference → “what you must index”), D2/D15 revised-by-this-entry. Fallout on landing:
+conformance goldens + `spec/examples/commerce` + the four `examples/*` schemas gain explicit
+`@index`/`id` lines; the migration goldens lose the `inf_` indexes. Codes `E0260`/`E0261`.
+
+## D104 — opaque column + index passthrough via `raw(…)` (NF9)
+
+**Decision.** The closed primitive set (`text int bool timestamp date json uuid float decimal`) gets
+a single escape hatch so a DB type the engine doesn’t model (PostGIS `geometry`, `tsvector`, `inet`,
+vendor JSON variants) no longer forces a raw migration behind the schema’s back — which today makes
+the snapshot blind on a modeled table, gets the column silently dropped by a sqlite table-rebuild,
+and excludes it from every generated surface (the “throw the whole system away for one field” cliff).
+The hatch is the existing **`raw` keyword (D96)**, now valid in **type** and **index** position —
+“raw at the leaves, never the structure” (principle 6). *(Spelling: `raw`, not a new word. Standing
+convention, owner 2026-07-21: **never use `sql` as a keyword/marker anywhere in the language** — we
+are Postgres-compatible and `sql` reads as ambiguous; this is why D96 renamed `sql`→`raw`, and it
+binds all future syntax.)*
+
+- **Opaque column type.** `location: raw("geometry(Point,4326)")?` — the engine stores the literal
+  type string in DDL + the neutral snapshot, so diff = string compare and migrations / sqlite
+  rebuilds / `@was` all keep working. A **per-dialect map** when the type name differs:
+  `tags: raw({ postgres: "tsvector", mariadb: "text" })`; a bare string applies to all targets. A
+  dialect that is a compile target but absent from the map is **`E0270`**. The value is **opaque end
+  to end** (Prisma’s `Unsupported` rule): the client treats it as an opaque string, it is **excluded
+  from `create`/`update` unless nullable or defaulted** (**`E0273`** on assigning a non-nullable,
+  non-defaulted opaque column — you can’t construct a value the engine doesn’t model), and
+  `where`/`order`/aggregate on it is **`E0271`** — *except* through the existing `raw` predicate /
+  `ShapeValue::Raw` leaf (D96), which already handles the read side (`ST_Area(location)` is a raw
+  shape value today). One opaque field degrades gracefully; CRUD on the rest of the model,
+  migrations, and the drift check all stay in-system.
+
+- **Exotic indexes — two tiers, same seam** (an opaque column you can’t index is dead weight — a
+  `geometry` without GIST, a `tsvector` without GIN, is unusable). (i) `@index(location) using gist`
+  — a `using <method>` token (gist/gin/brin/hash…; MariaDB `fulltext`/`spatial`), snapshot-recorded,
+  per-dialect validity checked **loudly** at gen (**`E0272`** — sqlite lacks most methods; an error,
+  never a silent skip). (ii) `@index raw("(lower(email))")` — the long-tail opaque index (expression
+  indexes, opclasses, partial `WHERE`) recorded as a literal string in the snapshot, diffed by string
+  compare; an empty/unparseable raw index is **`E0274`**. `IndexSnap` grows `method: Option<String>`
+  + `raw: Option<String>` (and drops `inferred` per D103), so create/drop/rebuild lifecycle stays
+  in-system for exotic indexes exactly as for opaque columns.
+
+**Spec seam.** models.md (Types: opaque type), indexing.md (`using` + opaque `@index raw`), raw.md
+(the type/index positions of `raw`; the `sql`-is-banned convention), migrations.md (opaque diff =
+string compare). Codes `E0270`–`E0274`.
+
+## D105 — `@was` lifecycle: `gen` self-consumes + teach-at-checkpoint (NF7)
+
+**Decision.** `@was("old")` is a one-shot gen-time rename hint; today it lingers after
+`based migrate gen` as `W0107` cruft (a second commit to remove) or the author strips it and the
+rename gesture never appears in any PR, so users never learn it — and a rename authored *without*
+`@was` becomes a silent destructive drop+add with no “did you mean a rename?” anywhere. Three moves
+(one already shipped):
+
+1. **`gen` self-consumes the spent `@was`.** After `gen` writes a migration that consumed a
+   field/model `@was`, it strips that exact `@was` token from the `.bsl` (minimal diff, only the
+   spent token) and prints a visible line — e.g. *removed spent `@was("old")` from `Model.field`
+   (recorded in migrations/NNNN_slug)*. The durable record is the `schema.snap` chain + `up.mig`’s
+   `rename` step (principle 4: one source of truth — the rename lives in the ledger, not permanently
+   in the model), so the source annotation is safe to retire automatically: no `W0107` cruft, no
+   second commit, works headless. `gen` already writes `migrations/` and `based fmt` already rewrites
+   `.bsl`, so a toolchain source edit is in-band; a discarded `gen` reverts source + migration
+   together under git. `W0107` stays as the fallback lint for a hand-authored migration where `gen`
+   didn’t run.
+
+2. **Teach-at-checkpoint (the load-bearing piece).** When a single-table diff drops column X and adds
+   a same-family column Y (one drop + one compatible add on one table), `gen` stdout, the `W0108`
+   drift note, and the apply destructive-gate message all add: *“if this renames X→Y, add
+   `@was("X")` on Y and re-run `based migrate gen`; otherwise X is dropped (data loss).”* This gives
+   `@was` the interactive-prompt’s self-revealing-at-ambiguity property over the run→read→edit→re-run
+   loop, with zero prior knowledge and no TTY dependence (so it works for headless agents; interactive
+   `gen` prompts stay rejected — non-TTY hangs, non-reproducible gen). No new code — a hint on the
+   existing destructive/drift detection.
+
+3. **Editor rename inserts `@was` — already shipped (D80).** `textDocument/rename` on a field/model
+   mapped to a live column/table inserts `@was("old")` as part of the rename edit.
+
+Rejected: interactive gen prompts; keep-forever Terraform-`moved`-style hints (the ledger already
+holds transition history). Spec seam: migrations.md E5.
+
+## D106 — `up.mig` is snapshot-authoritative: honest contract + a real editable surface (NF8)
+
+**Decision.** The generated `up.mig` header says “edit if needed, then apply,” but apply/render
+re-derive **structural** SQL from the `schema.snap` chain and only *parse* `raw(<dialect>)` lines out
+of `up.mig` (`based-runtime` `load_migrations` → `migrate::diff_snapshots` for structural,
+`parse_raw_steps` for raw) — so a hand-edit to a structural step line is **silently ignored at
+apply** (only offline `based migrate verify` catches the byte-drift, and only if it runs). Six fixes:
+
+(a) **Honest header.** `render_up`’s header (`migrate/up_mig.rs`) states the real contract:
+structural steps derive from `schema.snap` (editing a structural line has no effect at apply); the
+editable surface is `raw(dialect)` lines (which run *after* all structural steps, regardless of file
+position) and a hand-authored `down.mig`.
+
+(b) **Apply-time drift refusal (owner: refuse, hard error).** `load_migrations` already reads both
+`up.mig` and `schema.snap` per migration, so the `verify` byte-compare is nearly free there:
+apply/render **refuse** (new `MigrateError::UpMigDrift`, clear message) when a migration’s structural
+`up.mig` lines diverge from the snapshot-derived SQL, instead of silently ignoring the edit — closing
+the “verify-didn’t-run” hole (principle 1: a dangerous silent-ignore becomes an explicit stop at the
+moment of harm). Cosmetic whitespace/comment edits are still tolerated (the compare canonicalizes
+like `content_hash`).
+
+(c) **`.mig` (and minimal `.snap`) editor support.** A `.mig` tmLanguage grammar + VS Code language
+contribution (steps, `raw(dialect)`, the `# DESTRUCTIVE` marker, embedded SQL inside raw backticks);
+`.snap` gets a language id so it isn’t plain text (generated → minimal). Same per-dialect SQL
+treatment NF12 wants for `.bsl` raw — the `.mig` `raw(dialect)` token names its dialect explicitly.
+
+(d) **Multi-line `raw` steps.** `parse_raw_steps` is line-based (single-line only), so the sqlite
+table-rebuild the spec itself cites is unwritable readably. Fix: `raw(dialect)` may be followed by a
+**backtick-delimited multi-line block**, keeping the one-file artifact + the `content_hash` tamper
+contract (the whole `up.mig` is hashed, so multi-line raw stays covered). Sidecar files rejected
+(they’d need `up_hash`/`verify` extended or post-apply edits dodge the tamper check).
+
+(e) **`down.mig` placeholder.** `gen` emits `down.mig` prefilled with real reverse SQL for the
+manifest dialect where the step is mechanically reversible (add⇄drop, rename⇄rename, create⇄drop
+table) and a loud `-- <step> is irreversible (data loss); write your own or delete this file` for the
+rest — so the file exists and invites completion (without an invitation, down migrations are never
+written).
+
+(f) **Document the raw/snapshot boundary.** raw touching an object the snapshot *models* (a
+table/column/index) makes the snapshot blind with no shadow-DB to catch it; raw on *unmodeled*
+objects (views, triggers, extensions) is safe blindness. migrations.md/raw.md document the boundary;
+a `W0109` lint flags a raw migration step naming a modeled table (lower-priority within this slice).
+
+Spec seam: migrations.md (E5 + raw structural effects), raw.md, editors/vscode. Runtime
+`MigrateError::UpMigDrift`; lint `W0109`.
+
+## D107 — named `tx` step bindings replace `^` (NF13)
+
+**Decision.** A `tx` step back-references a prior step only via `^.field`, which today (sema `prev`
+reassignment in `check.rs` + a single-slot codegen `BackCtx`) reaches **only the immediately
+preceding `create`** — so a 3-step tx referencing step 1 is unwritable — and `^.id` is unintuitive +
+ungreppable. Replace it with **named step bindings**: bind a step’s produced row with `as <name>` and
+reference it as `$name.field`, unifying `$` as “a value bound in this callable” (params + step
+bindings):
+
+```
+tx {
+  create User { email = $email } as user;
+  create Address { user = $user.id, city = $city };
+  create Log { actor = $user.id };   // reaches step 1
+}
+```
+
+`as <name>` is a keyword (the bare trailing form `create … user;` is two adjacent bare tokens —
+banned by principle 3). Reference is **field-access only** (`$user.id`) and **single-assignment** (no
+rebinding), so no Turing-creep (principle 5). A binding reaches **any prior step** in the tx (fixes
+the step-1 gap). A binding whose name shadows a param, or a duplicate binding, is **`E0280`**; a
+`$name` naming no prior binding (or a later/forward step) is **`E0281`**; `$name.field` where `field`
+isn’t on the bound step’s model reuses `unknown_field`. **`^` is removed entirely** — pre-release, no
+back-compat shim (owner: “bin it off mercilessly”): the `Tok::Caret` / `Value::Back` / `BackRef` /
+`BackCtx` machinery and `E0170` all go; a `^` in source is a parse error whose message points to
+`create … as <name>;` + `$name.field`. Spec seam: mutations.md Atomic groups + grammar.ebnf; the
+helpdesk `open_ticket` (uses `^`) + conformance goldens migrate to `as`. Codes `E0280`/`E0281`;
+`E0170` retired.

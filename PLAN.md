@@ -75,12 +75,17 @@ Post-completion, **Track L4 — named nested projection (shape-in-nest) — is n
 reference a named shape (`placed_by -> UserRef`) for consumer-side type identity.
 The 2026-07-10 strategic pivot — **Track N: async-native core → streaming → flagship axum example —
 is now COMPLETE (N0–N3, D84–D89)** on the `async-native` branch, with the merge-to-main confidence
-bar met (`make check` green end-to-end). **Next: the Track N follow-ups (NF1–NF6, owner-ordered),
-then Track T resumes at T3** on the async core. **T3 — atomic update expressions — is now done (D100)**;
-**T4 — aggregations + group-by + having — is now done (D101)**; **T5 — upsert (`create … on
-conflict update`) + m2m-via-explicit-junction — is now done (D102)** (one m2m sugar slice —
-far-side flattening + implicit junction — left open on principle); Track T continues at T6
-(referential actions). Batch-by-batch history is in `PLAN-archive.md`.
+bar met (`make check` green end-to-end). **Track T (core DB parity) is now at T1–T5 done** —
+**T3 atomic update expressions (D100)**, **T4 aggregations + group-by + having (D101)**, **T5 upsert
+`create … on conflict update` + m2m-via-explicit-junction (D102)**. **The owner-flagged design
+follow-ups are now RESOLVED (D103–D107, owner-approved 2026-07-21), implementation queued:** NF11
+inferred-index/implicit-`id` → explicit-in-source (D103, keystone — reworded principle 8), NF9 opaque
+`raw(…)` column + exotic-index seam (D104), NF7 `@was` self-consuming gen (D105), NF8 snapshot-
+authoritative `up.mig` (D106), NF13 named `tx` bindings replacing `^` (D107). **Next: implement the
+decided items** (D103 keystone first — it retires the inferred-index machinery the others build on;
+then D104/D107/D105/D106), interleaved with **Track T6 (referential actions)** and the remaining T5
+m2m flattening-projection slice (now unblocked by D103). Batch-by-batch history is in
+`PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -429,7 +434,11 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   never a `200 null` the typed client can't decode. Same response for absent vs out-of-scope
   (no existence leak); a not-found releases the idempotency claim. Proven unit + live SQLite +
   the helpdesk smoke's new cross-tenant status-update assertion.
-- **NF7. `@was` lifecycle is a rough edge (owner-flagged 2026-07-16; design decision, priority).**
+- **NF7. ✅ DECIDED (D105), implementation queued. `@was` lifecycle.** Resolution (owner 2026-07-21):
+  **`gen` self-consumes** the spent `@was` from source (visible log line; the rename lives durably in
+  the ledger) + **teach-at-checkpoint** — a drop-X/add-Y-same-family diff prints "if this renames X→Y,
+  add `@was(\"X\")`" in gen/`W0108`/destructive-gate; editor-rename insert already shipped (D80).
+  `W0107` kept as fallback. Original writeup below (implementation context).
   Symptom: `@was` is a one-shot gen-time hint, so after `migrate gen` it is dead weight —
   either it lingers (W0107 cruft, a second commit to remove) or the author strips it
   pre-commit and no PR ever shows the gesture, so users never learn it and hand-write
@@ -452,7 +461,11 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   rename only by hand-editing `up.mig` (stays legal as escape hatch). Spec seam:
   migrations.md E5 + decisions entry when resolved.
 
-- **NF8. `up.mig` hand-edit contract is misleading + invisible (owner-flagged 2026-07-16; priority).**
+- **NF8. ✅ DECIDED (D106), implementation queued. `up.mig` snapshot-authoritative contract.**
+  Resolution (owner 2026-07-21): honest header; **apply/render refuse (hard error `MigrateError::UpMigDrift`)**
+  on a structural `up.mig` line that diverges from the snapshot-derived SQL (was silently ignored);
+  multi-line `raw` backtick blocks; prefilled `down.mig` placeholder; `.mig` (+ minimal `.snap`)
+  language/grammar; document the raw-touches-modeled-object boundary (`W0109`). Original writeup below.
   The header says "edit if needed, then apply", but the model is snapshot-authoritative:
   `apply`/`render` re-derive structural SQL from the `schema.snap` chain and only *parse*
   `raw(<dialect>)` lines out of `up.mig` (based-runtime migrate::load_migrations). So a
@@ -491,7 +504,14 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   `-- drop column X is irreversible; write your own or delete this file` comment; at
   minimum a commented template so the file exists and invites completion.
 
-- **NF9. Exotic column types need a passthrough seam (owner-flagged 2026-07-16; design decision, priority).**
+- **NF9. ✅ DECIDED (D104), implementation queued. Exotic column + index passthrough via `raw(…)`.**
+  Resolution (owner 2026-07-21): opaque column type `col: raw("geometry(Point,4326)")?` (per-dialect
+  map `raw({ postgres: …, mariadb: … })` when names differ) — literal type-string in DDL+snapshot
+  (diff = string compare), opaque client value (excluded from create/update unless nullable/defaulted),
+  filter/sort rejected except via the raw leaf; two exotic-index tiers `@index(col) using <method>`
+  + opaque `@index raw("…")`, per-dialect validity checked loudly. Codes E0270–E0274. **Standing
+  convention: `sql` is banned as a keyword/marker anywhere (Postgres-compatible → confusing); `raw`
+  is the one spelling (D96).** Original writeup below.
   Problem: the primitive set (`text int bool timestamp date json uuid float decimal`) is
   closed — a column whose DB type we don't model (PostGIS `geometry`, `tsvector`, `inet`,
   vendor JSON variants) **cannot be declared at all**. First-class geo support is not
@@ -530,9 +550,17 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   every token inside the decl. NF11, if adopted, retires the inferred-index fact; the
   narrow ctx/resolved-query anchoring stands regardless.
 
-- **NF11. Inferred indexes + implicit `id`: silent derivation → explicit-in-source with
-  error + autofix (owner-flagged 2026-07-16; design decision, priority — touches
-  principles.md).** Owner position: silent engine-created DDL disobeys principles — an
+- **NF11. ✅ DECIDED (D103, keystone), implementation queued. Inferred indexes + implicit `id` →
+  explicit-in-source.** Resolution (owner 2026-07-21): a traversed-but-unindexed join key → error
+  **E0260** (was `W0103`) + one-key LSP autofix (`unindexed(…)` stays the visible opt-out); a model
+  with no `id` → error **E0261** + autofix; both fire in `based check`, not editor-only. **Principle 8
+  reworded** (its inferred-index example inverts; principle 2 governs). `IndexSnap.inferred` / `inf_`
+  naming / `RModel.inferred_indexes` / the `InferredIndex` fact+inlay all retire; the written `@index`
+  is still rendered soft-delete-leading (a rendering, not a second index); inverse pairing stays a
+  shown fact. **Resolves D102's m2m fork: no implicit-junction sugar** (silent DDL), junction FK
+  indexes are explicit; only the far-side flattening projection remains. Fallout on landing: goldens +
+  `spec/examples/commerce` + the four `examples/*` schemas gain explicit `@index`/`id` lines. Original
+  writeup below. Owner position: silent engine-created DDL disobeys principles — an
   index has real write/disk cost and is invisible in a PR (hard priority 3: reviewer
   confirms design by reading; editor-only facts never reach review), and principle 2
   ("nothing consequential is true by omission") outranks principle 8's "show, don't write"
@@ -587,8 +615,14 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   (wire contract; the miss is a loud E0111, not silent). The irrelevant resolved-query/ctx
   hover sections remain NF10's whole-decl-span bleed, filed there.
 
-- **NF13. `^` back-reference → named step bindings in `tx` (owner-flagged 2026-07-16;
-  design decision).** Today a `tx` step back-references the prior step only via `^`
+- **NF13. ✅ DECIDED (D107), implementation queued. Named `tx` step bindings replace `^`.**
+  Resolution (owner 2026-07-21): bind a step with `create … as name;`, reference `$name.field`
+  (reaches any prior step, unifies `$` = a value bound in this callable, single-assignment /
+  field-access only). **`^` removed entirely — no back-compat shim** ("bin it off mercilessly"):
+  `Tok::Caret`/`Value::Back`/`BackRef`/`BackCtx` + `E0170` all go; a `^` is a parse error pointing to
+  `as`. Codes E0280 (shadow/dup binding) / E0281 (unbound/forward name). Migrate helpdesk
+  `open_ticket` + goldens. Original writeup below.
+  Today a `tx` step back-references the prior step only via `^`
   (`create Comment { ticket = ^.id, … }`, mutations.md). Owner: the tx form is neat and
   stays, but `^.id` oversteps the keystrokes-vs-intuition line — unintuitive, ungreppable,
   and it only reaches the *immediately preceding* step, so a 3-step tx referencing step 1

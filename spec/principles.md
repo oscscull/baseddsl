@@ -16,7 +16,7 @@ Tiebreakers, in priority order. Apply when a case isn't specified.
 
 7. **Own the brutal lifecycle; lend the intent.** Engine owns dangerous scaffolding (tx boundaries, batching, capture). Caller supplies intent. Reuse hardened external tools, don't rebuild.
 
-8. **Show, don't write, for derived facts.** Engine-derivable facts (inverse names, inferred indexes) shown in editor (LSP), not forced into source.
+8. **Show, don't write — only for cost-free, unambiguous derived facts.** A derived fact is shown in the editor (LSP), not written in source, only when deriving it is free of independent cost and has one meaning — e.g. an inverse name, fixed by the written forward edge. A derived fact a reviewer must weigh — an index (write + disk cost) or a primary key — is consequential (principle 2), so it is written in source; the engine errors when it's missing and offers a one-key autofix.
 
 ## Hard priorities
 1. Brevity (context windows).
