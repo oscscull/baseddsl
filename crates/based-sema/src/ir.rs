@@ -131,6 +131,12 @@ pub mod code {
     // independent write/disk cost are written in source, not silently derived.
     pub const UNINDEXED_JOIN: &str = "E0260"; // a traversed join key (or a query filter) is not covered by an `@index` (opt out with `unindexed(…)`)
     pub const NO_ID: &str = "E0261"; // a model declares no `id` field
+                                     // `@no_id("reason")`: the opt-out for a genuinely keyless legacy table, and the
+                                     // operations a keyless model forfeits.
+    pub const NO_ID_REASON: &str = "E0262"; // `@no_id` without a non-empty reason string
+    pub const KEYLESS_KEYSET: &str = "E0263"; // a keyset `page` on a `@no_id` model whose sort has no unique tiebreaker (a non-deterministic cursor)
+    pub const KEYLESS_CREATE: &str = "E0264"; // a create on a `@no_id` model with a declared read-back but no `(unique)` column set to read it back by
+    pub const REL_TO_KEYLESS: &str = "E0265"; // a forward relation targets a `@no_id` model (its `id` doesn't exist to reference)
 
     // --- upsert (`create … on conflict update`) ---
     pub const UPSERT_TARGET: &str = "E0250"; // the conflict target is not a declared unique key (unique column / `@index (…) unique` / pk)
@@ -155,6 +161,7 @@ pub const KNOWN_DECORATORS: &[&str] = &[
     "updated",
     "table",
     "was",
+    "no_id",
 ];
 
 /// The closed set of value-position functions (the grammar leaves the set to sema).
@@ -313,6 +320,11 @@ pub struct RModel {
     pub created: Option<String>,
     pub updated: Option<String>,
     pub indexes: Vec<RIndex>,
+    /// `@no_id("reason")` — the model is a genuinely keyless legacy table: it carries no
+    /// synthesized `id` primary key, and forfeits the id-keyed operations (get-by-id,
+    /// the keyset id tiebreaker, create read-back by generated id). `false` for the
+    /// ordinary case (a model always has an `id`).
+    pub no_id: bool,
     /// Field names that are individually unique (id, `(unique)`, single-col unique
     /// index). Drives `get`-must-be-keyed lint and codegen constraints.
     pub unique_cols: Vec<String>,

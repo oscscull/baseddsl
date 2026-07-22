@@ -49,9 +49,11 @@ member      = field | index_decl | soft_override ;
 model_deco  = scope_deco | decorator ;
 scope_deco  = '@scope' scope_name { ',' scope_name } ;  (* one alternative (AND); repeatable = OR *)
 
-(* Decorators stack above the model, one per line; never positional on header. *)
+(* Decorators stack above the model, one per line; never positional on header.  *)
+(* `@no_id("reason")` opts a genuinely keyless legacy table out of the `id`      *)
+(* primary key; the reason string is MANDATORY (like `unscoped(...)`).           *)
 decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
-deco_name   = ident ;                  (* soft_delete sort scope index was …    *)
+deco_name   = ident ;              (* soft_delete sort scope table was no_id …   *)
 deco_args   = deco_arg { ',' deco_arg } ;
 deco_arg    = sort_term | predicate | ident | path | literal ;
 

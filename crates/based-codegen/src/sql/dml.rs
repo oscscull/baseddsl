@@ -854,8 +854,10 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         // tiebreaker unless the sort already ends on it. This holds even with no
         // explicit `order`/`@sort` — an empty order still yields `ORDER BY id`, so the
         // cursor comparison has a unique basis and never drops or repeats a row. Offset
-        // pages don't need the tiebreaker (their window is positional).
-        if !page.offset && !last_is_id {
+        // pages don't need the tiebreaker (their window is positional). A keyless
+        // (`@no_id`) model has no `id` to append — sema (E0263) guarantees its declared
+        // sort already carries a unique tiebreaker.
+        if !page.offset && !last_is_id && !root.no_id {
             // The tiebreaker's primitive is the model's own `id` type: a declared
             // `id: text` cursor value must re-bind as text, not uuid.
             let prim = match root.member("id").map(|m| &m.kind) {

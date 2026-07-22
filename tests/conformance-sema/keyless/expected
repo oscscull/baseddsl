@@ -1,0 +1,11 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model AuditEvent  table=audit_event  no_id
+  source: text  unique
+  action: text
+  at: timestamp
+shape EventRow from AuditEvent
+query event_by_source  target=AuditEvent verb=get  shape=EventRow
+query recent_events  target=AuditEvent verb=list many  shape=EventRow  page
+mutation record_event  ret=AuditEvent

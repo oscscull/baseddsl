@@ -373,6 +373,67 @@ async fn atomic_update_expression_computes_server_side_end_to_end() {
     assert_eq!(resp.body, json!({ "status": "pending", "total": 120 }));
 }
 
+/// A keyless (`@no_id`) legacy table inserts + reads back end to end: no `id` column
+/// or `PRIMARY KEY` in the DDL, the INSERT sets no id, and the create's declared-shape
+/// re-select keys on the `(unique)` column the create set (not a generated id). A `get`
+/// keys on the same unique field.
+#[tokio::test]
+async fn keyless_model_inserts_and_reads_back_by_unique_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @no_id("append-only audit log keyed by its natural source, no surrogate id")
+        AuditEvent { source: text (unique), action: text }
+        shape EventRow from AuditEvent { source, action }
+        query event_by_source(source) -> EventRow;
+        mutation record_event(source: text, action: text) -> EventRow {
+          create AuditEvent { source = $source, action = $action };
+        }
+        "#,
+    );
+    // The DDL is keyless: no `id` column, no PRIMARY KEY.
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    assert!(
+        !ddl.contains("PRIMARY KEY"),
+        "keyless table has no PK:\n{ddl}"
+    );
+    assert!(
+        !ddl.contains("`id`"),
+        "keyless table has no id column:\n{ddl}"
+    );
+
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+
+    // Create: no generated id; the row reads back keyed on its unique `source`.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/record_event",
+        json!({ "source": "svc-a", "action": "login" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(resp.body, json!({ "source": "svc-a", "action": "login" }));
+
+    // Get by the unique key returns the same row.
+    let resp = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/event_by_source",
+        json!({ "source": "svc-a" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    assert_eq!(resp.body, json!({ "source": "svc-a", "action": "login" }));
+}
+
 /// An update whose `where` matches no row — a wrong id, or a cross-tenant id the scope
 /// filter excludes — is a 404 `not_found` with nothing written, never a `200` with a
 /// null body the typed client cannot decode.

@@ -787,3 +787,24 @@ fn upsert_composite_unique_index_target_and_scope() {
         "\n{out}"
     );
 }
+
+#[test]
+fn keyless_create_reselects_by_the_unique_column_not_a_generated_id() {
+    // A `@no_id` model has no generated id — the INSERT sets no `id`, and the
+    // declared-shape re-select keys on the `(unique)` column the create set.
+    let out = gen(r#"
+        @no_id("legacy audit log, no surrogate key")
+        Event { source: text (unique), action: text }
+        shape EventRow from Event { source, action }
+        mutation record(s: text, a: text) -> EventRow { create Event { source = $s, action = $a }; }
+        "#);
+    // INSERT names only the assigned columns — no `id`.
+    assert!(
+        out.contains("INSERT INTO `event` (`source`, `action`)"),
+        "\n{out}"
+    );
+    assert!(!out.contains("`id`"), "\n{out}");
+    // The re-select keys on the unique `source` = the create's bound value.
+    assert!(out.contains("`event`.`source` = :s"), "\n{out}");
+    assert!(!out.contains(":result_id"), "\n{out}");
+}

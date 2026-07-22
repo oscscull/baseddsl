@@ -1156,6 +1156,113 @@ fn or_predicate_is_opaque_to_unindexed() {
     );
 }
 
+// ---------- @no_id keyless legacy tables ----------------------------------
+
+#[test]
+fn no_id_suppresses_the_missing_id_error() {
+    // A keyless legacy table opts out of the primary key with a reason; no E0261.
+    assert_clean(
+        r#"
+        @no_id("legacy audit log has no surrogate key")
+        Event { source: text (unique), payload: text }
+        shape E from Event { source, payload }
+        query event_by_source(source) -> E;
+        "#,
+    );
+}
+
+#[test]
+fn no_id_requires_a_non_empty_reason() {
+    let (_, d) = analyze(
+        r#"
+        @no_id
+        Event { source: text (unique) }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0262"]);
+    let (_, d) = analyze(
+        r#"
+        @no_id("")
+        Event { source: text (unique) }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0262"]);
+}
+
+#[test]
+fn keyless_get_must_key_on_a_unique_field() {
+    // No `id` to key on: a `get` on a non-unique field is the ordinary E0144.
+    let (_, d) = analyze(
+        r#"
+        @no_id("legacy")
+        Event { source: text (unique), kind: text, @index kind }
+        shape E from Event { kind }
+        query by_kind(kind) -> E;
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0144"]);
+}
+
+#[test]
+fn keyless_keyset_page_needs_a_unique_sort_key() {
+    // No `id` tiebreaker → a keyset page must sort on a unique column, else E0263.
+    let (_, d) = analyze(
+        r#"
+        @no_id("legacy")
+        Event { source: text (unique), at: timestamp, @index at }
+        shape E from Event { source }
+        query recent() -> E[] { list Event order (at desc) page (20); }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0263"]);
+    // A unique sort key is deterministic; and an offset page needs no tiebreaker.
+    assert_clean(
+        r#"
+        @no_id("legacy")
+        Event { source: text (unique), at: timestamp, @index at }
+        shape E from Event { source }
+        query by_source() -> E[] { list Event order (source) page (20); }
+        query offset_page() -> E[] { list Event order (at desc) page (20) offset; }
+        "#,
+    );
+}
+
+#[test]
+fn keyless_create_must_set_a_unique_read_back_key() {
+    // A declared-shape create on a keyless model needs a unique column to read back by.
+    let (_, d) = analyze(
+        r#"
+        @no_id("legacy")
+        Event { source: text? (unique), payload: text }
+        shape E from Event { source, payload }
+        mutation record(p: text) -> E { create Event { payload = $p }; }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0264"]);
+    // Setting the unique column keys the read-back.
+    assert_clean(
+        r#"
+        @no_id("legacy")
+        Event { source: text (unique), payload: text }
+        shape E from Event { source, payload }
+        mutation record(s: text, p: text) -> E { create Event { source = $s, payload = $p }; }
+        "#,
+    );
+}
+
+#[test]
+fn forward_relation_to_a_keyless_model_errors() {
+    // A keyless model has no `id` for an FK to reference (E0265).
+    let (_, d) = analyze(
+        r#"
+        @no_id("legacy")
+        Event { source: text (unique) }
+        Log { id: Id, event: Event, note: text }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0265"]);
+}
+
 #[test]
 fn scope_filter_counts_toward_pattern() {
     // `@scope` is injected into every query on the model, so its

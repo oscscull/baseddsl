@@ -447,6 +447,25 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         );
     }
 
+    // A keyless model has no `id` tiebreaker, so a keyset page (non-offset `page`) needs
+    // a sort that is itself a total order — its effective sort must include a local
+    // `(unique)` column, else the minted cursor could drop or repeat rows (E0263).
+    let keyset = page_clause(&q.body).is_some_and(|p| !p.offset);
+    if cx.model(ti).no_id && !is_raw && !is_agg && keyset {
+        let m = cx.model(ti);
+        let deterministic = effective_sort(&q.body, m)
+            .iter()
+            .any(|t| t.path.segments.len() == 1 && m.is_unique(&t.path.segments[0].node));
+        if !deterministic {
+            sink.error_note(
+                code::KEYLESS_KEYSET,
+                q.span,
+                format!("keyset `page` on keyless `{}` has no unique sort key", m.name),
+                "a `@no_id` model has no `id` tiebreaker — `order (…)` on a `(unique)` column, or `page (…) offset`",
+            );
+        }
+    }
+
     // Scope acknowledgement: a callable touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
     let touched = crate::scope::touched_query(q, ti, cx);
@@ -1060,6 +1079,29 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         check_write(stmt, cx, &params, None, m.scoped.as_ref(), unscoped, sink);
     }
 
+    // A create on a keyless return model has no generated `id` to read the row back by,
+    // so a declared-shape return must key on a `(unique)` column the create sets. If it
+    // sets none, reject rather than emit a re-select the runtime can't key (E0264). An
+    // `-> ok` mutation reads nothing back, so it is exempt.
+    if !m.ret.ack {
+        if let Some(rmodel) = cx.find(&ret.model).map(|i| cx.model(i)) {
+            if rmodel.no_id
+                && creates_model(&m.body, &ret.model)
+                && !create_sets_unique(&m.body, &ret.model, rmodel)
+            {
+                sink.error_note(
+                    code::KEYLESS_CREATE,
+                    m.span,
+                    format!(
+                        "mutation `{}` creates keyless `{}` but sets no unique column to read it back by",
+                        m.name.node, ret.model
+                    ),
+                    "a `@no_id` model has no generated `id` — assign a `(unique)` column in the `create`, or return `-> ok`",
+                );
+            }
+        }
+    }
+
     // Scope acknowledgement: a mutation touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
     let touched = crate::scope::touched_mutation(m, ret.shape.as_deref(), &ret.model, cx);
@@ -1216,6 +1258,57 @@ fn check_shape_on_real_delete(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut 
 /// Check one write statement. `back` is the model of the immediately preceding
 /// `create` in the enclosing `tx` (`None` at the top level or before the first
 /// create) — the model a `^.field` back-reference resolves against.
+/// The query's `page` clause, if any (inline or block body).
+fn page_clause(body: &QueryBody) -> Option<&PageClause> {
+    let clauses: &[Clause] = match body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        _ => return None,
+    };
+    clauses.iter().find_map(|c| match c {
+        Clause::Page(p) => Some(p),
+        _ => None,
+    })
+}
+
+/// The query's effective sort terms: its `order` clause, else the model's `@sort`.
+fn effective_sort<'a>(body: &'a QueryBody, model: &'a RModel) -> &'a [SortTerm] {
+    let clauses: &[Clause] = match body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        _ => return &model.sort,
+    };
+    clauses
+        .iter()
+        .find_map(|c| match c {
+            Clause::Order(t) => Some(t.as_slice()),
+            _ => None,
+        })
+        .unwrap_or(&model.sort)
+}
+
+/// Whether the mutation body creates a row of `model` (recursing into `tx`).
+fn creates_model(body: &[WriteStmt], model: &str) -> bool {
+    body.iter().any(|w| match w {
+        WriteStmt::Create { model: m, .. } => m.node == model,
+        WriteStmt::Tx(inner) => creates_model(inner, model),
+        _ => false,
+    })
+}
+
+/// Whether every `create` of `model` in the body assigns a `(unique)` column — the
+/// read-back key a keyless model needs (no generated `id`). Fires per create so a
+/// mixed batch is only clean when each keyless create is keyable.
+fn create_sets_unique(body: &[WriteStmt], model: &str, rmodel: &RModel) -> bool {
+    body.iter().all(|w| match w {
+        WriteStmt::Create {
+            model: m, assigns, ..
+        } if m.node == model => assigns.iter().any(|a| rmodel.is_unique(&a.col.node)),
+        WriteStmt::Tx(inner) => create_sets_unique(inner, model, rmodel),
+        _ => true,
+    })
+}
+
 fn check_write(
     stmt: &WriteStmt,
     cx: &Cx,

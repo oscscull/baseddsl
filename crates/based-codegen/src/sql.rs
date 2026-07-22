@@ -138,8 +138,11 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
         }
     }
 
-    // Primary key — always `id`. It is the first member `skeleton` inserts.
-    lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+    // Primary key — `id`, the first member `skeleton` inserts. A `@no_id` (keyless
+    // legacy) table has none.
+    if !model.no_id {
+        lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+    }
 
     // Column-level `(unique)` constraints, in member order. All dialects accept the
     // inline `CONSTRAINT … UNIQUE (…)` table clause.

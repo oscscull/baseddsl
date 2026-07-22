@@ -4544,6 +4544,24 @@ one-key fix rides on the diagnostic as a `Fix{model, line}` (based-diagnostics) 
 guard — they exercise SQL/client emission, not index completeness, which is covered by based-sema's
 tests + the conformance goldens + the (indexed) examples.
 
+**`@no_id("reason")` — the E0261 opt-out for keyless legacy tables (owner, 2026-07-22).** A legacy
+DB being adopted may have a table with *no primary key at all*; E0261 would wall it out. `@no_id("reason")`
+is the escape hatch: presence suppresses E0261, and the model carries no synthesized `id`. The **reason
+string is mandatory** (like `unscoped("reason")`) — an empty/missing one is `E0262` — so a forfeited key
+is never silent in review. (A legacy PK with a different name/type/column is *not* this case — declare it in
+the `id` slot, `id: Id (column "account_pk")`.) A keyless model forfeits its id-keyed operations, each
+enforced with a loud compile error rather than a silent miscompile: get-by-id is impossible (a `get` keys on
+a `(unique)` column, else `E0144`); a keyset `page` has no `id` tiebreaker so its sort must carry a unique
+key (`E0263`, or `page … offset`); a declared-shape `create` has no generated id to read back by, so it must
+set a `(unique)` column the re-select keys on (`E0264`, or `-> ok`) — reusing the upsert's conflict-key
+re-select machinery, so the runtime binds it with no change; and a forward relation *to* a keyless model is
+`E0265` (no `id` to reference). Codegen drops the `PRIMARY KEY`/`id` column (DDL + snapshot, via a `no_id`
+flag on `RModel`/`TableSnap`) and the keyset `id` tiebreaker. **`@no_id` is a deliberate exception to the
+positive-framing convention** — it is a factual schema descriptor (this table has no id), not
+define-by-negation prose, so a later framing pass must not "correct" it. Spelling is snake_case to match every
+other decorator (not `@keyless` — a keyless table may still carry foreign keys; what is absent is
+specifically the `id`). Codes `E0262`–`E0265`.
+
 ## D104 — opaque column + index passthrough via `raw(…)` (NF9)
 
 **Decision.** The closed primitive set (`text int bool timestamp date json uuid float decimal`) gets

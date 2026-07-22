@@ -85,6 +85,9 @@ pub struct TableSnap {
     pub scope_alts: Vec<Vec<String>>,
     /// `@sort` terms as `(column, dir)` where dir is `asc`/`desc`, in declaration order.
     pub sort: Vec<(String, String)>,
+    /// `@no_id` — a keyless legacy table (no `id` primary key). The diff renders no
+    /// `PRIMARY KEY` for it.
+    pub no_id: bool,
     /// Columns, sorted by name.
     pub columns: Vec<ColumnSnap>,
     /// Declared indexes, sorted by name.
@@ -217,6 +220,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
         updated: model.updated.clone(),
         scope_alts: canonical_scope_alts(&model.scope_alts),
         sort: model.sort.iter().map(sort_term).collect(),
+        no_id: model.no_id,
         columns,
         indexes,
     }
@@ -528,6 +532,9 @@ fn render_table(out: &mut String, t: &TableSnap) {
             .join(", ");
         let _ = write!(header, " sort=({terms})");
     }
+    if t.no_id {
+        header.push_str(" no_id");
+    }
     header.push('\n');
     out.push_str(&header);
 
@@ -724,9 +731,13 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     let mut updated = None;
     let mut scope_alts = Vec::new();
     let mut sort = Vec::new();
+    let mut no_id = false;
 
     while !head.is_empty() {
-        if let Some(after) = head.strip_prefix("soft_delete=") {
+        if head == "no_id" || head.starts_with("no_id ") {
+            no_id = true;
+            head = head["no_id".len()..].trim_start();
+        } else if let Some(after) = head.strip_prefix("soft_delete=") {
             let mut sp = after.splitn(2, char::is_whitespace);
             let spec = sp.next().unwrap_or("");
             let (col, mode) = spec.split_once(':').ok_or_else(|| ParseError {
@@ -773,6 +784,7 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
         updated,
         scope_alts,
         sort,
+        no_id,
         columns: Vec::new(),
         indexes: Vec::new(),
     })

@@ -100,6 +100,11 @@ pub struct LoweredWrite {
     /// conflict path discards), so the winning row reads back on both paths. `None` for
     /// a plain create / any other write.
     pub conflict_key: Option<Vec<(String, String)>>,
+    /// For a `create` on a **keyless** (`@no_id`) model, the read-back key: a `(unique)`
+    /// column the create sets, as `(physical_col, value_sql)` — the declared-shape
+    /// re-select keys on it since there is no generated `id`. `None` for a keyed model /
+    /// any other write.
+    pub read_key: Option<Vec<(String, String)>>,
 }
 
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
@@ -191,11 +196,18 @@ fn lower_mutation<'a>(
             let upsert = stmts
                 .iter()
                 .find(|w| w.conflict_key.is_some() && w.model == rm.ret_model);
+            // A keyless create reads back by the `(unique)` column it set, not a
+            // generated id — the same `WHERE col = value` shape as a conflict key.
+            let keyless = stmts
+                .iter()
+                .find(|w| w.read_key.is_some() && w.model == rm.ret_model);
             let creates_ret = stmts
                 .iter()
                 .any(|w| w.gen_id.is_some() && w.model == rm.ret_model);
             let key = if let Some(w) = upsert {
                 RetKey::Conflict(w.conflict_key.clone().unwrap_or_default())
+            } else if let Some(w) = keyless {
+                RetKey::Conflict(w.read_key.clone().unwrap_or_default())
             } else if creates_ret {
                 RetKey::CreatedId
             } else {
@@ -462,6 +474,7 @@ fn lower_write<'a>(
             model: String::new(),
             gen_id: None,
             conflict_key: None,
+            read_key: None,
         }),
     }
 }
@@ -522,11 +535,28 @@ fn lower_create<'a>(
 
     // Implicit `id` is app-generated (uuid, no SQL default) — bind it unless the
     // model declares its own `id` that the caller sets explicitly. Only then does the
-    // engine generate the id at runtime, under this bind name.
-    let gen_id = if !assigned.iter().any(|c| c == "id") {
+    // engine generate the id at runtime, under this bind name. A keyless (`@no_id`)
+    // model has no `id` column at all — nothing to insert or generate.
+    let gen_id = if model.no_id {
+        None
+    } else if !assigned.iter().any(|c| c == "id") {
         cols.insert(0, dialect.quote("id"));
         vals.insert(0, format!(":{id_param}"));
         Some(id_param.to_string())
+    } else {
+        None
+    };
+
+    // A keyless create reads its row back by a `(unique)` column it set (no generated
+    // id). Sema (E0264) guarantees a declared-shape return sets one; picking the first
+    // keeps codegen deterministic. `None` when the model is keyed or no unique column
+    // was set (a declared-shape return of the latter is already `E0264`).
+    let read_key = if model.no_id {
+        model.unique_cols.iter().find_map(|u| {
+            value_by_field
+                .get(u)
+                .map(|v| vec![(physical_col(model, u), v.clone())])
+        })
     } else {
         None
     };
@@ -571,6 +601,7 @@ fn lower_create<'a>(
         model: model.name.clone(),
         gen_id,
         conflict_key,
+        read_key,
     }
 }
 
@@ -655,6 +686,7 @@ fn lower_update<'a>(
         model: model.name.clone(),
         gen_id: None,
         conflict_key: None,
+        read_key: None,
     }
 }
 
@@ -689,6 +721,7 @@ fn lower_delete(
             model: model.name.clone(),
             gen_id: None,
             conflict_key: None,
+            read_key: None,
         };
     }
 
@@ -706,6 +739,7 @@ fn lower_delete(
         model: model.name.clone(),
         gen_id: None,
         conflict_key: None,
+        read_key: None,
     }
 }
 
@@ -743,6 +777,7 @@ fn lower_restore(
         model: model.name.clone(),
         gen_id: None,
         conflict_key: None,
+        read_key: None,
     }
 }
 

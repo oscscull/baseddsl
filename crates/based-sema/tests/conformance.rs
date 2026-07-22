@@ -157,6 +157,9 @@ fn summarize_model(m: &RModel) -> String {
     if !m.sort.is_empty() {
         head.push_str(&format!("  sort=[{}]", sorts(&m.sort)));
     }
+    if m.no_id {
+        head.push_str("  no_id");
+    }
     let mut out = format!("{head}\n");
 
     for mem in &m.members {

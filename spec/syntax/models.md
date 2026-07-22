@@ -40,11 +40,30 @@ Uniform for columns and relations: `name: Type (modifiers)`
 - `id` is **required, written in source**: `id: Id`. A primary key is load-bearing, so
   its omission is not elidable (principle 2) — a model that declares no `id` is an error
   (`E0261`) with a one-key editor autofix that inserts the line. Declare a non-standard key
-  (a different type or column) in the same slot.
+  (a different type or column) in the same slot: `id: Id (column "account_pk")`.
+- A genuinely keyless legacy table — one with **no primary key at all** — opts out with
+  `@no_id("reason")` (below). It then forfeits the id-keyed operations.
 - Not-null default. `?` opts into nullable.
 
+### `@no_id("reason")` — keyless legacy tables
+Some adopted tables have no primary key whatsoever. `@no_id("reason")` records that fact:
+the model carries no synthesized `id`, and E0261 is suppressed. The **reason string is
+mandatory** (like `unscoped("reason")`) so the PR shows why the key is forfeited — an
+empty/missing reason is `E0262`. A keyless model loses the id-keyed operations and the
+compiler enforces the loss:
+- **No get-by-id.** A `get` keys on some `(unique)` column instead (else the ordinary
+  `E0144` fires).
+- **Keyset pagination** has no `id` tiebreaker, so a non-`offset` `page` must sort on a
+  `(unique)` column for a deterministic cursor — else `E0263` (use `page (…) offset`, or
+  add the unique sort key).
+- **Create read-back** has no generated id to re-select by, so a declared-shape `create`
+  must set a `(unique)` column (the row reads back keyed on it) — else `E0264` (or return
+  `-> ok` for no read-back).
+- A forward relation **to** a keyless model is `E0265` — there is no `id` for its foreign
+  key to reference.
+
 ## Decorators (model-level)
-Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
+Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8), `@no_id("reason")` (a keyless legacy table — see Defaults). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
 ```
 @soft_delete(deleted_at)
 @scope(org = $ctx.org)

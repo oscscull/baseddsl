@@ -48,16 +48,20 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         });
     }
 
+    // `@no_id("reason")` opts a genuinely keyless legacy table out of the primary key
+    // (the reason is mandatory, so the PR shows why — `E0262`).
+    let no_id = model_no_id(m, sink);
+
     // A model's primary key is load-bearing and written in source. A model that
     // declares no `id` field is an error (`E0261`) with a one-key autofix; the `id`
     // member is still synthesized so the rest of resolution + codegen has a PK to
-    // key on, but the source must name it.
-    if !seen.contains_key("id") {
+    // key on, but the source must name it. A `@no_id` model legitimately has none.
+    if !seen.contains_key("id") && !no_id {
         sink.error_fix(
             code::NO_ID,
             m.name.span,
             format!("model `{}` declares no `id`", m.name.node),
-            "every model needs a primary key — add an `id: Id` field",
+            "every model needs a primary key — add an `id: Id` field, or `@no_id(\"reason\")` for a keyless legacy table",
             m.name.node.clone(),
             "id: Id",
         );
@@ -94,9 +98,38 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         created: None,
         updated: None,
         indexes: Vec::new(),
+        no_id,
         unique_cols: Vec::new(),
         was: model_was(m),
     }
+}
+
+/// Whether the model carries `@no_id("reason")` (a keyless legacy table). The reason is
+/// mandatory — an empty or missing one is `E0262`, so a forfeited primary key is never
+/// silent in review.
+fn model_no_id(m: &Model, sink: &mut Sink) -> bool {
+    let mut keyless = false;
+    for d in &m.decorators {
+        if d.name.node != "no_id" {
+            continue;
+        }
+        keyless = true;
+        let reason = match d.args.first() {
+            Some(DecoArg::Lit(Literal::Str(s))) => Some(s.trim()),
+            _ => None,
+        };
+        if reason.is_none_or(str::is_empty) {
+            sink.error(
+                code::NO_ID_REASON,
+                d.span,
+                format!(
+                    "`@no_id` on `{}` needs a reason — `@no_id(\"why this table has no primary key\")`",
+                    m.name.node
+                ),
+            );
+        }
+    }
+    keyless
 }
 
 /// The model-level `@was("old_table")` rename directive's old table name, if declared.
@@ -326,15 +359,25 @@ fn validate_relations(
         let m = &models[mi];
         for (i, mem) in m.members.iter().enumerate() {
             match &mem.kind {
-                MemberKind::Forward { target, .. } => {
-                    if !index.contains_key(target) {
-                        sink.error(
-                            code::UNKNOWN_MODEL,
-                            mem.span,
-                            format!("relation `{}` names unknown model `{target}`", mem.name),
-                        );
-                    }
-                }
+                MemberKind::Forward { target, .. } => match index.get(target) {
+                    None => sink.error(
+                        code::UNKNOWN_MODEL,
+                        mem.span,
+                        format!("relation `{}` names unknown model `{target}`", mem.name),
+                    ),
+                    // A to-one relation's FK references the target's `id`; a keyless
+                    // target has none, so the edge could never resolve.
+                    Some(&ti) if models[ti].no_id => sink.error_note(
+                        code::REL_TO_KEYLESS,
+                        mem.span,
+                        format!(
+                            "relation `{}` targets the keyless model `{target}`",
+                            mem.name
+                        ),
+                        "a `@no_id` model has no `id` for a foreign key to reference",
+                    ),
+                    Some(_) => {}
+                },
                 MemberKind::Inverse { target, via } => {
                     let Some(&ti) = index.get(target) else {
                         sink.error(
@@ -454,6 +497,7 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
             }
             "table" => {} // consumed for the table name in `skeleton`
             "was" => {}   // model rename directive — validated in `validate_was`
+            "no_id" => {} // keyless opt-out — consumed + validated in `skeleton`
             other => sink.warn(
                 code::UNKNOWN_DECORATOR,
                 d.name.span,
@@ -568,7 +612,12 @@ fn resolve_managed_ts(
 /// single-column unique indexes. (Composite unique indexes make no *single*
 /// column unique, so they do not count here.)
 fn compute_unique(ast: &Model, m: &mut RModel) {
-    let mut unique = vec!["id".to_string()];
+    // A keyless model has no `id`, so it seeds no unique column from one.
+    let mut unique: Vec<String> = if m.no_id {
+        Vec::new()
+    } else {
+        vec!["id".to_string()]
+    };
     for mem in &ast.members {
         match mem {
             Member::Field(f) if f.modifiers.iter().any(|x| matches!(x, Modifier::Unique)) => {

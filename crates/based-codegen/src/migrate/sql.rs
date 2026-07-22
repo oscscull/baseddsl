@@ -188,8 +188,9 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
     // Implicit `id` primary key: synthesized as the default uuid when the snapshot
-    // elided it; a declared non-default `id` rides in the column list instead.
-    if t.column("id").is_none() {
+    // elided it; a declared non-default `id` rides in the column list instead. A keyless
+    // (`@no_id`) table has neither the column nor the `PRIMARY KEY`.
+    if !t.no_id && t.column("id").is_none() {
         lines.push(format!(
             "{} {} NOT NULL",
             dialect.quote("id"),
@@ -199,7 +200,9 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     for c in &t.columns {
         lines.push(column_ddl(c, dialect));
     }
-    lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+    if !t.no_id {
+        lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+    }
 
     // Column-level `(unique)` constraints (a declared `@index (unique)` is an IndexSnap
     // instead — handled below — so there is no double-emit).
