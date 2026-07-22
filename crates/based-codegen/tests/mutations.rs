@@ -19,9 +19,12 @@ fn gen_pg(src: &str) -> String {
 fn gen_for(src: &str, dialect: Dialect) -> String {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
+    // These snippets exercise write lowering, not index completeness — a write whose
+    // `where` scans an unindexed column (`E0260`) still lowers correctly, and the index
+    // requirement is covered authoritatively in based-sema's tests + conformance.
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -31,10 +34,11 @@ fn gen_for(src: &str, dialect: Dialect) -> String {
 #[test]
 fn create_binds_id_relation_fk_and_engine_timestamps() {
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @created(created_at)
         @updated(updated_at)
         User {
+          id: Id
           created_at: timestamp
           updated_at: timestamp
           org: Org
@@ -58,12 +62,13 @@ fn create_binds_id_relation_fk_and_engine_timestamps() {
 #[test]
 fn update_injects_soft_delete_scope_and_bumps_updated() {
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
         @scope Tenant
         @updated(updated_at)
         Order {
+          id: Id
           deleted_at: timestamp?
           updated_at: timestamp
           org: Org
@@ -95,7 +100,7 @@ fn atomic_update_lowers_to_real_sql_expression() {
     // row's own column, not a read-modify-write. MariaDB qualifies the SET target.
     let src = r#"
         @updated(updated_at)
-        Product { updated_at: timestamp, qty: int, name: text }
+        Product { id: Id, updated_at: timestamp, qty: int, name: text }
         shape P from Product { qty }
         mutation adjust(id: Id, delta: int) -> P {
           update Product where (id = $id) { qty = qty + $delta };
@@ -125,7 +130,7 @@ fn atomic_update_respects_precedence_with_parens() {
     // each binary node so the SQL evaluates in the same order.
     let out = gen(r#"
         @updated(updated_at)
-        Product { updated_at: timestamp, qty: int }
+        Product { id: Id, updated_at: timestamp, qty: int }
         shape P from Product { qty }
         mutation recompute(id: Id, base: int, n: int) -> P {
           update Product where (id = $id) { qty = (qty + $base) * $n };
@@ -143,7 +148,7 @@ fn update_where_inlines_named_filter() {
     // read side — the write chain threads `decls` so the filter body is available.
     let out = gen(r#"
         @updated(updated_at)
-        Product { updated_at: timestamp, active: bool, stock: int, name: text }
+        Product { id: Id, updated_at: timestamp, active: bool, stock: int, name: text }
         shape P from Product { name }
         filter sellable = active and stock > 0;
         mutation retire(name: text) -> P {
@@ -161,7 +166,7 @@ fn delete_on_soft_model_rewrites_to_tombstone_update() {
     let out = gen(r#"
         @soft_delete(deleted_at)
         @updated(updated_at)
-        Order { deleted_at: timestamp?, updated_at: timestamp, status: text }
+        Order { id: Id, deleted_at: timestamp?, updated_at: timestamp, status: text }
         shape OrderCard from Order { status }
         mutation remove(id: Id) -> OrderCard {
           delete Order where (id = $id);
@@ -190,11 +195,11 @@ fn delete_on_soft_model_rewrites_to_tombstone_update() {
 #[test]
 fn hard_delete_emits_real_delete_and_keeps_scope() {
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
         @scope Tenant
-        Order { deleted_at: timestamp?, org: Org, status: text }
+        Order { id: Id, deleted_at: timestamp?, org: Org, status: text }
         mutation purge(id: Id) -> ok scoped Tenant {
           hard delete Order where (id = $id);
         }
@@ -221,7 +226,7 @@ fn restore_clears_tombstone_without_live_predicate() {
     let out = gen(r#"
         @soft_delete(archived)
         @updated(updated_at)
-        Doc { archived: bool, updated_at: timestamp, title: text }
+        Doc { id: Id, archived: bool, updated_at: timestamp, title: text }
         shape DocCard from Doc { title }
         mutation unarchive(id: Id) -> DocCard {
           restore Doc where (id = $id);
@@ -244,7 +249,7 @@ fn restore_clears_tombstone_without_live_predicate() {
 #[test]
 fn delete_on_plain_model_is_a_real_delete() {
     let out = gen(r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         mutation drop_tag(id: Id) -> ok {
           delete Tag where (id = $id);
         }
@@ -258,8 +263,8 @@ fn delete_on_plain_model_is_a_real_delete() {
 #[test]
 fn tx_renders_each_write_in_order() {
     let out = gen(r#"
-        User { email: text }
-        Address { user: User?, city: text }
+        User { id: Id, email: text }
+        Address { id: Id, user: User?, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
           tx {
@@ -292,8 +297,8 @@ fn tx_renders_each_write_in_order() {
 #[test]
 fn tx_backref_binds_prior_create_id() {
     let out = gen(r#"
-        User { email: text }
-        Address { user: User, city: text }
+        User { id: Id, email: text }
+        Address { id: Id, user: User, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
           tx {
@@ -313,10 +318,11 @@ fn tx_backref_binds_prior_create_id() {
 #[test]
 fn create_returning_mutation_reselects_the_declared_shape() {
     let out = gen(r#"
-        Org { name: text }
-        User { name: text }
+        Org { id: Id, name: text }
+        User { id: Id, name: text }
         @soft_delete(deleted_at)
         Order {
+          id: Id
           deleted_at: timestamp?,
           org: Org,
           placed_by: User,
@@ -349,7 +355,7 @@ fn create_returning_mutation_reselects_the_declared_shape() {
 fn update_mutation_reselects_by_the_write_where() {
     let out = gen(r#"
         @updated(updated_at)
-        Order { updated_at: timestamp, status: text }
+        Order { id: Id, updated_at: timestamp, status: text }
         shape OrderCard from Order { status }
         mutation set_status(id: Id, status: text) -> OrderCard {
           update Order where (id = $id) { status = $status };
@@ -375,7 +381,7 @@ fn soft_delete_mutation_reselects_without_the_live_predicate() {
     let out = gen(r#"
         @soft_delete(deleted_at)
         @updated(updated_at)
-        Order { deleted_at: timestamp?, updated_at: timestamp, status: text }
+        Order { id: Id, deleted_at: timestamp?, updated_at: timestamp, status: text }
         shape OrderCard from Order { status }
         mutation remove(id: Id) -> OrderCard {
           delete Order where (id = $id);
@@ -396,7 +402,7 @@ fn hard_delete_mutation_emits_no_reselect() {
     // A real DELETE removes the row — no surviving row to read back, so an `-> ok`
     // mutation emits no re-select (the response is `{}` at runtime).
     let out = gen(r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         mutation drop_tag(id: Id) -> ok {
           delete Tag where (id = $id);
         }
@@ -410,9 +416,9 @@ fn hard_delete_mutation_emits_no_reselect() {
 #[test]
 fn update_where_across_relation_uses_multi_table_form() {
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @updated(updated_at)
-        Order { updated_at: timestamp, org: Org, status: text }
+        Order { id: Id, updated_at: timestamp, org: Org, status: text }
         shape OrderCard from Order { status }
         mutation flag_org_orders(name: text, status: text) -> OrderCard {
           update Order where (org.name = $name) { status = $status };
@@ -431,10 +437,10 @@ fn create_auto_sets_the_scope_column_from_ctx() {
     // On a scoped model the scope column is engine-managed on create : auto-set
     // from `:ctx_<field>`, never a caller param. Cross-scope create is inexpressible.
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Order { org: Org, total: int }
+        Order { id: Id, org: Org, total: int }
         shape OrderCard from Order { total }
         mutation place(total: int) -> OrderCard scoped Tenant { create Order { total = $total }; }
         "#);
@@ -461,11 +467,11 @@ fn unscoped_mutation_omits_scope_injection_and_auto_set() {
     // `unscoped(...)`  drops the write guard *and* the create auto-set: the caller
     // supplies the scope column and the write carries no injected scope predicate.
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
         @scope Tenant
-        Order { deleted_at: timestamp?, org: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int }
         shape OrderCard from Order { total }
         mutation import_order(org: Id, total: int) -> OrderCard
           unscoped("data import: rows land in the supplied org") {
@@ -485,11 +491,11 @@ fn unscoped_mutation_omits_scope_injection_and_auto_set() {
 #[test]
 fn unscoped_update_omits_the_scope_guard() {
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
         @updated(updated_at)
-        Order { updated_at: timestamp, org: Org, status: text }
+        Order { id: Id, updated_at: timestamp, org: Org, status: text }
         shape OrderCard from Order { status }
         mutation admin_set_status(id: Id, status: text) -> OrderCard
           unscoped("admin: correct any org's order") {
@@ -509,8 +515,8 @@ fn unscoped_update_omits_the_scope_guard() {
 fn pg_create_double_quotes_and_keeps_named_placeholders() {
     let out = gen_pg(
         r#"
-        Org { name: text }
-        Order { org: Org, status: text, total: int }
+        Org { id: Id, name: text }
+        Order { id: Id, org: Org, status: text, total: int }
         shape OrderCard from Order { status, total }
         mutation place(org: Id, status: text, total: int) -> OrderCard {
           create Order { org = $org, status = $status, total = $total };
@@ -545,7 +551,7 @@ fn pg_soft_delete_tombstone_uses_bare_set_column() {
         r#"
         @soft_delete(deleted_at)
         @updated(updated_at)
-        Order { deleted_at: timestamp?, updated_at: timestamp, status: text }
+        Order { id: Id, deleted_at: timestamp?, updated_at: timestamp, status: text }
         shape OrderCard from Order { status }
         mutation remove(id: Id) -> OrderCard { delete Order where (id = $id); }
         "#,
@@ -571,9 +577,9 @@ fn pg_update_across_relation_uses_from_clause() {
     // join `ON` folds into the WHERE (ahead of the user predicate).
     let out = gen_pg(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @updated(updated_at)
-        Order { updated_at: timestamp, org: Org, status: text }
+        Order { id: Id, updated_at: timestamp, org: Org, status: text }
         shape OrderCard from Order { status }
         mutation flag_org_orders(name: text, status: text) -> OrderCard {
           update Order where (org.name = $name) { status = $status };
@@ -605,8 +611,8 @@ fn pg_update_across_relation_uses_from_clause() {
 fn pg_hard_delete_across_relation_uses_using_clause() {
     let out = gen_pg(
         r#"
-        Org { name: text }
-        Order { org: Org, status: text }
+        Org { id: Id, name: text }
+        Order { id: Id, org: Org, status: text }
         mutation purge(name: text) -> ok {
           hard delete Order where (org.name = $name);
         }
@@ -632,10 +638,11 @@ fn and_scope_create_auto_sets_every_named_axis() {
     let out = gen(r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page, Author
         Comment {
+          id: Id
           page:   Page
           author: User
           body:   text
@@ -661,11 +668,12 @@ fn or_scope_create_auto_sets_only_the_named_alternative() {
     let out = gen(r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page
         @scope Author
         Post {
+          id: Id
           page:    Page?
           author:  User?
           body:    text
@@ -686,7 +694,7 @@ fn or_scope_create_auto_sets_only_the_named_alternative() {
 fn enum_create_assign_lowers_to_a_string_literal() {
     let src = r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         mutation place() -> OrderRow { create Order { status = paid, total = 1 } }
     "#;
@@ -698,6 +706,7 @@ fn enum_create_assign_lowers_to_a_string_literal() {
 
 const UPSERT: &str = r#"
     Page {
+      id: Id
       path: text (unique)
       hits: int
     }
@@ -750,10 +759,11 @@ fn upsert_sqlite_on_conflict_do_update() {
 fn upsert_composite_unique_index_target_and_scope() {
     // Per-tenant uniqueness: a composite `@index (org, slug) unique`, org scope-managed.
     let src = r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
         Doc {
+          id: Id
           org: Org
           slug: text
           views: int

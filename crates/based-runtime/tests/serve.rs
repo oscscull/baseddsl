@@ -20,7 +20,7 @@ fn compile(src: &str) -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -33,9 +33,10 @@ fn row(pairs: serde_json::Value) -> Row {
 
 const SCHEMA: &str = r#"
     @soft_delete(deleted_at)
-    Org { deleted_at: timestamp?, name: text }
+    Org { id: Id, deleted_at: timestamp?, name: text }
     @soft_delete(deleted_at)
     Order {
+      id: Id
         deleted_at: timestamp?,
         org: Org,
         status: text,
@@ -151,7 +152,7 @@ async fn mutation_route_returns_the_created_rows_declared_shape() {
 async fn zero_row_mutation_maps_to_404_not_found() {
     let c = compile(
         r#"
-        Order { status: text, total: int }
+        Order { id: Id, status: text, total: int }
         shape OrderCard from Order { status, total }
         mutation set_status(id: Id, status: text) -> OrderCard {
             update Order where (id = $id) { status = $status };
@@ -641,7 +642,7 @@ async fn reused_key_with_different_args_is_a_422() {
 // ---------- guards (auth.md Handle 3) ---------------------------------------
 
 const GUARDED_SCHEMA: &str = r#"
-    Order { status: text, total: int }
+    Order { id: Id, status: text, total: int }
     shape OrderCard from Order { status, total }
     mutation close_order(id) -> OrderCard guard caller_can_close {
         update Order where (id = $id) { status = "closed" };

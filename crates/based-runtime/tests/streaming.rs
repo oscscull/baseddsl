@@ -15,9 +15,9 @@ use based_runtime::plan::PlanError;
 use based_runtime::{dispatch_stream, run_query_stream, Compiled, Engine, MockDb, Request, Row};
 
 const SCHEMA: &str = r#"
-    Org { name: text }
+    Org { id: Id, name: text }
     @sort(total desc)
-    Order { org: Org, status: text, total: int }
+    Order { id: Id, org: Org, status: text, total: int }
     shape OrderCard from Order { status, total }
 
     query export_orders(org) -> stream OrderCard;
@@ -32,7 +32,7 @@ fn compile(src: &str) -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");

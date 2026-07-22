@@ -145,9 +145,8 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let (rscopes, scope_index) = scope::resolve_decls(&scope_decls, &index, &mut sink);
     scope::attach_models(&models, &mut rmodels, &rscopes, &scope_index, &mut sink);
 
-    // 4/5. Everything from here reads the finished models through one context
-    // (scoped so its borrow of `rmodels` ends before the inferred indexes land).
-    let (rshapes, rqueries, rmutations, rfilters, inferred) = {
+    // 4/5. Everything from here reads the finished models through one context.
+    let (rshapes, rqueries, rmutations, rfilters) = {
         let cx = Cx {
             models: &rmodels,
             index: &index,
@@ -182,9 +181,9 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             .map(|f| check::check_filter(f, &cx, &mut sink))
             .collect();
 
-        // 6. Index inference + lints. Last on purpose: it
+        // 6. Index requirement checks + lints. Last on purpose: it
         // reasons over the *whole* resolved access layer (closed world).
-        let inferred = indexes::run(
+        indexes::run(
             &models,
             &queries,
             &shapes,
@@ -194,11 +193,8 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
             &cx,
             &mut sink,
         );
-        (rshapes, rqueries, rmutations, rfilters, inferred)
+        (rshapes, rqueries, rmutations, rfilters)
     };
-    for (m, inf) in rmodels.iter_mut().zip(inferred) {
-        m.inferred_indexes = inf;
-    }
 
     // 7. `$ctx` coherence : each callable's inferred context requirement is
     // its own, but a field name must mean one type everywhere the caller's shared

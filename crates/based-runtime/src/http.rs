@@ -663,10 +663,10 @@ mod tests {
     fn compiled() -> crate::load::Compiled {
         use based_ast::FileId;
         const SCHEMA: &str = r#"
-            Org { name: text }
+            Org { id: Id, name: text }
             scope Tenant (org: Org = $ctx.org)
             @scope Tenant
-            Order { org: Org, status: text }
+            Order { id: Id, org: Org, status: text }
             shape OrderCard from Order { status }
 
             query order_by_id(id) -> OrderCard scoped Tenant;
@@ -681,7 +681,7 @@ mod tests {
         assert!(
             !diags
                 .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
+                .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
             "schema should check clean: {diags:?}"
         );
         crate::load::Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)

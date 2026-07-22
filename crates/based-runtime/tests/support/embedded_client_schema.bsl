@@ -1,9 +1,10 @@
 @soft_delete(deleted_at)
-Org { deleted_at: timestamp?, name: text }
+Org { id: Id, deleted_at: timestamp?, name: text }
 
 @soft_delete(deleted_at)
 @sort(total desc)
 Order {
+  id: Id
     deleted_at: timestamp?,
     org: Org,
     status: text,

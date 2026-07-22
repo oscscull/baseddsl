@@ -1,5 +1,5 @@
 DIAGNOSTICS
-  W0103: query `orders_by_buyer` will scan `Order`: no index leads with any of (placed_by, placed_at)
+  E0260: query `orders_by_buyer` will scan `Order`: no index leads with any of (placed_by, placed_at)
 SCHEMA
 model Order  table=order  soft_delete=deleted_at(timestamp)  sort=[placed_at desc]
   id: Id

@@ -2,11 +2,13 @@
 # non-unique field (E0144), an unknown field in a shape (E0111), and a duplicate
 # model (E0100). Confirms the diagnostics render stably and codegen is skipped.
 User {
+  id: Id
   name:  text
   email: text (unique)
 }
 
 User {
+  id: Id
   name: text
 }
 

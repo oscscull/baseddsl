@@ -7,6 +7,7 @@
 scope Tenant (org: Org = $ctx.org)
 
 Org {
+  id:   Id
   name: text
   slug: text (unique)
 }

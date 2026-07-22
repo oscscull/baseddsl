@@ -3,8 +3,9 @@
 //! On every edit it recompiles the project (the same discover -> parse -> check
 //! front end the CLI runs) and surfaces the facts the engine derives, shown but
 //! never written into source:
-//!   * **diagnostics** — every parse/sema error + lint, inline;
-//!   * **inlay hints** — the inferred inverse pairings and join-key indexes;
+//!   * **diagnostics** — every parse/sema error + lint, inline, some with a one-key
+//!     quick-fix (insert a missing `@index` / `id`);
+//!   * **inlay hints** — the inferred inverse pairings;
 //!   * **hover** — the "why" behind each derived fact.
 //!
 //! The derivation itself lives in `based-facts`; this crate maps those facts onto
@@ -178,6 +179,8 @@ impl LanguageServer for Backend {
                 // Fold declaration bodies; expand/shrink selection through the AST.
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                // Quick-fixes: insert a missing `@index` (E0260) / `id` (E0261).
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 // `.` opens field completion, `@` the decorator set (see
                 // `Snapshot::completions`); other contexts trigger on identifier chars.
                 completion_provider: Some(CompletionOptions {
@@ -425,6 +428,50 @@ impl LanguageServer for Backend {
         }]))
     }
 
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let st = self.state.lock().unwrap();
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+        // Each fix-carrying diagnostic in scope becomes a one-key quick-fix that
+        // inserts the missing `@index` / `id` line into the named model's body.
+        for diag in &params.context.diagnostics {
+            let Some(fix) = diag.data.as_ref().and_then(|d| d.get("fix")) else {
+                continue;
+            };
+            let (Some(model), Some(line)) = (
+                fix.get("model").and_then(|v| v.as_str()),
+                fix.get("line").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let Some((fid, edit)) = snapshot.member_insert_edit(model, line) else {
+                continue;
+            };
+            let Some(uri) = snapshot.file_uri(fid) else {
+                continue;
+            };
+            let mut changes = HashMap::new();
+            changes.insert(uri, vec![edit]);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Add `{line}` to `{model}`"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                is_preferred: Some(true),
+                ..Default::default()
+            }));
+        }
+        Ok(Some(actions))
+    }
+
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let st = self.state.lock().unwrap();
         let Ok(path) = params.text_document.uri.to_file_path() else {
@@ -560,12 +607,19 @@ fn to_lsp_diagnostic(d: &based_diagnostics::Diagnostic, idx: &compile::LineIndex
         message.push_str("\nnote: ");
         message.push_str(note);
     }
+    // Carry a mechanical fix (insert a member line into a model) as structured data,
+    // so the code-action handler can build the edit without re-deriving it.
+    let data = d
+        .fix
+        .as_ref()
+        .map(|f| serde_json::json!({ "fix": { "model": f.model, "line": f.line } }));
     Diagnostic {
         range,
         severity,
         code: Some(NumberOrString::String(d.code.to_string())),
         source: Some("based".to_string()),
         message,
+        data,
         ..Default::default()
     }
 }

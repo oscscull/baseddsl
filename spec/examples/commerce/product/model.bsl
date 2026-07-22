@@ -4,6 +4,7 @@
 @soft_delete(deleted_at)
 @created(created_at)
 Product {
+  id:         Id
   deleted_at: timestamp?
   created_at: timestamp
   org:        Org

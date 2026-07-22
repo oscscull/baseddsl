@@ -2,10 +2,12 @@
 # place (one nominal type per site). Negatives: an unknown shape (E0132), a shape
 # whose model mismatches the relation target (E0133), and a reference cycle (E0134).
 Org {
+  id: Id
   name: text
 }
 
 User {
+  id: Id
   name:          text
   email:         text
   org:           Org
@@ -13,6 +15,7 @@ User {
 }
 
 Order {
+  id: Id
   placed_by: User
   total:     int
 }

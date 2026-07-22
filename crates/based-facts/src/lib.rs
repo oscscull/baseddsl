@@ -1,17 +1,20 @@
 //! based-facts — the engine-derived facts an editor should *show*.
 //!
-//! "Show, don't write, for derived facts." A fact the compiler can derive — an
-//! inverse relation's paired forward edge, a join-key index the engine will
-//! create — must never be forced into source. Instead it is surfaced in the editor.
-//! This crate computes those facts as span-anchored [`Fact`] values; the LSP (or
-//! `based facts`) renders them as inlay hints / hover text.
+//! "Show, don't write, for cost-free, unambiguous derived facts." A fact the
+//! compiler can derive at no independent cost and with one meaning — an inverse
+//! relation's paired forward edge, fixed by the written forward edge — is surfaced
+//! in the editor rather than forced into source. (A fact a reviewer must weigh — an
+//! index, a primary key — is consequential, so it is written in source and the
+//! engine errors when it is missing; those are not shown here.) This crate computes
+//! the shown facts as span-anchored [`Fact`] values; the LSP (or `based facts`)
+//! renders them as inlay hints / hover text.
 //!
 //! The computation is pure over the already-checked schema (plus the AST, only to
 //! tell an *inferred* pairing from one the author wrote explicitly), so it is
 //! golden-testable without an editor in the loop.
 
 use based_ast::{Decl, Member, Primitive, Scoped, Span, Verb};
-use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RModel, RQuery, RScope};
+use based_sema::{CheckedSchema, CtxField, CtxReq, MemberKind, RQuery, RScope};
 
 /// What kind of derived fact this is — the editor keys presentation off it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,9 +22,6 @@ pub enum FactKind {
     /// An inverse relation edge whose paired forward field the engine inferred:
     /// the author wrote `posts: Post[]`, not `posts: Post[] (Post.author)`.
     InferredInverse,
-    /// A join-key index the engine will create even though no `@index` declares it.
-    /// Shown so the write cost is visible without living in source.
-    InferredIndex,
     /// The `$ctx` fields a callable requires — the request context the generated
     /// client sends. Each field's type is fixed by the scope decl or the column it
     /// binds to; a field used only in a hand-written `where` is typed by that use.
@@ -41,7 +41,6 @@ impl FactKind {
     pub fn tag(self) -> &'static str {
         match self {
             FactKind::InferredInverse => "inverse",
-            FactKind::InferredIndex => "index",
             FactKind::CtxRequirement => "ctx",
             FactKind::ResolvedQuery => "query",
             FactKind::Scope => "scope",
@@ -105,32 +104,6 @@ pub fn facts(schema: &CheckedSchema, decls: &[Decl]) -> Vec<Fact> {
                     });
                 }
             }
-        }
-
-        // Inferred join-key indexes the DDL will emit (name + columns match `sql::ddl`),
-        // anchored at the forward edge whose FK column they index — the member that
-        // incurs the write cost — falling back to the model-name ident.
-        for idx in &model.inferred_indexes {
-            let (name, cols) = inferred_index(model, &idx.columns);
-            let anchor = idx
-                .columns
-                .first()
-                .and_then(|f| model.member(f))
-                .map(|m| m.span)
-                .or_else(|| model_name_span(decls, &model.name))
-                .unwrap_or(model.span);
-            out.push(Fact {
-                span: anchor,
-                kind: FactKind::InferredIndex,
-                label: format!("index {name} ({})", cols.join(", ")),
-                detail: format!(
-                    "inferred index `{name}` on ({}): a join-key baseline for a traversed \
-                     relation; the engine creates it so reads don't scan. Add an explicit \
-                     `@index` only to override it.",
-                    cols.join(", "),
-                ),
-                nav: None,
-            });
         }
     }
 
@@ -304,14 +277,6 @@ fn callable_name_span(decls: &[Decl], name: &str) -> Option<Span> {
     })
 }
 
-/// The name-ident span of the model declaring `name`.
-fn model_name_span(decls: &[Decl], name: &str) -> Option<Span> {
-    decls.iter().find_map(|d| match d {
-        Decl::Model(m) if m.name.node == name => Some(m.name.span),
-        _ => None,
-    })
-}
-
 /// The resolved shape of a query: verb + target + cardinality + pagination, none of
 /// which appears in the signature. Anchored at the query's name ident.
 fn resolved_query_fact(q: &RQuery, anchor: Span) -> Fact {
@@ -370,33 +335,6 @@ fn inverse_was_inferred(decls: &[Decl], model: &str, field: &str) -> bool {
     false
 }
 
-/// Reproduce `sql::ddl`'s inferred-index name + physical column list so the shown
-/// fact matches the generated DDL exactly: soft-delete column prepended
-/// (predicate-leading — MariaDB has no partial indexes), name `inf_<table>_<cols>`
-/// over the *field* names, display columns mapped to their physical names.
-fn inferred_index(model: &RModel, columns: &[String]) -> (String, Vec<String>) {
-    let mut fields = columns.to_vec();
-    if let Some(sd) = &model.soft_delete {
-        fields.insert(0, sd.field.clone());
-    }
-    let mut name = format!("inf_{}", model.table);
-    for c in &fields {
-        name.push('_');
-        name.push_str(c);
-    }
-    let cols = fields.iter().map(|c| physical_col(model, c)).collect();
-    (name, cols)
-}
-
-/// Field name -> physical column (scalar column / forward FK), matching `sql::ddl`.
-fn physical_col(model: &RModel, field: &str) -> String {
-    match model.member(field).map(|m| &m.kind) {
-        Some(MemberKind::Scalar { column, .. }) => column.clone(),
-        Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
-        _ => field.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,9 +356,9 @@ mod tests {
     // A small scoped schema: one scope, one governed model, one scoped query + mutation.
     const SCOPED: &str = "
         scope Tenant (org: Org = $ctx.org)
-        Org { name: text }
+        Org { id: Id  name: text }
         @scope Tenant
-        Widget { org: Org  name: text }
+        Widget { id: Id  org: Org  name: text  @index org }
         shape WidgetCard from Widget { name }
         query widgets() -> WidgetCard[] scoped Tenant { list Widget; }
         mutation add_widget(name: text) -> WidgetCard scoped Tenant {

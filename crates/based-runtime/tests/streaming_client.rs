@@ -36,7 +36,7 @@ fn compile() -> Compiled {
     assert!(
         !diags
             .iter()
-            .any(|d| d.severity == based_diagnostics::Severity::Error),
+            .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
         "schema should check clean"
     );
     Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)

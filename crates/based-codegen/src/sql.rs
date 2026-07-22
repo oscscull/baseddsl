@@ -5,12 +5,10 @@
 //! declared `@index`es. No foreign-key constraints are emitted — they are
 //! opt-in, so the FK *column* exists but no `FOREIGN KEY` clause references it.
 //!
-//! Besides declared structure, each table carries the sema-inferred baseline
-//! indexes: join-key indexes for inverse edges the access
-//! layer traverses, named `inf_…` so engine-owned keys are distinguishable from
-//! declared `idx_…` ones. On a `@soft_delete` model the soft-delete column is
-//! prepended (predicate-leading — MariaDB has no partial indexes). Filter-path
-//! indexes are *not* auto-created; they surface as the W0103 lint instead.
+//! The table's indexes are exactly the written `@index` set. On a `@soft_delete`
+//! model a non-unique index's tombstone column is physically prepended
+//! (predicate-leading — MariaDB has no partial indexes), so the written index still
+//! leads with the column that selects.
 //!
 //! ## Type mapping
 //! | primitive   | MariaDB        | SQLite    | Postgres      | note |
@@ -67,41 +65,35 @@ struct IndexSpec {
     unique: bool,
 }
 
-/// Every declared + inferred index on a model, in emission order (declared first,
-/// then the sema-inferred join-key baseline). Column names are already physical.
+/// Every declared `@index` on a model, resolved to physical columns + a stable
+/// name. A non-unique index on a `@soft_delete` model is rendered predicate-leading:
+/// the always-filtered tombstone column is physically prepended (neither MariaDB nor
+/// SQLite has partial indexes), so the written index still leads with what selects. A
+/// unique index is a constraint — its column set is never reshaped.
 fn index_specs(model: &RModel) -> Vec<IndexSpec> {
-    let mut specs = Vec::new();
-
-    // Declared `@index`es (composite or single; unique or plain).
-    for idx in &model.indexes {
-        specs.push(IndexSpec {
-            name: constraint_name(
-                if idx.unique { "uq" } else { "idx" },
-                &model.table,
-                &idx.columns,
-            ),
-            columns: idx.columns.iter().map(|c| physical_col(model, c)).collect(),
-            unique: idx.unique,
-        });
-    }
-
-    // Inferred baseline indexes: join keys of traversed inverse
-    // edges, deduped by sema against declared structure. Neither MariaDB nor SQLite
-    // has partial indexes, so "predicate-leading" means the soft-delete column is
-    // physically prepended — the engine filters it on every generated query.
-    for idx in &model.inferred_indexes {
-        let mut columns = idx.columns.clone();
-        if let Some(sd) = &model.soft_delete {
-            columns.insert(0, sd.field.clone());
-        }
-        specs.push(IndexSpec {
-            name: constraint_name("inf", &model.table, &columns),
-            columns: columns.iter().map(|c| physical_col(model, c)).collect(),
-            unique: false,
-        });
-    }
-
-    specs
+    model
+        .indexes
+        .iter()
+        .map(|idx| {
+            let mut columns = idx.columns.clone();
+            if !idx.unique {
+                if let Some(sd) = &model.soft_delete {
+                    if columns.first() != Some(&sd.field) {
+                        columns.insert(0, sd.field.clone());
+                    }
+                }
+            }
+            IndexSpec {
+                name: constraint_name(
+                    if idx.unique { "uq" } else { "idx" },
+                    &model.table,
+                    &columns,
+                ),
+                columns: columns.iter().map(|c| physical_col(model, c)).collect(),
+                unique: idx.unique,
+            }
+        })
+        .collect()
 }
 
 /// One `CREATE TABLE` for a model: columns in declaration order, then the table

@@ -5,7 +5,7 @@
 //!
 //! The summary is deliberately coarse — the resolution facts that are *not* in
 //! the AST (table names, relation kinds, inferred verb/target, soft-delete mode,
-//! inferred indexes, `$ctx` requirements) plus the diagnostics, rendered stably
+//! declared indexes, `$ctx` requirements) plus the diagnostics, rendered stably
 //! so goldens stay legible in review and don't churn on unrelated field additions.
 
 use based_ast::{DefaultVal, FileId, Primitive, SortDir, SortTerm, Verb};
@@ -168,9 +168,6 @@ fn summarize_model(m: &RModel) -> String {
             if ix.unique { " unique" } else { "" },
             ix.columns.join(", ")
         ));
-    }
-    for ix in &m.inferred_indexes {
-        out.push_str(&format!("  index inferred({})\n", ix.columns.join(", ")));
     }
     out
 }

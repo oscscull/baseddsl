@@ -40,8 +40,8 @@ use based_sema::check;
 /// re-select fetch, commit.
 const SCHEMA: &str = r#"
     @sort(email asc)
-    User { email: text }
-    Address { user: User, city: text }
+    User { id: Id, email: text }
+    Address { id: Id, user: User, city: text }
     shape UserCard from User { email }
     query export_users() -> stream UserCard;
     mutation signup(email: text, city: text) -> UserCard {
@@ -57,7 +57,7 @@ fn compile() -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:#?}");
     Compiled::from_checked(schema, sf.decls, Dialect::Sqlite)

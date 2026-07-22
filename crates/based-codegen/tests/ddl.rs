@@ -33,7 +33,7 @@ fn gen_pg(src: &str) -> String {
 
 #[test]
 fn implicit_id_is_uuid_primary_key() {
-    let ddl = gen("Org { name: text }");
+    let ddl = gen("Org { id: Id, name: text }");
     assert!(ddl.contains("CREATE TABLE `org` ("), "\n{ddl}");
     assert!(ddl.contains("`id` UUID NOT NULL"), "\n{ddl}");
     assert!(ddl.contains("PRIMARY KEY (`id`)"), "\n{ddl}");
@@ -45,6 +45,7 @@ fn implicit_id_is_uuid_primary_key() {
 fn type_mapping_and_nullability() {
     let ddl = gen(r#"
         Widget {
+          id: Id
           name:   text
           note:   text?
           count:  int
@@ -70,6 +71,7 @@ fn type_mapping_and_nullability() {
 fn decimal_and_float_map_per_dialect() {
     let src = r#"
         Ledger {
+          id: Id
           price: decimal(12, 2)
           bare:  decimal
           score: float
@@ -99,7 +101,7 @@ fn decimal_and_float_map_per_dialect() {
 #[test]
 fn decimal_default_is_byte_exact() {
     // The trailing zero survives (a float round-trip would drop it).
-    let ddl = gen("Order { total: decimal(12, 2) (default 0.10) }");
+    let ddl = gen("Order { id: Id, total: decimal(12, 2) (default 0.10) }");
     assert!(
         ddl.contains("`total` DECIMAL(12, 2) NOT NULL DEFAULT 0.10"),
         "\n{ddl}"
@@ -110,6 +112,7 @@ fn decimal_default_is_byte_exact() {
 fn defaults_render_as_sql() {
     let ddl = gen(r#"
         Order {
+          id: Id
           status: text (default "pending")
           total:  int (default 0)
           live:   bool (default true)
@@ -133,7 +136,7 @@ fn defaults_render_as_sql() {
 
 #[test]
 fn unique_modifier_becomes_constraint() {
-    let ddl = gen("Org { slug: text (unique) }");
+    let ddl = gen("Org { id: Id, slug: text (unique) }");
     assert!(
         ddl.contains("CONSTRAINT `uq_org_slug` UNIQUE (`slug`)"),
         "\n{ddl}"
@@ -143,8 +146,8 @@ fn unique_modifier_becomes_constraint() {
 #[test]
 fn forward_relation_emits_fk_column_no_constraint() {
     let ddl = gen(r#"
-        Org { name: text }
-        Order { org: Org, buyer: Org? }
+        Org { id: Id, name: text }
+        Order { id: Id, org: Org, buyer: Org? }
         "#);
     // FK column named `<field>_id`, typed as the target's PK (uuid); optional -> NULL
     assert!(ddl.contains("`org_id` UUID NOT NULL"), "\n{ddl}");
@@ -157,8 +160,8 @@ fn forward_relation_emits_fk_column_no_constraint() {
 #[test]
 fn inverse_edge_stores_no_column() {
     let ddl = gen(r#"
-        Org { name: text, orders: Order[] }
-        Order { org: Org }
+        Org { id: Id, name: text, orders: Order[] }
+        Order { id: Id, org: Org }
         "#);
     // the to-many `orders` edge lives on `order.org_id`, never a column on `org`
     let org = ddl.split("CREATE TABLE `order`").next().unwrap();
@@ -168,9 +171,10 @@ fn inverse_edge_stores_no_column() {
 #[test]
 fn index_columns_resolve_relations_to_fk() {
     let ddl = gen(r#"
-        Org { name: text }
-        User { name: text }
+        Org { id: Id, name: text }
+        User { id: Id, name: text }
         Membership {
+          id: Id
           org:  Org
           user: User
           role: text
@@ -190,31 +194,32 @@ fn index_columns_resolve_relations_to_fk() {
 }
 
 #[test]
-fn inferred_join_key_emitted_predicate_leading() {
-    // The shape traverses `items` (an inverse edge), so the child table gets an
-    // engine-inferred index on the join FK, led by the soft-delete column
-    // (predicate-leading — MariaDB has no partial indexes).
+fn declared_index_on_soft_delete_model_is_predicate_leading() {
+    // A written `@index` on a `@soft_delete` model is rendered soft-delete-leading:
+    // the always-filtered tombstone column is prepended (predicate-leading — MariaDB
+    // has no partial indexes), so the declared index still leads with what selects.
     let ddl = gen(r#"
         @sort(placed_at desc)
-        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
+        Order { id: Id, placed_at: timestamp, items: OrderItem[], @index placed_at }
         @soft_delete(deleted_at)
-        OrderItem { deleted_at: timestamp?, order: Order, qty: int }
+        OrderItem { id: Id, deleted_at: timestamp?, order: Order, qty: int, @index order }
         shape O from Order { first_qty = items.qty }
         query orders() -> O[];
         "#);
     assert!(
-        ddl.contains("KEY `inf_order_item_deleted_at_order` (`deleted_at`, `order_id`)"),
+        ddl.contains("KEY `idx_order_item_deleted_at_order` (`deleted_at`, `order_id`)"),
         "\n{ddl}"
     );
 }
 
 #[test]
-fn inferred_join_key_deduped_when_declared() {
-    // The user declared the join-key index; nothing engine-owned is emitted.
+fn declared_join_key_index_names_the_fk_column() {
+    // The join-key index is written, not inferred; a non-soft-delete model renders it
+    // as-declared over the FK column, with no engine-owned `inf_` key.
     let ddl = gen(r#"
         @sort(placed_at desc)
-        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
-        OrderItem { order: Order, qty: int, @index order }
+        Order { id: Id, placed_at: timestamp, items: OrderItem[], @index placed_at }
+        OrderItem { id: Id, order: Order, qty: int, @index order }
         shape O from Order { first_qty = items.qty }
         query orders() -> O[];
         "#);
@@ -233,7 +238,7 @@ fn inferred_join_key_deduped_when_declared() {
 
 #[test]
 fn sqlite_header_names_the_dialect() {
-    let ddl = gen_sqlite("Org { name: text }");
+    let ddl = gen_sqlite("Org { id: Id, name: text }");
     assert!(ddl.contains("(dialect: sqlite)"), "\n{ddl}");
 }
 
@@ -242,6 +247,7 @@ fn sqlite_type_mapping_and_nullability() {
     let ddl = gen_sqlite(
         r#"
         Widget {
+          id: Id
           name:   text
           note:   text?
           count:  int
@@ -272,7 +278,7 @@ fn sqlite_type_mapping_and_nullability() {
 
 #[test]
 fn sqlite_id_is_text_primary_key() {
-    let ddl = gen_sqlite("Org { name: text }");
+    let ddl = gen_sqlite("Org { id: Id, name: text }");
     assert!(ddl.contains("`id` TEXT NOT NULL"), "\n{ddl}");
     assert!(ddl.contains("PRIMARY KEY (`id`)"), "\n{ddl}");
     // app-generated id carries no SQL default
@@ -283,8 +289,8 @@ fn sqlite_id_is_text_primary_key() {
 fn sqlite_fk_column_is_text() {
     let ddl = gen_sqlite(
         r#"
-        Org { name: text }
-        Order { org: Org, buyer: Org? }
+        Org { id: Id, name: text }
+        Order { id: Id, org: Org, buyer: Org? }
         "#,
     );
     assert!(ddl.contains("`org_id` TEXT NOT NULL"), "\n{ddl}");
@@ -297,6 +303,7 @@ fn sqlite_bool_default_renders_as_integer() {
     let ddl = gen_sqlite(
         r#"
         Order {
+          id: Id
           status: text (default "pending")
           total:  int (default 0)
           live:   bool (default true)
@@ -327,7 +334,7 @@ fn sqlite_bool_default_renders_as_integer() {
 #[test]
 fn sqlite_unique_constraint_stays_inline() {
     // A column-level `(unique)` is an inline table constraint on both dialects.
-    let ddl = gen_sqlite("Org { slug: text (unique) }");
+    let ddl = gen_sqlite("Org { id: Id, slug: text (unique) }");
     assert!(
         ddl.contains("CONSTRAINT `uq_org_slug` UNIQUE (`slug`)"),
         "\n{ddl}"
@@ -338,9 +345,10 @@ fn sqlite_unique_constraint_stays_inline() {
 fn sqlite_indexes_are_separate_create_index_statements() {
     let ddl = gen_sqlite(
         r#"
-        Org { name: text }
-        User { name: text }
+        Org { id: Id, name: text }
+        User { id: Id, name: text }
         Membership {
+          id: Id
           org:  Org
           user: User
           role: text
@@ -371,22 +379,22 @@ fn sqlite_indexes_are_separate_create_index_statements() {
 }
 
 #[test]
-fn sqlite_inferred_join_key_is_a_create_index() {
-    // The inferred join-key baseline  becomes a trailing CREATE INDEX on SQLite,
-    // still predicate-leading (soft-delete column first).
+fn sqlite_declared_soft_delete_index_is_a_predicate_leading_create_index() {
+    // A written `@index` on a soft-delete model becomes a trailing CREATE INDEX on
+    // SQLite, rendered predicate-leading (soft-delete column first).
     let ddl = gen_sqlite(
         r#"
         @sort(placed_at desc)
-        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
+        Order { id: Id, placed_at: timestamp, items: OrderItem[], @index placed_at }
         @soft_delete(deleted_at)
-        OrderItem { deleted_at: timestamp?, order: Order, qty: int }
+        OrderItem { id: Id, deleted_at: timestamp?, order: Order, qty: int, @index order }
         shape O from Order { first_qty = items.qty }
         query orders() -> O[];
         "#,
     );
     assert!(
         ddl.contains(
-            "CREATE INDEX `inf_order_item_deleted_at_order` ON `order_item` (`deleted_at`, `order_id`);"
+            "CREATE INDEX `idx_order_item_deleted_at_order` ON `order_item` (`deleted_at`, `order_id`);"
         ),
         "\n{ddl}"
     );
@@ -402,6 +410,7 @@ fn pg_uses_double_quoted_identifiers_and_native_types() {
         r#"
         @created(created_at)
         Order {
+          id: Id
           created_at: timestamp
           status:     text
           total:      int
@@ -434,8 +443,8 @@ fn pg_uses_double_quoted_identifiers_and_native_types() {
 fn pg_fk_column_is_uuid() {
     let ddl = gen_pg(
         r#"
-        Org { name: text }
-        Order { org: Org, buyer: Org? }
+        Org { id: Id, name: text }
+        Order { id: Id, org: Org, buyer: Org? }
         "#,
     );
     assert!(ddl.contains("\"org_id\" UUID NOT NULL"), "\n{ddl}");
@@ -449,6 +458,7 @@ fn pg_bool_default_uses_keyword() {
     let ddl = gen_pg(
         r#"
         Order {
+          id: Id
           status: text (default "pending")
           live:   bool (default true)
           off:    bool (default false)
@@ -480,9 +490,10 @@ fn pg_indexes_are_separate_create_index_statements() {
     // table as CREATE [UNIQUE] INDEX statements. `(unique)` stays an inline constraint.
     let ddl = gen_pg(
         r#"
-        Org { slug: text (unique) }
-        User { name: text }
+        Org { id: Id, slug: text (unique) }
+        User { id: Id, name: text }
         Membership {
+          id: Id
           org:  Org
           user: User
           role: text
@@ -513,7 +524,7 @@ fn pg_indexes_are_separate_create_index_statements() {
 
 const ENUM_SCHEMA: &str = r#"
 enum Status { pending, paid, shipped, cancelled }
-Order { status: Status (default pending), total: int }
+Order { id: Id, status: Status (default pending), total: int }
 "#;
 
 #[test]
@@ -557,7 +568,7 @@ fn enum_column_postgres_is_text_with_check() {
 
 const STRING_ENUM_NAME_NE_VALUE: &str = r#"
 enum Status { pending, paid = "PAID" }
-Order { status: Status (default paid), total: int }
+Order { id: Id, status: Status (default paid), total: int }
 "#;
 
 #[test]
@@ -576,7 +587,7 @@ fn string_enum_check_and_default_use_the_wire_value_not_the_name() {
 
 const INT_ENUM_SCHEMA: &str = r#"
 enum Priority { low = 0, medium = 1, high = 2 }
-Ticket { priority: Priority (default low), title: text }
+Ticket { id: Id, priority: Priority (default low), title: text }
 "#;
 
 #[test]

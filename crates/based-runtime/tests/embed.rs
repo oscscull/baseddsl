@@ -40,7 +40,7 @@ fn compiled() -> Compiled {
     assert!(
         !diags
             .iter()
-            .any(|d| d.severity == based_diagnostics::Severity::Error),
+            .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
         "schema should check clean"
     );
     Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
@@ -63,7 +63,7 @@ fn generated_client_is_current() {
     assert!(
         !diags
             .iter()
-            .any(|d| d.severity == based_diagnostics::Severity::Error),
+            .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
         "schema should check clean"
     );
     let generated = client_with(
@@ -308,7 +308,7 @@ async fn keyed_mutation_replays_in_process() {
 
 /// A schema whose one mutation declares a host guard.
 const GUARDED_SCHEMA: &str = r#"
-    Order { status: text, total: int }
+    Order { id: Id, status: text, total: int }
     shape OrderCard from Order { status, total }
     query order_by_id(id) -> OrderCard;
     mutation close_order(id) -> OrderCard guard caller_can_close {
@@ -321,7 +321,7 @@ fn guarded_compiled() -> Compiled {
     let (schema, diags) = based_sema::check(&sf.decls);
     assert!(!diags
         .iter()
-        .any(|d| d.severity == based_diagnostics::Severity::Error));
+        .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"));
     Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
 }
 

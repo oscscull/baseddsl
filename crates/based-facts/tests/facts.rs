@@ -18,11 +18,12 @@ fn of_kind(fs: &[Fact], kind: FactKind) -> Vec<&Fact> {
 }
 
 // The canonical case: an inverse edge (`items: OrderItem[]`) whose forward pair is
-// inferred, and the join-key index that traversal forces on the FK-holding model.
+// inferred. The traversal forces an explicit `@index order` on the FK-holding model
+// (else E0260); that written index is not a shown fact — only the pairing is.
 const TRAVERSAL: &str = r#"
     @sort(placed_at desc)
-    Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
-    OrderItem { order: Order, qty: int }
+    Order { id: Id, placed_at: timestamp, items: OrderItem[], @index placed_at }
+    OrderItem { id: Id, order: Order, qty: int, @index order }
     shape O from Order { first_qty = items.qty }
     query orders() -> O[];
 "#;
@@ -45,36 +46,15 @@ fn inferred_inverse_is_shown() {
     assert!(inv[0].nav.is_some(), "inverse fact carries a nav target");
 }
 
-#[test]
-fn inferred_index_matches_ddl_naming() {
-    let fs = facts_of(TRAVERSAL);
-    let idx = of_kind(&fs, FactKind::InferredIndex);
-    assert_eq!(idx.len(), 1, "{fs:#?}");
-    // No soft-delete on OrderItem; FK field `order` -> physical `order_id`.
-    assert_eq!(idx[0].label, "index inf_order_item_order (order_id)");
-}
-
 // Facts anchor at narrow spans (a name ident / the inducing member), never a whole
 // declaration — a whole-decl anchor would make the hover surface the fact on every
 // token inside the decl body.
 
 #[test]
-fn inferred_index_anchors_on_the_inducing_forward_edge() {
-    let fs = facts_of(TRAVERSAL);
-    let idx = of_kind(&fs, FactKind::InferredIndex);
-    assert_eq!(idx.len(), 1, "{fs:#?}");
-    // The `order` field ident in `OrderItem { order: Order, … }` — the FK the
-    // index covers — not the whole `OrderItem` decl.
-    let at = TRAVERSAL.find("order: Order").unwrap() as u32;
-    assert_eq!(idx[0].span.start, at, "{:#?}", idx[0]);
-    assert_eq!(idx[0].span.end, at + "order".len() as u32, "{:#?}", idx[0]);
-}
-
-#[test]
 fn callable_facts_anchor_on_the_name_ident() {
     let src = r#"
-        Org { name: text }
-        Product { org: Org, name: text, @index org }
+        Org { id: Id, name: text }
+        Product { id: Id, org: Org, name: text, @index org }
         shape P from Product { name }
         query my_products() -> P[] where (org = $ctx.org) order (name);
     "#;
@@ -91,8 +71,8 @@ fn callable_facts_anchor_on_the_name_ident() {
 #[test]
 fn mutation_ctx_fact_anchors_on_the_name_ident() {
     let src = r#"
-        Org { name: text }
-        Product { org: Org, name: text }
+        Org { id: Id, name: text }
+        Product { id: Id, org: Org, name: text }
         shape P from Product { name }
         mutation add_product(name: text) -> P {
           create Product { name = $name, org = $ctx.org };
@@ -116,8 +96,8 @@ fn explicit_inverse_pairing_is_not_shown() {
     // "show, don't write" fact.
     let fs = facts_of(
         r#"
-        Order { placed_at: timestamp, items: OrderItem[] (OrderItem.order) }
-        OrderItem { order: Order, qty: int }
+        Order { id: Id, placed_at: timestamp, items: OrderItem[] (OrderItem.order) }
+        OrderItem { id: Id, order: Order, qty: int }
         shape O from Order { placed_at }
         query orders() -> O[] order (placed_at);
     "#,
@@ -129,34 +109,12 @@ fn explicit_inverse_pairing_is_not_shown() {
 }
 
 #[test]
-fn soft_delete_column_leads_the_inferred_index() {
-    // A `@soft_delete` model prepends its tombstone column to the inferred key
-    // (predicate-leading — MariaDB has no partial indexes), matching `sql::ddl`.
-    let fs = facts_of(
-        r#"
-        @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, placed_at: timestamp, items: OrderItem[], @index placed_at }
-        @soft_delete(deleted_at)
-        OrderItem { deleted_at: timestamp?, order: Order, qty: int }
-        shape O from Order { first_qty = items.qty }
-        query orders() -> O[] order (placed_at);
-    "#,
-    );
-    let idx = of_kind(&fs, FactKind::InferredIndex);
-    assert_eq!(idx.len(), 1, "{fs:#?}");
-    assert_eq!(
-        idx[0].label,
-        "index inf_order_item_deleted_at_order (deleted_at, order_id)"
-    );
-}
-
-#[test]
 fn no_derived_facts_on_a_flat_schema() {
     // No relations, no traversal -> no inverse/index facts. A query still resolves a
     // shape, so that one fact remains.
     let fs = facts_of(
         r#"
-        Product { name: text, @index name }
+        Product { id: Id, name: text, @index name }
         shape P from Product { name }
         query products() -> P[] order (name);
     "#,
@@ -165,7 +123,6 @@ fn no_derived_facts_on_a_flat_schema() {
         of_kind(&fs, FactKind::InferredInverse).is_empty(),
         "{fs:#?}"
     );
-    assert!(of_kind(&fs, FactKind::InferredIndex).is_empty(), "{fs:#?}");
     assert!(of_kind(&fs, FactKind::CtxRequirement).is_empty(), "{fs:#?}");
 }
 
@@ -175,7 +132,7 @@ fn resolved_query_shape_is_shown() {
     // inferred from the return shape + cardinality.
     let fs = facts_of(
         r#"
-        Product { name: text, @index name }
+        Product { id: Id, name: text, @index name }
         shape P from Product { name }
         query products() -> P[] order (name);
     "#,
@@ -189,7 +146,7 @@ fn resolved_query_shape_is_shown() {
 fn get_query_resolves_to_singular() {
     let fs = facts_of(
         r#"
-        Product { sku: text (unique), name: text }
+        Product { id: Id, sku: text (unique), name: text }
         shape P from Product { name }
         query product(sku) -> P;
     "#,
@@ -205,8 +162,8 @@ fn ctx_requirement_is_shown_typed() {
     // field is inferred as a relation  — nothing in source declares it.
     let fs = facts_of(
         r#"
-        Org { name: text }
-        Product { org: Org, name: text, @index org }
+        Org { id: Id, name: text }
+        Product { id: Id, org: Org, name: text, @index org }
         shape P from Product { name }
         query my_products() -> P[] where (org = $ctx.org) order (name);
     "#,

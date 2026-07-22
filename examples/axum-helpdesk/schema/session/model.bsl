@@ -3,6 +3,7 @@
 # desk later trusts as `$ctx` is derived here, never taken from a request body.
 @scope Tenant
 Session {
+  id:    Id
   org:   Org
   user:  User
   token: text

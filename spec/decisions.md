@@ -177,6 +177,10 @@ implicit `id` is **`uuid` by default** (distributed-friendly, non-enumerable; Ma
   to a relation field (e.g. `org`) compares against that relation's FK column.
 
 ## D2 — `id` implicit; timestamps are decorated, never implicit
+> **Revised by D103 (NF11):** `id` is no longer implicit — a model that declares no `id` is
+> error `E0261` (a PK is load-bearing, so principle 2 governs its omission), fixed by writing
+> `id: Id`. The rest of this entry (timestamps decorated, never implicit) stands.
+
 Only **`id: Id`** is implicit (single safe meaning; principle 2 holds). Created/updated
 timestamps are NOT implicit — making them so would force `updated_at` onto tables that don't
 want it, violating principle 2. They are a real declared field plus a decorator that marks the
@@ -436,6 +440,12 @@ A `filter name(params) = predicate` declares no model, so its column paths belon
   body (filter params carry no declared column, so arg/usage agreement is unchecked).
 
 ## D15 — Index inference, baseline emission, and the index lints
+> **Revised by D103 (NF11):** the inferred join-key baseline is retired — a traversed join
+> key (and a scanning root filter) with no covering `@index` is now error `E0260`, not a
+> silent auto-index; `W0103` is gone (promoted to `E0260`). `W0104`/`W0105` and the
+> `unindexed(…)` opt-out stand. A written `@index` on a soft-delete model keeps the
+> predicate-leading rendering described below.
+
 How indexing.md's inference + bidirectional lint lower (`based-sema::indexes`; DDL emission in
 `based-codegen::sql`). Closed-world (D5) is what makes this decidable: the access layer *is* the
 full set of generated SQL, so "a query will scan" and "no query uses it" are facts, not guesses.
@@ -4523,6 +4533,16 @@ sugar over existing machinery — approved, queued, no silent-DDL concern.
 indexing.md (Inference → “what you must index”), D2/D15 revised-by-this-entry. Fallout on landing:
 conformance goldens + `spec/examples/commerce` + the four `examples/*` schemas gain explicit
 `@index`/`id` lines; the migration goldens lose the `inf_` indexes. Codes `E0260`/`E0261`.
+
+**Implementation note.** `E0260` subsumes the whole retired `W0103` check, not only the
+join-key case: it fires both on a traversed join key with no covering `@index` *and* on a query
+whose root eq/range/leading-sort filter no index leads with (both "the query will scan"), each
+satisfied by an `@index` or the `unindexed(…)` opt-out and each carrying the autofix. The
+one-key fix rides on the diagnostic as a `Fix{model, line}` (based-diagnostics) that the LSP's
+`code_action` handler turns into a body-insertion edit. Codegen/runtime *lowering* tests
+(dml/mutations/openapi/client-adjacent + the runtime suites) tolerate `E0260` in their clean-schema
+guard — they exercise SQL/client emission, not index completeness, which is covered by based-sema's
+tests + the conformance goldens + the (indexed) examples.
 
 ## D104 — opaque column + index passthrough via `raw(…)` (NF9)
 

@@ -2,6 +2,7 @@
 # whose columns the create sets; the update branch runs the same self-referential
 # arithmetic an ordinary update allows. E0250 non-unique target, E0253 soft-delete.
 Page {
+  id: Id
   path: text (unique)
   hits: int
 }
@@ -13,6 +14,7 @@ mutation record_hit(path: text) -> PageRow {
 }
 
 Note {
+  id: Id
   slug: text
   body: text
 }
@@ -25,6 +27,7 @@ mutation upsert_note(slug: text, body: text) -> NoteRow {
 
 @soft_delete(deleted_at)
 Tag {
+  id: Id
   deleted_at: timestamp?
   label: text (unique)
 }

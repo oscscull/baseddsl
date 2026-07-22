@@ -4,6 +4,7 @@
 @soft_delete(deleted_at)
 @sort(placed_at desc)
 Order {
+  id: Id
   deleted_at: timestamp?
   placed_by:  User
   total:      int
@@ -12,11 +13,13 @@ Order {
 }
 
 OrderItem {
+  id: Id
   order: Order
   qty:   int
 }
 
 User {
+  id: Id
   name:  text
   email: text (unique)
   orders: Order[] (Order.placed_by)

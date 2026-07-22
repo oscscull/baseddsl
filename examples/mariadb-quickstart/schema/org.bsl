@@ -1,5 +1,6 @@
 @soft_delete(deleted_at)
 Org {
+  id:         Id
   deleted_at: timestamp?
   name:       text
   slug:       text (unique)

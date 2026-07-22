@@ -87,7 +87,7 @@ pub struct TableSnap {
     pub sort: Vec<(String, String)>,
     /// Columns, sorted by name.
     pub columns: Vec<ColumnSnap>,
-    /// Indexes (declared + inferred), sorted by name.
+    /// Declared indexes, sorted by name.
     pub indexes: Vec<IndexSnap>,
 }
 
@@ -110,8 +110,6 @@ pub struct IndexSnap {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
-    /// An engine-inferred join-key baseline index vs. a declared `@index`.
-    pub inferred: bool,
 }
 
 impl Snapshot {
@@ -291,35 +289,31 @@ fn canonical_scope_alts(alts: &[Vec<String>]) -> Vec<Vec<String>> {
     out
 }
 
-/// Declared `@index`es + the inferred join-key baseline, each resolved to
-/// physical columns and its stable `idx_`/`uq_`/`inf_` name. Mirrors `sql::ddl`'s
-/// naming so the snapshot's index identity matches the generated DDL exactly — the
-/// soft-delete column is prepended to an inferred index (predicate-leading).
+/// Declared `@index`es resolved to physical columns and their stable `idx_`/`uq_`
+/// name. Mirrors `sql::ddl`'s naming so the snapshot's index identity matches the
+/// generated DDL exactly — a non-unique index on a soft-delete model prepends the
+/// tombstone column (predicate-leading).
 fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
-    let mut out = Vec::new();
-    for idx in &model.indexes {
-        let cols: Vec<String> = idx.columns.iter().map(|c| physical_col(model, c)).collect();
-        out.push(IndexSnap {
-            name: index_name(if idx.unique { "uq" } else { "idx" }, &model.table, &cols),
-            columns: cols,
-            unique: idx.unique,
-            inferred: false,
-        });
-    }
-    for idx in &model.inferred_indexes {
-        let mut fields = idx.columns.clone();
-        if let Some(sd) = &model.soft_delete {
-            fields.insert(0, sd.field.clone());
-        }
-        let cols: Vec<String> = fields.iter().map(|c| physical_col(model, c)).collect();
-        out.push(IndexSnap {
-            name: index_name("inf", &model.table, &cols),
-            columns: cols,
-            unique: false,
-            inferred: true,
-        });
-    }
-    out
+    model
+        .indexes
+        .iter()
+        .map(|idx| {
+            let mut fields = idx.columns.clone();
+            if !idx.unique {
+                if let Some(sd) = &model.soft_delete {
+                    if fields.first() != Some(&sd.field) {
+                        fields.insert(0, sd.field.clone());
+                    }
+                }
+            }
+            let cols: Vec<String> = fields.iter().map(|c| physical_col(model, c)).collect();
+            IndexSnap {
+                name: index_name(if idx.unique { "uq" } else { "idx" }, &model.table, &cols),
+                columns: cols,
+                unique: idx.unique,
+            }
+        })
+        .collect()
 }
 
 fn soft_delete_snap(sd: &SoftDelete) -> (String, String) {
@@ -561,9 +555,6 @@ fn render_table(out: &mut String, t: &TableSnap) {
         let mut line = format!("  index {} ({cols})", i.name);
         if i.unique {
             line.push_str(" unique");
-        }
-        if i.inferred {
-            line.push_str(" inferred");
         }
         line.push('\n');
         out.push_str(&line);
@@ -872,12 +863,10 @@ fn parse_index(rest: &str, line: usize) -> Result<IndexSnap, ParseError> {
     };
     let flags = after[close + 1..].trim();
     let unique = flags.split_whitespace().any(|f| f == "unique");
-    let inferred = flags.split_whitespace().any(|f| f == "inferred");
 
     Ok(IndexSnap {
         name: name.trim().to_string(),
         columns,
         unique,
-        inferred,
     })
 }

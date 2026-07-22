@@ -1,6 +1,6 @@
 DIAGNOSTICS
+  E0260: query `my_org_orders` will scan `Order`: no index leads with any of (org)
   W0100: `list` query `my_org_orders` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
-  W0103: query `my_org_orders` will scan `Order`: no index leads with any of (org)
 SCHEMA
 model Org  table=org  soft_delete=deleted_at(timestamp)
   id: Id

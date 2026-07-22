@@ -48,8 +48,19 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         });
     }
 
-    // Implicit `id: Id` unless the model declares its own key .
+    // A model's primary key is load-bearing and written in source. A model that
+    // declares no `id` field is an error (`E0261`) with a one-key autofix; the `id`
+    // member is still synthesized so the rest of resolution + codegen has a PK to
+    // key on, but the source must name it.
     if !seen.contains_key("id") {
+        sink.error_fix(
+            code::NO_ID,
+            m.name.span,
+            format!("model `{}` declares no `id`", m.name.node),
+            "every model needs a primary key — add an `id: Id` field",
+            m.name.node.clone(),
+            "id: Id",
+        );
         members.insert(
             0,
             RMember {
@@ -83,7 +94,6 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         created: None,
         updated: None,
         indexes: Vec::new(),
-        inferred_indexes: Vec::new(),
         unique_cols: Vec::new(),
         was: model_was(m),
     }

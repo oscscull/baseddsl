@@ -92,7 +92,6 @@ pub mod code {
     pub const UNKNOWN_DECORATOR: &str = "W0101";
     pub const RAW_SOFT_DELETE_GAP: &str = "W0102";
     // index lints
-    pub const UNINDEXED: &str = "W0103"; // a query will scan: no usable index, no annotation
     pub const USELESS_INDEX: &str = "W0104"; // declared index no query uses (pure write-tax)
     pub const STALE_UNINDEXED: &str = "W0105"; // unindexed(...) on a query that is indexed
     pub const STALE_UNSCOPED: &str = "W0106"; // unscoped(...) on a callable whose model has no @scope
@@ -127,6 +126,11 @@ pub mod code {
     pub const AGG_CONTEXT: &str = "E0243"; // `group by` / `having` on a query whose return shape carries no aggregate
     pub const AGG_PAGE: &str = "E0244"; // `page` on an aggregate query (grouped keyset paging is unsupported)
     pub const AGG_COMPOSE: &str = "E0245"; // an aggregate shape nests/references a relation, is nested/referenced, or is a mutation return
+
+    // explicit-in-source structure (E026x): the two engine-created facts that carry
+    // independent write/disk cost are written in source, not silently derived.
+    pub const UNINDEXED_JOIN: &str = "E0260"; // a traversed join key (or a query filter) is not covered by an `@index` (opt out with `unindexed(…)`)
+    pub const NO_ID: &str = "E0261"; // a model declares no `id` field
 
     // --- upsert (`create … on conflict update`) ---
     pub const UPSERT_TARGET: &str = "E0250"; // the conflict target is not a declared unique key (unique column / `@index (…) unique` / pk)
@@ -309,11 +313,6 @@ pub struct RModel {
     pub created: Option<String>,
     pub updated: Option<String>,
     pub indexes: Vec<RIndex>,
-    /// Engine-inferred baseline indexes: FK columns of inverse
-    /// edges the access layer actually traverses, minus anything a declared index
-    /// already covers. Columns are field-level (like `indexes`); DDL prepends the
-    /// soft-delete column (predicate-leading). Never `unique`.
-    pub inferred_indexes: Vec<RIndex>,
     /// Field names that are individually unique (id, `(unique)`, single-col unique
     /// index). Drives `get`-must-be-keyed lint and codegen constraints.
     pub unique_cols: Vec<String>,
@@ -599,6 +598,26 @@ impl Sink {
     ) {
         self.diags
             .push(Diagnostic::warning(code, msg).at(span).note(note));
+    }
+
+    /// An error carrying a note and a one-key autofix (insert `line` into model
+    /// `model`'s body).
+    #[allow(clippy::too_many_arguments)]
+    pub fn error_fix(
+        &mut self,
+        code: &'static str,
+        span: Span,
+        msg: impl Into<String>,
+        note: impl Into<String>,
+        model: impl Into<String>,
+        line: impl Into<String>,
+    ) {
+        self.diags.push(
+            Diagnostic::error(code, msg)
+                .at(span)
+                .note(note)
+                .with_fix(model, line),
+        );
     }
 }
 

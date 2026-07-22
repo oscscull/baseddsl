@@ -8,6 +8,7 @@ scope Tenant (org: Org = $ctx.org)
 
 @soft_delete(deleted_at)
 Org {
+  id: Id
   deleted_at: timestamp?
   name:       text
 }
@@ -15,6 +16,7 @@ Org {
 @soft_delete(deleted_at)
 @scope Tenant
 Order {
+  id: Id
   deleted_at: timestamp?
   org:        Org
   total:      int

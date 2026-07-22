@@ -4,6 +4,7 @@
 @sort(created_at desc)
 @scope Tenant, Author
 DraftNote {
+  id:         Id
   created_at: timestamp (default now())
   org:        Org
   author:     User

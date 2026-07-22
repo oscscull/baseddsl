@@ -1,11 +1,12 @@
 # A destructive mutation returns `ok`: the primary model is the first real
 # DELETE's, scope still applies, and there is no return shape.
-Org { name: text }
+Org { id: Id, name: text }
 scope Tenant (org: Org = $ctx.org)
 
 @soft_delete(deleted_at)
 @scope Tenant
 Comment {
+  id: Id
   deleted_at: timestamp?
   org:        Org
   body:       text

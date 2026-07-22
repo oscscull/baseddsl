@@ -1,5 +1,5 @@
 DIAGNOSTICS
-  (none)
+  E0260: query `busy_orders` joins `OrderItem` through `order` with no covering index — the join will scan
 SCHEMA
 model Order  table=order
   id: Id
@@ -9,6 +9,5 @@ model OrderItem  table=order_item
   id: Id
   order: -> Order  fk=order_id
   qty: int
-  index inferred(order)
 shape OrderCard from Order
 query busy_orders  target=Order verb=list many  shape=OrderCard

@@ -10,6 +10,7 @@ enum Role { requester, agent, admin }
 
 @sort(name)
 User {
+  id:    Id
   org:   Org
   name:  text
   email: text (unique)

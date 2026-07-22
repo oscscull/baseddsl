@@ -42,6 +42,7 @@ fn minimal_schema_is_clean() {
         @soft_delete(deleted_at)
         @sort(name asc)
         Org {
+          id: Id
           deleted_at: timestamp?
           name: text
           slug: text (unique)
@@ -60,13 +61,15 @@ fn resolved_schema_shape() {
         @soft_delete(deleted_at)
         @created(created_at)
         Order {
+          id: Id
           deleted_at: timestamp?
           created_at: timestamp
           placed_by: User
           items: OrderItem[]
         }
-        OrderItem { order: Order, qty: int }
+        OrderItem { id: Id, order: Order, qty: int }
         User {
+          id: Id
           name: text
           placed_orders: Order[] (Order.placed_by)
         }
@@ -114,7 +117,7 @@ fn resolved_schema_shape() {
 fn query_verb_inference() {
     let (schema, diags) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserCard from User { name }
         query user_by_id(id) -> UserCard;
         query users() -> UserCard[];
@@ -138,7 +141,7 @@ fn query_verb_inference() {
 
 #[test]
 fn unknown_model_in_relation() {
-    let (_, d) = analyze("User { org: Org }");
+    let (_, d) = analyze("User { id: Id, org: Org }");
     assert_eq!(errors(&d), ["E0110"]);
 }
 
@@ -146,7 +149,7 @@ fn unknown_model_in_relation() {
 fn unknown_field_in_where() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { name }
         query find(org: Id) -> P[] { list Product where (missing = $org); }
         "#,
@@ -158,7 +161,7 @@ fn unknown_field_in_where() {
 fn cannot_traverse_scalar() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { deep = name.oops }
         "#,
     );
@@ -169,7 +172,7 @@ fn cannot_traverse_scalar() {
 fn unknown_param_in_where() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { name }
         query find() -> P[] { list Product where (name = $nope); }
         "#,
@@ -185,7 +188,7 @@ fn soft_delete_bad_type() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Doc { deleted_at: int }
+        Doc { id: Id, deleted_at: int }
         "#,
     );
     assert_eq!(errors(&d), ["E0120"]);
@@ -197,7 +200,7 @@ fn soft_delete_requires_nullable_timestamp() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Doc { deleted_at: timestamp }
+        Doc { id: Id, deleted_at: timestamp }
         "#,
     );
     assert_eq!(errors(&d), ["E0120"]);
@@ -205,13 +208,13 @@ fn soft_delete_requires_nullable_timestamp() {
 
 #[test]
 fn unknown_decorator_warns() {
-    let (_, d) = analyze("@wat\nDoc { name: text }");
+    let (_, d) = analyze("@wat\nDoc { id: Id, name: text }");
     assert_eq!(codes(&d), ["W0101"]);
 }
 
 #[test]
 fn index_unknown_column() {
-    let (_, d) = analyze("Doc { name: text\n @index nope }");
+    let (_, d) = analyze("Doc { id: Id, name: text\n @index nope }");
     assert_eq!(errors(&d), ["E0122"]);
 }
 
@@ -221,8 +224,8 @@ fn index_unknown_column() {
 fn inverse_ambiguous() {
     let (_, d) = analyze(
         r#"
-        User { invites: Membership[] }
-        Membership { inviter: User, invitee: User }
+        User { id: Id, invites: Membership[] }
+        Membership { id: Id, inviter: User, invitee: User }
         "#,
     );
     assert_eq!(errors(&d), ["E0124"]);
@@ -232,8 +235,8 @@ fn inverse_ambiguous() {
 fn inverse_ref_not_forward_edge() {
     let (_, d) = analyze(
         r#"
-        User { posts: Post[] (Post.nope) }
-        Post { author: User }
+        User { id: Id, posts: Post[] (Post.nope) }
+        Post { id: Id, author: User }
         "#,
     );
     assert_eq!(errors(&d), ["E0123"]);
@@ -245,8 +248,8 @@ fn inverse_ref_not_forward_edge() {
 fn shape_bare_relation_rejected() {
     let (_, d) = analyze(
         r#"
-        User { org: Org }
-        Org { name: text }
+        User { id: Id, org: Org }
+        Org { id: Id, name: text }
         shape U from User { org }
         "#,
     );
@@ -257,7 +260,7 @@ fn shape_bare_relation_rejected() {
 fn shape_nest_scalar_rejected() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape U from User { name { x } }
         "#,
     );
@@ -268,8 +271,8 @@ fn shape_nest_scalar_rejected() {
 fn shape_nest_and_reach_ok() {
     assert_clean(
         r#"
-        User { name: text, org: Org }
-        Org { name: text, slug: text }
+        User { id: Id, name: text, org: Org }
+        Org { id: Id, name: text, slug: text }
         shape U from User {
           name
           city = org.name
@@ -285,9 +288,9 @@ fn shape_nest_ref_ok_to_one_and_to_many() {
     // relation, and a referenced shape may itself nest (inline or by name).
     assert_clean(
         r#"
-        User { name: text, org: Org, placed_orders: Order[] (Order.placed_by) }
-        Org { name: text, slug: text }
-        Order { placed_by: User, total: int }
+        User { id: Id, name: text, org: Org, placed_orders: Order[] (Order.placed_by) }
+        Org { id: Id, name: text, slug: text }
+        Order { id: Id, placed_by: User, total: int }
         shape OrgRef from Org { name, slug }
         shape UserRef from User { name, org -> OrgRef }
         shape OrderDetail from Order {
@@ -308,8 +311,8 @@ fn shape_nest_ref_ok_to_one_and_to_many() {
 fn shape_nest_ref_unknown_shape() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
-        Order { placed_by: User }
+        User { id: Id, name: text }
+        Order { id: Id, placed_by: User }
         shape D from Order { placed_by -> Missing }
         "#,
     );
@@ -321,9 +324,9 @@ fn shape_nest_ref_model_mismatch() {
     // `OrgRef` projects `Org`, but `placed_by` relates to `User` — never silent.
     let (_, d) = analyze(
         r#"
-        User { name: text }
-        Org { name: text }
-        Order { placed_by: User }
+        User { id: Id, name: text }
+        Org { id: Id, name: text }
+        Order { id: Id, placed_by: User }
         shape OrgRef from Org { name }
         shape D from Order { placed_by -> OrgRef }
         "#,
@@ -335,7 +338,7 @@ fn shape_nest_ref_model_mismatch() {
 fn shape_nest_ref_on_scalar_rejected() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape N from User { name }
         shape D from User { name -> N }
         "#,
@@ -349,8 +352,8 @@ fn shape_nest_ref_cycle_rejected() {
     // the reference that closes the cycle from its own root.
     let (_, d) = analyze(
         r#"
-        User { name: text, placed_orders: Order[] (Order.placed_by) }
-        Order { placed_by: User }
+        User { id: Id, name: text, placed_orders: Order[] (Order.placed_by) }
+        Order { id: Id, placed_by: User }
         shape UserRef from User { placed_orders -> OrderRow }
         shape OrderRow from Order { placed_by -> UserRef }
         "#,
@@ -366,7 +369,7 @@ fn shape_nest_ref_cycle_rejected() {
 fn shape_nest_ref_self_cycle_rejected() {
     let (_, d) = analyze(
         r#"
-        User { name: text, invited_by: User? }
+        User { id: Id, name: text, invited_by: User? }
         shape UserTree from User { name, invited_by -> UserTree }
         "#,
     );
@@ -379,7 +382,7 @@ fn shape_nest_ref_self_cycle_rejected() {
 fn get_must_be_keyed_on_unique() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text, @index name }
         shape P from Product { name }
         query by_name(name) -> P;
         "#,
@@ -391,7 +394,7 @@ fn get_must_be_keyed_on_unique() {
 fn get_on_unique_column_ok() {
     assert_clean(
         r#"
-        Product { sku: text (unique) }
+        Product { id: Id, sku: text (unique) }
         shape P from Product { sku }
         query by_sku(sku) -> P;
         "#,
@@ -408,7 +411,7 @@ fn unknown_return_type() {
 fn edge_binding_must_be_relation() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text, @index name }
         shape P from Product { name }
         query q(x -> name) -> P[];
         "#,
@@ -420,7 +423,7 @@ fn edge_binding_must_be_relation() {
 fn restore_requires_soft_delete() {
     let (_, d) = analyze(
         r#"
-        Doc { name: text }
+        Doc { id: Id, name: text }
         shape D from Doc { name }
         mutation undo(id: Id) -> D { restore Doc where (id = $id); }
         "#,
@@ -432,7 +435,7 @@ fn restore_requires_soft_delete() {
 fn mutation_create_unknown_column() {
     let (_, d) = analyze(
         r#"
-        Doc { name: text? }
+        Doc { id: Id, name: text? }
         shape D from Doc { name }
         mutation make(t: text) -> D { create Doc { nope = $t }; }
         "#,
@@ -448,7 +451,7 @@ fn mutation_create_missing_required_field() {
         r#"
         @soft_delete(deleted_at)
         @created(created_at)
-        Doc { deleted_at: timestamp?, created_at: timestamp, title: text, note: text? }
+        Doc { id: Id, deleted_at: timestamp?, created_at: timestamp, title: text, note: text? }
         shape D from Doc { title }
         mutation make(n: text) -> D { create Doc { note = $n }; }
         "#,
@@ -461,8 +464,8 @@ fn mutation_create_missing_required_relation_fk() {
     // A non-optional forward relation must have its FK set on create.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         mutation make(t: text) -> D { create Doc { title = $t }; }
         "#,
@@ -478,6 +481,7 @@ fn mutation_create_defaulted_and_optional_not_required() {
         @soft_delete(deleted_at)
         @updated(updated_at)
         Doc {
+          id: Id
           deleted_at: timestamp?
           updated_at: timestamp
           title: text
@@ -496,7 +500,7 @@ fn mutation_create_wrong_literal_type_rejected() {
     // twin of the `=` operand-typing on the read side.
     let (_, d) = analyze(
         r#"
-        Doc { count: int, title: text }
+        Doc { id: Id, count: int, title: text }
         shape D from Doc { title }
         mutation make(t: text) -> D { create Doc { count = "lots", title = $t }; }
         "#,
@@ -509,7 +513,7 @@ fn mutation_update_wrong_column_type_rejected() {
     // Assigning one column to another of an incompatible family (text ← int).
     let (_, d) = analyze(
         r#"
-        Doc { count: int, title: text }
+        Doc { id: Id, count: int, title: text }
         shape D from Doc { title }
         mutation rename(id: Id) -> D { update Doc where (id = $id) { title = count }; }
         "#,
@@ -523,8 +527,8 @@ fn mutation_assign_relation_key_is_clean() {
     // matching literal is fine. Correct scalar types pass too.
     assert_clean(
         r#"
-        Org { name: text }
-        Doc { org: Org, count: int, title: text }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, count: int, title: text }
         shape D from Doc { title }
         mutation make(o: Org, t: text) -> D {
           create Doc { org = $o, count = 3, title = $t };
@@ -539,8 +543,8 @@ fn tx_backref_type_mismatch_rejected() {
     // is a family clash (`E0153`), typed through the back-reference.
     let (_, d) = analyze(
         r#"
-        Batch { count: int }
-        Doc { label: text, batch: Batch }
+        Batch { id: Id, count: int }
+        Doc { id: Id, label: text, batch: Batch }
         shape D from Doc { label }
         mutation run(n: int) -> D {
           tx {
@@ -560,7 +564,7 @@ fn atomic_update_numeric_expr_is_clean() {
     // A self-referential arithmetic SET over numeric columns + a param.
     assert_clean(
         r#"
-        Product { qty: int, price: decimal(10, 2) }
+        Product { id: Id, qty: int, price: decimal(10, 2) }
         shape P from Product { qty, price }
         mutation adjust(id: Id, delta: int) -> P {
           update Product where (id = $id) { qty = qty + $delta };
@@ -576,7 +580,7 @@ fn atomic_update_numeric_expr_is_clean() {
 fn atomic_update_precedence_and_parens_clean() {
     assert_clean(
         r#"
-        Product { qty: int, price: decimal(10, 2) }
+        Product { id: Id, qty: int, price: decimal(10, 2) }
         shape P from Product { qty, price }
         mutation recompute(id: Id, base: int, n: int) -> P {
           update Product where (id = $id) { qty = (qty + $base) * $n - 1 };
@@ -590,7 +594,7 @@ fn atomic_update_expr_in_create_rejected() {
     // A `create` has no existing row to self-reference — arithmetic is update-only.
     let (_, d) = analyze(
         r#"
-        Product { qty: int }
+        Product { id: Id, qty: int }
         shape P from Product { qty }
         mutation make(n: int) -> P { create Product { qty = qty + $n }; }
         "#,
@@ -603,7 +607,7 @@ fn atomic_update_nonnumeric_column_operand_rejected() {
     // A text column can't be an arithmetic operand.
     let (_, d) = analyze(
         r#"
-        Product { qty: int, name: text }
+        Product { id: Id, qty: int, name: text }
         shape P from Product { qty }
         mutation bump(id: Id, n: int) -> P {
           update Product where (id = $id) { qty = name + $n };
@@ -618,7 +622,7 @@ fn atomic_update_nonnumeric_target_rejected() {
     // Assigning a numeric arithmetic result to a text column is the ordinary E0153.
     let (_, d) = analyze(
         r#"
-        Product { qty: int, name: text }
+        Product { id: Id, qty: int, name: text }
         shape P from Product { name }
         mutation bump(id: Id, n: int) -> P {
           update Product where (id = $id) { name = qty + $n };
@@ -634,7 +638,7 @@ fn atomic_update_nonnumeric_target_rejected() {
 fn filter_arity_mismatch() {
     let (_, d) = analyze(
         r#"
-        Product { name: text, active: bool }
+        Product { id: Id, name: text, active: bool }
         shape P from Product { name }
         filter live() = active;
         query q() -> P[] { list Product where (live(1)) order (name); }
@@ -647,7 +651,7 @@ fn filter_arity_mismatch() {
 fn unknown_filter_call() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { name }
         query q() -> P[] { list Product where (ghost()) order (name); }
         "#,
@@ -661,7 +665,7 @@ fn filter_body_resolves_at_call_site() {
     // declaration; they resolve against Product when the query calls it.
     assert_clean(
         r#"
-        Product { name: text, active: bool, stock: int, @index(active, stock) }
+        Product { id: Id, name: text, active: bool, stock: int, @index(active, stock) }
         shape P from Product { name }
         filter sellable = active and stock > 0;
         query q() -> P[] { list Product where (sellable) order (name); }
@@ -675,7 +679,7 @@ fn filter_body_bad_column_at_call_site() {
     // against the call-site model even though the declaration itself parsed.
     let (_, d) = analyze(
         r#"
-        Product { name: text, active: bool }
+        Product { id: Id, name: text, active: bool }
         shape P from Product { name }
         filter sellable = active and stock > 0;
         query q() -> P[] { list Product where (sellable) order (name); }
@@ -689,9 +693,9 @@ fn filter_body_traverses_relation_at_call_site() {
     // A relation-reaching filter path resolves through the call-site model's edges.
     assert_clean(
         r#"
-        City { name: text }
-        Address { city: City }
-        User { name: text, address: Address }
+        City { id: Id, name: text }
+        Address { id: Id, city: City }
+        User { id: Id, name: text, address: Address }
         shape U from User { name }
         filter in_city(c) = address.city.name = $c;
         query users_in(c) -> U[] { list User where (in_city($c)) order (name); }
@@ -705,7 +709,7 @@ fn filter_body_operand_type_checked_at_call_site() {
     // is caught inside the filter body.
     let (_, d) = analyze(
         r#"
-        Product { name: text, stock: int }
+        Product { id: Id, name: text, stock: int }
         shape P from Product { name }
         filter cheap = stock ~ "x";
         query q() -> P[] { list Product where (cheap) order (name); }
@@ -720,7 +724,7 @@ fn recursive_filter_terminates() {
     // re-expansion. (Whether to *reject* recursion is a separate policy.)
     let (_, d) = analyze(
         r#"
-        Product { name: text, active: bool }
+        Product { id: Id, name: text, active: bool, @index active }
         shape P from Product { name }
         filter loopy = active and loopy;
         query q() -> P[] { list Product where (loopy) order (name); }
@@ -733,7 +737,7 @@ fn recursive_filter_terminates() {
 fn unknown_function() {
     let (_, d) = analyze(
         r#"
-        Product { name: text (default bogus()) }
+        Product { id: Id, name: text (default bogus()) }
         "#,
     );
     assert_eq!(errors(&d), ["E0116"]);
@@ -745,7 +749,7 @@ fn unknown_function() {
 fn nondeterministic_list_warns() {
     let (_, d) = analyze(
         r#"
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { name }
         query all() -> P[];
         "#,
@@ -758,7 +762,7 @@ fn model_sort_silences_nondeterministic_lint() {
     assert_clean(
         r#"
         @sort(name asc)
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { name }
         query all() -> P[];
         "#,
@@ -772,7 +776,7 @@ fn bare_model_sort_term_defaults_to_asc() {
     let (schema, d) = analyze(
         r#"
         @sort(name)
-        Product { name: text }
+        Product { id: Id, name: text }
         shape P from Product { name }
         query all() -> P[];
         "#,
@@ -788,7 +792,7 @@ fn raw_soft_delete_gap_warns() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Product { deleted_at: timestamp?, name: text }
+        Product { id: Id, deleted_at: timestamp?, name: text }
         shape P from Product { name }
         query q() -> P[] { list Product where (raw`name is not null`) order (name); }
         "#,
@@ -800,7 +804,7 @@ fn raw_soft_delete_gap_warns() {
 
 #[test]
 fn duplicate_model_and_field() {
-    let (_, d) = analyze("Doc { name: text, name: int }\nDoc { x: int }");
+    let (_, d) = analyze("Doc { id: Id, name: text, name: int }\nDoc { id: Id, x: int }");
     assert!(errors(&d).contains(&"E0104"));
     assert!(errors(&d).contains(&"E0100"));
 }
@@ -812,7 +816,7 @@ fn like_on_non_text_rejected() {
     // `~` needs a text column; `qty` is an int.
     let (_, d) = analyze(
         r#"
-        Product { name: text, qty: int }
+        Product { id: Id, name: text, qty: int }
         shape P from Product { name }
         query q(x) -> P[] { list Product where (qty ~ "%a%") order (name); }
         "#,
@@ -824,7 +828,7 @@ fn like_on_non_text_rejected() {
 fn like_on_text_ok() {
     assert_clean(
         r#"
-        Product { name: text, @index name }
+        Product { id: Id, name: text, @index name }
         shape P from Product { name }
         query q() -> P[] { list Product where (name ~ "%a%") order (name); }
         "#,
@@ -836,8 +840,8 @@ fn ordering_on_relation_rejected() {
     // `<` on a relation edge is nonsense.
     let (_, d) = analyze(
         r#"
-        Product { name: text, maker: Maker }
-        Maker { name: text }
+        Product { id: Id, name: text, maker: Maker }
+        Maker { id: Id, name: text }
         shape P from Product { name }
         query q() -> P[] { list Product where (maker < "x") order (name); }
         "#,
@@ -850,7 +854,7 @@ fn literal_type_mismatch_rejected() {
     // comparing an int column to a string literal.
     let (_, d) = analyze(
         r#"
-        Product { name: text, qty: int }
+        Product { id: Id, name: text, qty: int }
         shape P from Product { name }
         query q() -> P[] { list Product where (qty = "lots") order (name); }
         "#,
@@ -862,7 +866,7 @@ fn literal_type_mismatch_rejected() {
 fn bool_column_vs_number_rejected() {
     let (_, d) = analyze(
         r#"
-        Product { name: text, active: bool }
+        Product { id: Id, name: text, active: bool }
         shape P from Product { name }
         query q() -> P[] { list Product where (active > 3) order (name); }
         "#,
@@ -876,8 +880,8 @@ fn relation_compared_to_uuid_literal_ok() {
     // a relation edge is comparable to its key (a uuid string).
     assert_clean(
         r#"
-        Product { name: text, maker: Maker, @index maker }
-        Maker { name: text }
+        Product { id: Id, name: text, maker: Maker, @index maker }
+        Maker { id: Id, name: text }
         shape P from Product { name }
         query q() -> P[] { list Product where (maker = "0f-uuid") order (name); }
         "#,
@@ -888,7 +892,7 @@ fn relation_compared_to_uuid_literal_ok() {
 fn column_vs_column_family_mismatch_rejected() {
     let (_, d) = analyze(
         r#"
-        Product { name: text, qty: int }
+        Product { id: Id, name: text, qty: int }
         shape P from Product { name }
         query q() -> P[] { list Product where (qty = name) order (name); }
         "#,
@@ -901,7 +905,7 @@ fn param_type_disagrees_with_column_rejected() {
     // `id` param annotated `int` but maps to a text column.
     let (_, d) = analyze(
         r#"
-        Product { sku: text }
+        Product { id: Id, sku: text }
         shape P from Product { sku }
         query q(sku: int) -> P[];
         "#,
@@ -914,8 +918,8 @@ fn relation_param_typed_as_model_ok() {
     assert_clean(
         r#"
         @sort(name asc)
-        Product { name: text, maker: Maker, @index maker }
-        Maker { name: text }
+        Product { id: Id, name: text, maker: Maker, @index maker }
+        Maker { id: Id, name: text }
         shape P from Product { name }
         query by_maker(maker: Maker) -> P[];
         "#,
@@ -926,9 +930,9 @@ fn relation_param_typed_as_model_ok() {
 fn relation_param_typed_wrong_model_rejected() {
     let (_, d) = analyze(
         r#"
-        Product { name: text, maker: Maker }
-        Maker { name: text }
-        Other { name: text }
+        Product { id: Id, name: text, maker: Maker }
+        Maker { id: Id, name: text }
+        Other { id: Id, name: text }
         shape P from Product { name }
         query by_maker(maker: Other) -> P[];
         "#,
@@ -942,8 +946,8 @@ fn relation_param_typed_as_id_ok() {
     assert_clean(
         r#"
         @sort(name asc)
-        Product { name: text, maker: Maker, @index maker }
-        Maker { name: text }
+        Product { id: Id, name: text, maker: Maker, @index maker }
+        Maker { id: Id, name: text }
         shape P from Product { name }
         query by_maker(maker: Id) -> P[];
         "#,
@@ -953,63 +957,61 @@ fn relation_param_typed_as_id_ok() {
 // ---------- index inference + lints -----------------------------------------
 
 #[test]
-fn traversed_inverse_edge_infers_join_key() {
-    // The shape reaches `items.qty` (an inverse hop), so OrderItem needs an index
-    // on the FK the join runs through — inferred, not declared.
-    let (schema, diags) = analyze(
+fn traversed_join_key_needs_index() {
+    // The shape reaches `items.qty` (an inverse hop), so OrderItem's join key is
+    // traversed with no covering `@index` — a hard error, no silent auto-index.
+    let (_, d) = analyze(
         r#"
         @sort(placed_at desc)
-        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
-        OrderItem { order: Order, qty: int }
+        Order { id: Id, placed_at: timestamp, items: OrderItem[], @index placed_at }
+        OrderItem { id: Id, order: Order, qty: int }
         shape O from Order { first_qty = items.qty }
         query orders() -> O[];
         "#,
     );
-    assert!(diags.is_empty(), "{:?}", codes(&diags));
-    let inferred = &schema.model("OrderItem").unwrap().inferred_indexes;
-    assert_eq!(inferred.len(), 1, "{inferred:?}");
-    assert_eq!(inferred[0].columns, vec!["order".to_string()]);
+    assert_eq!(codes(&d), vec!["E0260"]);
+    // The autofix inserts `@index order` on the model that owns the join key.
+    let fix = d[0].fix.as_ref().expect("fix");
+    assert_eq!(fix.model, "OrderItem");
+    assert_eq!(fix.line, "@index order");
 }
 
 #[test]
-fn inferred_join_key_deduped_by_declared_index() {
-    // The user already declared the join-key index; nothing is inferred, and the
+fn traversed_join_key_satisfied_by_declared_index() {
+    // The user declared the join-key index; the traversal is covered, and the
     // declared index counts as used (no W0104).
-    let (schema, diags) = analyze(
+    assert_clean(
         r#"
         @sort(placed_at desc)
-        Order { placed_at: timestamp, items: OrderItem[], @index placed_at }
-        OrderItem { order: Order, qty: int, @index order }
+        Order { id: Id, placed_at: timestamp, items: OrderItem[], @index placed_at }
+        OrderItem { id: Id, order: Order, qty: int, @index order }
         shape O from Order { first_qty = items.qty }
         query orders() -> O[];
         "#,
     );
-    assert!(diags.is_empty(), "{:?}", codes(&diags));
-    assert!(schema
-        .model("OrderItem")
-        .unwrap()
-        .inferred_indexes
-        .is_empty());
 }
 
 #[test]
-fn unindexed_query_warns() {
+fn unindexed_query_errors() {
     // `by_status` filters `status`, but no index leads with it — the query scans.
     let (_, d) = analyze(
         r#"
-        Product { name: text, status: text, @index name }
+        Product { id: Id, name: text, status: text, @index name }
         shape P from Product { name }
         query by_status(status) -> P[] order (name);
         "#,
     );
-    assert_eq!(codes(&d), vec!["W0103"]);
+    assert_eq!(codes(&d), vec!["E0260"]);
+    let fix = d[0].fix.as_ref().expect("fix");
+    assert_eq!(fix.model, "Product");
+    assert_eq!(fix.line, "@index status");
 }
 
 #[test]
 fn unindexed_satisfied_by_declared_index() {
     assert_clean(
         r#"
-        Product { name: text, status: text, @index status }
+        Product { id: Id, name: text, status: text, @index status }
         shape P from Product { name }
         query by_status(status) -> P[] order (name);
         "#,
@@ -1018,10 +1020,10 @@ fn unindexed_satisfied_by_declared_index() {
 
 #[test]
 fn unindexed_satisfied_by_unsafe_annotation() {
-    // The loud opt-out: greppable, silences W0103, never silently dropped.
+    // The loud opt-out: greppable, silences the unindexed error, never silently dropped.
     assert_clean(
         r#"
-        Product { name: text, status: text, @index name }
+        Product { id: Id, name: text, status: text, @index name }
         shape P from Product { name }
         query by_status(status) -> P[] order (name) unindexed(unsafe, "ops table, stays tiny");
         "#,
@@ -1032,7 +1034,7 @@ fn unindexed_satisfied_by_unsafe_annotation() {
 fn unindexed_satisfied_by_max_rows_in_block() {
     assert_clean(
         r#"
-        Product { name: text, status: text, @index name }
+        Product { id: Id, name: text, status: text, @index name }
         shape P from Product { name }
         query by_status(s) -> P[] {
           list Product where (status = $s) order (name) unindexed(max_rows: 500);
@@ -1042,25 +1044,25 @@ fn unindexed_satisfied_by_max_rows_in_block() {
 }
 
 #[test]
-fn mutation_where_unindexed_warns() {
+fn mutation_where_unindexed_errors() {
     // A bulk `update` filtering a non-unique, unindexed column scans just like a
-    // query would — W0103 (mutations carry no `unindexed(…)` clause to suppress it).
+    // query would — E0260 (mutations carry no `unindexed(…)` clause to suppress it).
     let (_, d) = analyze(
         r#"
-        Product { name: text, status: text }
+        Product { id: Id, name: text, status: text }
         shape P from Product { name }
         mutation archive(s: text) -> P { update Product where (status = $s) { name = "x" }; }
         "#,
     );
-    assert_eq!(codes(&d), vec!["W0103"]);
+    assert_eq!(codes(&d), vec!["E0260"]);
 }
 
 #[test]
 fn mutation_where_keyed_on_unique_is_clean() {
-    // The common case: a write keyed on `id` (unique) is served, no W0103.
+    // The common case: a write keyed on `id` (unique) is served, no error.
     assert_clean(
         r#"
-        Product { name: text, status: text }
+        Product { id: Id, name: text, status: text }
         shape P from Product { name }
         mutation rename(id: Id, n: text) -> P { update Product where (id = $id) { name = $n }; }
         "#,
@@ -1073,7 +1075,7 @@ fn mutation_where_marks_index_used() {
     // the usage pool keeps W0104 from firing on a mutation-only index.
     assert_clean(
         r#"
-        Product { name: text, status: text, @index status }
+        Product { id: Id, name: text, status: text, @index status }
         shape P from Product { name }
         mutation archive(s: text) -> P { update Product where (status = $s) { name = "x" }; }
         "#,
@@ -1085,7 +1087,7 @@ fn stale_unindexed_annotation_warns() {
     // `sku` is unique, so the get is indexed — the annotation is stale.
     let (_, d) = analyze(
         r#"
-        Product { sku: text (unique), name: text }
+        Product { id: Id, sku: text (unique), name: text }
         shape P from Product { name }
         query by_sku(sku) -> P unindexed(max_rows: 10);
         "#,
@@ -1099,7 +1101,7 @@ fn useless_index_warns() {
     let (_, d) = analyze(
         r#"
         @sort(name asc)
-        Product { name: text, price: int, @index price, @index name }
+        Product { id: Id, name: text, price: int, @index price, @index name }
         shape P from Product { name }
         query all() -> P[];
         "#,
@@ -1109,19 +1111,19 @@ fn useless_index_warns() {
 
 #[test]
 fn paginated_sort_wants_an_index() {
-    // No filter at all: a paginated list still pays for its sort — W0103 unless
+    // No filter at all: a paginated list still pays for its sort — E0260 unless
     // the sort key is indexed.
     let (_, d) = analyze(
         r#"
-        Product { name: text, created_at: timestamp }
+        Product { id: Id, name: text, created_at: timestamp }
         shape P from Product { name }
         query recent() -> P[] order (created_at desc) page (20);
         "#,
     );
-    assert_eq!(codes(&d), vec!["W0103"]);
+    assert_eq!(codes(&d), vec!["E0260"]);
     assert_clean(
         r#"
-        Product { name: text, created_at: timestamp, @index created_at }
+        Product { id: Id, name: text, created_at: timestamp, @index created_at }
         shape P from Product { name }
         query recent() -> P[] order (created_at desc) page (20);
         "#,
@@ -1132,22 +1134,22 @@ fn paginated_sort_wants_an_index() {
 fn unique_index_is_never_useless() {
     // A unique index is a constraint, not a perf structure — exempt from W0104
     // even with no queries at all.
-    assert_clean("M { a: text, b: text, @index(a, b) unique }");
+    assert_clean("M { id: Id, a: text, b: text, @index(a, b) unique }");
 }
 
 #[test]
 fn index_duplicating_unique_constraint_warns() {
-    let (_, d) = analyze("Org { slug: text (unique), @index slug }");
+    let (_, d) = analyze("Org { id: Id, slug: text (unique), @index slug }");
     assert_eq!(codes(&d), vec!["W0104"]);
 }
 
 #[test]
 fn or_predicate_is_opaque_to_unindexed() {
-    // First-column reasoning can't judge an `or`; W0103 stays silent rather than
+    // First-column reasoning can't judge an `or`; the check stays silent rather than
     // guess (precision over recall).
     assert_clean(
         r#"
-        Product { name: text, a: text, b: text, @index name }
+        Product { id: Id, name: text, a: text, b: text, @index name }
         shape P from Product { name }
         query q() -> P[] { list Product where (a = "x" or b = "y") order (name); }
         "#,
@@ -1160,21 +1162,21 @@ fn scope_filter_counts_toward_pattern() {
     // columns are part of every query's index pattern.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
     );
-    assert_eq!(codes(&d), vec!["W0103"]);
+    assert_eq!(codes(&d), vec!["E0260"]);
     assert_clean(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1189,10 +1191,10 @@ fn scope_term_must_bind_ctx_field() {
     // `E0180` (the predicate-form rule, now at the decl site).
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $other.org)
         @scope Tenant
-        Doc { org: Org, title: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1202,10 +1204,10 @@ fn scope_term_must_bind_ctx_field() {
     // A multi-segment `$ctx` path is not the flat scope-field form → `E0180`.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org.id)
         @scope Tenant
-        Doc { org: Org, title: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1219,11 +1221,11 @@ fn multi_term_ctx_equality_scope_is_clean() {
     // with two terms).
     assert_clean(
         r#"
-        Org { name: text }
-        Region { name: text }
+        Org { id: Id, name: text }
+        Region { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org, region: Region = $ctx.region)
         @scope Tenant
-        Doc { org: Org, region: Region, title: text, @index(org, region) }
+        Doc { id: Id, org: Org, region: Region, title: text, @index(org, region) }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant { list Doc order (title); }
         "#,
@@ -1236,10 +1238,10 @@ fn scoped_callable_must_acknowledge_scope_e0182() {
     // `E0182` — the contract is written, not implied.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] order (title);
         "#,
@@ -1252,9 +1254,9 @@ fn scope_ref_unknown_name_is_e0183() {
     // `@scope Name` / `scoped Name` naming no `scope` decl is `E0183`.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @scope Nope
-        Doc { org: Org, title: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         query docs() -> D[] scoped Nope order (title);
         "#,
@@ -1268,10 +1270,10 @@ fn scope_model_missing_or_wrong_column_is_e0184() {
     // has no `org` field → `E0184`.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { title: text }
+        Doc { id: Id, title: text }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1281,10 +1283,10 @@ fn scope_model_missing_or_wrong_column_is_e0184() {
     // A column of the wrong type also fails E0184 (`org` is text, not the relation `Org`).
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: text, title: text }
+        Doc { id: Id, org: text, title: text }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1297,11 +1299,11 @@ fn scoped_naming_untouched_scope_is_e0185() {
     // `scoped Other` names a scope no model this callable touches declares → `E0185`.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         scope Other (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] scoped Other order (title);
         "#,
@@ -1317,14 +1319,14 @@ fn nest_only_scoped_child_is_touched_e0185() {
     // `scoped Tenant` covers the root `Order` but not `LineItem`'s Region axis → `E0185`.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Region { name: text }
+        Org { id: Id, name: text }
+        Region { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         scope Region (region: Region = $ctx.region)
         @scope Tenant
-        Order { org: Org, total: int, items: LineItem[], @index org }
+        Order { id: Id, org: Org, total: int, items: LineItem[], @index org }
         @scope Region
-        LineItem { order: Order, region: Region, sku: text, @index region }
+        LineItem { id: Id, order: Order, region: Region, sku: text, @index region }
         shape OrderCard from Order { total, items { sku } }
         query order_by_id(id) -> OrderCard scoped Tenant;
         "#,
@@ -1334,14 +1336,14 @@ fn nest_only_scoped_child_is_touched_e0185() {
     // Naming both axes satisfies every touched model's alternative → checks clean.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Region { name: text }
+        Org { id: Id, name: text }
+        Region { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         scope Region (region: Region = $ctx.region)
         @scope Tenant
-        Order { org: Org, total: int, items: LineItem[], @index org }
+        Order { id: Id, org: Org, total: int, items: LineItem[], @index org }
         @scope Region
-        LineItem { order: Order, region: Region, sku: text, @index region }
+        LineItem { id: Id, order: Order, region: Region, sku: text, @index region, @index order }
         shape OrderCard from Order { total, items { sku } }
         query order_by_id(id) -> OrderCard scoped Tenant, Region;
         "#,
@@ -1355,10 +1357,10 @@ fn scope_field_type_sourced_from_the_decl() {
     // requires `$ctx.org` typed as an `Org` relation — no per-callable inference needed.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1379,10 +1381,10 @@ fn create_assigning_scope_column_is_e0181() {
     // that assigns it is trying to plant a row into an arbitrary scope.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         mutation make(org: Id, title: text) -> D scoped Tenant {
           create Doc { org = $org, title = $title };
@@ -1398,10 +1400,10 @@ fn create_on_scoped_model_omitting_scope_column_is_clean() {
     // The create's ctx bag gains `org` from that auto-set.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         mutation make(title: text) -> D scoped Tenant { create Doc { title = $title }; }
         "#,
@@ -1418,10 +1420,10 @@ fn unscoped_query_drops_the_scope_ctx_requirement() {
     // the scope's `$ctx` field.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query all(org) -> D[] unscoped("admin: cross-org read") order (title);
         "#,
@@ -1437,10 +1439,10 @@ fn unscoped_create_may_assign_the_scope_column() {
     // the column and assigning it is fine (no E0181).
     assert_clean(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         mutation import_doc(org: Id, title: text) -> D
           unscoped("data import: rows land in the supplied org") {
@@ -1454,7 +1456,7 @@ fn unscoped_create_may_assign_the_scope_column() {
 fn unscoped_on_a_model_without_scope_is_stale_w0106() {
     let (_, d) = analyze(
         r#"
-        Doc { title: text, @index title }
+        Doc { id: Id, title: text, @index title }
         shape D from Doc { title }
         query all() -> D[] unscoped("nothing to opt out of") order (title);
         "#,
@@ -1470,8 +1472,8 @@ fn ctx_inferred_from_use_is_clean() {
     // it compares against.
     assert_clean(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] { list Doc where (org = $ctx.org) order (title); }
         "#,
@@ -1484,8 +1486,8 @@ fn ctx_requirement_is_recorded_per_callable() {
     // client sends exactly this as request context.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] { list Doc where (org = $ctx.org) order (title); }
         query all() -> D[] order (title);
@@ -1506,10 +1508,10 @@ fn ctx_scope_propagates_to_every_query() {
     // no `where` of its own.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, title: text, @index org }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] scoped Tenant order (title);
         "#,
@@ -1528,11 +1530,11 @@ fn ctx_joined_scope_is_required_via_shape_reach() {
     // injected `:ctx_org` bind is unbound at runtime.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
         query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#,
@@ -1551,11 +1553,11 @@ fn ctx_joined_scope_is_required_via_shape_reach() {
 fn ctx_joined_scope_is_required_via_where_reach() {
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text, @index name }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text, @index name }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject }
         query tickets(name) -> TicketCard[] scoped Tenant {
           list Ticket where (raised_by.name = $name) order (subject);
@@ -1577,11 +1579,11 @@ fn ctx_unscoped_query_drops_joined_scope_requirement() {
     // scoped model contributes no `$ctx` requirement (mirrors codegen).
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
         query any_ticket(id) -> TicketCard unscoped("admin: cross-org lookup");
         "#,
@@ -1600,8 +1602,8 @@ fn ctx_bad_path_errors() {
     // `$ctx` fields are flat: exactly one segment.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] { list Doc where (org = $ctx.org.deep) order (title); }
         "#,
@@ -1613,8 +1615,8 @@ fn ctx_bad_path_errors() {
 fn ctx_bare_no_field_errors() {
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query docs() -> D[] { list Doc where (org = $ctx) order (title); }
         "#,
@@ -1627,8 +1629,8 @@ fn ctx_coherent_across_callables_is_clean() {
     // `$ctx.org` is an `Org` key in both queries — one coherent request-context bag.
     assert_clean(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org }
         shape D from Doc { title }
         query a() -> D[] { list Doc where (org = $ctx.org) order (title); }
         query b() -> D[] { list Doc where (org = $ctx.org) order (title); }
@@ -1642,8 +1644,8 @@ fn ctx_conflict_across_callables_errors() {
     // build one bag that satisfies both.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org, @index title }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org, @index title }
         shape D from Doc { title }
         query a() -> D[] { list Doc where (org = $ctx.org) order (title); }
         query b() -> D[] { list Doc where (title = $ctx.org) order (title); }
@@ -1657,8 +1659,8 @@ fn ctx_conflict_within_one_callable_errors() {
     // Same field used at two types in one query is itself incoherent.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text, @index org, @index title }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text, @index org, @index title }
         shape D from Doc { title }
         query a() -> D[] {
           list Doc where (org = $ctx.x and title = $ctx.x) order (title);
@@ -1673,8 +1675,8 @@ fn ctx_from_create_assign_is_recorded() {
     // A `create` can set a column from context; the field types from that column.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
-        Doc { org: Org, title: text }
+        Org { id: Id, name: text }
+        Doc { id: Id, org: Org, title: text }
         shape D from Doc { title }
         mutation add(t: text) -> D { create Doc { org = $ctx.org, title = $t }; }
         "#,
@@ -1693,11 +1695,11 @@ fn ctx_mutation_reselect_joined_scope_is_required() {
     // unscoped but its re-select reaches the org-scoped `Contact`.
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
         mutation open_ticket(by: Contact, subject: text) -> TicketCard scoped Tenant {
           create Ticket { raised_by = $by, subject = $subject };
@@ -1723,8 +1725,8 @@ fn ctx_mutation_reselect_joined_scope_is_required() {
 fn tx_backref_to_prior_create_is_clean() {
     assert_clean(
         r#"
-        User { email: text }
-        Address { user: User, city: text }
+        User { id: Id, email: text }
+        Address { id: Id, user: User, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
           tx {
@@ -1740,8 +1742,8 @@ fn tx_backref_to_prior_create_is_clean() {
 fn tx_backref_to_unknown_field_rejected() {
     let (_, d) = analyze(
         r#"
-        User { email: text }
-        Address { user: User, city: text }
+        User { id: Id, email: text }
+        Address { id: Id, user: User, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
           tx {
@@ -1759,7 +1761,7 @@ fn backref_without_prior_create_rejected() {
     // First statement in the tx: nothing precedes it to back-reference.
     let (_, d) = analyze(
         r#"
-        Address { city: text, ref_id: text }
+        Address { id: Id, city: text, ref_id: text }
         shape A from Address { city }
         mutation m(city: text) -> A {
           tx {
@@ -1776,7 +1778,7 @@ fn backref_outside_tx_rejected() {
     // `^` in a plain (non-tx) create has no preceding step in scope.
     let (_, d) = analyze(
         r#"
-        Address { city: text, ref_id: text }
+        Address { id: Id, city: text, ref_id: text }
         shape A from Address { city }
         mutation m(city: text) -> A {
           create Address { ref_id = ^.id, city = $city };
@@ -1791,7 +1793,7 @@ fn backref_in_query_predicate_rejected() {
     // `^` is only valid in a tx write; a query `where` is a misuse.
     let (_, d) = analyze(
         r#"
-        Doc { title: text }
+        Doc { id: Id, title: text }
         shape D from Doc { title }
         query find() -> D[] { list Doc where (title = ^.id); }
         "#,
@@ -1808,10 +1810,11 @@ fn custom_join_resolves_clean() {
     assert_clean(
         r#"
         Order {
+          id: Id
           user_ref: int
           placed_by: User (on: order.user_ref = user.legacy_id)
         }
-        User { name: text, legacy_id: int }
+        User { id: Id, name: text, legacy_id: int }
         "#,
     );
 }
@@ -1822,10 +1825,11 @@ fn custom_join_unknown_column_rejected() {
     let (_, d) = analyze(
         r#"
         Order {
+          id: Id
           user_ref: int
           placed_by: User (on: order.user_ref = user.nope)
         }
-        User { name: text, legacy_id: int }
+        User { id: Id, name: text, legacy_id: int }
         "#,
     );
     assert!(errors(&d).contains(&"E0111"), "{:?}", codes(&d));
@@ -1837,10 +1841,11 @@ fn custom_join_unknown_table_rejected() {
     let (_, d) = analyze(
         r#"
         Order {
+          id: Id
           user_ref: int
           placed_by: User (on: order.user_ref = customers.legacy_id)
         }
-        User { name: text, legacy_id: int }
+        User { id: Id, name: text, legacy_id: int }
         "#,
     );
     assert!(errors(&d).contains(&"E0125"), "{:?}", codes(&d));
@@ -1852,10 +1857,11 @@ fn custom_join_unqualified_column_rejected() {
     let (_, d) = analyze(
         r#"
         Order {
+          id: Id
           user_ref: int
           placed_by: User (on: user_ref = user.legacy_id)
         }
-        User { name: text, legacy_id: int }
+        User { id: Id, name: text, legacy_id: int }
         "#,
     );
     assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
@@ -1867,9 +1873,10 @@ fn custom_join_on_scalar_rejected() {
     let (_, d) = analyze(
         r#"
         Order {
+          id: Id
           user_ref: int (on: order.user_ref = user.legacy_id)
         }
-        User { name: text, legacy_id: int }
+        User { id: Id, name: text, legacy_id: int }
         "#,
     );
     assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
@@ -1881,10 +1888,11 @@ fn custom_join_param_rejected() {
     let (_, d) = analyze(
         r#"
         Order {
+          id: Id
           user_ref: int
           placed_by: User (on: order.user_ref = $x)
         }
-        User { name: text, legacy_id: int }
+        User { id: Id, name: text, legacy_id: int }
         "#,
     );
     assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
@@ -1900,16 +1908,19 @@ fn or_model_query_injects_only_its_named_alternative() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page
         @scope Author
         @sort(created desc)
         Post {
+          id: Id
           page:    Page
           author:  User
           body:    text
           created: timestamp
+          @index page
+          @index author
         }
         shape PostCard from Post { body }
         query posts_on_page() -> PostCard[] scoped Page   { list Post order (created desc); }
@@ -1948,15 +1959,17 @@ fn and_model_naming_one_axis_is_e0185() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page, Author
         @sort(created desc)
         Comment {
+          id: Id
           page:    Page
           author:  User
           body:    text
           created: timestamp
+          @index page
         }
         shape CommentCard from Comment { body }
         query my_comments() -> CommentCard[] scoped Page {
@@ -1973,15 +1986,17 @@ fn and_model_naming_both_axes_is_clean() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page, Author
         @sort(created desc)
         Comment {
+          id: Id
           page:    Page
           author:  User
           body:    text
           created: timestamp
+          @index page
         }
         shape CommentCard from Comment { body }
         query my_comments() -> CommentCard[] scoped Page, Author {
@@ -2013,10 +2028,11 @@ fn create_not_satisfying_any_alternative_is_e0186() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page, Author
         Comment {
+          id: Id
           page:   Page
           author: User
           body:   text
@@ -2038,10 +2054,11 @@ fn create_satisfying_an_alternative_has_no_e0186() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page, Author
         Comment {
+          id: Id
           page:   Page
           author: User
           body:   text
@@ -2064,12 +2081,13 @@ fn or_model_ctx_follows_the_chosen_alternative() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page
         @scope Author
         @sort(created desc)
         Post {
+          id: Id
           page:    Page
           author:  User
           body:    text
@@ -2099,12 +2117,13 @@ fn or_model_create_naming_both_alternatives_is_clean() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page
         @scope Author
         @sort(created desc)
         Post {
+          id: Id
           page:    Page
           author:  User
           body:    text
@@ -2139,12 +2158,13 @@ fn scoped_create_assigning_an_unchosen_alternative_column_is_e0181() {
         r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page
         @scope Author
         @sort(body asc)
         Post {
+          id: Id
           page:   Page
           author: User?
           body:   text
@@ -2166,11 +2186,12 @@ fn unindexed_annotation_on_an_unscoped_query_is_not_stale() {
     // its annotation "stale" — the pattern is the query's own filter only.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
         @sort(created desc)
         Doc {
+          id: Id
           org:     Org
           title:   text
           created: timestamp
@@ -2200,6 +2221,7 @@ fn field_was_rename_is_clean() {
         r#"
         @sort(name asc)
         Product {
+          id: Id
           name: text
           barcode: text? @was("upc")
         }
@@ -2216,6 +2238,7 @@ fn model_was_rename_is_clean() {
         @sort(name asc)
         @was("legacy_product")
         Product {
+          id: Id
           name: text
         }
         shape ProductCard from Product { name }
@@ -2230,6 +2253,7 @@ fn field_was_naming_a_live_column_is_e0191() {
     let (_, d) = analyze(
         r#"
         Product {
+          id: Id
           sku: text
           barcode: text? @was("sku")
         }
@@ -2243,6 +2267,7 @@ fn field_was_naming_itself_is_e0190() {
     let (_, d) = analyze(
         r#"
         Product {
+          id: Id
           barcode: text? @was("barcode")
         }
         "#,
@@ -2254,9 +2279,9 @@ fn field_was_naming_itself_is_e0190() {
 fn model_was_naming_a_live_table_is_e0191() {
     let (_, d) = analyze(
         r#"
-        Legacy { name: text }
+        Legacy { id: Id, name: text }
         @was("legacy")
-        Product { name: text }
+        Product { id: Id, name: text }
         "#,
     );
     assert!(errors(&d).contains(&"E0191"), "{:?}", codes(&d));
@@ -2267,7 +2292,7 @@ fn model_was_naming_its_own_table_is_e0190() {
     let (_, d) = analyze(
         r#"
         @was("product")
-        Product { name: text }
+        Product { id: Id, name: text }
         "#,
     );
     assert!(errors(&d).contains(&"E0190"), "{:?}", codes(&d));
@@ -2280,7 +2305,7 @@ fn enum_typed_field_is_a_scalar_not_a_relation() {
     let (schema, d) = analyze(
         r#"
         enum Status { pending, paid, shipped }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         "#,
     );
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -2302,7 +2327,7 @@ fn enum_default_must_be_a_member() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid }
-        Order { status: Status (default shipped), total: int }
+        Order { id: Id, status: Status (default shipped), total: int }
         "#,
     );
     assert!(errors(&d).contains(&"E0155"), "{:?}", codes(&d));
@@ -2313,7 +2338,7 @@ fn enum_default_member_is_clean() {
     assert_clean(
         r#"
         enum Status { pending, paid }
-        Order { status: Status (default pending), total: int }
+        Order { id: Id, status: Status (default pending), total: int }
         "#,
     );
 }
@@ -2322,7 +2347,7 @@ fn enum_default_member_is_clean() {
 fn bare_default_on_non_enum_column_is_e0155() {
     let (_, d) = analyze(
         r#"
-        Order { total: int (default whoops) }
+        Order { id: Id, total: int (default whoops) }
         "#,
     );
     assert!(errors(&d).contains(&"E0155"), "{:?}", codes(&d));
@@ -2333,7 +2358,7 @@ fn where_on_non_member_variant_is_e0154() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query paid_orders() -> OrderRow[] { list Order where (status = shipped); }
         "#,
@@ -2346,7 +2371,7 @@ fn where_on_member_variant_has_no_errors() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int, @index status }
         shape OrderRow from Order { status, total }
         query paid_orders() -> OrderRow[] { list Order where (status = paid) order (total); }
         "#,
@@ -2360,7 +2385,7 @@ fn in_list_on_enum_column_checks_each_variant() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid, shipped }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int, @index status }
         shape OrderRow from Order { status, total }
         query open(extra: Status) -> OrderRow[] {
           list Order where (status in (pending, paid, $extra)) order (total);
@@ -2373,7 +2398,7 @@ fn in_list_on_enum_column_checks_each_variant() {
         r#"
         enum Status { pending, paid }
         enum Priority { low = 1, high = 2 }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query open() -> OrderRow[] { list Order where (status in (pending, low)); }
         "#,
@@ -2386,7 +2411,7 @@ fn in_list_elements_are_family_checked() {
     // A text element in a numeric column's list is the same E0151 an `=` gives.
     let (_, d) = analyze(
         r#"
-        Order { total: int, note: text }
+        Order { id: Id, total: int, note: text }
         shape OrderRow from Order { total }
         query cheap() -> OrderRow[] { list Order where (total in (1, 2, "three")); }
         "#,
@@ -2395,7 +2420,7 @@ fn in_list_elements_are_family_checked() {
 
     let (_, d) = analyze(
         r#"
-        Order { total: int, note: text }
+        Order { id: Id, total: int, note: text, @index total }
         shape OrderRow from Order { total }
         query cheap(x: int) -> OrderRow[] { list Order where (total in (1, 2, $x)); }
         "#,
@@ -2407,7 +2432,7 @@ fn in_list_elements_are_family_checked() {
 fn in_list_with_unknown_param_is_reported() {
     let (_, d) = analyze(
         r#"
-        Order { total: int }
+        Order { id: Id, total: int }
         shape OrderRow from Order { total }
         query cheap() -> OrderRow[] { list Order where (total in (1, $nope)); }
         "#,
@@ -2420,7 +2445,7 @@ fn create_with_non_member_variant_is_e0154() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         mutation place() -> OrderRow { create Order { status = shipped, total = 1 } }
         "#,
@@ -2433,7 +2458,7 @@ fn create_with_member_variant_has_no_errors() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         mutation place() -> OrderRow { create Order { status = paid, total = 1 } }
         "#,
@@ -2445,7 +2470,7 @@ fn create_with_member_variant_has_no_errors() {
 fn enum_name_colliding_with_a_model_is_e0106() {
     let (_, d) = analyze(
         r#"
-        Status { name: text }
+        Status { id: Id, name: text }
         enum Status { pending, paid }
         "#,
     );
@@ -2457,7 +2482,7 @@ fn string_enum_with_explicit_value_resolves() {
     let (schema, d) = analyze(
         r#"
         enum Status { pending, paid = "PAID", shipped }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         "#,
     );
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -2489,7 +2514,7 @@ fn int_enum_resolves_and_is_an_integer_column() {
     let (schema, d) = analyze(
         r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority (default low), title: text }
+        Ticket { id: Id, priority: Priority (default low), title: text }
         "#,
     );
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
@@ -2516,7 +2541,7 @@ fn mixed_int_and_bare_variants_is_e0156() {
     let (_, d) = analyze(
         r#"
         enum Bad { low = 0, medium, high = 2 }
-        Ticket { priority: Bad }
+        Ticket { id: Id, priority: Bad }
         "#,
     );
     assert!(errors(&d).contains(&"E0156"), "{:?}", codes(&d));
@@ -2527,7 +2552,7 @@ fn mixed_int_and_string_variants_is_e0156() {
     let (_, d) = analyze(
         r#"
         enum Bad { low = 0, medium = "MID" }
-        Ticket { priority: Bad }
+        Ticket { id: Id, priority: Bad }
         "#,
     );
     assert!(errors(&d).contains(&"E0156"), "{:?}", codes(&d));
@@ -2538,7 +2563,7 @@ fn duplicate_variant_value_is_e0157() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid = "pending" }
-        Order { status: Status }
+        Order { id: Id, status: Status }
         "#,
     );
     assert!(errors(&d).contains(&"E0157"), "{:?}", codes(&d));
@@ -2549,7 +2574,7 @@ fn duplicate_int_variant_value_is_e0157() {
     let (_, d) = analyze(
         r#"
         enum Priority { low = 0, medium = 0 }
-        Ticket { priority: Priority }
+        Ticket { id: Id, priority: Priority }
         "#,
     );
     assert!(errors(&d).contains(&"E0157"), "{:?}", codes(&d));
@@ -2560,7 +2585,7 @@ fn duplicate_variant_name_is_e0104() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, pending }
-        Order { status: Status }
+        Order { id: Id, status: Status }
         "#,
     );
     assert!(errors(&d).contains(&"E0104"), "{:?}", codes(&d));
@@ -2571,7 +2596,7 @@ fn ordered_op_on_string_enum_is_e0158() {
     let (_, d) = analyze(
         r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query high() -> OrderRow[] { list Order where (status > pending); }
         "#,
@@ -2584,7 +2609,7 @@ fn ordered_op_on_int_enum_is_clean() {
     let (_, d) = analyze(
         r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority, title: text }
+        Ticket { id: Id, priority: Priority, title: text, @index priority }
         shape TicketRow from Ticket { priority, title }
         query urgent() -> TicketRow[] { list Ticket where (priority >= medium) order (title); }
         "#,
@@ -2598,7 +2623,7 @@ fn int_enum_variant_membership_still_checked_by_name() {
     let (_, d) = analyze(
         r#"
         enum Priority { low = 0, high = 1 }
-        Ticket { priority: Priority, title: text }
+        Ticket { id: Id, priority: Priority, title: text }
         shape TicketRow from Ticket { priority, title }
         query q() -> TicketRow[] { list Ticket where (priority = urgent); }
         "#,
@@ -2613,6 +2638,7 @@ fn decimal_and_float_columns_resolve() {
     let (schema, d) = analyze(
         r#"
         Ledger {
+          id: Id
           price: decimal(12, 2)
           bare:  decimal
           score: float
@@ -2632,13 +2658,13 @@ fn decimal_and_float_columns_resolve() {
 #[test]
 fn bad_decimal_precision_scale_errors() {
     // scale > precision
-    let (_, d) = analyze("Ledger { price: decimal(2, 5) }");
+    let (_, d) = analyze("Ledger { id: Id, price: decimal(2, 5) }");
     assert!(errors(&d).contains(&"E0159"), "{:?}", codes(&d));
     // precision over the 38 cap
-    let (_, d) = analyze("Ledger { price: decimal(40, 2) }");
+    let (_, d) = analyze("Ledger { id: Id, price: decimal(40, 2) }");
     assert!(errors(&d).contains(&"E0159"), "{:?}", codes(&d));
     // scale zero (need 1 <= scale)
-    let (_, d) = analyze("Ledger { price: decimal(10, 0) }");
+    let (_, d) = analyze("Ledger { id: Id, price: decimal(10, 0) }");
     assert!(errors(&d).contains(&"E0159"), "{:?}", codes(&d));
 }
 
@@ -2646,7 +2672,7 @@ fn bad_decimal_precision_scale_errors() {
 fn numeric_literal_binds_to_decimal_and_float_columns() {
     let (_, d) = analyze(
         r#"
-        Ledger { price: decimal(12, 2), score: float, name: text }
+        Ledger { id: Id, price: decimal(12, 2), score: float, name: text }
         shape LedgerRow from Ledger { price, score }
         query dear() -> LedgerRow[] { list Ledger where (price > 9.99) unindexed(unsafe) order (name); }
         query fast() -> LedgerRow[] { list Ledger where (score >= 0.5) unindexed(unsafe) order (name); }
@@ -2660,7 +2686,7 @@ fn numeric_literal_binds_to_decimal_and_float_columns() {
 fn ordered_compare_on_decimal_allowed() {
     let (_, d) = analyze(
         r#"
-        Ledger { price: decimal(12, 2), name: text }
+        Ledger { id: Id, price: decimal(12, 2), name: text }
         shape LedgerRow from Ledger { price }
         query pricey(min: decimal(12, 2) >= price) -> LedgerRow[] { list Ledger unindexed(unsafe) order (name); }
         "#,
@@ -2673,7 +2699,9 @@ fn decimal_default_must_be_a_decimal_literal() {
     let (_, d) = analyze(r#"Ledger { price: decimal(12, 2) (default "x") }"#);
     assert!(errors(&d).contains(&"E0159"), "{:?}", codes(&d));
     // an integer or a fractional literal is fine
-    assert_clean("Ledger { a: decimal(12, 2) (default 5), b: decimal(12, 2) (default 9.99) }");
+    assert_clean(
+        "Ledger { id: Id, a: decimal(12, 2) (default 5), b: decimal(12, 2) (default 9.99) }",
+    );
 }
 
 // ---------- whole-query raw bodies (raw.md's third level) -------------------
@@ -2682,8 +2710,8 @@ fn decimal_default_must_be_a_decimal_literal() {
 fn raw_query_body_with_typed_params_is_clean() {
     let (schema, d) = analyze(
         r#"
-        Org { name: text }
-        User { org: Org, name: text, email: text }
+        Org { id: Id, name: text }
+        User { id: Id, org: Org, name: text, email: text }
         shape UserRow from User { name, email }
         query heavy_users(min: int) -> UserRow[] {
           raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.id >= ${min}`;
@@ -2702,7 +2730,7 @@ fn raw_query_scalar_return_needs_no_unique_key() {
     // A raw `get` skips E0144 — the SQL owns its keying.
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserRow from User { name }
         query one(who: text) -> UserRow { raw`SELECT name FROM user WHERE name = ${who}`; }
         "#,
@@ -2714,7 +2742,7 @@ fn raw_query_scalar_return_needs_no_unique_key() {
 fn raw_query_param_must_be_typed() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserRow from User { name }
         query heavy(min) -> UserRow[] { raw`SELECT name FROM user WHERE id >= ${min}`; }
         "#,
@@ -2726,7 +2754,7 @@ fn raw_query_param_must_be_typed() {
 fn raw_query_param_binding_is_rejected() {
     let (_, d) = analyze(
         r#"
-        User { name: text, created_at: timestamp }
+        User { id: Id, name: text, created_at: timestamp }
         shape UserRow from User { name }
         query heavy(since: timestamp > created_at) -> UserRow[] { raw`SELECT name FROM user`; }
         "#,
@@ -2738,7 +2766,7 @@ fn raw_query_param_binding_is_rejected() {
 fn raw_query_unknown_param_is_reported() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserRow from User { name }
         query heavy() -> UserRow[] { raw`SELECT name FROM user WHERE id = ${nope}`; }
         "#,
@@ -2750,7 +2778,7 @@ fn raw_query_unknown_param_is_reported() {
 fn raw_query_ctx_ref_is_rejected() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserRow from User { name }
         query mine() -> UserRow[] { raw`SELECT name FROM user WHERE org = ${ctx.org}`; }
         "#,
@@ -2762,7 +2790,7 @@ fn raw_query_ctx_ref_is_rejected() {
 fn raw_query_cannot_stream() {
     let (_, d) = analyze(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserRow from User { name }
         query all() -> stream UserRow { raw`SELECT name FROM user`; }
         "#,
@@ -2776,9 +2804,9 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
     // `unscoped("…")` is the loud, legal spelling.
     let src_scoped = r#"
         scope Tenant (org: Org = $ctx.org)
-        Org { name: text }
+        Org { id: Id, name: text }
         @scope Tenant
-        Ticket { org: Org, title: text }
+        Ticket { id: Id, org: Org, title: text }
         shape TicketRow from Ticket { title }
         query all() -> TicketRow[] scoped Tenant { raw`SELECT title FROM ticket`; }
     "#;
@@ -2787,9 +2815,9 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
 
     let src_unscoped = r#"
         scope Tenant (org: Org = $ctx.org)
-        Org { name: text }
+        Org { id: Id, name: text }
         @scope Tenant
-        Ticket { org: Org, title: text }
+        Ticket { id: Id, org: Org, title: text }
         shape TicketRow from Ticket { title }
         query all() -> TicketRow[] unscoped("admin report") { raw`SELECT title FROM ticket`; }
     "#;
@@ -2799,9 +2827,9 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
     // Writing neither is the ordinary missing-ack error.
     let src_bare = r#"
         scope Tenant (org: Org = $ctx.org)
-        Org { name: text }
+        Org { id: Id, name: text }
         @scope Tenant
-        Ticket { org: Org, title: text }
+        Ticket { id: Id, org: Org, title: text }
         shape TicketRow from Ticket { title }
         query all() -> TicketRow[] { raw`SELECT title FROM ticket`; }
     "#;
@@ -2813,8 +2841,8 @@ fn raw_query_on_scoped_model_must_be_unscoped() {
 fn raw_query_shape_must_be_flat() {
     let (_, d) = analyze(
         r#"
-        Org { name: text }
-        User { org: Org, name: text }
+        Org { id: Id, name: text }
+        User { id: Id, org: Org, name: text }
         shape UserCard from User { name, org { name } }
         query all() -> UserCard[] { raw`SELECT name FROM user`; }
         "#,
@@ -2829,9 +2857,9 @@ fn raw_query_soft_delete_gap_is_linted() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
+        User { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, user: User, total: int }
+        Order { id: Id, deleted_at: timestamp?, user: User, total: int }
         shape UserRow from User { name }
         query buyers() -> UserRow[] {
           raw`SELECT u.name AS name FROM user u JOIN order o ON o.user_id = u.id WHERE u.deleted_at IS NULL`;
@@ -2854,7 +2882,7 @@ fn ack_hard_delete_resolves_the_deleted_model() {
     let (schema, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Comment { deleted_at: timestamp?, body: text }
+        Comment { id: Id, deleted_at: timestamp?, body: text }
         mutation purge_comment(id: Id) -> ok {
           hard delete Comment where (id = $id);
         }
@@ -2871,7 +2899,7 @@ fn ack_hard_delete_resolves_the_deleted_model() {
 fn ack_plain_delete_on_plain_model_is_clean() {
     let (schema, d) = analyze(
         r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         mutation drop_tag(id: Id) -> ok {
           delete Tag where (id = $id);
         }
@@ -2886,7 +2914,7 @@ fn shape_on_real_delete_is_rejected() {
     // No surviving row to read back as the shape → E0220.
     let (_, d) = analyze(
         r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         shape TagCard from Tag { label }
         mutation drop_tag(id: Id) -> TagCard {
           delete Tag where (id = $id);
@@ -2901,7 +2929,7 @@ fn shape_on_hard_delete_is_rejected() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Comment { deleted_at: timestamp?, body: text }
+        Comment { id: Id, deleted_at: timestamp?, body: text }
         shape CommentRow from Comment { body }
         mutation purge_comment(id: Id) -> CommentRow {
           hard delete Comment where (id = $id);
@@ -2917,8 +2945,8 @@ fn shape_survives_when_a_tx_sibling_creates_the_return_row() {
     // sibling write — a surviving row exists, so the declared shape stands.
     let (_, d) = analyze(
         r#"
-        Tag { label: text }
-        Audit { note: text }
+        Tag { id: Id, label: text }
+        Audit { id: Id, note: text }
         shape AuditRow from Audit { note }
         mutation drop_tag(id: Id, note: text) -> AuditRow {
           tx {
@@ -2937,7 +2965,7 @@ fn ack_on_soft_delete_is_rejected() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Comment { deleted_at: timestamp?, body: text }
+        Comment { id: Id, deleted_at: timestamp?, body: text }
         mutation remove_comment(id: Id) -> ok {
           delete Comment where (id = $id);
         }
@@ -2950,7 +2978,7 @@ fn ack_on_soft_delete_is_rejected() {
 fn ack_on_create_or_update_is_rejected() {
     let (_, d) = analyze(
         r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         mutation rename_tag(id: Id, label: text) -> ok {
           update Tag where (id = $id) { label = $label };
         }
@@ -2963,7 +2991,7 @@ fn ack_on_create_or_update_is_rejected() {
 fn ack_without_a_real_delete_is_rejected() {
     let (_, d) = analyze(
         r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         mutation noop() -> ok {
           raw`ANALYZE`;
         }
@@ -2976,7 +3004,7 @@ fn ack_without_a_real_delete_is_rejected() {
 fn ack_on_a_query_is_rejected() {
     let (_, d) = analyze(
         r#"
-        Tag { label: text }
+        Tag { id: Id, label: text }
         query tags() -> ok;
         "#,
     );
@@ -2988,10 +3016,10 @@ fn ack_scoped_hard_delete_keeps_scope_ack_checking() {
     // The ack mutation still owes the scope acknowledgement for the model it deletes.
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Comment { org: Org, body: text }
+        Comment { id: Id, org: Org, body: text }
         mutation purge_comment(id: Id) -> ok {
           hard delete Comment where (id = $id);
         }
@@ -3003,9 +3031,10 @@ fn ack_scoped_hard_delete_keeps_scope_ack_checking() {
 // ---------- aggregations + group by + having (T4) --------------------------
 
 const AGG_MODELS: &str = r#"
-        Buyer { name: text }
+        Buyer { id: Id, name: text }
         @soft_delete(deleted_at)
         Order {
+          id: Id
           deleted_at: timestamp?
           buyer: Buyer
           total: decimal(12, 2)
@@ -3172,7 +3201,7 @@ fn aggregate_shape_as_mutation_return_is_e0245() {
 fn upsert_unique_target_is_clean() {
     assert_clean(
         r#"
-        Page { path: text (unique), hits: int }
+        Page { id: Id, path: text (unique), hits: int }
         shape PageRow from Page { path, hits }
         mutation record_hit(path: text) -> PageRow {
           create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
@@ -3185,10 +3214,10 @@ fn upsert_unique_target_is_clean() {
 fn upsert_composite_unique_index_is_clean() {
     assert_clean(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, slug: text, views: int, @index (org, slug) unique }
+        Doc { id: Id, org: Org, slug: text, views: int, @index (org, slug) unique }
         shape DocRow from Doc { slug, views }
         mutation touch(slug: text) -> DocRow scoped Tenant {
           create Doc { slug = $slug, views = 1 } on conflict (org, slug) update { views = views + 1 };
@@ -3201,7 +3230,7 @@ fn upsert_composite_unique_index_is_clean() {
 fn upsert_non_unique_target_is_e0250() {
     let (_, d) = analyze(
         r#"
-        Page { path: text, hits: int }
+        Page { id: Id, path: text, hits: int }
         shape PageRow from Page { path, hits }
         mutation record_hit(path: text) -> PageRow {
           create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
@@ -3215,7 +3244,7 @@ fn upsert_non_unique_target_is_e0250() {
 fn upsert_update_branch_sets_conflict_col_is_e0251() {
     let (_, d) = analyze(
         r#"
-        Page { path: text (unique), hits: int }
+        Page { id: Id, path: text (unique), hits: int }
         shape PageRow from Page { path, hits }
         mutation record_hit(path: text) -> PageRow {
           create Page { path = $path, hits = 1 } on conflict (path) update { path = $path };
@@ -3231,7 +3260,7 @@ fn upsert_target_not_set_by_create_is_e0252() {
     // value to conflict on or read the winning row back by).
     let (_, d) = analyze(
         r#"
-        Page { path: text (unique), code: text (unique), hits: int (default 0) }
+        Page { id: Id, path: text (unique), code: text (unique), hits: int (default 0) }
         shape PageRow from Page { hits }
         mutation record_hit(path: text) -> PageRow {
           create Page { path = $path } on conflict (code) update { hits = hits + 1 }
@@ -3246,7 +3275,7 @@ fn upsert_on_soft_delete_model_is_e0253() {
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
-        Page { deleted_at: timestamp?, path: text (unique), hits: int }
+        Page { id: Id, deleted_at: timestamp?, path: text (unique), hits: int }
         shape PageRow from Page { path, hits }
         mutation record_hit(path: text) -> PageRow {
           create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };
@@ -3260,10 +3289,10 @@ fn upsert_on_soft_delete_model_is_e0253() {
 fn upsert_scoped_target_omits_scope_col_is_e0254() {
     let (_, d) = analyze(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Doc { org: Org, slug: text (unique), views: int }
+        Doc { id: Id, org: Org, slug: text (unique), views: int }
         shape DocRow from Doc { slug, views }
         mutation touch(slug: text) -> DocRow scoped Tenant {
           create Doc { slug = $slug, views = 1 } on conflict (slug) update { views = views + 1 };

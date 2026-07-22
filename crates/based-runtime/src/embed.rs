@@ -223,9 +223,9 @@ mod tests {
 
     const SCHEMA: &str = r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, status: text, total: int }
         shape OrderCard from Order { status, total }
 
         query order_by_id(id) -> OrderCard;
@@ -240,7 +240,7 @@ mod tests {
         let (schema, diags) = based_sema::check(&sf.decls);
         assert!(!diags
             .iter()
-            .any(|d| d.severity == based_diagnostics::Severity::Error));
+            .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"));
         Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
     }
 

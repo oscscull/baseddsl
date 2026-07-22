@@ -1,22 +1,19 @@
-//! Index inference + the bidirectional index lints.
+//! The index requirements + the index lints.
 //!
 //! Runs after every query/shape/mutation is resolved, because the whole point is
 //! closed-world reasoning: the access layer *is* the set of generated SQL, so the
 //! engine can know which indexes queries need and which declared indexes nothing
 //! uses.
 //!
-//! Three outputs:
-//!   * **Inferred baseline** (per model): an index on the FK column of every
-//!     inverse edge some query/shape actually traverses — the join keys, the one
-//!     class of index that is unambiguously right to auto-create. Deduped against
-//!     declared structure; emitted by DDL codegen (predicate-leading there).
-//!   * **W0103 `unindexed`** (missing-index): a query — or a mutation's `update`/
-//!     `delete`/`restore` `where`, which scans the same way — whose filter pattern
-//!     no available index serves. Satisfied by an `@index` or by the
-//!     `unindexed(max_rows: N)` / `unindexed(unsafe)` annotation (a query-body
-//!     clause; a bulk write has no such clause, so it simply shows). Filter-path
-//!     indexes are *not* auto-created (whether one is worth its write tax is a
-//!     human call — shown, not written); this lint is how they show.
+//! Two index facts carry independent write/disk cost and are load-bearing, so they
+//! are written in source, not silently derived:
+//!   * **E0260 `unindexed`**: a query — or a mutation's `update`/`delete`/`restore`
+//!     `where`, which scans the same way — whose root filter pattern no available
+//!     index serves, and a relation join key some query/shape traverses that no
+//!     `@index` covers. Both are errors, satisfied by an `@index` (the editor
+//!     autofix inserts one) or by the visible `unindexed(max_rows: N)` /
+//!     `unindexed(unsafe)` annotation (a query-body clause; a bulk write has no such
+//!     clause, so it can't opt out — it must be indexed).
 //!   * **W0104 `useless-index`**: a declared non-unique index nothing in the access
 //!     layer (queries *and* mutation `where`s) filters, sorts, or joins on — pure
 //!     write tax. (Unique indexes are constraints, not perf, so they are exempt.)
@@ -26,8 +23,8 @@
 //! The pattern model is coarse on purpose (same spirit as operand typing): eq/
 //! range columns off the conjunctive spine, first-column index matching. It aims
 //! to catch "this query has no index at all", not to re-derive the planner. A
-//! predicate with an `or` or a raw atom is opaque — W0103 stays silent rather
-//! than guessing (precision over recall; a warn lint must not cry wolf).
+//! predicate with an `or` or a raw atom is opaque — the filter check stays silent
+//! rather than guessing (precision over recall).
 
 use based_ast::*;
 use std::collections::HashMap;
@@ -35,8 +32,7 @@ use std::collections::HashMap;
 use crate::ir::*;
 use crate::resolve::Cx;
 
-/// Run inference + lints. Returns the inferred baseline, indexed like `cx.models`
-/// (the caller owns `models` mutably only after `cx` is dropped).
+/// Run the index requirement checks + lints.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     models_ast: &[&Model],
@@ -47,7 +43,7 @@ pub fn run(
     rmutations: &[RMutation],
     cx: &Cx,
     sink: &mut Sink,
-) -> Vec<Vec<RIndex>> {
+) {
     let ast_by_name: HashMap<&str, &Query> = queries_ast
         .iter()
         .map(|q| (q.name.node.as_str(), *q))
@@ -57,7 +53,7 @@ pub fn run(
         .map(|s| (s.name.node.as_str(), *s))
         .collect();
 
-    // ---- collect: one pattern per query, one usage/demand pool per model ----
+    // ---- collect: one pattern per query, one usage pool per model ----
     let mut usage: Vec<Usage> = cx.models.iter().map(|_| Usage::default()).collect();
     let mut patterns: Vec<(usize, Pattern)> = Vec::new(); // (model idx, pattern)
 
@@ -68,17 +64,19 @@ pub fn run(
         let Some(ast) = ast_by_name.get(rq.name.as_str()).copied() else {
             continue;
         };
-        let pat = query_pattern(ast, rq, mi, cx, &mut usage);
-        patterns.push((mi, pat));
+        let mut pat = query_pattern(ast, rq, mi, cx, &mut usage);
 
-        // A shape only creates traversal demand through a query that returns it.
+        // A shape only creates traversal demand through a query that returns it — its
+        // join reaches ride on that query's pattern (so the query's `unindexed(…)`
+        // opt-out covers them too).
         if let Some(shape) = rq.ret_shape.as_deref().and_then(|s| shape_by_name.get(s)) {
-            shape_demand(&shape.body, mi, cx, &mut usage);
+            shape_demand(&shape.body, mi, cx, &mut usage, &mut pat.joins);
         }
+        patterns.push((mi, pat));
     }
 
     // A mutation's `update`/`delete`/`restore` `where` scans exactly like a query's
-    // — feed each into the same pool so W0103 flags an unindexed bulk write and
+    // — feed each into the same pool so E0260 flags an unindexed bulk write and
     // W0104 counts a column a mutation filters on as used.
     let rmut_by_name: HashMap<&str, &RMutation> =
         rmutations.iter().map(|m| (m.name.as_str(), m)).collect();
@@ -92,49 +90,30 @@ pub fn run(
         }
     }
 
-    // ---- inferred baseline: traversed inverse-edge FKs, minus declared -------
-    let inferred: Vec<Vec<RIndex>> = usage
-        .iter()
-        .enumerate()
-        .map(|(mi, u)| {
-            let m = cx.model(mi);
-            u.join_fields
-                .iter()
-                .filter(|f| !covers(m, f))
-                .map(|f| RIndex {
-                    columns: vec![f.clone()],
-                    unique: false,
-                })
-                .collect()
-        })
-        .collect();
-
-    // ---- W0103 / W0105: pattern vs available indexes ------------------------
+    // ---- E0260 / W0105: pattern vs available indexes -----------------------
     for (mi, pat) in &patterns {
-        check_pattern(pat, *mi, &inferred[*mi], cx, sink);
+        check_pattern(pat, *mi, cx, sink);
     }
 
     // ---- W0104: declared indexes nothing uses --------------------------------
     for (mi, ast) in models_ast.iter().enumerate() {
         lint_useless(ast, mi, &usage[mi], cx, sink);
     }
-
-    inferred
 }
 
 // ---------- per-model usage pool -------------------------------------------
 
 /// Everything the access layer touches on one model, pooled across queries.
 /// Feeds the useless-index lint (broad: a column mentioned anywhere counts as
-/// "used", so W0104 under-fires rather than over-fires) and the join-key
-/// inference (`join_fields`).
+/// "used", so W0104 under-fires rather than over-fires).
 #[derive(Default)]
 struct Usage {
     /// Columns filtered (eq or range) or sorted on, by any query — including
     /// filters that land here through a relation reach from another model.
     cols: Vec<String>,
     /// Forward fields whose FK column a traversed inverse edge joins through
-    /// (`via` of each traversed `Inverse`) — the inferred-baseline seed.
+    /// (`via` of each traversed `Inverse`) — pooled so a declared join-key index
+    /// counts as used.
     join_fields: Vec<String>,
 }
 
@@ -164,27 +143,37 @@ struct Pattern {
     range: Vec<String>,
     /// Leading sort field when local (query `order` first, else model `@sort`).
     sort: Option<String>,
+    /// Join keys this query traverses: `(model idx, forward `via` field)`. Each is
+    /// an index the join runs through — the FK on the far model. Deduped.
+    joins: Vec<(usize, String)>,
     paginated: bool,
-    /// `or` / raw atom seen: the pattern is beyond first-column reasoning, so
-    /// W0103 stays silent instead of guessing.
+    /// `or` / raw atom seen: the filter is beyond first-column reasoning, so the
+    /// filter check stays silent instead of guessing (joins still check).
     opaque: bool,
     annotation: Option<Unindexed>,
 }
 
+impl Pattern {
+    fn new(name: String, span: Span, paginated: bool) -> Pattern {
+        Pattern {
+            name,
+            span,
+            eq: Vec::new(),
+            range: Vec::new(),
+            sort: None,
+            joins: Vec::new(),
+            paginated,
+            opaque: false,
+            annotation: None,
+        }
+    }
+}
+
 fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]) -> Pattern {
-    let mut pat = Pattern {
-        name: rq.name.clone(),
-        span: rq.span,
-        eq: Vec::new(),
-        range: Vec::new(),
-        sort: None,
-        paginated: rq.paginated,
-        opaque: false,
-        annotation: None,
-    };
+    let mut pat = Pattern::new(rq.name.clone(), rq.span, rq.paginated);
 
     // A raw body is opaque SQL: no filter pattern to reason about, so the
-    // missing-index lint stays silent (same treatment as a raw predicate atom).
+    // missing-index check stays silent (same treatment as a raw predicate atom).
     if matches!(q.body, QueryBody::Raw(_)) {
         pat.opaque = true;
         return pat;
@@ -242,7 +231,7 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
 /// Turn a write statement's `where` into a root-table access pattern (recursing
 /// through `tx`). `create` has no `where`; `raw` has no bound model. A mutation
 /// carries no `unindexed(…)` clause (that is a query-body annotation), so a
-/// scanning bulk write can't be annotated away — it just shows.
+/// scanning bulk write can't be annotated away — it must be indexed.
 fn collect_write(
     stmt: &WriteStmt,
     mut_name: &str,
@@ -285,16 +274,7 @@ fn write_pattern(
     cx: &Cx,
     usage: &mut [Usage],
 ) -> Pattern {
-    let mut pat = Pattern {
-        name: name.to_string(),
-        span,
-        eq: Vec::new(),
-        range: Vec::new(),
-        sort: None,
-        paginated: false,
-        opaque: false,
-        annotation: None,
-    };
+    let mut pat = Pattern::new(name.to_string(), span, false);
     pat.walk(where_, mi, cx, usage, &mut Vec::new());
     for si in inject {
         if si.model == cx.model(mi).name {
@@ -410,7 +390,7 @@ impl Pattern {
             }
             return;
         }
-        if let Some((tmi, terminal)) = trace(path, mi, cx, usage) {
+        if let Some((tmi, terminal)) = trace(path, mi, cx, usage, &mut self.joins) {
             usage[tmi].touch(&terminal);
         }
     }
@@ -427,17 +407,24 @@ impl Pattern {
                     }
                     usage[mi].touch(f);
                 }
-            } else if let Some((tmi, terminal)) = trace(&t.path, mi, cx, usage) {
+            } else if let Some((tmi, terminal)) = trace(&t.path, mi, cx, usage, &mut self.joins) {
                 usage[tmi].touch(&terminal);
             }
         }
     }
 }
 
-/// Walk a multi-segment path recording join demand for every inverse hop, and
-/// return where its terminal lands: `(model idx, terminal field)`. Quiet — name
-/// errors were already reported by the resolver.
-fn trace(path: &Path, start: usize, cx: &Cx, usage: &mut [Usage]) -> Option<(usize, String)> {
+/// Walk a multi-segment path recording join demand for every inverse hop (into both
+/// the pooled usage and `joins`), and return where its terminal lands:
+/// `(model idx, terminal field)`. Quiet — name errors were already reported by the
+/// resolver.
+fn trace(
+    path: &Path,
+    start: usize,
+    cx: &Cx,
+    usage: &mut [Usage],
+    joins: &mut Vec<(usize, String)>,
+) -> Option<(usize, String)> {
     let mut cur = start;
     let n = path.segments.len();
     for (i, seg) in path.segments.iter().enumerate() {
@@ -457,6 +444,7 @@ fn trace(path: &Path, start: usize, cx: &Cx, usage: &mut [Usage]) -> Option<(usi
             MemberKind::Inverse { target, via } => {
                 let ti = cx.find(target)?;
                 usage[ti].join(via);
+                push_join(joins, ti, via);
                 if last {
                     return Some((cur, seg.node.clone()));
                 }
@@ -465,6 +453,12 @@ fn trace(path: &Path, start: usize, cx: &Cx, usage: &mut [Usage]) -> Option<(usi
         }
     }
     None
+}
+
+fn push_join(joins: &mut Vec<(usize, String)>, ti: usize, via: &str) {
+    if !joins.iter().any(|(m, v)| *m == ti && v == via) {
+        joins.push((ti, via.to_string()));
+    }
 }
 
 // ---------- index availability ----------------------------------------------
@@ -488,59 +482,90 @@ fn lead<'a>(m: &RModel, idx: &'a RIndex) -> Option<&'a str> {
     }
 }
 
-// ---------- W0103 / W0105 -----------------------------------------------------
+// ---------- E0260 / W0105 -----------------------------------------------------
 
-fn check_pattern(pat: &Pattern, mi: usize, inferred: &[RIndex], cx: &Cx, sink: &mut Sink) {
-    if pat.opaque {
-        return; // beyond first-column reasoning; stay silent rather than guess
-    }
+fn check_pattern(pat: &Pattern, mi: usize, cx: &Cx, sink: &mut Sink) {
     let m = cx.model(mi);
     let leads = |field: &str| -> bool {
-        m.is_unique(field)
-            || m.indexes.iter().any(|i| lead(m, i) == Some(field))
-            || inferred.iter().any(|i| lead(m, i) == Some(field))
+        m.is_unique(field) || m.indexes.iter().any(|i| lead(m, i) == Some(field))
     };
 
-    let served = if !pat.eq.is_empty() || !pat.range.is_empty() {
-        pat.eq.iter().chain(&pat.range).any(|f| leads(f))
-    } else if let (Some(sort), true) = (&pat.sort, pat.paginated) {
-        // No filter at all: only a paginated list pays for its sort — an index on
-        // the sort key turns a full filesort into an early-exit scan.
-        leads(sort)
-    } else {
-        true // nothing an index could serve; nothing to lint
-    };
+    // A filter with no leading index scans (unless it is opaque — then stay silent).
+    let filter_ok = pat.opaque
+        || if !pat.eq.is_empty() || !pat.range.is_empty() {
+            pat.eq.iter().chain(&pat.range).any(|f| leads(f))
+        } else if let (Some(sort), true) = (&pat.sort, pat.paginated) {
+            // No filter at all: only a paginated list pays for its sort — an index on
+            // the sort key turns a full filesort into an early-exit scan.
+            leads(sort)
+        } else {
+            true // nothing an index could serve; nothing to check
+        };
 
+    // Join keys this query traverses that no declared `@index` covers.
+    let uncovered: Vec<&(usize, String)> = pat
+        .joins
+        .iter()
+        .filter(|(ti, via)| !covers(cx.model(*ti), via))
+        .collect();
+
+    let served = filter_ok && uncovered.is_empty();
+
+    // The visible `unindexed(…)` opt-out satisfies both the filter and the join
+    // requirement for this query; a stale one (the query is served) is W0105.
     match (&pat.annotation, served) {
-        (None, false) => {
-            let wants: Vec<&str> = pat
-                .eq
-                .iter()
-                .chain(&pat.range)
-                .chain(&pat.sort)
-                .map(|s| s.as_str())
-                .collect();
-            sink.warn_note(
-                code::UNINDEXED,
-                pat.span,
+        (Some(_), false) => return,
+        (Some(u), true) => {
+            sink.warn(
+                code::STALE_UNINDEXED,
+                u.span,
                 format!(
-                    "query `{}` will scan `{}`: no index leads with any of ({})",
-                    pat.name,
-                    m.name,
-                    wants.join(", ")
+                    "query `{}` is indexed — this `unindexed` annotation is stale; drop it",
+                    pat.name
                 ),
-                "add an `@index`, or annotate `unindexed(max_rows: N)` / `unindexed(unsafe)`",
             );
+            return;
         }
-        (Some(u), true) => sink.warn(
-            code::STALE_UNINDEXED,
-            u.span,
+        (None, true) => return,
+        (None, false) => {}
+    }
+
+    if !filter_ok {
+        let wants: Vec<&str> = pat
+            .eq
+            .iter()
+            .chain(&pat.range)
+            .chain(&pat.sort)
+            .map(|s| s.as_str())
+            .collect();
+        let col = wants.first().copied().unwrap_or("");
+        sink.error_fix(
+            code::UNINDEXED_JOIN,
+            pat.span,
             format!(
-                "query `{}` is indexed — this `unindexed` annotation is stale; drop it",
-                pat.name
+                "query `{}` will scan `{}`: no index leads with any of ({})",
+                pat.name,
+                m.name,
+                wants.join(", ")
             ),
-        ),
-        _ => {}
+            "add an `@index`, or annotate `unindexed(max_rows: N)` / `unindexed(unsafe)`",
+            m.name.clone(),
+            format!("@index {col}"),
+        );
+    }
+    for (ti, via) in uncovered {
+        let target = cx.model(*ti);
+        sink.error_fix(
+            code::UNINDEXED_JOIN,
+            pat.span,
+            format!(
+                "query `{}` joins `{}` through `{via}` with no covering index — the join will scan",
+                pat.name, target.name
+            ),
+            "add an `@index`, or annotate `unindexed(max_rows: N)` / `unindexed(unsafe)`",
+            target.name.clone(),
+            format!("@index {via}"),
+        );
     }
 }
 
@@ -593,9 +618,16 @@ fn lint_useless(ast: &Model, mi: usize, usage: &Usage, cx: &Cx, sink: &mut Sink)
 /// join demand a predicate reach does. Nested sub-objects recurse into the target
 /// model; the nest edge itself is a traversal. A `field -> Shape` reference expands
 /// the named shape's body in place (guarded against reference cycles, which sema
-/// rejects but this pass must still terminate on).
-fn shape_demand(body: &[ShapeField], mi: usize, cx: &Cx, usage: &mut [Usage]) {
-    shape_demand_in(body, mi, cx, usage, &mut Vec::new());
+/// rejects but this pass must still terminate on). Join reaches are recorded on
+/// `joins` (the returning query's pattern) as well as the pooled `usage`.
+fn shape_demand(
+    body: &[ShapeField],
+    mi: usize,
+    cx: &Cx,
+    usage: &mut [Usage],
+    joins: &mut Vec<(usize, String)>,
+) {
+    shape_demand_in(body, mi, cx, usage, joins, &mut Vec::new());
 }
 
 fn shape_demand_in(
@@ -603,6 +635,7 @@ fn shape_demand_in(
     mi: usize,
     cx: &Cx,
     usage: &mut [Usage],
+    joins: &mut Vec<(usize, String)>,
     stack: &mut Vec<String>,
 ) {
     for f in body {
@@ -611,7 +644,7 @@ fn shape_demand_in(
             ShapeField::Rename { value, .. } => {
                 if let ShapeValue::Path(p) = value {
                     if p.segments.len() > 1 {
-                        trace(p, mi, cx, usage);
+                        trace(p, mi, cx, usage, joins);
                     }
                 }
             }
@@ -620,10 +653,11 @@ fn shape_demand_in(
                     if let MemberKind::Inverse { target, via } = &kind {
                         if let Some(ti) = cx.find(target) {
                             usage[ti].join(via);
+                            push_join(joins, ti, via);
                         }
                     }
                     if let Some(ti) = kind.target().and_then(|t| cx.find(t)) {
-                        shape_demand_in(body, ti, cx, usage, stack);
+                        shape_demand_in(body, ti, cx, usage, joins, stack);
                     }
                 }
             }
@@ -635,6 +669,7 @@ fn shape_demand_in(
                     if let MemberKind::Inverse { target, via } = &kind {
                         if let Some(ti) = cx.find(target) {
                             usage[ti].join(via);
+                            push_join(joins, ti, via);
                         }
                     }
                     if let (Some(ti), Some(body)) = (
@@ -642,7 +677,7 @@ fn shape_demand_in(
                         cx.shape_bodies.get(&shape.node).copied(),
                     ) {
                         stack.push(shape.node.clone());
-                        shape_demand_in(body, ti, cx, usage, stack);
+                        shape_demand_in(body, ti, cx, usage, joins, stack);
                         stack.pop();
                     }
                 }

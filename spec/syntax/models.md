@@ -1,6 +1,6 @@
 # syntax/models.md
 
-Principles: 2 (no hidden fields), 3 (delimiters), 8 (show derived).
+Principles: 2 (no hidden fields), 3 (delimiters), 8 (show *cost-free* derived facts only).
 
 ## File
 One model per file. References out are fine; editing a model never mutates another model's file. Blocks `{ }`. Items separated by newline or comma. Layout free.
@@ -37,7 +37,10 @@ Uniform for columns and relations: `name: Type (modifiers)`
 - Split is intentional: cardinality/optionality = type-shape; constraints = field-qualifier.
 
 ## Defaults
-- `id` implicit. Declare a key only if non-standard (deviation is visible).
+- `id` is **required, written in source**: `id: Id`. A primary key is load-bearing, so
+  its omission is not elidable (principle 2) — a model that declares no `id` is an error
+  (`E0261`) with a one-key editor autofix that inserts the line. Declare a non-standard key
+  (a different type or column) in the same slot.
 - Not-null default. `?` opts into nullable.
 
 ## Decorators (model-level)

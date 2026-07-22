@@ -3,12 +3,14 @@
 @soft_delete(deleted_at)
 @scope Tenant
 Comment {
+  id:         Id
   deleted_at: timestamp?
   created_at: timestamp (default now())
   org:        Org
   ticket:     Ticket
   author:     User
   body:       text
+  @index ticket
 }
 
 shape CommentRow from Comment {

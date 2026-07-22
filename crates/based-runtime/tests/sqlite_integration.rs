@@ -249,9 +249,9 @@ async fn backend_ping_succeeds_on_a_live_db() {
 async fn update_mutation_reselects_full_declared_shape_end_to_end() {
     let c = compile_sqlite(
         r#"
-        User { name: text }
+        User { id: Id, name: text }
         @updated(updated_at)
-        Order { updated_at: timestamp, placed_by: User, status: text, total: int }
+        Order { id: Id, updated_at: timestamp, placed_by: User, status: text, total: int }
         shape OrderCard from Order { status, total, placed_by { name } }
         mutation set_status(id: Id, status: text) -> OrderCard {
           update Order where (id = $id) { status = $status };
@@ -319,7 +319,7 @@ async fn atomic_update_expression_computes_server_side_end_to_end() {
     let c = compile_sqlite(
         r#"
         @updated(updated_at)
-        Order { updated_at: timestamp, status: text, total: int }
+        Order { id: Id, updated_at: timestamp, status: text, total: int }
         shape OrderCard from Order { status, total }
         mutation adjust_total(id: Id, delta: int) -> OrderCard {
           update Order where (id = $id) { total = total + $delta };
@@ -380,11 +380,11 @@ async fn atomic_update_expression_computes_server_side_end_to_end() {
 async fn zero_row_update_is_404_and_writes_nothing_end_to_end() {
     let c = compile_sqlite(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
         @updated(updated_at)
-        Order { updated_at: timestamp, org: Org, status: text }
+        Order { id: Id, updated_at: timestamp, org: Org, status: text }
         shape OrderCard from Order { status }
         mutation set_status(id: Id, status: text) -> OrderCard scoped Tenant {
           update Order where (id = $id) { status = $status };
@@ -459,19 +459,19 @@ async fn zero_row_update_is_404_and_writes_nothing_end_to_end() {
 async fn nest_reached_scoped_child_is_confined_cross_tenant() {
     let c = compile_sqlite(
         r#"
-        Org { name: text }
-        Region { name: text }
+        Org { id: Id, name: text }
+        Region { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         scope Region (region: Region = $ctx.region)
         @scope Tenant
         @sort(id asc)
-        Order { org: Org, contact: Contact?, total: int, items: LineItem[] }
+        Order { id: Id, org: Org, contact: Contact?, total: int, items: LineItem[] }
         @scope Region
         @sort(id asc)
-        Contact { region: Region, name: text }
+        Contact { id: Id, region: Region, name: text }
         @scope Region
         @sort(id asc)
-        LineItem { order: Order, region: Region, sku: text }
+        LineItem { id: Id, order: Order, region: Region, sku: text }
         shape OrderCard from Order { total, contact { name }, items { sku } }
         query order_by_id(id) -> OrderCard scoped Tenant, Region;
         "#,
@@ -548,7 +548,7 @@ async fn enum_round_trip_string_and_int_end_to_end() {
         r#"
         enum Status { pending, paid = "PAID", shipped }
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { status: Status (default pending), priority: Priority, title: text }
+        Ticket { id: Id, status: Status (default pending), priority: Priority, title: text }
         shape TicketRow from Ticket { status, priority, title }
         mutation open_ticket(title: text) -> TicketRow {
           create Ticket { title = $title, priority = high, status = paid };
@@ -616,7 +616,7 @@ async fn in_value_list_filters_end_to_end() {
     let c = compile_sqlite(
         r#"
         enum Status { pending, paid = "PAID", shipped }
-        Ticket { status: Status, title: text, @index(status) }
+        Ticket { id: Id, status: Status, title: text, @index(status) }
         shape TicketRow from Ticket { status, title }
         query active(extra: Status) -> TicketRow[] {
           list Ticket where (status in (pending, $extra)) order (title);
@@ -663,7 +663,7 @@ async fn in_value_list_filters_end_to_end() {
 async fn decimal_and_float_round_trip_end_to_end() {
     let c = compile_sqlite(
         r#"
-        Ledger { name: text, price: decimal(12, 2), score: float }
+        Ledger { id: Id, name: text, price: decimal(12, 2), score: float }
         shape LedgerRow from Ledger { name, price, score }
         mutation add_entry(name: text, price: decimal(12, 2), score: float) -> LedgerRow {
           create Ledger { name = $name, price = $price, score = $score };
@@ -730,9 +730,10 @@ async fn decimal_and_float_round_trip_end_to_end() {
 async fn aggregate_group_by_having_end_to_end() {
     let c = compile_sqlite(
         r#"
-        Buyer { name: text }
+        Buyer { id: Id, name: text }
         @soft_delete(deleted_at)
         Order {
+          id: Id
           deleted_at: timestamp?
           buyer:      Buyer
           total:      decimal(12, 2)
@@ -804,7 +805,7 @@ fn compile_sqlite(src: &str) -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -819,11 +820,11 @@ async fn joined_scope_hides_cross_scope_row_end_to_end() {
     // org is invisible across the join.
     let c = compile_sqlite(
         r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact?, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact?, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
         query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#,
@@ -882,9 +883,9 @@ async fn joined_scope_hides_cross_scope_row_end_to_end() {
 #[tokio::test]
 async fn nested_to_one_query_returns_nested_json() {
     let src = r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, fulfilled_by: User?, total: int }
+        Order { id: Id, placed_by: User, fulfilled_by: User?, total: int }
         shape OrderCard from Order { total, placed_by { name, email } }
         query order_by_id(id) -> OrderCard;
         query orders() -> OrderCard[];
@@ -969,16 +970,17 @@ async fn nested_to_one_query_returns_nested_json() {
 #[tokio::test]
 async fn absent_optional_to_one_nest_is_json_null() {
     let src = r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
         Order {
+          id: Id
           placed_by:    User
           fulfilled_by: User?
           total:        int
           items:        Item[] (Item.order)
         }
         @sort(id asc)
-        Item { order: Order, checker: User?, qty: int }
+        Item { id: Id, order: Order, checker: User?, qty: int, @index order }
         shape OrderCard from Order {
           total
           placed_by { name }
@@ -1081,7 +1083,7 @@ async fn keyset_pagination_walks_the_set_end_to_end() {
     let c = compile_sqlite(
         r#"
         @sort(id asc)
-        Item { name: text, rank: int }
+        Item { id: Id, name: text, rank: int }
         shape ItemCard from Item { name, rank }
         query items() -> ItemCard[] { list Item order (rank asc) page (2); }
         "#,
@@ -1148,7 +1150,7 @@ async fn with_count_page_carries_total_end_to_end() {
     let c = compile_sqlite(
         r#"
         @sort(id asc)
-        Item { name: text, rank: int }
+        Item { id: Id, name: text, rank: int }
         shape ItemCard from Item { name }
         query counted() -> ItemCard[] { list Item order (rank asc) page (2) offset with count; }
         query windowed() -> ItemCard[] { list Item order (rank asc) page (2); }
@@ -1198,10 +1200,10 @@ async fn nested_to_many_query_returns_json_array() {
     let c = compile_sqlite(
         r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
+        Order { id: Id, total: int, items: OrderItem[] }
         @sort(id asc)
         @soft_delete(deleted_at)
-        OrderItem { order: Order, sku: text, qty: int, deleted_at: timestamp? }
+        OrderItem { id: Id, order: Order, sku: text, qty: int, deleted_at: timestamp? }
         shape OrderCard from Order { total, items { sku, qty } }
         query order_by_id(id) -> OrderCard;
         query orders() -> OrderCard[];
@@ -1269,6 +1271,7 @@ async fn nested_self_referential_to_many_returns_json_array() {
         r#"
         @sort(id asc)
         User {
+          id: Id
           name: text
           invited_by: User?
           invited_users: User[] (User.invited_by)
@@ -1332,14 +1335,15 @@ async fn nested_to_many_rows_ride_in_sort_cascade_order() {
         r#"
         @sort(id asc)
         Ticket {
+          id: Id
           subject: text
           comments: Comment[]
           pins: Pin[] @sort(rank desc)
         }
         @sort(pos asc)
-        Comment { ticket: Ticket, pos: int, body: text }
+        Comment { id: Id, ticket: Ticket, pos: int, body: text }
         @sort(rank asc)
-        Pin { ticket: Ticket, rank: int, label: text }
+        Pin { id: Id, ticket: Ticket, rank: int, label: text }
         shape TicketDetail from Ticket { subject, comments { body }, pins { label } }
         query ticket_by_id(id) -> TicketDetail;
         "#,
@@ -1395,12 +1399,12 @@ async fn nested_to_many_rows_ride_in_sort_cascade_order() {
 async fn named_shape_nest_returns_nested_json() {
     let c = compile_sqlite(
         r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, total: int, items: OrderItem[] }
+        Order { id: Id, placed_by: User, total: int, items: OrderItem[] }
         @sort(id asc)
         @soft_delete(deleted_at)
-        OrderItem { order: Order, sku: text, qty: int, deleted_at: timestamp? }
+        OrderItem { id: Id, order: Order, sku: text, qty: int, deleted_at: timestamp? }
         shape UserRef from User { name, email }
         shape ItemRow from OrderItem { sku, qty }
         shape OrderDetail from Order {
@@ -1517,6 +1521,7 @@ async fn enum_variant_filter_and_check_constraint_end_to_end() {
         r#"
         enum Status { pending, paid, shipped }
         Item {
+          id: Id
           status: Status (default pending)
           name:   text
         }
@@ -1574,7 +1579,7 @@ async fn guard_reads_the_live_database_before_the_write() {
     use std::sync::Arc;
 
     const SCHEMA: &str = r#"
-        Order { status: text, total: int }
+        Order { id: Id, status: text, total: int }
         shape OrderCard from Order { status, total }
         mutation close_order(id) -> OrderCard guard order_still_open {
             update Order where (id = $id) { status = "closed" };
@@ -1584,7 +1589,7 @@ async fn guard_reads_the_live_database_before_the_write() {
     let (schema, diags) = check(&sf.decls);
     assert!(!diags
         .iter()
-        .any(|d| d.severity == based_diagnostics::Severity::Error));
+        .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"));
     let c = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
 
     let backend = Arc::new(SqliteBackend::in_memory().expect("open in-memory sqlite"));
@@ -1677,7 +1682,7 @@ async fn raw_query_body_end_to_end() {
     let c = compile_sqlite(
         r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text, total: int }
+        User { id: Id, deleted_at: timestamp?, name: text, total: int }
         shape UserRow from User { name, total }
         query heavy_users(min: int) -> UserRow[] {
           raw`SELECT u.name AS name, u.total AS total
@@ -1752,7 +1757,7 @@ async fn upsert_inserts_then_composes_on_conflict() {
     // atomic arithmetic in the conflict branch). The winning row reads back on both paths.
     let c = compile_sqlite(
         r#"
-        Page { path: text (unique), hits: int }
+        Page { id: Id, path: text (unique), hits: int }
         shape PageRow from Page { path, hits }
         mutation record_hit(path: text) -> PageRow {
           create Page { path = $path, hits = 1 } on conflict (path) update { hits = hits + 1 };

@@ -18,9 +18,12 @@ fn gen_pg(src: &str) -> String {
 fn gen_for(src: &str, dialect: Dialect) -> String {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
+    // These snippets exercise SELECT lowering, not index completeness — a query that
+    // scans an unindexed column (`E0260`) still lowers to correct SQL, and the index
+    // requirement is covered authoritatively in based-sema's tests + conformance.
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -31,7 +34,7 @@ fn gen_for(src: &str, dialect: Dialect) -> String {
 fn bare_get_injects_soft_delete_and_maps_param() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, status: text, total: int }
         shape OrderCard from Order { status, total }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -48,9 +51,9 @@ fn bare_get_injects_soft_delete_and_maps_param() {
 fn relation_param_maps_to_fk_column() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int }
         shape OrderCard from Order { total }
         query orders(org) -> OrderCard[];
         "#);
@@ -62,10 +65,10 @@ fn relation_param_maps_to_fk_column() {
 fn shape_reach_joins_and_injects_soft_delete_in_on() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
+        User { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
         @sort(placed_at desc)
-        Order { deleted_at: timestamp?, placed_by: User, placed_at: timestamp }
+        Order { id: Id, deleted_at: timestamp?, placed_by: User, placed_at: timestamp }
         shape OrderCard from Order { buyer = placed_by.name }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -83,11 +86,11 @@ fn shape_reach_into_scoped_model_injects_scope_in_join_on() {
     // `@scope` into the join `ON` — same slot as soft-delete — so it can't read a row
     // across the scope boundary. Here `Contact` is org-scoped and reached via a shape.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
         query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#);
@@ -104,11 +107,11 @@ fn shape_reach_into_scoped_model_injects_scope_in_join_on() {
 fn where_reach_into_scoped_model_injects_scope_in_join_on() {
     // The same injection fires for a relation reached in a `where`, not just a shape.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject }
         query tickets_by_contact_name(name) -> TicketCard[] scoped Tenant {
           list Ticket where (raised_by.name = $name);
@@ -127,11 +130,11 @@ fn unscoped_query_drops_joined_scope_too() {
     // `unscoped`  opts out of *all* scope handling — the joined table's `@scope`
     //  included, not just the root's. The join `ON` carries no scope predicate.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, who = raised_by.name }
         query any_ticket(id) -> TicketCard unscoped("admin: cross-org ticket lookup");
         "#);
@@ -150,9 +153,9 @@ fn unscoped_query_drops_joined_scope_too() {
 #[test]
 fn optional_relation_is_left_join() {
     let ddl = gen(r#"
-        User { name: text }
+        User { id: Id, name: text }
         @sort(id asc)
-        Order { fulfilled_by: User?, total: int }
+        Order { id: Id, fulfilled_by: User?, total: int }
         shape OrderCard from Order { fulfiller = fulfilled_by.name }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -166,10 +169,10 @@ fn optional_relation_is_left_join() {
 fn edge_binding_and_colop_binding() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
+        User { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
         @sort(created_at desc)
-        Post { deleted_at: timestamp?, author: User, created_at: timestamp }
+        Post { id: Id, deleted_at: timestamp?, author: User, created_at: timestamp }
         shape PostShape from Post { created_at }
         query posts(user -> author, since: timestamp > created_at) -> PostShape[];
         "#);
@@ -183,12 +186,13 @@ fn block_query_where_order_page_and_bare_bool() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)
         Product {
+          id: Id
           deleted_at: timestamp?
           created_at: timestamp
           org: Org
           active: bool (default true)
         }
-        Org { name: text }
+        Org { id: Id, name: text }
         shape ProductCard from Product { active }
         query active_products(org: Id) -> ProductCard[] {
           list Product
@@ -240,8 +244,8 @@ fn scope_predicate_is_injected() {
         @soft_delete(deleted_at)
         @scope Tenant
         @sort(id asc)
-        Order { deleted_at: timestamp?, org: Org, total: int }
-        Org { name: text }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int }
+        Org { id: Id, name: text }
         shape OrderCard from Order { total }
         query orders() -> OrderCard[] scoped Tenant;
         "#);
@@ -259,8 +263,8 @@ fn unscoped_query_omits_the_scope_predicate() {
         @soft_delete(deleted_at)
         @scope Tenant
         @sort(id asc)
-        Order { deleted_at: timestamp?, org: Org, total: int }
-        Org { name: text }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int }
+        Org { id: Id, name: text }
         shape OrderCard from Order { total }
         query all_orders(org) -> OrderCard[] unscoped("admin: cross-org listing");
         "#);
@@ -294,9 +298,9 @@ fn offset_pagination_and_with_count() {
 #[test]
 fn bare_model_return_projects_all_stored_columns() {
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @sort(id asc)
-        Order { org: Org, status: text, total: int }
+        Order { id: Id, org: Org, status: text, total: int }
         query orders() -> Order[];
         "#);
     assert!(ddl.contains("`order`.`status` AS `status`"), "\n{ddl}");
@@ -309,7 +313,7 @@ fn bare_model_return_projects_all_stored_columns() {
 fn zero_arg_filter_is_inlined_against_call_site() {
     let ddl = gen(r#"
         @sort(id asc)
-        Product { name: text, active: bool, stock: int }
+        Product { id: Id, name: text, active: bool, stock: int }
         shape P from Product { name }
         filter sellable = active and stock > 0;
         query q() -> P[] { list Product where (sellable) order (name); }
@@ -324,10 +328,10 @@ fn zero_arg_filter_is_inlined_against_call_site() {
 #[test]
 fn filter_call_substitutes_args_and_traverses_relation() {
     let ddl = gen(r#"
-        City { name: text }
-        Address { city: City }
+        City { id: Id, name: text }
+        Address { id: Id, city: City }
         @sort(id asc)
-        User { address: Address, name: text }
+        User { id: Id, address: Address, name: text }
         shape U from User { name }
         filter in_city(c) = address.city.name = $c;
         query users_in(c) -> U[] { list User where (in_city($c)) order (name); }
@@ -346,7 +350,7 @@ fn recursive_filter_terminates_in_codegen() {
     // Mirrors the sema `recursive_filter_terminates` case: lowering must not loop.
     let ddl = gen(r#"
         @sort(id asc)
-        Product { name: text, active: bool }
+        Product { id: Id, name: text, active: bool }
         shape P from Product { name }
         filter loopy = active and loopy;
         query q() -> P[] { list Product where (loopy) order (name); }
@@ -358,10 +362,10 @@ fn recursive_filter_terminates_in_codegen() {
 #[test]
 fn multi_hop_path_chains_joins() {
     let ddl = gen(r#"
-        City { name: text }
-        Address { city: City }
+        City { id: Id, name: text }
+        Address { id: Id, city: City }
         @sort(id asc)
-        User { address: Address, name: text }
+        User { id: Id, address: Address, name: text }
         shape UserCard from User { city = address.city.name }
         query user_by_id(id) -> UserCard;
         "#);
@@ -388,10 +392,10 @@ fn nested_to_one_forward_projects_prefixed_columns() {
     // the same one a reach-rename would build (reused machinery).
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text, email: text }
+        User { id: Id, deleted_at: timestamp?, name: text, email: text }
         @soft_delete(deleted_at)
         @sort(placed_at desc)
-        Order { deleted_at: timestamp?, placed_by: User, total: int, placed_at: timestamp }
+        Order { id: Id, deleted_at: timestamp?, placed_by: User, total: int, placed_at: timestamp }
         shape OrderCard from Order { total, placed_by { name, email } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -420,10 +424,11 @@ fn optional_to_one_nest_projects_a_presence_probe() {
     // inner-joins and needs no probe.
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text, email: text }
+        User { id: Id, deleted_at: timestamp?, name: text, email: text }
         @soft_delete(deleted_at)
         @sort(placed_at desc)
         Order {
+          id: Id
           deleted_at: timestamp?
           placed_by:  User
           courier:    User?
@@ -446,17 +451,18 @@ fn optional_to_one_nest_inside_a_json_array_null_collapses() {
     // row collapses there: CASE WHEN the child's id IS NULL THEN NULL.
     let ddl = gen(r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
+        User { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
         @sort(placed_at desc)
         Order {
+          id: Id
           deleted_at: timestamp?
           total:      int
           placed_at:  timestamp
           items:      OrderItem[] (OrderItem.order)
         }
         @soft_delete(deleted_at)
-        OrderItem { deleted_at: timestamp?, order: Order, checker: User?, qty: int }
+        OrderItem { id: Id, deleted_at: timestamp?, order: Order, checker: User?, qty: int }
         shape OrderCard from Order { total, items { qty, checker { name } } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -472,11 +478,11 @@ fn nested_to_one_recurses_and_reaches_inside_nest() {
     // alias prefix (`placed_by.org.name`); a `=`-reach inside a nest resolves from the
     // nested model's alias.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @sort(id asc)
-        User { org: Org, name: text }
+        User { id: Id, org: Org, name: text }
         @sort(id asc)
-        Order { placed_by: User, total: int }
+        Order { id: Id, placed_by: User, total: int }
         shape OrderCard from Order { total, placed_by { name, org { name }, org_name = org.name } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -514,12 +520,12 @@ fn nest_ref_lowers_identically_to_inline_nest() {
     // to-one edge and for a to-many edge (correlated JSON subquery) alike.
     let common = r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text, email: text }
+        User { id: Id, deleted_at: timestamp?, name: text, email: text }
         @soft_delete(deleted_at)
         @sort(placed_at desc)
-        Order { deleted_at: timestamp?, placed_by: User, total: int, placed_at: timestamp,
+        Order { id: Id, deleted_at: timestamp?, placed_by: User, total: int, placed_at: timestamp,
                 items: OrderItem[] }
-        OrderItem { order: Order, sku: text, qty: int }
+        OrderItem { id: Id, order: Order, sku: text, qty: int }
     "#;
     let inline = gen(&format!(
         r#"{common}
@@ -544,11 +550,11 @@ fn nest_ref_recurses_through_named_shapes() {
     // A referenced shape may itself reference: `placed_by -> UserRef` where UserRef
     // nests `org -> OrgRef` chains the joins and prefixes like inline nesting.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         @sort(id asc)
-        User { org: Org, name: text }
+        User { id: Id, org: Org, name: text }
         @sort(id asc)
-        Order { placed_by: User, total: int }
+        Order { id: Id, placed_by: User, total: int }
         shape OrgRef from Org { name }
         shape UserRef from User { name, org -> OrgRef }
         shape OrderDetail from Order { total, placed_by -> UserRef }
@@ -569,11 +575,11 @@ fn nest_only_to_one_scoped_child_injects_scope_in_join_on() {
     // a nested sub-object can't read a row across the scope boundary. `Contact` is
     // org-scoped; `Ticket` is not.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
-        Ticket { raised_by: Contact, subject: text }
+        Contact { id: Id, org: Org, name: text }
+        Ticket { id: Id, raised_by: Contact, subject: text }
         shape TicketCard from Ticket { subject, raised_by { name } }
         query ticket_by_id(id) -> TicketCard scoped Tenant;
         "#);
@@ -591,13 +597,13 @@ fn nest_only_to_many_scoped_child_injects_scope_in_subquery_where() {
     // `@scope` into the correlated subquery's `WHERE`, beside the correlation and the
     // tombstone. `LineItem` is org-scoped; `Order` is not.
     let ddl = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @sort(id asc)
-        Order { total: int, items: LineItem[] }
+        Order { id: Id, total: int, items: LineItem[] }
         @scope Tenant
         @sort(id asc)
-        LineItem { order: Order, org: Org, sku: text }
+        LineItem { id: Id, order: Order, org: Org, sku: text }
         shape OrderCard from Order { total, items { sku } }
         query order_by_id(id) -> OrderCard scoped Tenant;
         "#);
@@ -617,10 +623,10 @@ fn nested_to_many_aggregates_into_a_json_array_column() {
     // rides the subquery WHERE, and the subquery correlates on the child's back FK.
     let ddl = gen(r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
+        Order { id: Id, total: int, items: OrderItem[] }
         @sort(id asc)
         @soft_delete(deleted_at)
-        OrderItem { order: Order, quantity: int, deleted_at: timestamp? }
+        OrderItem { id: Id, order: Order, quantity: int, deleted_at: timestamp? }
         shape OrderCard from Order { total, items { quantity } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -646,7 +652,7 @@ fn nested_self_referential_to_many_aliases_child_distinctly() {
     // (`s1_user`) must differ from the outer `user` row so the correlation is unambiguous.
     let ddl = gen(r#"
         @sort(id asc)
-        User { name: text, invited_by: User?, invited_users: User[] (User.invited_by) }
+        User { id: Id, name: text, invited_by: User?, invited_users: User[] (User.invited_by) }
         shape UserCard from User { name, invited_users { name } }
         query user_by_id(id) -> UserCard;
         "#);
@@ -666,9 +672,9 @@ fn nested_to_many_relation_sort_overrides_child_model_sort() {
     // beats the child model's own `@sort` (id asc) inside the aggregate's ORDER BY.
     let ddl = gen(r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] @sort(rank desc) }
+        Order { id: Id, total: int, items: OrderItem[] @sort(rank desc) }
         @sort(id asc)
-        OrderItem { order: Order, rank: int, sku: text }
+        OrderItem { id: Id, order: Order, rank: int, sku: text }
         shape OrderCard from Order { total, items { sku } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -686,8 +692,8 @@ fn nested_to_many_without_any_sort_stays_unordered() {
     // the array stays an unordered set (as before).
     let ddl = gen(r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
-        OrderItem { order: Order, sku: text }
+        Order { id: Id, total: int, items: OrderItem[] }
+        OrderItem { id: Id, order: Order, sku: text }
         shape OrderCard from Order { total, items { sku } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -706,9 +712,9 @@ fn sqlite_nested_to_many_orders_inside_json_group_array() {
     let sql = gen_for(
         r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
+        Order { id: Id, total: int, items: OrderItem[] }
         @sort(rank desc)
-        OrderItem { order: Order, rank: int, sku: text }
+        OrderItem { id: Id, order: Order, rank: int, sku: text }
         shape OrderCard from Order { total, items { sku } }
         query order_by_id(id) -> OrderCard;
         "#,
@@ -726,9 +732,9 @@ fn pg_nested_to_many_uses_json_agg_and_double_quotes() {
     let sql = gen_pg(
         r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
+        Order { id: Id, total: int, items: OrderItem[] }
         @sort(id asc)
-        OrderItem { order: Order, quantity: int }
+        OrderItem { id: Id, order: Order, quantity: int }
         shape OrderCard from Order { total, items { quantity } }
         query order_by_id(id) -> OrderCard;
         "#,
@@ -745,9 +751,9 @@ fn pg_nested_to_one_double_quotes_prefixed_alias() {
     let sql = gen_pg(
         r#"
         @sort(id asc)
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, total: int }
+        Order { id: Id, placed_by: User, total: int }
         shape OrderCard from Order { total, placed_by { name } }
         query order_by_id(id) -> OrderCard;
         "#,
@@ -768,7 +774,7 @@ fn pg_select_double_quotes_identifiers_and_keeps_named_placeholders() {
     let sql = gen_pg(
         r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, status: text, total: int }
         shape OrderCard from Order { status, total }
         query order_by_id(id) -> OrderCard;
         "#,
@@ -792,7 +798,7 @@ fn pg_bare_bool_uses_true_keyword() {
     let sql = gen_pg(
         r#"
         @sort(id asc)
-        Order { active: bool, total: int }
+        Order { id: Id, active: bool, total: int }
         shape O from Order { total }
         query live() -> O[] { list Order where (active); }
         "#,
@@ -807,7 +813,7 @@ fn pg_has_uses_jsonb_containment_operator() {
     let sql = gen_pg(
         r#"
         @sort(id asc)
-        Order { tags: text[], total: int }
+        Order { id: Id, tags: text[], total: int }
         shape O from Order { total }
         query tagged(tag: text) -> O[] { list Order where (tags has $tag); }
         "#,
@@ -821,8 +827,8 @@ fn pg_join_double_quotes_alias_and_on() {
     let sql = gen_pg(
         r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
-        Order { placed_by: User, total: int }
+        User { id: Id, deleted_at: timestamp?, name: text }
+        Order { id: Id, placed_by: User, total: int }
         shape OrderCard from Order { who = placed_by.name }
         query order_by_id(id) -> OrderCard;
         "#,
@@ -858,12 +864,13 @@ fn or_scope_injects_the_callable_chosen_alternative() {
     let ddl = gen(r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page
         @scope Author
         @sort(created desc)
         Post {
+          id: Id
           page:    Page
           author:  User
           body:    text
@@ -895,11 +902,12 @@ fn and_scope_injects_both_axes() {
     let ddl = gen(r#"
         scope Page   (page:   Page = $ctx.page)
         scope Author (author: User = $ctx.user)
-        Page { title: text }
-        User { name: text }
+        Page { id: Id, title: text }
+        User { id: Id, name: text }
         @scope Page, Author
         @sort(created desc)
         Comment {
+          id: Id
           page:    Page
           author:  User
           body:    text
@@ -921,7 +929,7 @@ fn and_scope_injects_both_axes() {
 fn enum_where_variant_lowers_to_a_string_literal() {
     let src = r#"
         enum Status { pending, paid }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query paid() -> OrderRow[] { list Order where (status = paid) order (total); }
     "#;
@@ -933,7 +941,7 @@ fn enum_where_variant_lowers_to_a_string_literal() {
 fn string_enum_variant_lowers_to_its_wire_value() {
     let src = r#"
         enum Status { pending, paid = "PAID" }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query paid() -> OrderRow[] { list Order where (status = paid) order (total); }
     "#;
@@ -945,7 +953,7 @@ fn string_enum_variant_lowers_to_its_wire_value() {
 fn in_value_list_lowers_variants_params_and_literals_all_dialects() {
     let src = r#"
         enum Status { pending, paid = "PAID", shipped }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query active(extra: Status) -> OrderRow[] {
           list Order where (status in (pending, paid, $extra) and total in (1, 2)) order (total);
@@ -976,7 +984,7 @@ fn in_value_list_lowers_variants_params_and_literals_all_dialects() {
 fn int_enum_in_value_list_lowers_to_integers() {
     let src = r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority, title: text }
+        Ticket { id: Id, priority: Priority, title: text }
         shape TicketRow from Ticket { priority, title }
         query hot() -> TicketRow[] { list Ticket where (priority in (medium, high)) order (title); }
     "#;
@@ -988,7 +996,7 @@ fn int_enum_in_value_list_lowers_to_integers() {
 fn int_enum_variant_lowers_to_an_integer_literal() {
     let src = r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority, title: text }
+        Ticket { id: Id, priority: Priority, title: text }
         shape TicketRow from Ticket { priority, title }
         query urgent() -> TicketRow[] { list Ticket where (priority >= medium) order (title); }
     "#;
@@ -1004,7 +1012,7 @@ fn raw_query_body_is_the_statement_with_bound_params() {
     let src = r#"
         @soft_delete(deleted_at)
         @sort(name asc)
-        User { deleted_at: timestamp?, name: text, total: int }
+        User { id: Id, deleted_at: timestamp?, name: text, total: int }
         shape UserRow from User { name }
         query heavy(min: int) -> UserRow[] {
           raw`SELECT u.name AS name FROM {table} u WHERE u.total >= ${min}`;
@@ -1032,7 +1040,7 @@ fn raw_query_body_is_the_statement_with_bound_params() {
 fn raw_query_trailing_semicolon_is_normalized() {
     // A raw body already ending in `;` emits exactly one terminator.
     let out = gen(r#"
-        User { name: text }
+        User { id: Id, name: text }
         shape UserRow from User { name }
         query all() -> UserRow[] { raw`SELECT name FROM user;`; }
         "#);
@@ -1043,9 +1051,10 @@ fn raw_query_trailing_semicolon_is_normalized() {
 // ---------- aggregations + group by + having (T4) --------------------------
 
 const AGG_SCHEMA: &str = r#"
-    Buyer { name: text }
+    Buyer { id: Id, name: text }
     @soft_delete(deleted_at)
     Order {
+      id: Id
       deleted_at: timestamp?
       buyer: Buyer
       total: decimal(12, 2)

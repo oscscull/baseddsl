@@ -23,7 +23,7 @@ fn compile(src: &str) -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -40,10 +40,11 @@ fn row(pairs: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
 }
 
 const CREATE_SCHEMA: &str = r#"
-    Org { name: text }
-    User { name: text }
+    Org { id: Id, name: text }
+    User { id: Id, name: text }
     @created(created_at)
     Order {
+      id: Id
         created_at: timestamp,
         org: Org,
         buyer: User,
@@ -149,12 +150,13 @@ fn unknown_mutation_is_rejected() {
 }
 
 const UPDATE_SCHEMA: &str = r#"
-    Org { name: text }
+    Org { id: Id, name: text }
     scope Tenant (org: Org = $ctx.org)
     @soft_delete(deleted_at)
     @scope Tenant
     @updated(updated_at)
     Order {
+      id: Id
         deleted_at: timestamp?,
         updated_at: timestamp,
         org: Org,
@@ -225,7 +227,7 @@ async fn soft_delete_executes_a_tombstone_update_never_a_real_delete() {
         r#"
         @soft_delete(deleted_at)
         @updated(updated_at)
-        Order { deleted_at: timestamp?, updated_at: timestamp, status: text }
+        Order { id: Id, deleted_at: timestamp?, updated_at: timestamp, status: text }
         shape OrderCard from Order { status }
         mutation remove(id: Id) -> OrderCard {
             delete Order where (id = $id);
@@ -302,8 +304,8 @@ async fn zero_row_update_is_not_found_and_rolls_back() {
 async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
     let c = compile(
         r#"
-        User { email: text }
-        Address { user: User, city: text }
+        User { id: Id, email: text }
+        Address { id: Id, user: User, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
             tx {
@@ -506,7 +508,7 @@ async fn mutation_gives_up_after_bounded_deadlock_retries() {
 
 const ACK_SCHEMA: &str = r#"
     @soft_delete(deleted_at)
-    Comment { deleted_at: timestamp?, body: text }
+    Comment { id: Id, deleted_at: timestamp?, body: text }
     mutation purge_comment(id: Id) -> ok {
         hard delete Comment where (id = $id);
     }

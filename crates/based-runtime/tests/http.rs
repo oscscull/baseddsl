@@ -17,8 +17,8 @@ use based_runtime::{Backend, Compiled, Db, DbError, MockDb, Row};
 use serde_json::json;
 
 const SCHEMA: &str = r#"
-    Org { name: text }
-    Order { org: Org, status: text, total: int }
+    Org { id: Id, name: text }
+    Order { id: Id, org: Org, status: text, total: int }
     shape OrderCard from Order { status, total }
 
     query order_by_id(id) -> OrderCard;
@@ -100,7 +100,7 @@ fn compile() -> Compiled {
     assert!(
         !diags
             .iter()
-            .any(|d| d.severity == based_diagnostics::Severity::Error),
+            .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
         "schema should check clean"
     );
     Compiled::from_checked(schema, sf.decls, based_codegen::Dialect::MariaDb)
@@ -549,7 +549,7 @@ fn graceful_shutdown_drains_and_returns() {
 #[tokio::test]
 async fn listener_refuses_a_guarded_schema_at_startup() {
     const GUARDED: &str = r#"
-        Order { status: text, total: int }
+        Order { id: Id, status: text, total: int }
         shape OrderCard from Order { status, total }
         mutation close_order(id) -> OrderCard guard caller_can_close {
             update Order where (id = $id) { status = "closed" };

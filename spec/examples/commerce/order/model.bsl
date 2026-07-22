@@ -17,6 +17,7 @@ enum Status { pending, paid, shipped, cancelled }
 # `unscoped(...)` opt-out (see queries.bsl).
 @scope Tenant
 Order {
+  id:           Id
   deleted_at:   timestamp?
   org:          Org
   placed_by:    User

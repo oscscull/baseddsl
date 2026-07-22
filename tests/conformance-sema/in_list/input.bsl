@@ -5,6 +5,7 @@ enum Status { open, waiting = "waiting_on_customer", closed }
 enum Priority { low = 1, high = 2 }
 
 Ticket {
+  id: Id
   status:   Status
   priority: Priority
   total:    int

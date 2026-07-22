@@ -119,12 +119,12 @@ fn init_diff_equals_the_from_scratch_create_set() {
 fn add_nullable_column_plus_index_is_the_worked_example() {
     // The worked example: Product gains a nullable `barcode` + an index.
     let base = "
-        Org { name: text }
-        Product { org: Org  name: text }
+        Org { id: Id  name: text }
+        Product { id: Id  org: Org  name: text }
     ";
     let evolved = "
-        Org { name: text }
-        Product { org: Org  name: text  barcode: text?  @index barcode }
+        Org { id: Id  name: text }
+        Product { id: Id  org: Org  name: text  barcode: text?  @index barcode }
     ";
     let prev = Snapshot::from_schema(&checked(base));
     let steps = migrate::diff(&prev, &checked(evolved));
@@ -150,7 +150,7 @@ fn enum_kinds_encode_distinctly_in_the_snapshot_and_round_trip() {
         r#"
         enum Status { pending, paid = "PAID" }
         enum Priority { low = 0, high = 1 }
-        Order { status: Status, priority: Priority, total: int }
+        Order { id: Id, status: Status, priority: Priority, total: int }
         "#,
     );
     let text = migrate::snapshot(&schema);
@@ -167,7 +167,7 @@ fn int_enum_from_scratch_renders_integer_column_and_int_check() {
     let schema = checked(
         r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority (default low), title: text }
+        Ticket { id: Id, priority: Priority (default low), title: text }
         "#,
     );
     let steps = migrate::diff(&Snapshot::default(), &schema);
@@ -183,10 +183,10 @@ fn int_enum_from_scratch_renders_integer_column_and_int_check() {
 #[test]
 fn dropping_a_model_is_a_marked_drop_table() {
     let base = "
-        Org { name: text }
-        Legacy { note: text }
+        Org { id: Id  name: text }
+        Legacy { id: Id  note: text }
     ";
-    let evolved = "Org { name: text }";
+    let evolved = "Org { id: Id  name: text }";
     let prev = Snapshot::from_schema(&checked(base));
     let steps = migrate::diff(&prev, &checked(evolved));
 
@@ -245,8 +245,8 @@ fn init_render_produces_one_create_table_per_model_per_dialect() {
 fn renamed_column_is_a_drop_add_pair_not_a_rename() {
     // Renames are never auto-guessed (the @was rename step is the exception): a changed name reads
     // as a drop of the old column + an add of the new one.
-    let base = "Widget { label: text }";
-    let evolved = "Widget { title: text }";
+    let base = "Widget { id: Id  label: text }";
+    let evolved = "Widget { id: Id  title: text }";
     let prev = Snapshot::from_schema(&checked(base));
     let steps = migrate::diff(&prev, &checked(evolved));
 

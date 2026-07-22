@@ -1,6 +1,7 @@
 @soft_delete(deleted_at)
 @sort(placed_at desc)
 Order {
+  id: Id
   deleted_at:   timestamp?
   org:          Org
   placed_by:    User

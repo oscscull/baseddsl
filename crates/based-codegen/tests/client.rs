@@ -28,7 +28,7 @@ fn gen_opts(src: &str, opts: ClientOptions) -> String {
 fn preamble_carries_envelope_and_transport() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -43,7 +43,7 @@ fn preamble_carries_envelope_and_transport() {
 fn get_query_returns_option_of_shape() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, status: text, total: int }
         shape OrderCard from Order { status, total }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -66,9 +66,9 @@ fn get_query_returns_option_of_shape() {
 fn list_query_returns_vec() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int, @index org }
         shape OrderCard from Order { total }
         query orders_in_org(org) -> OrderCard[];
         "#);
@@ -85,7 +85,7 @@ fn list_query_returns_vec() {
 fn paginated_query_returns_page_envelope() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Product { deleted_at: timestamp?, name: text, active: bool }
+        Product { id: Id, deleted_at: timestamp?, name: text, active: bool, @index active }
         shape ProductCard from Product { name }
         query active(org: Id) -> ProductCard[] {
           list Product where (active) page (20);
@@ -139,9 +139,9 @@ fn explicit_param_type_and_relation_reach() {
     // params carry explicit and inferred types respectively.
     let out = gen(r#"
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
+        User { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, placed_by: User, created_at: timestamp }
+        Order { id: Id, deleted_at: timestamp?, placed_by: User, created_at: timestamp, @index placed_by }
         shape OrderCard from Order { buyer = placed_by.name }
         query recent(user -> placed_by, since: timestamp > created_at) -> OrderCard[];
         "#);
@@ -156,9 +156,9 @@ fn explicit_param_type_and_relation_reach() {
 fn mutation_returns_single_shape_and_maps_to_m_route() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, placed_by: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, placed_by: Org, total: int }
         shape OrderCard from Order { total }
         mutation place_order(org: Id, buyer: Id) -> OrderCard {
           create Order { org = $org, placed_by = $buyer, total = 0 };
@@ -185,9 +185,9 @@ fn mutation_returns_single_shape_and_maps_to_m_route() {
 fn bare_model_return_projects_every_stored_column() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, status: text, total: int }
         query order_by_id(id) -> Order;
         "#);
     // Scalars by type, the own `id` and the forward FK as typed ids under the field name.
@@ -202,7 +202,7 @@ fn bare_model_return_projects_every_stored_column() {
 fn optional_and_defaulted_params_are_option() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Product { deleted_at: timestamp?, name: text, active: bool }
+        Product { id: Id, deleted_at: timestamp?, name: text, active: bool, @index name }
         shape ProductCard from Product { name }
         query search(name: text?, limit: int = 20) -> ProductCard[] {
           list Product where (name = $name) page (20);
@@ -217,7 +217,7 @@ fn optional_and_defaulted_params_are_option() {
 fn shared_shape_emits_one_struct() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text, @index status }
         shape OrderCard from Order { status }
         query a(id) -> OrderCard;
         query b(status) -> OrderCard[];
@@ -230,7 +230,7 @@ fn shared_shape_emits_one_struct() {
 fn keyword_field_is_raw_escaped() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, type: text }
+        Order { id: Id, deleted_at: timestamp?, type: text }
         shape OrderCard from Order { type }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -243,7 +243,7 @@ fn ctx_transport_carries_typed_context() {
     // The abstract transport threads a typed context alongside the input .
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -261,9 +261,9 @@ fn callable_reading_ctx_gets_typed_ctx_struct() {
     // struct the method takes; a relation field carries the model's typed id.
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, status: text }
+        Order { id: Id, deleted_at: timestamp?, org: Org, status: text, @index org }
         shape OrderCard from Order { status }
         query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
         "#);
@@ -286,7 +286,7 @@ fn public_callable_takes_unit_ctx_and_emits_no_ctx_struct() {
     // A callable that reads no `$ctx` stays clean: `ctx: ()`, no `<Name>Ctx` struct.
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -305,7 +305,7 @@ fn ctx_scalar_field_typed_by_inference() {
     // (here `int`), not a Uuid — the same inference untyped params use.
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text, tier: int }
+        Order { id: Id, deleted_at: timestamp?, status: text, tier: int, @index tier }
         shape OrderCard from Order { status }
         query my_tier() -> OrderCard[] { list Order where (tier = $ctx.tier); }
         "#);
@@ -318,9 +318,9 @@ fn nested_to_one_shape_emits_nested_struct() {
     // A to-one `placed_by { … }` nest emits a nested struct `<Parent><Field>` and the
     // parent field takes that type; an optional relation nests as `Option<…>`.
     let out = gen(r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, fulfilled_by: User?, total: int }
+        Order { id: Id, placed_by: User, fulfilled_by: User?, total: int }
         shape OrderCard from Order {
           total
           placed_by { name, email }
@@ -350,15 +350,15 @@ fn nest_into_scoped_child_keeps_relation_optionality() {
     // `Sub` (the runtime raises a decode error if a genuine cross-scope FK ever NULLs
     // it — the type never softens to `Option`); a to-many stays `Vec`, never `Option`.
     let out = gen(r#"
-        Org { name: text }
+        Org { id: Id, name: text }
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
-        Contact { org: Org, name: text }
+        Contact { id: Id, org: Org, name: text }
         @scope Tenant
         @sort(id asc)
-        LineItem { org: Org, order: Ticket, sku: text }
+        LineItem { id: Id, org: Org, order: Ticket, sku: text, @index order }
         @sort(id asc)
-        Ticket { raised_by: Contact, backup: Contact?, items: LineItem[], subject: text }
+        Ticket { id: Id, raised_by: Contact, backup: Contact?, items: LineItem[], subject: text }
         shape TicketCard from Ticket {
           subject
           raised_by { name }
@@ -391,9 +391,9 @@ fn nested_to_many_shape_emits_vec_of_nested_struct() {
     // parent field takes `Vec<…>` (the runtime decodes the SQL JSON array into it).
     let out = gen(r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
+        Order { id: Id, total: int, items: OrderItem[] }
         @sort(id asc)
-        OrderItem { order: Order, sku: text, qty: int }
+        OrderItem { id: Id, order: Order, sku: text, qty: int, @index order }
         shape OrderCard from Order { total, items { sku, qty } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -410,11 +410,11 @@ fn nest_ref_field_takes_the_named_shape_type() {
     // one nominal type shared by every site — instead of minting `<Parent><Field>`.
     // Optional relations wrap it in `Option<…>`; to-many in `Vec<…>`.
     let out = gen(r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, fulfilled_by: User?, total: int, items: OrderItem[] }
+        Order { id: Id, placed_by: User, fulfilled_by: User?, total: int, items: OrderItem[] }
         @sort(id asc)
-        OrderItem { order: Order, sku: text }
+        OrderItem { id: Id, order: Order, sku: text, @index order }
         shape UserRef from User { name, email }
         shape ItemRow from OrderItem { sku }
         shape OrderDetail from Order {
@@ -441,9 +441,9 @@ fn nest_ref_field_takes_the_named_shape_type() {
 fn nest_ref_shape_shared_with_a_direct_return_is_one_struct() {
     // A shape both returned by a query and referenced from a nest emits one struct.
     let out = gen(r#"
-        User { name: text }
+        User { id: Id, name: text }
         @sort(id asc)
-        Order { placed_by: User, total: int }
+        Order { id: Id, placed_by: User, total: int }
         shape UserRef from User { name }
         shape OrderDetail from Order { total, placed_by -> UserRef }
         query order_detail(id) -> OrderDetail;
@@ -460,7 +460,7 @@ fn nest_ref_shape_shared_with_a_direct_return_is_one_struct() {
 fn embedded_bridge_is_gated_on_the_option() {
     let src = r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#;
@@ -493,11 +493,11 @@ fn embedded_bridge_is_gated_on_the_option() {
 fn typed_ids_are_phantom_newtypes_per_entity() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        User { deleted_at: timestamp?, name: text }
+        User { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, placed_by: User, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, placed_by: User, total: int }
         shape OrderCard from Order { id, total, owner = org.id }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -527,7 +527,7 @@ fn no_inner_allow_attribute_so_include_accepts_it() {
     // (no string surgery).
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -541,7 +541,7 @@ fn no_inner_allow_attribute_so_include_accepts_it() {
 
 const STREAM_SRC: &str = r#"
     @sort(total desc)
-    Order { status: text, total: int }
+    Order { id: Id, status: text, total: int, @index status }
     shape OrderCard from Order { status, total }
     query export_orders(status) -> stream OrderCard;
     query order_by_id(id) -> OrderCard;
@@ -576,7 +576,7 @@ fn schema_without_stream_emits_no_streaming_surface() {
     // No `-> stream` query → the module (and its dependency set: no `futures_core`)
     // is exactly the pre-streaming output.
     let out = gen(r#"
-        Order { status: text }
+        Order { id: Id, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -607,7 +607,7 @@ fn embedded_bridge_streams_the_engine_rows() {
 fn enum_emits_a_rust_enum_and_types_the_field() {
     let src = r#"
         enum Status { pending, paid, shipped }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query orders() -> OrderRow[];
     "#;
@@ -628,7 +628,7 @@ fn enum_annotated_param_takes_the_enum_type() {
     let src = r#"
         enum Status { pending, paid, shipped }
         @sort(total desc)
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int, @index status }
         shape OrderRow from Order { status, total }
         query by_status(status: Status) -> OrderRow[] { list Order where (status = $status); }
         mutation set_status(id: Id, status: Status = pending) -> OrderRow {
@@ -646,7 +646,7 @@ fn enum_annotated_param_takes_the_enum_type() {
 fn string_enum_with_explicit_value_renames_to_the_wire_value() {
     let src = r#"
         enum Status { pending, paid = "PAID" }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query orders() -> OrderRow[];
     "#;
@@ -659,7 +659,7 @@ fn string_enum_with_explicit_value_renames_to_the_wire_value() {
 fn int_enum_emits_explicit_discriminants_and_a_manual_serde_impl() {
     let src = r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority, title: text }
+        Ticket { id: Id, priority: Priority, title: text }
         shape TicketRow from Ticket { priority, title }
         query tickets() -> TicketRow[];
     "#;
@@ -687,7 +687,7 @@ fn int_enum_emits_explicit_discriminants_and_a_manual_serde_impl() {
 #[test]
 fn decimal_field_emits_rust_decimal_and_float_emits_f64() {
     let out = gen(r#"
-        Ledger { price: decimal(12, 2), score: float }
+        Ledger { id: Id, price: decimal(12, 2), score: float }
         shape LedgerRow from Ledger { price, score }
         query ledger() -> LedgerRow[];
         "#);
@@ -698,7 +698,7 @@ fn decimal_field_emits_rust_decimal_and_float_emits_f64() {
 // ---------- idempotency keys -------------------------------------------------
 
 const KEYED_SRC: &str = r#"
-    Order { status: text, total: int }
+    Order { id: Id, status: text, total: int }
     shape OrderCard from Order { status, total }
     query order_by_id(id) -> OrderCard;
     mutation place_order(status, total: int) -> OrderCard {
@@ -731,7 +731,7 @@ fn mutation_gets_a_keyed_twin_through_the_keyed_call() {
 fn schema_without_mutations_emits_no_keyed_surface() {
     // No mutation → no key to carry: the module is exactly the pre-key output.
     let out = gen(r#"
-        Order { status: text }
+        Order { id: Id, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -756,7 +756,7 @@ fn raw_bodied_query_generates_an_ordinary_method() {
     // struct (from the mandatory annotations), and shape output are identical to an
     // engine-built query of the same signature.
     let out = gen(r#"
-        User { name: text, email: text, total: int }
+        User { id: Id, name: text, email: text, total: int }
         shape UserRow from User { name, email }
         query heavy_users(min: int) -> UserRow[] {
           raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
@@ -781,7 +781,7 @@ fn raw_bodied_query_generates_an_ordinary_method() {
 fn ack_mutation_method_returns_unit() {
     let out = gen(r#"
         @soft_delete(deleted_at)
-        Comment { deleted_at: timestamp?, body: text }
+        Comment { id: Id, deleted_at: timestamp?, body: text }
         mutation purge_comment(id: Id) -> ok {
           hard delete Comment where (id = $id);
         }
@@ -807,7 +807,7 @@ fn ack_mutation_method_returns_unit() {
 #[test]
 fn schema_without_an_ack_mutation_emits_no_ack_type() {
     let out = gen(r#"
-        Order { status: text }
+        Order { id: Id, status: text }
         shape OrderCard from Order { status }
         mutation set_status(id: Id, status: text) -> OrderCard {
           update Order where (id = $id) { status = $status };
@@ -819,8 +819,8 @@ fn schema_without_an_ack_mutation_emits_no_ack_type() {
 #[test]
 fn aggregate_shape_types_each_function() {
     let out = gen(r#"
-        Buyer { name: text }
-        Order { buyer: Buyer, total: decimal(12, 2), qty: int }
+        Buyer { id: Id, name: text }
+        Order { id: Id, buyer: Buyer, total: decimal(12, 2), qty: int }
         shape BuyerStats from Order {
           who = buyer
           orders = count()

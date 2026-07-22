@@ -19,6 +19,7 @@ enum Priority { low = 1, normal = 2, high = 3, urgent = 4 }
 @scope Tenant
 @scope Requester
 Ticket {
+  id:           Id
   deleted_at:   timestamp?
   created_at:   timestamp
   updated_at:   timestamp
@@ -36,6 +37,7 @@ Ticket {
   @index(org, status)
   @index assignee
   @index requester
+  @index duplicate_of
 }
 
 # List row: bare local fields plus one reach-and-rename across the requester edge.

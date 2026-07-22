@@ -10,6 +10,7 @@ scope Tenant (org: Org = $ctx.org)
 @sort(placed_at desc)
 @scope Tenant
 Order {
+  id:         Id
   deleted_at: timestamp?
   org:        Org
   placed_by:  User

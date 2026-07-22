@@ -1,12 +1,13 @@
 # A stream query resolves like its `[]` twin: verb `list`, same target/shape —
 # only the delivery differs. Everything composes: filters, sort cascade, `$ctx`
 # scope injection.
-Org { name: text }
+Org { id: Id, name: text }
 scope Tenant (org: Org = $ctx.org)
 
 @scope Tenant
 @sort(placed_at desc)
 Order {
+  id: Id
   org: Org
   status: text
   total: int

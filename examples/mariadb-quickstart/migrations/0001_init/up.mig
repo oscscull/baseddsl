@@ -6,8 +6,8 @@ create table order {
   column placed_by_id uuid not_null fk=User
   column status text not_null default="pending"
   column total decimal(12,2) not_null
-  index idx_order_org_id_status (org_id, status)
-  index idx_order_placed_at (placed_at)
+  index idx_order_deleted_at_org_id_status (deleted_at, org_id, status)
+  index idx_order_deleted_at_placed_at (deleted_at, placed_at)
 }
 create table org {
   column deleted_at timestamp null

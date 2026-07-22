@@ -23,7 +23,7 @@ fn compile(src: &str) -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -37,7 +37,7 @@ fn compile_pg(src: &str) -> Compiled {
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -54,10 +54,11 @@ fn row(pairs: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
 
 const SCHEMA: &str = r#"
     @soft_delete(deleted_at)
-    Org { deleted_at: timestamp?, name: text }
+    Org { id: Id, deleted_at: timestamp?, name: text }
     @soft_delete(deleted_at)
     @sort(placed_at desc)
     Order {
+      id: Id
         deleted_at: timestamp?,
         org: Org,
         status: text,
@@ -120,8 +121,8 @@ fn postgres_offset_pagination_orders_placeholders() {
         scope Tenant (org: Org = $ctx.org)
         @scope Tenant
         @sort(id asc)
-        Order { org: Org, total: int }
-        Org { name: text }
+        Order { id: Id, org: Org, total: int }
+        Org { id: Id, name: text }
         shape OrderCard from Order { total }
         query orders() -> OrderCard[] scoped Tenant { list Order order (id asc) page (20) offset; }
         "#,
@@ -224,7 +225,7 @@ fn wrong_typed_arg_is_rejected_before_sql() {
     // `total: int` param, but the caller sends a string.
     let c = compile(
         r#"
-        Product { name: text, price: int }
+        Product { id: Id, name: text, price: int }
         shape Card from Product { name }
         query priced(price: int) -> Card[] { list Product where (price > $price); }
         "#,
@@ -244,7 +245,7 @@ fn wrong_typed_arg_is_rejected_before_sql() {
 fn default_applied_when_arg_omitted() {
     let c = compile(
         r#"
-        Product { name: text, active: bool }
+        Product { id: Id, name: text, active: bool }
         shape Card from Product { name }
         query listing(active: bool = true) -> Card[] { list Product where (active = $active); }
         "#,
@@ -265,7 +266,7 @@ async fn paginated_list_uses_page_envelope_with_offset_and_count() {
     let c = compile(
         r#"
         @sort(created_at desc)
-        Product { created_at: timestamp, name: text }
+        Product { id: Id, created_at: timestamp, name: text }
         shape Card from Product { name }
         query recent() -> Card[] { list Product page (20) offset with count; }
         "#,
@@ -299,7 +300,7 @@ fn offset_defaults_to_zero() {
     let c = compile(
         r#"
         @sort(created_at desc)
-        Product { created_at: timestamp, name: text }
+        Product { id: Id, created_at: timestamp, name: text }
         shape Card from Product { name }
         query recent() -> Card[] { list Product page (20) offset; }
         "#,

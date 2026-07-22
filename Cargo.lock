@@ -278,6 +278,7 @@ dependencies = [
  "based-manifest",
  "based-parser",
  "based-sema",
+ "serde_json",
  "tokio",
  "tower-lsp",
 ]

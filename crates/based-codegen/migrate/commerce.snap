@@ -17,9 +17,9 @@ table order soft_delete=deleted_at:timestamp scope=(Tenant) sort=(placed_at desc
   column placed_by_id uuid not_null fk=User
   column status enum(pending,paid,shipped,cancelled) not_null default="pending"
   column total decimal(12,2) not_null
-  index idx_order_org_id_status (org_id, status)
-  index idx_order_placed_at (placed_at)
-  index idx_order_placed_by_id (placed_by_id)
+  index idx_order_deleted_at_org_id_status (deleted_at, org_id, status)
+  index idx_order_deleted_at_placed_at (deleted_at, placed_at)
+  index idx_order_deleted_at_placed_by_id (deleted_at, placed_by_id)
 
 table order_item soft_delete=deleted_at:timestamp
   column deleted_at timestamp null
@@ -41,7 +41,7 @@ table product soft_delete=deleted_at:timestamp created=created_at
   column org_id uuid not_null fk=Org
   column price int not_null
   column sku text not_null unique
-  index idx_product_org_id_active (org_id, active)
+  index idx_product_deleted_at_org_id_active (deleted_at, org_id, active)
 
 table user soft_delete=deleted_at:timestamp
   column deleted_at timestamp null

@@ -51,7 +51,7 @@ fn gen_writes_init_then_is_a_no_op_when_unchanged() {
     s.write("based.toml", MANIFEST);
     s.write(
         "shop.bsl",
-        "Org { name: text }\nProduct { org: Org  name: text }\n",
+        "Org { id: Id  name: text }\nProduct { id: Id  org: Org  name: text }\n",
     );
 
     // First run: writes 0001_init with both artifacts.
@@ -83,7 +83,7 @@ fn gen_writes_init_then_is_a_no_op_when_unchanged() {
 fn gen_writes_the_next_incremental_migration() {
     let s = Scratch::new("incr");
     s.write("based.toml", MANIFEST);
-    s.write("shop.bsl", "Product { name: text }\n");
+    s.write("shop.bsl", "Product { id: Id  name: text }\n");
 
     let out = run_gen(&s.0, Some("init"));
     assert!(out.status.success(), "{out:#?}");
@@ -91,7 +91,7 @@ fn gen_writes_the_next_incremental_migration() {
     // Evolve the schema: a nullable column + an index on it.
     s.write(
         "shop.bsl",
-        "Product { name: text  barcode: text?  @index barcode }\n",
+        "Product { id: Id  name: text  barcode: text?  @index barcode }\n",
     );
     let out2 = run_gen(&s.0, Some("add barcode"));
     assert!(out2.status.success(), "{out2:#?}");

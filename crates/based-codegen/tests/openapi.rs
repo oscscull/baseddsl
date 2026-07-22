@@ -14,9 +14,12 @@ use serde_json::Value;
 fn gen(src: &str) -> Value {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
+    // These snippets exercise OpenAPI schema emission, not index completeness — an
+    // unindexed query (`E0260`) still emits its schema, and the index requirement is
+    // covered authoritatively in based-sema's tests + conformance.
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == based_diagnostics::Severity::Error)
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
@@ -33,7 +36,7 @@ fn ok_schema<'a>(doc: &'a Value, path: &str) -> &'a Value {
 fn document_carries_openapi_version_and_shared_surface() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -55,7 +58,7 @@ fn document_carries_openapi_version_and_shared_surface() {
 fn query_is_a_post_with_input_body_and_ctx_header() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -81,7 +84,7 @@ fn query_is_a_post_with_input_body_and_ctx_header() {
 fn get_query_response_is_nullable_shape() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, status: text, total: int }
         shape OrderCard from Order { status, total }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -100,9 +103,9 @@ fn get_query_response_is_nullable_shape() {
 fn list_query_response_is_array() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int }
         shape OrderCard from Order { total }
         query orders_in_org(org) -> OrderCard[];
         "#);
@@ -120,7 +123,7 @@ fn list_query_response_is_array() {
 fn paginated_query_response_is_page_envelope() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Product { deleted_at: timestamp?, name: text, active: bool }
+        Product { id: Id, deleted_at: timestamp?, name: text, active: bool }
         shape ProductCard from Product { name }
         query active(org: Id) -> ProductCard[] {
           list Product where (active) page (20);
@@ -186,9 +189,9 @@ fn offset_page_input_carries_offset() {
 fn create_mutation_advertises_its_declared_shape() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, placed_by: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, placed_by: Org, total: int }
         shape OrderCard from Order { total }
         mutation place_order(org: Id, buyer: Id) -> OrderCard {
           create Order { org = $org, placed_by = $buyer, total = 0 };
@@ -214,7 +217,7 @@ fn mutation_with_model_return_advertises_the_model() {
     // `{ id }` fallback covers only a callable whose return model can't be resolved.
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         mutation set_status(id, status: text) -> Order {
           update Order where (id = $id) { status = $status };
         }
@@ -230,9 +233,9 @@ fn mutation_with_model_return_advertises_the_model() {
 fn bare_model_return_projects_every_stored_column() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, org: Org, status: text, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, status: text, total: int }
         query order_by_id(id) -> Order;
         "#);
     let model = &doc["components"]["schemas"]["Order"];
@@ -246,7 +249,7 @@ fn bare_model_return_projects_every_stored_column() {
 fn optional_and_defaulted_params_are_not_required() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Product { deleted_at: timestamp?, name: text, active: bool }
+        Product { id: Id, deleted_at: timestamp?, name: text, active: bool }
         shape ProductCard from Product { name }
         query search(name: text?, limit: int = 20) -> ProductCard[] {
           list Product where (name = $name) page (20);
@@ -268,11 +271,11 @@ fn optional_and_defaulted_params_are_not_required() {
 fn ctx_requirements_surface_as_vendor_extension() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Org { deleted_at: timestamp?, name: text }
+        Org { id: Id, deleted_at: timestamp?, name: text }
         scope Tenant (org: Org = $ctx.org)
         @soft_delete(deleted_at)
         @scope Tenant
-        Order { deleted_at: timestamp?, org: Org, total: int }
+        Order { id: Id, deleted_at: timestamp?, org: Org, total: int }
         shape OrderCard from Order { total }
         query my_org_orders() -> OrderCard[] scoped Tenant {
           list Order where (org = $ctx.org);
@@ -289,7 +292,7 @@ fn ctx_requirements_surface_as_vendor_extension() {
 fn shared_shape_emits_one_schema() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Order { deleted_at: timestamp?, status: text }
+        Order { id: Id, deleted_at: timestamp?, status: text }
         shape OrderCard from Order { status }
         query a(id) -> OrderCard;
         query b(status) -> OrderCard[];
@@ -312,9 +315,9 @@ fn nested_to_one_shape_emits_inline_object_schema() {
     // A to-one `placed_by { … }` nest becomes an inline nested object property in the
     // output schema, required unless the relation is optional.
     let doc = gen(r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, fulfilled_by: User?, total: int }
+        Order { id: Id, placed_by: User, fulfilled_by: User?, total: int }
         shape OrderCard from Order {
           total
           placed_by { name, email }
@@ -342,11 +345,11 @@ fn nest_ref_emits_schema_ref_to_the_named_shape() {
     // schema instead of inlining an object; the referenced schema is registered once
     // even when no callable returns it directly. To-many refs are arrays of the `$ref`.
     let doc = gen(r#"
-        User { name: text, email: text }
+        User { id: Id, name: text, email: text }
         @sort(id asc)
-        Order { placed_by: User, fulfilled_by: User?, total: int, items: OrderItem[] }
+        Order { id: Id, placed_by: User, fulfilled_by: User?, total: int, items: OrderItem[] }
         @sort(id asc)
-        OrderItem { order: Order, sku: text }
+        OrderItem { id: Id, order: Order, sku: text }
         shape UserRef from User { name, email }
         shape ItemRow from OrderItem { sku }
         shape OrderDetail from Order {
@@ -388,9 +391,9 @@ fn nested_to_many_shape_emits_array_of_object_schema() {
     // element object schema; always present (empty array when childless) → required.
     let doc = gen(r#"
         @sort(id asc)
-        Order { total: int, items: OrderItem[] }
+        Order { id: Id, total: int, items: OrderItem[] }
         @sort(id asc)
-        OrderItem { order: Order, sku: text, qty: int }
+        OrderItem { id: Id, order: Order, sku: text, qty: int }
         shape OrderCard from Order { total, items { sku, qty } }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -415,7 +418,7 @@ fn nested_to_many_shape_emits_array_of_object_schema() {
 fn enum_field_is_a_string_schema_with_enum_list() {
     let doc = gen(r#"
         enum Status { pending, paid, shipped }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query orders() -> OrderRow[];
     "#);
@@ -435,7 +438,7 @@ fn enum_annotated_param_is_the_enum_schema() {
     let doc = gen(r#"
         enum Status { pending, paid, shipped }
         @sort(total desc)
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query by_status(status: Status) -> OrderRow[] { list Order where (status = $status); }
     "#);
@@ -457,7 +460,7 @@ fn enum_annotated_param_is_the_enum_schema() {
 fn string_enum_with_explicit_value_lists_the_wire_values() {
     let doc = gen(r#"
         enum Status { pending, paid = "PAID" }
-        Order { status: Status, total: int }
+        Order { id: Id, status: Status, total: int }
         shape OrderRow from Order { status, total }
         query orders() -> OrderRow[];
     "#);
@@ -474,7 +477,7 @@ fn string_enum_with_explicit_value_lists_the_wire_values() {
 fn int_enum_field_is_an_integer_schema_with_int_enum_list() {
     let doc = gen(r#"
         enum Priority { low = 0, medium = 1, high = 2 }
-        Ticket { priority: Priority, title: text }
+        Ticket { id: Id, priority: Priority, title: text }
         shape TicketRow from Ticket { priority, title }
         query tickets() -> TicketRow[];
     "#);
@@ -486,7 +489,7 @@ fn int_enum_field_is_an_integer_schema_with_int_enum_list() {
 #[test]
 fn decimal_is_a_string_and_float_a_number() {
     let doc = gen(r#"
-        Ledger { price: decimal(12, 2), score: float }
+        Ledger { id: Id, price: decimal(12, 2), score: float }
         shape LedgerRow from Ledger { price, score }
         query ledger() -> LedgerRow[];
         "#);
@@ -502,7 +505,7 @@ fn decimal_is_a_string_and_float_a_number() {
 fn stream_query_response_is_ndjson_with_the_envelope_line_schema() {
     let doc = gen(r#"
         @sort(total desc)
-        Order { status: text, total: int }
+        Order { id: Id, status: text, total: int }
         shape OrderCard from Order { status, total }
         query export_orders(status) -> stream OrderCard;
         "#);
@@ -539,7 +542,7 @@ fn stream_query_response_is_ndjson_with_the_envelope_line_schema() {
 #[test]
 fn mutation_documents_the_idempotency_key_header_and_outcomes() {
     let doc = gen(r#"
-        Order { status: text, total: int }
+        Order { id: Id, status: text, total: int }
         shape OrderCard from Order { status, total }
         query order_by_id(id) -> OrderCard;
         mutation place_order(status, total: int) -> OrderCard {
@@ -567,7 +570,7 @@ fn mutation_documents_the_idempotency_key_header_and_outcomes() {
 #[test]
 fn query_only_schema_carries_no_idempotency_parameter() {
     let doc = gen(r#"
-        Order { status: text }
+        Order { id: Id, status: text }
         shape OrderCard from Order { status }
         query order_by_id(id) -> OrderCard;
         "#);
@@ -577,7 +580,7 @@ fn query_only_schema_carries_no_idempotency_parameter() {
 #[test]
 fn guarded_mutation_documents_the_403_denial() {
     let doc = gen(r#"
-        Order { status: text, total: int }
+        Order { id: Id, status: text, total: int }
         shape OrderCard from Order { status, total }
         mutation close_order(id) -> OrderCard guard caller_can_close {
             update Order where (id = $id) { status = "closed" };
@@ -601,7 +604,7 @@ fn raw_bodied_query_documents_like_any_query() {
     // Raw is invisible on the wire surface: the route, annotated input, and shape
     // response schema are identical to an engine-built query's.
     let doc = gen(r#"
-        User { name: text, email: text, total: int }
+        User { id: Id, name: text, email: text, total: int }
         shape UserRow from User { name, email }
         query heavy_users(min: int) -> UserRow[] {
           raw`SELECT u.name AS name, u.email AS email FROM user u WHERE u.total >= ${min}`;
@@ -622,7 +625,7 @@ fn raw_bodied_query_documents_like_any_query() {
 fn ack_mutation_responds_with_the_shared_ack_schema() {
     let doc = gen(r#"
         @soft_delete(deleted_at)
-        Comment { deleted_at: timestamp?, body: text }
+        Comment { id: Id, deleted_at: timestamp?, body: text }
         mutation purge_comment(id: Id) -> ok {
           hard delete Comment where (id = $id);
         }
@@ -641,7 +644,7 @@ fn ack_mutation_responds_with_the_shared_ack_schema() {
 #[test]
 fn schema_without_an_ack_mutation_has_no_ack_component() {
     let doc = gen(r#"
-        Order { status: text }
+        Order { id: Id, status: text }
         shape OrderCard from Order { status }
         mutation set_status(id: Id, status: text) -> OrderCard {
           update Order where (id = $id) { status = $status };

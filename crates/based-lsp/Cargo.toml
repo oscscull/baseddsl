@@ -20,3 +20,4 @@ based-sema.workspace = true
 based-facts.workspace = true
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros"] }
+serde_json = { workspace = true }

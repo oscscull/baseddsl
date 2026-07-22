@@ -2,6 +2,7 @@
 # own numeric columns + params lowers to a real SQL expression. Clean on numeric
 # columns; E0230 in a `create` (no existing row), E0231 on a non-numeric operand.
 Product {
+  id: Id
   qty:   int
   price: decimal(10, 2)
   name:  text

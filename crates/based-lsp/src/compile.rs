@@ -610,7 +610,7 @@ impl Snapshot {
                 continue;
             }
             let position = match f.kind {
-                FactKind::InferredInverse | FactKind::InferredIndex | FactKind::ResolvedQuery => {
+                FactKind::InferredInverse | FactKind::ResolvedQuery => {
                     idx.end_of_line(f.span.start as usize)
                 }
                 FactKind::Scope | FactKind::CtxRequirement => continue,
@@ -640,6 +640,52 @@ impl Snapshot {
             });
         }
         hints
+    }
+
+    /// The edit a quick-fix applies to insert `line` as the first member of model
+    /// `model`'s body: `(file id, TextEdit)`. The line lands at the top of the body,
+    /// matching the existing members' indentation (or two spaces on an empty body).
+    /// Diagnostics that carry a `fix` name the model + line; the handler builds the
+    /// edit here so the fix logic stays in one place.
+    pub fn member_insert_edit(&self, model: &str, line: &str) -> Option<(usize, TextEdit)> {
+        let m = self.decls.iter().find_map(|d| match d {
+            Decl::Model(m) if m.name.node == model => Some(m),
+            _ => None,
+        })?;
+        let fid = m.name.span.file.0 as usize;
+        let src = &self.sources.get(fid)?.1;
+        let idx = self.lines.get(fid)?;
+
+        // Anchor at the first member's line, so the insert adopts its indentation and
+        // sits at the top of the body. With no members, drop in right after the `{`.
+        if let Some(first) = m.members.iter().filter_map(member_start).min() {
+            let ls = line_start(src, first);
+            let indent: String = src[ls..]
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
+            let pos = idx.position(ls);
+            let edit = TextEdit {
+                range: Range::new(pos, pos),
+                new_text: format!("{indent}{line}\n"),
+            };
+            return Some((fid, edit));
+        }
+        let brace = src[m.name.span.end as usize..].find('{')? + m.name.span.end as usize + 1;
+        let pos = idx.position(brace);
+        Some((
+            fid,
+            TextEdit {
+                range: Range::new(pos, pos),
+                new_text: format!("\n  {line}"),
+            },
+        ))
+    }
+
+    /// The owning file's URI for a file id — the target document of a quick-fix edit.
+    pub fn file_uri(&self, fid: usize) -> Option<Url> {
+        let (path, _) = self.sources.get(fid)?;
+        Url::from_file_path(path).ok()
     }
 
     /// A cross-file `Location` for a span, resolving its `FileId` to the owning URI —
@@ -2151,6 +2197,16 @@ fn line_start(src: &str, off: u32) -> usize {
     src[..o].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
+/// The start byte offset of a spanned model member (field / index). A raw
+/// soft-override carries no span, so it never anchors the insert.
+fn member_start(m: &Member) -> Option<u32> {
+    match m {
+        Member::Field(f) => Some(f.span.start),
+        Member::Index(i) => Some(i.span.start),
+        Member::SoftOverride(_) => None,
+    }
+}
+
 // ---- Hover renderers ("what", rust-analyzer baseline) -----------------------
 
 /// A `TypeExpr` as source writes it: base spelling + `?` (optional) + `[]` (many).
@@ -2680,6 +2736,18 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
 
+    /// A snapshot is navigation-clean when it has no hard error other than the
+    /// terse-schema conveniences these navigation/hover/rename tests skip: the
+    /// index/id requirements (`E0260`/`E0261`), which are exercised in based-sema
+    /// and the code-action test, not here.
+    fn nav_clean(diags: &[Diagnostic]) -> bool {
+        !diags.iter().any(|d| {
+            d.severity == based_diagnostics::Severity::Error
+                && d.code != "E0260"
+                && d.code != "E0261"
+        })
+    }
+
     #[test]
     fn position_offset_round_trip_ascii() {
         let src = "Order {\n  name: text\n}\n";
@@ -2714,7 +2782,7 @@ mod tests {
     fn compile_commerce_has_facts_and_no_diagnostics() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         assert!(snap.project_diagnostics.is_empty());
         assert!(!snap.sources.is_empty());
         // The inferred inverse on `Order.items` is surfaced.
@@ -2761,10 +2829,10 @@ mod tests {
 
         // Each project compiles clean on its own manifest.
         let a = compile_manifest(&ws.path("a"), &HashMap::new());
-        assert!(a.diagnostics.is_empty(), "project A: {:?}", a.diagnostics);
+        assert!(nav_clean(&a.diagnostics), "project A: {:?}", a.diagnostics);
         assert!(a.project_diagnostics.is_empty());
         let b = compile_manifest(&ws.path("b"), &HashMap::new());
-        assert!(b.diagnostics.is_empty(), "project B: {:?}", b.diagnostics);
+        assert!(nav_clean(&b.diagnostics), "project B: {:?}", b.diagnostics);
 
         // The two projects are disjoint: B never sees A's models.
         assert!(b.sources.iter().all(|(p, _)| !p.ends_with("user.bsl")));
@@ -2789,7 +2857,7 @@ mod tests {
         ws.write("org.bsl", "Org { name: text }\n");
         ws.write("user.bsl", "User {\n  org: Org\n  name: text\n}\n");
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // Cursor mid-`Org` in the `org: Org` field type of user.bsl.
         let user_fid = snap.file_id_of(&ws.path("user.bsl")).unwrap();
@@ -2815,7 +2883,7 @@ mod tests {
     fn goto_definition_resolves_shape_nest_reference() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // Cursor mid-`UserRef` in `placed_by -> UserRef` (order/model.bsl). The last
         // occurrence is the shape field (earlier ones sit in comments).
@@ -2854,14 +2922,7 @@ mod tests {
              query widgets() -> Widget[] scoped Tenant { list Widget; }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
@@ -2893,7 +2954,7 @@ mod tests {
     fn references_include_inverse_back_edge() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // Cursor on the `order` forward-edge declaration in order_item/model.bsl.
         let oi_fid = snap.file_id_of(&root.join("order_item/model.bsl")).unwrap();
@@ -2931,14 +2992,7 @@ mod tests {
              query find() -> W[] { list Widget where (active and big(5)); }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
 
@@ -2995,7 +3049,7 @@ mod tests {
         ws.write("org.bsl", "Org { name: text }\n");
         ws.write("user.bsl", "User {\n  org: Org\n  name: text\n}\n");
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // Cursor on the `Org` reference in user.bsl → rename to `Organization`.
         let ufid = snap.file_id_of(&ws.path("user.bsl")).unwrap();
@@ -3026,7 +3080,7 @@ mod tests {
     fn rename_forward_edge_leaves_inverse_back_edge_untouched() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // Rename the `order` forward edge on OrderItem. Find-references lists the
         // inverse `Order.items` as a related site, but rename must not touch it (it
@@ -3084,7 +3138,7 @@ mod tests {
     fn inverse_inlay_is_a_clickable_label_part() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let model_fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
 
         let hints = snap.inlay_hints(model_fid);
@@ -3127,7 +3181,7 @@ mod tests {
     fn goto_definition_resolves_field_reference_path() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // `buyer = placed_by.name` in OrderCard (order/model.bsl).
         let model_fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
@@ -3168,7 +3222,7 @@ mod tests {
     fn hover_reports_field_and_decl_signatures() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
         let src = &snap.sources[fid].1;
 
@@ -3207,14 +3261,7 @@ mod tests {
              query export_orders() -> stream OrderRow;\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
         let off = (src.find("export_orders").unwrap() + 1) as u32;
@@ -3234,14 +3281,7 @@ mod tests {
              mutation drop_tag(id: Id) -> ok { delete Tag where (id = $id) }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
         let off = (src.find("drop_tag").unwrap() + 1) as u32;
@@ -3266,14 +3306,7 @@ mod tests {
              mutation add(l: text) -> W { create Widget { label = $l }; }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
         let label_decl = src.find("label: text").unwrap();
@@ -3301,7 +3334,7 @@ mod tests {
     fn document_symbols_over_commerce_order_files() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // order/model.bsl: the `Order` model (Struct) with its fields nested, plus
         // the `OrderCard` shape (Interface) — both flat top-level symbols.
@@ -3350,7 +3383,7 @@ mod tests {
     fn folding_ranges_over_commerce_order_file() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
         let src = &snap.sources[fid].1;
         let idx = &snap.lines[fid];
@@ -3407,6 +3440,58 @@ mod tests {
         assert_ne!(formatted, canonical); // the overlay replaced the on-disk model
     }
 
+    /// The one-key quick-fix for `E0261` (no `id`) and `E0260` (an unindexed query):
+    /// each diagnostic carries a `fix` naming the model + the member line, and
+    /// `member_insert_edit` drops that line at the top of the model's body, adopting
+    /// the existing members' indentation.
+    #[test]
+    fn index_and_id_quickfixes_insert_the_missing_member() {
+        let ws = TempWorkspace::new("quickfix");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Widget {\n  org: text\n  name: text\n}\n\
+             shape W from Widget { name }\n\
+             query by_org(org) -> W[];\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+
+        // `E0261` (no id) carries a `Widget` / `id: Id` fix.
+        let no_id = snap
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0261")
+            .and_then(|d| d.fix.as_ref())
+            .expect("E0261 carries a fix");
+        assert_eq!(
+            (no_id.model.as_str(), no_id.line.as_str()),
+            ("Widget", "id: Id")
+        );
+        let (efid, edit) = snap.member_insert_edit("Widget", "id: Id").expect("edit");
+        assert_eq!(efid, fid);
+        assert_eq!(edit.new_text, "  id: Id\n");
+        // It lands at the top of the body, before the first member `org`.
+        let org_line = snap.lines[fid].position(snap.sources[fid].1.find("  org: text").unwrap());
+        assert_eq!(edit.range.start, org_line);
+
+        // `E0260` (the query scans `org`) carries a `Widget` / `@index org` fix.
+        let scan = snap
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0260")
+            .and_then(|d| d.fix.as_ref())
+            .expect("E0260 carries a fix");
+        assert_eq!(
+            (scan.model.as_str(), scan.line.as_str()),
+            ("Widget", "@index org")
+        );
+        let (_, edit) = snap
+            .member_insert_edit("Widget", "@index org")
+            .expect("edit");
+        assert_eq!(edit.new_text, "  @index org\n");
+    }
+
     /// A selection range expands outward through the AST: the `total` token → its
     /// field declaration → the enclosing `Order` model → the whole file, each range
     /// strictly containing the one it parents.
@@ -3414,7 +3499,7 @@ mod tests {
     fn selection_range_expands_token_to_field_to_model_to_file() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&root.join("order/model.bsl")).unwrap();
         let src = &snap.sources[fid].1;
         let idx = &snap.lines[fid];
@@ -3472,7 +3557,7 @@ mod tests {
     fn workspace_symbols_span_project_and_filter() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
         let snap = compile_manifest(&root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         // Empty query = everything. Symbols come from many files, each carrying its
         // own file `Location` (workspace-wide, not one file).
@@ -3545,7 +3630,7 @@ mod tests {
         );
         ws.write("dec.bsl", "@table(\"things\")\nThing { label: text }\n");
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(snap.diagnostics.is_empty(), "{:?}", snap.diagnostics);
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
 
         let labels = |items: &[CompletionItem]| -> Vec<String> {
             items.iter().map(|c| c.label.clone()).collect()
@@ -3698,14 +3783,7 @@ mod tests {
              query other(min: int) -> W[] { list Widget where (qty < $min); }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
 
@@ -3742,14 +3820,7 @@ mod tests {
              query mine() -> Widget[] scoped Tenant { list Widget where (org = $ctx.org); }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
 
@@ -3787,14 +3858,7 @@ mod tests {
              query find() -> W[] { list Widget order (qty asc); }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let off = (snap.sources[fid].1.find("find()").unwrap() + 1) as u32;
         let changes = snap
@@ -3971,14 +4035,7 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
         ws.write("based.toml", "");
         ws.write("schema.bsl", ENUM_NAV_SCHEMA);
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         (snap, fid)
     }
@@ -4117,14 +4174,7 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
              query by_name(name) -> User[];\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         (ws, snap)
     }
 
@@ -4257,14 +4307,7 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
              }\n",
         );
         let snap = compile_manifest(&ws.root, &HashMap::new());
-        assert!(
-            !snap
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == based_diagnostics::Severity::Error),
-            "{:?}",
-            snap.diagnostics
-        );
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
         let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
         let src = &snap.sources[fid].1;
 

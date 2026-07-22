@@ -1,5 +1,6 @@
 @soft_delete(deleted_at)
 User {
+  id:            Id
   deleted_at:    timestamp?
   email:         text (unique)
   name:          text

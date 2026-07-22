@@ -2,6 +2,7 @@
 # declared index nothing uses (W0104 useless), and an unknown decorator (W0101).
 @frobnicate
 Widget {
+  id: Id
   name:  text
   color: text
   @index(color)

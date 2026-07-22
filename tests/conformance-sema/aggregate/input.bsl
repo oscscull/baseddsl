@@ -3,11 +3,13 @@
 # global (no group by) all-aggregate shape is one whole-table row. Errors:
 # E0241 (sum over text), E0242 (ungrouped projected column), E0244 (page).
 Buyer {
+  id: Id
   name: text
 }
 
 @soft_delete(deleted_at)
 Order {
+  id: Id
   deleted_at: timestamp?
   buyer:      Buyer
   total:      decimal(12, 2)
