@@ -7,7 +7,7 @@
 //! dialect — SQL lives in [`super::sql`].
 
 use based_ast::{DefaultVal, Literal, Primitive, SortDir, SortTerm};
-use based_sema::{CheckedSchema, MemberKind, RModel, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel, SoftDelete, SoftMode};
 use std::fmt::Write as _;
 
 // ---------- neutral snapshot model ----------------------------------------
@@ -92,6 +92,23 @@ pub struct TableSnap {
     pub columns: Vec<ColumnSnap>,
     /// Declared indexes, sorted by name.
     pub indexes: Vec<IndexSnap>,
+    /// Resolved foreign-key constraints (the toml `foreign_keys` convention ⊕ per-relation
+    /// `@fk`/`@no_fk`), one per constrained FK column, sorted by column. Recorded so
+    /// adding / removing / changing an FK diffs into a migration step. Empty when the
+    /// convention is `none` and nothing writes `@fk`.
+    pub foreign_keys: Vec<ForeignKeySnap>,
+}
+
+/// One resolved foreign-key constraint: the local FK column, the referenced table + its
+/// primary-key column, and the optional referential actions. Diffed by value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ForeignKeySnap {
+    pub column: String,
+    pub ref_table: String,
+    pub ref_column: String,
+    /// `cascade`/`restrict`/`set_null`/`no_action`, or `None` for the DB-default action.
+    pub on_delete: Option<String>,
+    pub on_update: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,14 +138,22 @@ pub struct IndexSnap {
 }
 
 impl Snapshot {
-    /// Build the neutral snapshot from a resolved schema. Pure and deterministic:
-    /// tables, columns, and indexes are all sorted by name so nothing map-ordered
-    /// leaks in.
+    /// Build the neutral snapshot from a resolved schema, under the default `foreign_keys`
+    /// convention (`none`). Convenience over [`Snapshot::from_schema_with`] for callers
+    /// (tests, from-scratch DDL that carries only explicit `@fk`s) that don't thread the
+    /// manifest convention.
     pub fn from_schema(schema: &CheckedSchema) -> Snapshot {
+        Snapshot::from_schema_with(schema, ForeignKeys::None)
+    }
+
+    /// Build the neutral snapshot from a resolved schema under a given `foreign_keys`
+    /// convention. Pure and deterministic: tables, columns, indexes, and FK constraints are
+    /// all sorted by name so nothing map-ordered leaks in.
+    pub fn from_schema_with(schema: &CheckedSchema, fks: ForeignKeys) -> Snapshot {
         let mut tables: Vec<TableSnap> = schema
             .models
             .iter()
-            .map(|m| table_snap(schema, m))
+            .map(|m| table_snap(schema, m, fks))
             .collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let mut scopes: Vec<ScopeDeclSnap> = schema.scopes.iter().map(scope_decl_snap).collect();
@@ -167,7 +192,7 @@ fn is_default_id(c: &ColumnSnap) -> bool {
     c.name == "id" && c.ty == "uuid" && !c.nullable && !c.unique && c.fk.is_none()
 }
 
-fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
+fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> TableSnap {
     let mut columns: Vec<ColumnSnap> = Vec::new();
     for mem in &model.members {
         match &mem.kind {
@@ -224,6 +249,9 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
     let mut indexes = index_snaps(model);
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let mut foreign_keys = foreign_key_snaps(schema, model, fks);
+    foreign_keys.sort();
+
     TableSnap {
         name: model.table.clone(),
         soft_delete: model.soft_delete.as_ref().map(soft_delete_snap),
@@ -234,7 +262,56 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
         no_id: model.no_id,
         columns,
         indexes,
+        foreign_keys,
     }
+}
+
+/// The resolved FK constraints on a model's forward relations under the convention. A
+/// relation whose target is keyless (`@no_id`, already `E0265`) contributes none — there is
+/// no primary key to reference.
+pub fn foreign_key_snaps(
+    schema: &CheckedSchema,
+    model: &RModel,
+    fks: ForeignKeys,
+) -> Vec<ForeignKeySnap> {
+    let mut out = Vec::new();
+    for mem in &model.members {
+        let MemberKind::Forward { target, fk_col, .. } = &mem.kind else {
+            continue;
+        };
+        let Some(resolved) = model.resolved_fk(mem, fks) else {
+            continue;
+        };
+        let Some(ref_column) = target_pk_column(schema, target) else {
+            continue;
+        };
+        let ref_table = schema
+            .model(target)
+            .map(|t| t.table.clone())
+            .unwrap_or_else(|| target.clone());
+        out.push(ForeignKeySnap {
+            column: fk_col.clone(),
+            ref_table,
+            ref_column,
+            on_delete: resolved.on_delete.map(|a| a.snap().to_string()),
+            on_update: resolved.on_update.map(|a| a.snap().to_string()),
+        });
+    }
+    out
+}
+
+/// The physical primary-key column of a relation target (`id`, or its `(column "…")`
+/// override). `None` when the target is missing or keyless (`@no_id`).
+pub fn target_pk_column(schema: &CheckedSchema, target: &str) -> Option<String> {
+    let t = schema.model(target)?;
+    if t.no_id {
+        return None;
+    }
+    Some(
+        t.member("id")
+            .map(|m| m.physical_col().to_string())
+            .unwrap_or_else(|| "id".to_string()),
+    )
 }
 
 /// The declared renames (`@was`) across the schema: model-level `@was` → a table rename,
@@ -582,6 +659,22 @@ fn render_table(out: &mut String, t: &TableSnap) {
     for i in &t.indexes {
         out.push_str(&format!("  index {}\n", index_spec_text(i)));
     }
+    for f in &t.foreign_keys {
+        out.push_str(&format!("  {}\n", fk_spec_text(f)));
+    }
+}
+
+/// The `fk <col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]` line shared by
+/// the `schema.snap` FK line and the `up.mig` foreign-key step.
+pub fn fk_spec_text(f: &ForeignKeySnap) -> String {
+    let mut s = format!("fk {} -> {}.{}", f.column, f.ref_table, f.ref_column);
+    if let Some(a) = &f.on_delete {
+        let _ = write!(s, " on_delete={a}");
+    }
+    if let Some(a) = &f.on_update {
+        let _ = write!(s, " on_update={a}");
+    }
+    s
 }
 
 /// The `<name> (<cols>) [unique] [using <m>]` / `<name> raw(…)` spec shared by the
@@ -652,6 +745,12 @@ impl Snapshot {
                     message: "index before any table".to_string(),
                 })?;
                 t.indexes.push(parse_index(rest, line_no)?);
+            } else if let Some(rest) = line.strip_prefix("fk ") {
+                let t = tables.last_mut().ok_or_else(|| ParseError {
+                    line: line_no,
+                    message: "fk before any table".to_string(),
+                })?;
+                t.foreign_keys.push(parse_fk(rest, line_no)?);
             } else {
                 return Err(ParseError {
                     line: line_no,
@@ -819,6 +918,38 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
         no_id,
         columns: Vec::new(),
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+    })
+}
+
+/// Parse a `<col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]` FK line (the
+/// `fk ` prefix already stripped).
+fn parse_fk(rest: &str, line: usize) -> Result<ForeignKeySnap, ParseError> {
+    let malformed = || ParseError {
+        line,
+        message: format!("malformed fk: {rest}"),
+    };
+    let (col, tail) = rest.split_once("->").ok_or_else(malformed)?;
+    let mut toks = tail.split_whitespace();
+    let reference = toks.next().ok_or_else(malformed)?;
+    let (ref_table, ref_column) = reference.split_once('.').ok_or_else(malformed)?;
+    let mut on_delete = None;
+    let mut on_update = None;
+    for tok in toks {
+        if let Some(a) = tok.strip_prefix("on_delete=") {
+            on_delete = Some(a.to_string());
+        } else if let Some(a) = tok.strip_prefix("on_update=") {
+            on_update = Some(a.to_string());
+        } else {
+            return Err(malformed());
+        }
+    }
+    Ok(ForeignKeySnap {
+        column: col.trim().to_string(),
+        ref_table: ref_table.trim().to_string(),
+        ref_column: ref_column.trim().to_string(),
+        on_delete,
+        on_update,
     })
 }
 

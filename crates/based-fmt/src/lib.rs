@@ -462,6 +462,15 @@ fn field(f: &Field, name_w: usize, inverse_w: usize) -> String {
     if let Some(pred) = &f.relation_on {
         s.push_str(&format!(" (on: {})", predicate(pred, 0)));
     }
+    if let Some(fk) = &f.fk {
+        s.push_str(&fk_annot(fk));
+    }
+    if let Some(no_fk) = &f.no_fk {
+        s.push_str(&match &no_fk.reason {
+            Some(r) => format!(" @no_fk(\"{}\")", esc(&r.node)),
+            None => " @no_fk".to_string(),
+        });
+    }
     if let Some(w) = &f.was {
         s.push_str(&format!(" @was(\"{}\")", esc(&w.node)));
     }
@@ -472,6 +481,26 @@ fn field(f: &Field, name_w: usize, inverse_w: usize) -> String {
         ));
     }
     s
+}
+
+/// Reprint `@fk` / `@fk("reason", on_delete: cascade, on_update: cascade)`. Bare when it
+/// carries no reason and no actions; the reason (if any) leads, then the action kwargs.
+fn fk_annot(fk: &FkAnnot) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(r) = &fk.reason {
+        parts.push(format!("\"{}\"", esc(&r.node)));
+    }
+    if let Some(a) = &fk.on_delete {
+        parts.push(format!("on_delete: {}", a.node));
+    }
+    if let Some(a) = &fk.on_update {
+        parts.push(format!("on_update: {}", a.node));
+    }
+    if parts.is_empty() {
+        " @fk".to_string()
+    } else {
+        format!(" @fk({})", parts.join(", "))
+    }
 }
 
 fn modifiers_group(mods: &[Modifier]) -> String {

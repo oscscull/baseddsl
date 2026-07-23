@@ -1958,3 +1958,61 @@ async fn opaque_column_and_index_execute_live() {
     assert_eq!(read.body["shape_"], json!("POINT(1 2)"));
     assert_eq!(read.body["shape_len"], json!(10));
 }
+
+/// **Live FK enforcement + `on_delete: cascade`** against real SQLite. Proves two things
+/// end to end: (1) the SQLite `foreign_keys` pragma is on (a bad-parent insert is rejected),
+/// and (2) `@fk(on_delete: cascade)` in the generated DDL actually cascades — deleting the
+/// parent row removes the child. Without the pragma SQLite silently ignores the FK, so this
+/// test also guards the connection-setup pragma from regressing.
+#[tokio::test]
+async fn fk_on_delete_cascade_is_enforced_live() {
+    use based_runtime::fetch_all;
+
+    let src = "Org { id: Id  name: text }\n\
+               Order { id: Id  org: Org @fk(on_delete: cascade) }";
+    let sf = parse_file(src, FileId(0)).expect("parse");
+    let (schema, diags) = check(&sf.decls);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != based_diagnostics::Severity::Error),
+        "sema errors: {diags:#?}"
+    );
+    let ddl = sql::ddl(&schema, Dialect::Sqlite);
+    assert!(ddl.contains("ON DELETE CASCADE"), "\n{ddl}");
+
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            "INSERT INTO `org` (`id`, `name`) VALUES ('o1', 'Acme');\n\
+             INSERT INTO `order` (`id`, `org_id`) VALUES ('r1', 'o1');",
+        )
+        .await
+        .expect("seed");
+
+    // (1) The FK is enforced: a child pointing at a non-existent parent is rejected.
+    let bad = backend
+        .execute_batch("INSERT INTO `order` (`id`, `org_id`) VALUES ('r2', 'ghost');")
+        .await;
+    assert!(bad.is_err(), "FK not enforced — the pragma is off");
+
+    // (2) Deleting the parent cascades: the child row disappears.
+    let mut db = backend.checkout("").await.expect("checkout");
+    db.execute(
+        "DELETE FROM `org` WHERE `id` = ?",
+        &[based_runtime::SqlValue::Text("o1".into())],
+    )
+    .await
+    .expect("delete parent");
+    let rows = fetch_all(db.fetch("SELECT `id` FROM `order`", &[]))
+        .await
+        .expect("count orders");
+    assert!(
+        rows.is_empty(),
+        "cascade did not remove the child rows: {rows:?}"
+    );
+}

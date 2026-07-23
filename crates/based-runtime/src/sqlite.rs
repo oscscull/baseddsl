@@ -199,6 +199,9 @@ impl SqliteBackend {
     pub fn in_memory() -> Result<SqliteBackend, DbError> {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
+            // SQLite ignores FK constraints unless this pragma is ON per connection — make
+            // it explicit so opt-in `@fk` cascade/restrict/set_null actually enforce.
+            .foreign_keys(true)
             .busy_timeout(BUSY_TIMEOUT);
         let pool = SqlitePoolOptions::new()
             .min_connections(1)
@@ -217,6 +220,7 @@ impl SqliteBackend {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
+            .foreign_keys(true)
             .busy_timeout(BUSY_TIMEOUT);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)

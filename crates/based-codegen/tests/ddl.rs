@@ -695,3 +695,73 @@ fn index_access_method_renders_per_dialect() {
         "\n{hashed}"
     );
 }
+
+// ---------- foreign-key constraints (opt-in) -------------------------------
+
+const FK_SCHEMA: &str = "Org { id: Id  name: text }\n\
+     Order { id: Id  org: Org @fk(on_delete: cascade, on_update: restrict) }";
+
+#[test]
+fn fk_constraint_renders_per_dialect() {
+    let maria = gen(FK_SCHEMA);
+    assert!(
+        maria.contains(
+            "CONSTRAINT `fk_order_org_id` FOREIGN KEY (`org_id`) REFERENCES `org` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+        ),
+        "\n{maria}"
+    );
+    let sqlite = gen_sqlite(FK_SCHEMA);
+    assert!(
+        sqlite.contains(
+            "CONSTRAINT `fk_order_org_id` FOREIGN KEY (`org_id`) REFERENCES `order` (`id`)"
+        ) || sqlite.contains("REFERENCES `org` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"),
+        "\n{sqlite}"
+    );
+    let pg = gen_pg(FK_SCHEMA);
+    assert!(
+        pg.contains(
+            r#"CONSTRAINT "fk_order_org_id" FOREIGN KEY ("org_id") REFERENCES "order" ("id") ON DELETE CASCADE ON UPDATE RESTRICT"#
+        ) || pg.contains(r#"REFERENCES "org" ("id") ON DELETE CASCADE ON UPDATE RESTRICT"#),
+        "\n{pg}"
+    );
+}
+
+#[test]
+fn bare_fk_has_no_action_clause() {
+    let maria = gen("Org { id: Id  name: text }\nOrder { id: Id  org: Org @fk }");
+    assert!(
+        maria.contains("FOREIGN KEY (`org_id`) REFERENCES `org` (`id`)"),
+        "\n{maria}"
+    );
+    assert!(!maria.contains("ON DELETE"), "\n{maria}");
+}
+
+#[test]
+fn no_fk_relation_emits_no_constraint_even_under_all() {
+    let src = "Org { id: Id  name: text }\n\
+         Order { id: Id  org: Org @no_fk(\"legacy\") }";
+    let sf = parse_file(src, FileId(0)).unwrap();
+    let (schema, _) = check(&sf.decls);
+    let ddl = sql::ddl_with(&schema, Dialect::Postgres, based_sema::ForeignKeys::All);
+    assert!(!ddl.contains("FOREIGN KEY"), "\n{ddl}");
+    // The FK column still exists — only the constraint is opted out.
+    assert!(ddl.contains(r#""org_id" UUID"#), "\n{ddl}");
+}
+
+#[test]
+fn foreign_keys_all_constrains_every_relation() {
+    let src = "Org { id: Id  name: text }\nOrder { id: Id  org: Org }";
+    let sf = parse_file(src, FileId(0)).unwrap();
+    let (schema, _) = check(&sf.decls);
+    let ddl = sql::ddl_with(&schema, Dialect::Postgres, based_sema::ForeignKeys::All);
+    assert!(
+        ddl.contains(r#"FOREIGN KEY ("org_id") REFERENCES "org" ("id")"#),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn foreign_keys_none_default_emits_no_constraint() {
+    let ddl = gen("Org { id: Id  name: text }\nOrder { id: Id  org: Org }");
+    assert!(!ddl.contains("FOREIGN KEY"), "\n{ddl}");
+}

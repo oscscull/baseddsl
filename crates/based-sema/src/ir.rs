@@ -149,6 +149,17 @@ pub mod code {
     pub const OPAQUE_ASSIGN: &str = "E0273"; // a create/update assigns an opaque column, or a create can't supply a required one
     pub const RAW_EMPTY: &str = "E0274"; // an empty `raw(…)` body
 
+    // opt-in FK referential actions (E029x): `@fk` opts a forward relation into an FK
+    // constraint (with optional `on_delete`/`on_update` actions); `@no_fk` opts out (edge
+    // or whole model). Presence is resolved against the toml `foreign_keys` convention.
+    pub const FK_TARGET: &str = "E0290"; // `@fk`/`@no_fk` on something that is not a forward to-one relation (an inverse/`[]` edge or a scalar)
+    pub const FK_CUSTOM_JOIN: &str = "E0291"; // `@fk`/`@no_fk` on a custom-join (`on:`) relation — it owns no conventional FK column
+    pub const FK_CONFLICT: &str = "E0292"; // `@fk` and `@no_fk` on the same relation
+    pub const FK_SET_NULL_REQUIRED: &str = "E0293"; // `on_delete: set_null` on a required (non-nullable) relation
+    pub const FK_ACTION: &str = "E0294"; // an unknown referential action (not cascade/restrict/set_null/no_action)
+    pub const FK_DIVERGE_REASON: &str = "E0295"; // a decorator flips FK presence against the `foreign_keys` convention without a reason
+    pub const FK_REDUNDANT: &str = "W0110"; // a decorator restates the `foreign_keys` convention (no effect) — remove it
+
     // --- upsert (`create … on conflict update`) ---
     pub const UPSERT_TARGET: &str = "E0250"; // the conflict target is not a declared unique key (unique column / `@index (…) unique` / pk)
     pub const UPSERT_TARGET_SET: &str = "E0251"; // the `on conflict update` branch assigns a conflict-target column (moving the key breaks the read-back)
@@ -173,7 +184,95 @@ pub const KNOWN_DECORATORS: &[&str] = &[
     "table",
     "was",
     "no_id",
+    "no_fk",
 ];
+
+/// The project-wide FK-constraint convention, from the manifest `[schema] foreign_keys`
+/// key. `None` (default): a relation gets an FK only if it writes `@fk`. `All`: every
+/// forward relation gets a bare FK unless it (or its model) writes `@no_fk`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ForeignKeys {
+    #[default]
+    None,
+    All,
+}
+
+impl ForeignKeys {
+    /// Parse the manifest value; anything but `"all"` is the safe `None` default.
+    pub fn parse(s: &str) -> ForeignKeys {
+        match s {
+            "all" => ForeignKeys::All,
+            _ => ForeignKeys::None,
+        }
+    }
+}
+
+/// A standard-SQL referential action on an FK (`on_delete`/`on_update`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FkAction {
+    Cascade,
+    Restrict,
+    SetNull,
+    NoAction,
+}
+
+impl FkAction {
+    /// Map the source keyword to an action, or `None` for an unknown spelling (`E0294`).
+    pub fn parse(s: &str) -> Option<FkAction> {
+        match s {
+            "cascade" => Some(FkAction::Cascade),
+            "restrict" => Some(FkAction::Restrict),
+            "set_null" => Some(FkAction::SetNull),
+            "no_action" => Some(FkAction::NoAction),
+            _ => None,
+        }
+    }
+    /// The SQL clause spelling (`ON DELETE <this>`).
+    pub fn sql(self) -> &'static str {
+        match self {
+            FkAction::Cascade => "CASCADE",
+            FkAction::Restrict => "RESTRICT",
+            FkAction::SetNull => "SET NULL",
+            FkAction::NoAction => "NO ACTION",
+        }
+    }
+    /// The neutral snapshot spelling (matches the source keyword).
+    pub fn snap(self) -> &'static str {
+        match self {
+            FkAction::Cascade => "cascade",
+            FkAction::Restrict => "restrict",
+            FkAction::SetNull => "set_null",
+            FkAction::NoAction => "no_action",
+        }
+    }
+}
+
+/// The parsed `@fk`/`@no_fk` intent carried on a forward relation. Presence is *not*
+/// resolved here — that needs the `foreign_keys` convention (see [`RModel::resolved_fk`]).
+/// Reason strings + spans ride along so the manifest-dependent divergence pass can check
+/// them without re-reading the AST.
+#[derive(Debug, Clone, Default)]
+pub struct FkDecl {
+    /// `@fk` present on this edge.
+    pub fk: bool,
+    pub fk_reason: Option<String>,
+    pub fk_span: Option<Span>,
+    /// `@no_fk` present on this edge.
+    pub no_fk: bool,
+    pub no_fk_reason: Option<String>,
+    pub no_fk_span: Option<Span>,
+    /// Resolved referential actions (an unknown action maps to `None` here and is `E0294`).
+    pub on_delete: Option<FkAction>,
+    pub on_update: Option<FkAction>,
+}
+
+/// A resolved foreign-key constraint on a forward relation: whether it is emitted is
+/// decided by [`RModel::resolved_fk`]; this carries only the actions once it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFk {
+    pub on_delete: Option<FkAction>,
+    pub on_update: Option<FkAction>,
+}
 
 /// The closed set of value-position functions (the grammar leaves the set to sema).
 pub const KNOWN_FUNCS: &[&str] = &["now"];
@@ -336,6 +435,11 @@ pub struct RModel {
     /// the keyset id tiebreaker, create read-back by generated id). `false` for the
     /// ordinary case (a model always has an `id`).
     pub no_id: bool,
+    /// `@no_fk` on the model — opt *every* forward relation out of an FK constraint (the
+    /// whole-table legacy escape). Reason + span ride along for the divergence check.
+    pub no_fk: bool,
+    pub no_fk_reason: Option<String>,
+    pub no_fk_span: Option<Span>,
     /// Field names that are individually unique (id, `(unique)`, single-col unique
     /// index). Drives `get`-must-be-keyed lint and codegen constraints.
     pub unique_cols: Vec<String>,
@@ -362,6 +466,28 @@ impl RModel {
     }
     pub fn is_unique(&self, field: &str) -> bool {
         self.unique_cols.iter().any(|c| c == field)
+    }
+
+    /// The resolved FK constraint for a forward-relation member under the project
+    /// `foreign_keys` convention, or `None` when no constraint is emitted. Per-relation /
+    /// per-model `@fk`/`@no_fk` always wins over the convention; a custom-join relation
+    /// (no conventional FK column) never gets one. Actions declared with `@fk(on_delete: …)`
+    /// apply regardless of which side (decorator or convention) supplies the presence.
+    pub fn resolved_fk(&self, mem: &RMember, fks: ForeignKeys) -> Option<ResolvedFk> {
+        let MemberKind::Forward {
+            custom_join, fk, ..
+        } = &mem.kind
+        else {
+            return None;
+        };
+        if *custom_join || self.no_fk || fk.no_fk {
+            return None;
+        }
+        let present = fk.fk || matches!(fks, ForeignKeys::All);
+        present.then_some(ResolvedFk {
+            on_delete: fk.on_delete,
+            on_update: fk.on_update,
+        })
     }
     /// The `@scope` equality terms as `(lhs_field, ctx_field)` pairs : for
     /// `@scope(org = $ctx.org)`, `[("org", "org")]`. Sema restricts `@scope` to a
@@ -458,6 +584,9 @@ pub enum MemberKind {
         optional: bool,
         fk_col: String,
         custom_join: bool,
+        /// The `@fk`/`@no_fk` intent on this edge (presence resolved via
+        /// [`RModel::resolved_fk`] against the `foreign_keys` convention).
+        fk: FkDecl,
     },
     /// Back edge (to-many, or a one-to-one inverse): FK lives on `target`, paired
     /// with its forward field `via`.

@@ -28,8 +28,58 @@ User {
 
 "What points at User?" = tooling query (find-references), not source.
 
-## No foreign keys
-No DB FK emitted by default (bad at scale / often banned). Relations are app-level; engine knows how to join, emits no FK constraint unless asked.
+## Foreign keys — opt-in
+
+A relation is app-level: the engine knows how to join and stores the `<field>_id` FK
+**column**, but whether it emits a DB `FOREIGN KEY` **constraint** is a deliberate choice
+(FK constraints are often banned at scale). The default is safe — no constraint — and every
+divergence is visible in source.
+
+**The convention (`based.toml`).**
+
+```toml
+[schema]
+foreign_keys = "none"   # default: a relation gets an FK only if it writes @fk
+# foreign_keys = "all"  # every forward relation gets a bare FK unless it writes @no_fk
+```
+
+**`@fk` — opt a forward (to-one) relation into a constraint**, with optional standard-SQL
+referential actions:
+
+```
+placed_by: User @fk(on_delete: cascade)
+org:       Org  @fk(on_delete: restrict, on_update: cascade)
+author:    User @fk                       # bare: DB-default action (no ON DELETE/UPDATE clause)
+```
+
+Actions: `cascade`, `restrict`, `set_null`, `no_action`. `on_delete:`/`on_update:` are
+independent optional kwargs. `on_delete: set_null` requires the relation be optional
+(nullable FK) — `E0293`.
+
+**`@no_fk` — opt out of the constraint**, on one forward edge or a whole model:
+
+```
+Order @no_fk { org: Org  placed_by: User }   # whole table — no FKs on any forward relation
+Event { org: Org  actor: User @no_fk }        # just this edge
+```
+
+`@fk`/per-edge `@no_fk` are valid **only on a forward to-one relation** (an inverse/`[]`
+edge or a scalar is `E0290`; a custom-join `on:` relation, which owns no conventional FK
+column, is `E0291`; both on one edge is `E0292`; an unknown action is `E0294`).
+
+**The reason rule.** A **reason string is required exactly when a decorator flips FK
+presence *against* the `foreign_keys` convention** — spelled and handled like
+`@no_id("reason")` / `unscoped("reason")`, so a forfeited or against-convention guarantee is
+never silent in review:
+
+| convention | `@fk` (adds an FK) | `@no_fk` (removes an FK) |
+|------------|--------------------|--------------------------|
+| `"none"` (norm: absent) | **diverges** → reason required (`E0295`): `@fk("orders die with their org", on_delete: cascade)` | concordant → **redundant** `W0110` |
+| `"all"` (norm: present) | concordant (an action refines) / bare is **redundant** `W0110` | **diverges** → reason required (`E0295`): `@no_fk("legacy table, FKs banned at scale")` |
+
+Referential actions never trigger a reason on their own — only flipping presence does. A
+resolved FK is recorded in `schema.snap` (a `fk` line), so adding / removing / changing one
+diffs into a migration step (migrations.md).
 
 ## Many-to-many
 A many-to-many relationship is modeled by an **explicit junction model** — a model with a

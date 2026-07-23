@@ -849,3 +849,60 @@ fn opaque_raw_type_outside_a_field_is_a_parse_error() {
     // An opaque type has no array form.
     assert!(parse_file(r#"M { id: Id, a: raw("inet")[] }"#, FileId(0)).is_err());
 }
+
+#[test]
+fn fk_and_no_fk_annotations_parse() {
+    let m = only_model(
+        r#"
+        Order {
+          org:        Org @fk(on_delete: cascade, on_update: restrict)
+          reason_fk:  Org @fk("orders die with their org", on_delete: cascade)
+          bare:       Org @fk
+          skip:       Org @no_fk("legacy")
+          skip2:      Org @no_fk
+        }
+        "#,
+    );
+    let field = |name: &str| {
+        m.members
+            .iter()
+            .find_map(|mem| match mem {
+                Member::Field(f) if f.name.node == name => Some(f),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let org = field("org").fk.as_ref().unwrap();
+    assert_eq!(org.on_delete.as_ref().unwrap().node, "cascade");
+    assert_eq!(org.on_update.as_ref().unwrap().node, "restrict");
+    assert!(org.reason.is_none());
+
+    let reason_fk = field("reason_fk").fk.as_ref().unwrap();
+    assert_eq!(
+        reason_fk.reason.as_ref().unwrap().node,
+        "orders die with their org"
+    );
+    assert_eq!(reason_fk.on_delete.as_ref().unwrap().node, "cascade");
+
+    let bare = field("bare").fk.as_ref().unwrap();
+    assert!(bare.reason.is_none() && bare.on_delete.is_none() && bare.on_update.is_none());
+
+    assert_eq!(
+        field("skip")
+            .no_fk
+            .as_ref()
+            .unwrap()
+            .reason
+            .as_ref()
+            .unwrap()
+            .node,
+        "legacy"
+    );
+    assert!(field("skip2").no_fk.as_ref().unwrap().reason.is_none());
+}
+
+#[test]
+fn model_level_no_fk_parses_as_a_decorator() {
+    let m = only_model(r#"@no_fk("legacy table") Order { org: Org }"#);
+    assert!(m.decorators.iter().any(|d| d.name.node == "no_fk"));
+}

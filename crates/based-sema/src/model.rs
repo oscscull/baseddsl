@@ -52,6 +52,10 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
     // (the reason is mandatory, so the PR shows why — `E0262`).
     let no_id = model_no_id(m, sink);
 
+    // `@no_fk` opts the whole table out of FK constraints (reason checked, if required,
+    // in the manifest-dependent divergence pass).
+    let no_fk = model_no_fk(m);
+
     // A model's primary key is load-bearing and written in source. A model that
     // declares no `id` field is an error (`E0261`) with a one-key autofix; the `id`
     // member is still synthesized so the rest of resolution + codegen has a PK to
@@ -100,9 +104,29 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         updated: None,
         indexes: Vec::new(),
         no_id,
+        no_fk: no_fk.is_some(),
+        no_fk_reason: no_fk.as_ref().and_then(|(r, _)| r.clone()),
+        no_fk_span: no_fk.map(|(_, s)| s),
         unique_cols: Vec::new(),
         was: model_was(m),
     }
+}
+
+/// The model-level `@no_fk` opt-out (whole table): whether it is present, plus its optional
+/// reason string and decorator span (the divergence check needs both). Only the last
+/// `@no_fk` decorator is recorded — repeating it is meaningless.
+fn model_no_fk(m: &Model) -> Option<(Option<String>, Span)> {
+    m.decorators
+        .iter()
+        .rev()
+        .find(|d| d.name.node == "no_fk")
+        .map(|d| {
+            let reason = match d.args.first() {
+                Some(DecoArg::Lit(Literal::Str(s))) if !s.trim().is_empty() => Some(s.clone()),
+                _ => None,
+            };
+            (reason, d.span)
+        })
 }
 
 /// Whether the model carries `@no_id("reason")` (a keyless legacy table). The reason is
@@ -231,9 +255,42 @@ fn classify(f: &Field, enums: &HashMap<String, EnumKind>) -> MemberKind {
                     optional: f.ty.optional,
                     fk_col,
                     custom_join: f.relation_on.is_some(),
+                    fk: fk_decl(f),
                 }
             }
         }
+    }
+}
+
+/// Carry a field's `@fk`/`@no_fk` intent into the resolved member. Presence is left
+/// unresolved (it needs the `foreign_keys` convention); an unknown action maps to `None`
+/// and is flagged `E0294` in [`validate_fk`].
+fn fk_decl(f: &Field) -> FkDecl {
+    FkDecl {
+        fk: f.fk.is_some(),
+        fk_reason: f
+            .fk
+            .as_ref()
+            .and_then(|a| a.reason.as_ref())
+            .map(|r| r.node.clone()),
+        fk_span: f.fk.as_ref().map(|a| a.span),
+        no_fk: f.no_fk.is_some(),
+        no_fk_reason: f
+            .no_fk
+            .as_ref()
+            .and_then(|a| a.reason.as_ref())
+            .map(|r| r.node.clone()),
+        no_fk_span: f.no_fk.as_ref().map(|a| a.span),
+        on_delete: f
+            .fk
+            .as_ref()
+            .and_then(|a| a.on_delete.as_ref())
+            .and_then(|s| FkAction::parse(&s.node)),
+        on_update: f
+            .fk
+            .as_ref()
+            .and_then(|a| a.on_update.as_ref())
+            .and_then(|s| FkAction::parse(&s.node)),
     }
 }
 
@@ -259,6 +316,7 @@ pub fn validate(
     validate_relations(mi, models, index, sink);
     validate_indexes(ast, mi, models, sink);
     validate_decorators(ast, mi, models, sink);
+    validate_fk(ast, mi, models, sink);
     validate_was(ast, mi, models, sink);
     validate_decimals(ast, sink);
     compute_unique(ast, &mut models[mi]);
@@ -301,6 +359,102 @@ fn validate_decimals(ast: &Model, sink: &mut Sink) {
                 );
             }
         }
+    }
+}
+
+/// Validate `@fk`/`@no_fk` on relation fields — the target-independent, convention-free
+/// half of the FK checks (the reason-vs-convention divergence rule runs later, in the
+/// manifest-dependent pass). Both decorators are valid only on a *forward to-one* relation
+/// that owns a conventional `<field>_id` FK column:
+///   * on an inverse / `[]` edge, or a scalar column → `E0290`,
+///   * on a custom-join (`on:`) relation → `E0291` (no conventional FK column),
+///   * both `@fk` and `@no_fk` on one edge → `E0292`,
+///   * `@fk(on_delete: set_null)` on a required (non-nullable) relation → `E0293`,
+///   * an unknown referential action → `E0294`.
+fn validate_fk(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Sink) {
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        if f.fk.is_none() && f.no_fk.is_none() {
+            continue;
+        }
+        let span =
+            f.fk.as_ref()
+                .map(|a| a.span)
+                .or_else(|| f.no_fk.as_ref().map(|a| a.span))
+                .unwrap_or(f.span);
+        // `@fk` + `@no_fk` on the same edge is contradictory.
+        if f.fk.is_some() && f.no_fk.is_some() {
+            sink.error(
+                code::FK_CONFLICT,
+                span,
+                format!(
+                    "`{}` carries both `@fk` and `@no_fk` — an FK is either opted in or out, not both",
+                    f.name.node
+                ),
+            );
+            continue;
+        }
+        // The decorators mean something only on a forward to-one relation column.
+        match models[mi].member(&f.name.node).map(|m| &m.kind) {
+            Some(MemberKind::Forward { custom_join, .. }) => {
+                if *custom_join {
+                    sink.error(
+                        code::FK_CUSTOM_JOIN,
+                        span,
+                        format!(
+                            "`@fk`/`@no_fk` on `{}` — a custom-join (`on:`) relation owns no conventional FK column",
+                            f.name.node
+                        ),
+                    );
+                    continue;
+                }
+            }
+            _ => {
+                sink.error(
+                    code::FK_TARGET,
+                    span,
+                    format!(
+                        "`@fk`/`@no_fk` on `{}` — only a forward to-one relation (which owns the `{}_id` FK column) can carry one",
+                        f.name.node, f.name.node
+                    ),
+                );
+                continue;
+            }
+        }
+        // Referential actions: known spelling, and `set_null` needs a nullable relation.
+        if let Some(fk) = &f.fk {
+            for act in [&fk.on_delete, &fk.on_update].into_iter().flatten() {
+                match FkAction::parse(&act.node) {
+                    None => sink.error(
+                        code::FK_ACTION,
+                        act.span,
+                        format!(
+                            "unknown referential action `{}` — use cascade, restrict, set_null, or no_action",
+                            act.node
+                        ),
+                    ),
+                    Some(FkAction::SetNull) if !f.ty.optional => sink.error(
+                        code::FK_SET_NULL_REQUIRED,
+                        act.span,
+                        format!(
+                            "`set_null` on required relation `{}` — make it optional (`{}: {}?`) for the FK to null it",
+                            f.name.node,
+                            f.name.node,
+                            type_base_name(f)
+                        ),
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// The relation's target model name, for a diagnostic hint (`field: Target?`).
+fn type_base_name(f: &Field) -> String {
+    match &f.ty.base {
+        BaseType::Model(m) => m.node.clone(),
+        _ => "Target".to_string(),
     }
 }
 
@@ -566,6 +720,7 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
             "table" => {} // consumed for the table name in `skeleton`
             "was" => {}   // model rename directive — validated in `validate_was`
             "no_id" => {} // keyless opt-out — consumed + validated in `skeleton`
+            "no_fk" => {} // whole-table FK opt-out — consumed in `skeleton`, divergence in the manifest pass
             other => sink.warn(
                 code::UNKNOWN_DECORATOR,
                 d.name.span,

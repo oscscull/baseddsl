@@ -19,6 +19,28 @@ pub struct Manifest {
     /// Schema root relative to the manifest; defaults to manifest dir.
     #[serde(default)]
     pub root: Option<String>,
+    /// `[schema]` block — schema-wide conventions.
+    #[serde(default)]
+    pub schema: SchemaConfig,
+}
+
+/// The `[schema]` manifest block: project-wide schema conventions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SchemaConfig {
+    /// `foreign_keys = "all" | "none"` — the FK-constraint convention. `"none"` (default,
+    /// backward-compatible): no relation gets an FK unless it writes `@fk`. `"all"`: every
+    /// forward relation gets a bare FK unless it (or its model) writes `@no_fk`. A
+    /// per-relation/per-model decorator always wins over this default.
+    #[serde(default = "default_foreign_keys")]
+    pub foreign_keys: String,
+}
+
+impl Default for SchemaConfig {
+    fn default() -> Self {
+        SchemaConfig {
+            foreign_keys: default_foreign_keys(),
+        }
+    }
 }
 
 fn default_dialect() -> String {
@@ -26,6 +48,9 @@ fn default_dialect() -> String {
 }
 fn default_client() -> String {
     "rust".to_string()
+}
+fn default_foreign_keys() -> String {
+    "none".to_string()
 }
 
 /// One `.bsl` source file located by discovery.

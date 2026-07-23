@@ -24,6 +24,7 @@ fn table(name: &str, columns: Vec<ColumnSnap>) -> TableSnap {
         no_id: false,
         columns,
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
     }
 }
 
@@ -77,6 +78,13 @@ fn render_then_parse_round_trips_every_attribute() {
                 unique: false,
                 method: None,
                 raw: None,
+            }],
+            foreign_keys: vec![ForeignKeySnap {
+                column: "org_id".to_string(),
+                ref_table: "org".to_string(),
+                ref_column: "id".to_string(),
+                on_delete: Some("cascade".to_string()),
+                on_update: None,
             }],
         }],
 

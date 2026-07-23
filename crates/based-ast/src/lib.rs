@@ -164,6 +164,35 @@ pub struct Field {
     /// once the rename is captured). The `Ident` carries the old name (unquoted) and
     /// the string-literal span for diagnostics.
     pub was: Option<Ident>,
+    /// `@fk` / `@fk("reason", on_delete: cascade, on_update: cascade)` — opt this forward
+    /// to-one relation into a real FK constraint (with optional referential actions).
+    pub fk: Option<FkAnnot>,
+    /// `@no_fk` / `@no_fk("reason")` — opt this forward relation out of an FK constraint.
+    pub no_fk: Option<NoFkAnnot>,
+    pub span: Span,
+}
+
+/// `@fk(…)` on a forward relation — opt it into a real foreign-key constraint. `reason`
+/// is a leading positional string, required only when this decorator flips FK presence
+/// *against* the project's toml `foreign_keys` convention (checked in the
+/// manifest-dependent pass). `on_delete`/`on_update` are independent optional kwargs; a
+/// bare `@fk` (both absent) is the DB-default action — no `ON DELETE`/`ON UPDATE` clause.
+/// Each action carries the raw keyword verbatim so sema can validate it and the formatter
+/// can reprint it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FkAnnot {
+    pub reason: Option<Spanned<String>>,
+    pub on_delete: Option<Spanned<String>>,
+    pub on_update: Option<Spanned<String>>,
+    pub span: Span,
+}
+
+/// `@no_fk(…)` on a forward relation (edge) or a model (whole table) — opt out of the FK
+/// constraint. `reason` is required only when opting out *against* a `foreign_keys = "all"`
+/// convention (checked in the manifest-dependent pass).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoFkAnnot {
+    pub reason: Option<Spanned<String>>,
     pub span: Span,
 }
 

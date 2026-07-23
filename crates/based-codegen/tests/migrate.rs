@@ -468,3 +468,115 @@ fn a_migration_recreates_opaque_columns_and_indexes_verbatim() {
         "\n{maria}"
     );
 }
+
+// ---------- foreign-key constraints in the snapshot + diff ------------------
+
+const FK_ORG: &str = "Org { id: Id  name: text }\n";
+
+#[test]
+fn fk_line_round_trips_through_the_snapshot() {
+    let schema = checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade, on_update: restrict) }}"
+    ));
+    let text = migrate::snapshot(&schema);
+    assert!(
+        text.contains("fk org_id -> org.id on_delete=cascade on_update=restrict"),
+        "\n{text}"
+    );
+    let parsed = Snapshot::parse(&text).expect("parse");
+    assert_eq!(parsed, Snapshot::from_schema(&schema));
+}
+
+#[test]
+fn adding_an_fk_diffs_to_add_foreign_key() {
+    let prev = Snapshot::from_schema(&checked(&format!("{FK_ORG}Order {{ id: Id  org: Org }}")));
+    let now = Snapshot::from_schema(&checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade) }}"
+    )));
+    let steps = migrate::diff_snapshots(&prev, &now);
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, migrate::Step::AddForeignKey { .. })),
+        "{steps:#?}"
+    );
+    // Renders to a real ALTER on Postgres, an honest rebuild marker on SQLite.
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains("ADD CONSTRAINT") && pg.contains("ON DELETE CASCADE"),
+        "\n{pg}"
+    );
+    let sqlite = migrate::render_sql(&steps, Dialect::Sqlite);
+    assert!(sqlite.contains("raw(sqlite) table-rebuild"), "\n{sqlite}");
+}
+
+#[test]
+fn dropping_an_fk_diffs_to_drop_foreign_key() {
+    let prev = Snapshot::from_schema(&checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade) }}"
+    )));
+    let now = Snapshot::from_schema(&checked(&format!("{FK_ORG}Order {{ id: Id  org: Org }}")));
+    let steps = migrate::diff_snapshots(&prev, &now);
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, migrate::Step::DropForeignKey { .. })),
+        "{steps:#?}"
+    );
+    let maria = migrate::render_sql(&steps, Dialect::MariaDb);
+    assert!(
+        maria.contains("DROP FOREIGN KEY `fk_order_org_id`"),
+        "\n{maria}"
+    );
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#"DROP CONSTRAINT "fk_order_org_id""#),
+        "\n{pg}"
+    );
+}
+
+#[test]
+fn changing_an_fk_action_diffs_to_drop_then_add() {
+    let prev = Snapshot::from_schema(&checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade) }}"
+    )));
+    let now = Snapshot::from_schema(&checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: restrict) }}"
+    )));
+    let steps = migrate::diff_snapshots(&prev, &now);
+    let drops = steps
+        .iter()
+        .filter(|s| matches!(s, migrate::Step::DropForeignKey { .. }))
+        .count();
+    let adds = steps
+        .iter()
+        .filter(|s| matches!(s, migrate::Step::AddForeignKey { .. }))
+        .count();
+    assert_eq!((drops, adds), (1, 1), "{steps:#?}");
+}
+
+#[test]
+fn from_scratch_migration_carries_the_fk_inline_on_sqlite() {
+    // 0001_init CreateTable must build the FK inline on every target including SQLite.
+    let now = Snapshot::from_schema(&checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade) }}"
+    )));
+    let steps = migrate::diff_snapshots(&Snapshot::default(), &now);
+    let sqlite = migrate::render_sql(&steps, Dialect::Sqlite);
+    assert!(
+        sqlite.contains("FOREIGN KEY (`org_id`) REFERENCES `org` (`id`) ON DELETE CASCADE"),
+        "\n{sqlite}"
+    );
+    // The create-table renderer matches `based gen sql` (same clause).
+    let ddl = sql::ddl(&now_schema_fk(), Dialect::Sqlite);
+    assert!(
+        ddl.contains("FOREIGN KEY (`org_id`) REFERENCES `org` (`id`)"),
+        "\n{ddl}"
+    );
+}
+
+fn now_schema_fk() -> CheckedSchema {
+    checked(&format!(
+        "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade) }}"
+    ))
+}

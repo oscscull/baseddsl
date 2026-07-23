@@ -314,8 +314,9 @@ fn cmd_fmt(root: &Path, check: bool) -> Result<(), CliError> {
 fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
+    let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
     // Schema DDL first, then the parameterized query templates.
-    let mut sql = based_codegen::sql::ddl(&schema, dialect);
+    let mut sql = based_codegen::sql::ddl_with(&schema, dialect, fks);
     if !schema.queries.is_empty() {
         sql.push_str(
             "\n\n-- ============================== queries ==============================\n",
@@ -394,7 +395,11 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
         None => migrate::Snapshot::default(),
     };
 
-    let steps = migrate::diff(&prev, &schema);
+    // The current snapshot under the project FK convention, so an FK add/remove/change
+    // diffs and lands in the migration.
+    let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
+    let now = migrate::Snapshot::from_schema_with(&schema, fks);
+    let steps = migrate::diff_snapshots(&prev, &now);
     if steps.is_empty() {
         println!("no schema changes since the latest migration — nothing to generate");
         return Ok(());
@@ -408,7 +413,7 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     std::fs::create_dir_all(&dir).map_err(|e| io_at("creating", &dir, e))?;
 
     let up = migrate::render_up(&steps);
-    let snap = migrate::snapshot(&schema);
+    let snap = now.render();
     // Prefill a `down.mig` for the manifest dialect: real reverse SQL where the step is
     // mechanically reversible, a loud irreversible comment otherwise, so a reverse exists to
     // complete instead of being silently never written.
@@ -444,7 +449,6 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     // Teach-at-checkpoint: when this diff drops one column and adds one same-family column
     // on a table, it is ambiguous with a rename — point at `@was` so the gesture is
     // discoverable with zero prior knowledge (D105).
-    let now = migrate::Snapshot::from_schema(&schema);
     for hint in migrate::rename_hints(&prev, &now) {
         println!("hint: {}", hint.message());
     }
@@ -691,7 +695,8 @@ async fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Result<()
 fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
     use based_codegen::migrate;
 
-    let (_project, schema, _decls, _sources, _warnings) = load_checked(root)?;
+    let (project, schema, _decls, _sources, _warnings) = load_checked(root)?;
+    let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
     let existing = existing_migrations(&root.join("migrations"))?;
 
     let mut problems = 0usize;
@@ -748,7 +753,7 @@ fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
     // The latest snapshot must equal the current schema — else there are uncaptured
     // changes. Compared via the diff (not raw equality) so a spent `@was` — whose rename
     // is already captured — reads as no change even while it lingers in the `.bsl`.
-    let current = migrate::Snapshot::from_schema(&schema);
+    let current = migrate::Snapshot::from_schema_with(&schema, fks);
     if existing.is_empty() {
         if !current.tables.is_empty() {
             eprintln!("  no migrations yet — run `based migrate gen` to capture the schema");
@@ -958,6 +963,14 @@ fn load_checked(root: &Path) -> Result<Loaded, CliError> {
         );
         count(&target, &mut errors, &mut warnings);
         render::render(&target, &sources);
+        // FK-convention checks: the divergence-reason rule, judged against the manifest's
+        // `foreign_keys` value (a decorator flipping FK presence against it needs a reason).
+        let fk = based_sema::check_foreign_keys(
+            &checked,
+            based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys),
+        );
+        count(&fk, &mut errors, &mut warnings);
+        render::render(&fk, &sources);
         schema = checked;
     }
 

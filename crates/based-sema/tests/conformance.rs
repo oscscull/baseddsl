@@ -221,6 +221,7 @@ fn member(name: &str, kind: &MemberKind) -> String {
             optional,
             fk_col,
             custom_join,
+            ..
         } => format!(
             "{name}: -> {target}{}  fk={fk_col}{}",
             if *optional { "?" } else { "" },

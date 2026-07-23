@@ -68,6 +68,112 @@ pub fn check_target(schema: &CheckedSchema, dialect: &str) -> Vec<Diagnostic> {
     sink.diags
 }
 
+/// The FK-convention half of the checks: the divergence-reason rule, which can only be
+/// judged once the project's `foreign_keys` convention is known. Run after [`check`], by
+/// whoever resolved the manifest — the CLI with the manifest value, the LSP with the
+/// resolved project value (the dialect-free [`check`] cannot decide divergence alone).
+///
+/// A reason string is required exactly when a decorator flips FK **presence** against the
+/// convention: `@fk` under `foreign_keys = "none"` (adds an FK) or `@no_fk` under
+/// `"all"` (removes one) — a missing reason is `E0295`. A decorator that merely restates
+/// the convention (a `@no_fk` under `"none"`, a bare `@fk` under `"all"`) has no effect
+/// and earns the `W0110` redundancy lint. Referential actions never trigger a reason on
+/// their own — only flipping presence does.
+pub fn check_foreign_keys(schema: &CheckedSchema, fks: ForeignKeys) -> Vec<Diagnostic> {
+    let mut sink = Sink::default();
+    for m in &schema.models {
+        // Model-level `@no_fk` (whole-table opt-out).
+        if m.no_fk {
+            let span = m.no_fk_span.unwrap_or(m.span);
+            match fks {
+                ForeignKeys::All if m.no_fk_reason.is_none() => sink.error(
+                    code::FK_DIVERGE_REASON,
+                    span,
+                    format!(
+                        "`@no_fk` on `{}` drops the FK constraints your `foreign_keys = \"all\"` \
+                         convention would create — add a reason: `@no_fk(\"why\")`",
+                        m.name
+                    ),
+                ),
+                ForeignKeys::None => sink.warn(
+                    code::FK_REDUNDANT,
+                    span,
+                    format!(
+                        "`@no_fk` on `{}` restates `foreign_keys = \"none\"` (no FK either way) — remove it",
+                        m.name
+                    ),
+                ),
+                _ => {}
+            }
+        }
+        for mem in &m.members {
+            let MemberKind::Forward {
+                fk, custom_join, ..
+            } = &mem.kind
+            else {
+                continue;
+            };
+            // A custom-join edge owns no FK column — already `E0291`; nothing to weigh here.
+            if *custom_join {
+                continue;
+            }
+            if fk.fk {
+                let span = fk.fk_span.unwrap_or(mem.span);
+                let has_actions = fk.on_delete.is_some() || fk.on_update.is_some();
+                match fks {
+                    ForeignKeys::None if fk.fk_reason.is_none() => sink.error(
+                        code::FK_DIVERGE_REASON,
+                        span,
+                        format!(
+                            "`@fk` on `{}.{}` adds an FK your `foreign_keys = \"none\"` convention \
+                             omits — add a reason: `@fk(\"why\"{})`",
+                            m.name,
+                            mem.name,
+                            if has_actions { ", on_delete: …" } else { "" }
+                        ),
+                    ),
+                    // Under `all` a bare `@fk` just restates the convention; one carrying
+                    // actions is legitimately refining a present FK (no lint).
+                    ForeignKeys::All if !has_actions => sink.warn(
+                        code::FK_REDUNDANT,
+                        span,
+                        format!(
+                            "`@fk` on `{}.{}` restates `foreign_keys = \"all\"` (already an FK) — \
+                             drop it, or add an `on_delete`/`on_update` action",
+                            m.name, mem.name
+                        ),
+                    ),
+                    _ => {}
+                }
+            }
+            if fk.no_fk {
+                let span = fk.no_fk_span.unwrap_or(mem.span);
+                match fks {
+                    ForeignKeys::All if fk.no_fk_reason.is_none() => sink.error(
+                        code::FK_DIVERGE_REASON,
+                        span,
+                        format!(
+                            "`@no_fk` on `{}.{}` drops the FK your `foreign_keys = \"all\"` \
+                             convention creates — add a reason: `@no_fk(\"why\")`",
+                            m.name, mem.name
+                        ),
+                    ),
+                    ForeignKeys::None => sink.warn(
+                        code::FK_REDUNDANT,
+                        span,
+                        format!(
+                            "`@no_fk` on `{}.{}` restates `foreign_keys = \"none\"` (no FK either way) — remove it",
+                            m.name, mem.name
+                        ),
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+    sink.diags
+}
+
 fn raw_spec_covers(spec: &based_ast::RawSpec, dialect: &str, sink: &mut Sink) {
     if spec.for_dialect(dialect).is_none() {
         sink.error_note(

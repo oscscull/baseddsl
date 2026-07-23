@@ -177,6 +177,15 @@ drop unique <name>
 # add/drop/alter column step on `<field>_id`; adding a required relation is a
 # `not_null` add and follows the not-null-without-default destructive rule.
 
+# foreign-key constraints (opt-in — relations.md). A resolved FK is a `fk` snapshot line;
+# a change to it diffs into an add/drop step. On Postgres/MariaDB these render as
+# `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` / `DROP CONSTRAINT`/`DROP FOREIGN KEY`;
+# SQLite has no in-place FK ALTER (it needs a table rebuild), so an add/drop there is a
+# loud honest marker pointing at a hand-authored raw(sqlite) rebuild — never a silent skip.
+# A from-scratch `create table` carries its FKs inline on every target (SQLite included).
+add foreign_key <table>.<col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]
+drop foreign_key <table>.<col>
+
 # escape hatch — data migrations / anything the neutral vocabulary can't express
 raw(<dialect>) `<sql>`                               # NOT offline-verifiable for this step
 ```

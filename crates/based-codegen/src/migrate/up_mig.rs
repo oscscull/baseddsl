@@ -5,7 +5,7 @@
 //! SQL is [`super::sql`]; the step vocabulary is [`super::diff`].
 
 use super::diff::{ColumnChange, ScopeChange, Step};
-use super::model::{index_spec_text, render_scope_decl, ColumnSnap, TableSnap};
+use super::model::{fk_spec_text, index_spec_text, render_scope_decl, ColumnSnap, TableSnap};
 use std::fmt::Write as _;
 
 // ---------- `up.mig` rendering --------------------------------------------
@@ -83,6 +83,22 @@ fn render_step(out: &mut String, step: &Step) {
         Step::DropUnique { name, .. } => {
             let _ = writeln!(out, "drop unique {name}");
         }
+        Step::AddForeignKey { table, fk } => {
+            let mut line = format!(
+                "add foreign_key {table}.{} -> {}.{}",
+                fk.column, fk.ref_table, fk.ref_column
+            );
+            if let Some(a) = &fk.on_delete {
+                let _ = write!(line, " on_delete={a}");
+            }
+            if let Some(a) = &fk.on_update {
+                let _ = write!(line, " on_update={a}");
+            }
+            let _ = writeln!(out, "{line}");
+        }
+        Step::DropForeignKey { table, column } => {
+            let _ = writeln!(out, "drop foreign_key {table}.{column}");
+        }
         Step::RenameTable { from, to } => {
             let _ = writeln!(out, "rename table {from} -> {to}");
         }
@@ -126,6 +142,9 @@ fn render_create_table(out: &mut String, t: &TableSnap) {
     for i in &t.indexes {
         let kind = if i.unique { "unique" } else { "index" };
         let _ = writeln!(out, "  {kind} {}", index_spec_text(i));
+    }
+    for f in &t.foreign_keys {
+        let _ = writeln!(out, "  {}", fk_spec_text(f));
     }
     out.push_str("}\n");
 }

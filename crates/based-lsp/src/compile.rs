@@ -2528,6 +2528,7 @@ fn drift_diagnostics(
     root: &Path,
     schema: &based_sema::CheckedSchema,
     decls: &[Decl],
+    fks: based_sema::ForeignKeys,
 ) -> Vec<Diagnostic> {
     use based_codegen::migrate;
     // Only projects that have opted into migrations get a drift check — no `migrations/`
@@ -2537,7 +2538,8 @@ fn drift_diagnostics(
     };
 
     let mut out = Vec::new();
-    let steps = migrate::drift(&prev, schema);
+    let now = migrate::Snapshot::from_schema_with(schema, fks);
+    let steps = migrate::diff_snapshots(&prev, &now);
     let total = steps.len();
     if total > 0 {
         // Group each step under the model it touches, so one diagnostic per changed
@@ -2563,7 +2565,6 @@ fn drift_diagnostics(
         }
         // Teach-at-checkpoint: a drop-one/add-one-same-family diff on a table is ambiguous
         // with a rename, so the drift note points at `@was` (D105).
-        let now = migrate::Snapshot::from_schema(schema);
         for hint in migrate::rename_hints(&prev, &now) {
             if let Some(span) = self_model_span(schema, decls, &hint.table) {
                 let key = (span.file.0, span.start, span.end);
@@ -2698,8 +2699,9 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
     match based_manifest::discover(root) {
         Ok(project) => {
             let dialect = based_codegen::Dialect::parse(&project.manifest.dialect);
+            let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
             let paths = project.files.into_iter().map(|f| f.path).collect();
-            compile_paths(paths, overlays, Vec::new(), Some(root), Some(dialect))
+            compile_paths(paths, overlays, Vec::new(), Some(root), Some(dialect), fks)
         }
         // Manifest present but unreadable/malformed: surface it as a project-level
         // diagnostic and still compile this project's open buffers so the editor
@@ -2711,7 +2713,14 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
                 .cloned()
                 .collect();
             ps.sort();
-            compile_paths(ps, overlays, diags, Some(root), None)
+            compile_paths(
+                ps,
+                overlays,
+                diags,
+                Some(root),
+                None,
+                based_sema::ForeignKeys::None,
+            )
         }
     }
 }
@@ -2719,7 +2728,14 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
 /// Compile a single `.bsl` file under no manifest in isolation (the fallback for a
 /// file that belongs to no project — cross-file references cannot resolve here).
 pub fn compile_loose(file: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
-    compile_paths(vec![file.to_path_buf()], overlays, Vec::new(), None, None)
+    compile_paths(
+        vec![file.to_path_buf()],
+        overlays,
+        Vec::new(),
+        None,
+        None,
+        based_sema::ForeignKeys::None,
+    )
 }
 
 /// Read + parse + check a fixed file set, preferring open buffers over disk, into a
@@ -2730,6 +2746,7 @@ fn compile_paths(
     project_diagnostics: Vec<Diagnostic>,
     migrations_root: Option<&Path>,
     dialect: Option<based_codegen::Dialect>,
+    fks: based_sema::ForeignKeys,
 ) -> Snapshot {
     // Read every file, preferring an open buffer over disk.
     let mut sources: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
@@ -2766,11 +2783,14 @@ fn compile_paths(
         if let Some(d) = dialect {
             diagnostics.extend(based_sema::check_target(&schema, d.name()));
         }
+        // FK-convention divergence checks (resolved project `foreign_keys`; a loose file
+        // with no project uses the safe `None` default).
+        diagnostics.extend(based_sema::check_foreign_keys(&schema, fks));
         facts = based_facts::facts(&schema, &decls);
         // Offline migration-drift diagnostic: if the project has captured migrations and
         // the `.bsl` has structural changes not yet in one, flag them.
         if let Some(root) = migrations_root {
-            diagnostics.extend(drift_diagnostics(root, &schema, &decls));
+            diagnostics.extend(drift_diagnostics(root, &schema, &decls, fks));
         }
         checked = Some(schema);
     }

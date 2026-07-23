@@ -1,0 +1,15 @@
+DIAGNOSTICS
+  E0290: `@fk`/`@no_fk` on `note` — only a forward to-one relation (which owns the `note_id` FK column) can carry one
+  E0292: `both` carries both `@fk` and `@no_fk` — an FK is either opted in or out, not both
+  E0293: `set_null` on required relation `hard` — make it optional (`hard: Org?`) for the FK to null it
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model Order  table=order
+  id: Id
+  org: -> Org  fk=org_id
+  note: text
+  owner: -> Org?  fk=owner_id
+  both: -> Org  fk=both_id
+  hard: -> Org  fk=hard_id

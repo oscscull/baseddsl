@@ -5,7 +5,9 @@
 //! the current schema and emits the neutral step list. Dialect-neutral throughout; SQL
 //! rendering is [`super::sql`], neutral `up.mig` text is [`super::up_mig`].
 
-use super::model::{ColumnSnap, IndexSnap, Rename, ScopeDeclSnap, Snapshot, TableSnap};
+use super::model::{
+    ColumnSnap, ForeignKeySnap, IndexSnap, Rename, ScopeDeclSnap, Snapshot, TableSnap,
+};
 use crate::Dialect;
 use based_sema::CheckedSchema;
 use std::collections::HashSet;
@@ -46,6 +48,13 @@ pub enum Step {
     AddUnique { table: String, index: IndexSnap },
     /// `drop unique <name>`.
     DropUnique { table: String, name: String },
+    /// `add foreign_key <table>.<col> -> <ref>` — a new FK constraint on an existing
+    /// column. `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` on Postgres/MariaDB; SQLite
+    /// cannot ALTER-add an FK (needs a table rebuild) — the renderer surfaces that loudly.
+    AddForeignKey { table: String, fk: ForeignKeySnap },
+    /// `drop foreign_key <table>.<col>` — drop the FK constraint on a column. Safe.
+    /// `ALTER TABLE … DROP CONSTRAINT`/`DROP FOREIGN KEY`; SQLite needs a rebuild (loud).
+    DropForeignKey { table: String, column: String },
     /// `rename table <old> -> <new>` — only ever emitted via a model `@was` (never
     /// auto-guessed). Safe: an in-place `ALTER TABLE … RENAME`.
     RenameTable { from: String, to: String },
@@ -362,6 +371,45 @@ fn diff_table(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &mut
             drop_index_step(i, now, steps);
         }
     }
+
+    diff_foreign_keys(prev, now, steps);
+}
+
+/// Diff a table's FK constraints by column. An FK gained is `add foreign_key`; one dropped
+/// is `drop foreign_key`; a changed constraint (retargeted or an action change) is a drop +
+/// re-add. Keyed on the local column, so it is stable across a target/action edit.
+fn diff_foreign_keys(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
+    let prev_fk = |col: &str| prev.foreign_keys.iter().find(|f| f.column == col);
+    let now_fk = |col: &str| now.foreign_keys.iter().find(|f| f.column == col);
+    // Added or changed.
+    for f in &now.foreign_keys {
+        match prev_fk(&f.column) {
+            Some(old) if old == f => {}
+            Some(_) => {
+                steps.push(Step::DropForeignKey {
+                    table: now.name.clone(),
+                    column: f.column.clone(),
+                });
+                steps.push(Step::AddForeignKey {
+                    table: now.name.clone(),
+                    fk: f.clone(),
+                });
+            }
+            None => steps.push(Step::AddForeignKey {
+                table: now.name.clone(),
+                fk: f.clone(),
+            }),
+        }
+    }
+    // Dropped.
+    for f in &prev.foreign_keys {
+        if now_fk(&f.column).is_none() {
+            steps.push(Step::DropForeignKey {
+                table: now.name.clone(),
+                column: f.column.clone(),
+            });
+        }
+    }
 }
 
 fn drop_index_step(idx: &IndexSnap, table: &TableSnap, steps: &mut Vec<Step>) {
@@ -421,6 +469,8 @@ impl Step {
             | Step::DropIndex { table, .. }
             | Step::AddUnique { table, .. }
             | Step::DropUnique { table, .. }
+            | Step::AddForeignKey { table, .. }
+            | Step::DropForeignKey { table, .. }
             | Step::RenameColumn { table, .. } => Some(table),
             Step::RenameTable { from, .. } => Some(from),
             Step::ScopeChange(_) | Step::Raw { .. } => None,
@@ -441,6 +491,12 @@ impl Step {
             }
             Step::DropIndex { name, .. } | Step::DropUnique { name, .. } => {
                 format!("dropped index `{name}`")
+            }
+            Step::AddForeignKey { table, fk } => {
+                format!("added foreign key `{table}.{}`", fk.column)
+            }
+            Step::DropForeignKey { table, column } => {
+                format!("dropped foreign key `{table}.{column}`")
             }
             Step::RenameTable { from, to } => format!("renamed table `{from}` → `{to}`"),
             Step::RenameColumn { table, from, to } => {

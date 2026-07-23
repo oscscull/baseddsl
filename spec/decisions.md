@@ -62,7 +62,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   junction model — two forward edges + two to-many inverses, no new syntax; far-side
   flattening + implicit-junction sugar deferred), D103 (m2m fork resolved: **no** implicit-junction
   sugar — a junction's FK columns are explicit `@index`; only the far-side flattening projection
-  remains, as sugar over existing machinery)
+  remains, as sugar over existing machinery), D108 (opt-in FK referential actions: `@fk(…)` /
+  `@no_fk` + toml `[schema] foreign_keys` convention + the divergence-reason rule; E0290–E0295, W0110)
 - **Aggregations** — D101 (aggregations + group by + having: an *aggregate shape*
   `count()`/`sum`/`avg`/`min`/`max` projected over groups, paired with a query's
   `group by`/`having`/`order`; `GROUP BY`/`HAVING` lowering with row filter before grouping +
@@ -4811,3 +4812,73 @@ surface: a binding decl (`as name`) and every `$name.field` head are one callabl
 go-to-def, find-refs, rename, and a hover naming the bound model. Migrated: helpdesk `open_ticket`;
 tests across parser/sema/codegen/fmt/runtime/LSP + a new sema conformance golden `tx_bindings`. Live
 via `make check` (the `open_ticket` tx ran green against Postgres/MariaDB).
+
+## D108 — opt-in FK referential actions: `@fk` / `@no_fk` + a `foreign_keys` convention (T6)
+
+**Decision.** A relation's `<field>_id` FK **column** is always stored, but the DB `FOREIGN
+KEY` **constraint** is opt-in and every divergence from the project convention is visible in
+source (FK constraints are often banned at scale — principle 2). Owner-approved syntax:
+
+- **toml `[schema] foreign_keys = "all" | "none"`** (default `"none"`, backward-compatible).
+  `"none"`: a relation gets a constraint only if it writes `@fk`. `"all"`: every forward
+  relation gets a bare FK unless it (or its model) writes `@no_fk`. Per-relation/per-model
+  decorators always win over the toml default.
+- **`@fk` — opt a forward (to-one) relation IN**, with optional standard-SQL actions:
+  `@fk(on_delete: cascade)`, `@fk(on_delete: restrict, on_update: cascade)`, bare `@fk`
+  (DB-default action, no clause). Actions: `cascade`, `restrict`, `set_null`, `no_action`;
+  `on_delete:`/`on_update:` are independent optional kwargs.
+- **`@no_fk` — opt OUT**, on one forward edge (`actor: User @no_fk`) or a whole model
+  (`Order @no_fk { … }` — every forward relation).
+
+**The divergence-reason rule (the load-bearing part).** The toml value is the project's
+convention. A **reason string is required exactly when a decorator flips FK presence AGAINST
+that convention** — spelled/handled identically to `@no_id("reason")` (a leading positional
+string). Under `"none"`, `@fk` *adds* an FK → reason required (`E0295`), and `@no_fk` is
+redundant (`W0110`). Under `"all"`, `@no_fk` *removes* an FK → reason required (`E0295`), a
+bare `@fk` is redundant (`W0110`), and `@fk(on_delete: …)` refining a present FK is
+concordant (no reason). Actions never trigger a reason on their own — only flipping presence
+does. Because it depends on the manifest, this runs in a **manifest-dependent pass mirroring
+D104's `check_target`**: `check_foreign_keys(&schema, foreign_keys)`, run by the CLI with the
+manifest value and the LSP with the resolved project value (the dialect-free `check` can't
+decide divergence alone).
+
+**Other checks (convention-free, in `check`).** `@fk`/per-edge `@no_fk` is valid only on a
+forward to-one relation: on an inverse/`[]`/scalar → `E0290`; on a custom-join (`on:`)
+relation (no conventional FK column) → `E0291`; `@fk` + `@no_fk` on one edge → `E0292`;
+`on_delete: set_null` on a required (non-nullable) relation → `E0293`; an unknown action →
+`E0294`. A forward relation to a `@no_id` keyless target is already `E0265` (no PK to
+reference) — unchanged.
+
+**Codegen.** DDL emits `CONSTRAINT fk_<table>_<col> FOREIGN KEY (<col>) REFERENCES
+<ref>(<id>) [ON DELETE <a>] [ON UPDATE <a>]` inline on all three dialects (SQLite honors an
+inline table FK), resolved per relation via `RModel::resolved_fk(mem, foreign_keys)`. FK
+presence threads through `sql::ddl_with` / `Snapshot::from_schema_with` (the old
+`ddl`/`from_schema` keep the safe `none` default, so an explicit `@fk` still emits under it
+and callers that don't thread the convention are unaffected). **SQLite enforcement:** the
+`foreign_keys` pragma is set ON explicitly at connection setup (sqlx defaults it on; made
+explicit + greppable), so `on_delete: cascade` actually cascades — proven live.
+
+**Snapshot + migrations.** A resolved FK is a `fk <col> -> <ref_table>.<ref_col>
+[on_delete=…] [on_update=…]` line in `schema.snap` (a new `ForeignKeySnap` alongside
+`IndexSnap`), so adding/removing/changing an FK diffs into an `add foreign_key` /
+`drop foreign_key` step (a changed action is drop + re-add). Postgres/MariaDB render these as
+`ALTER TABLE … ADD CONSTRAINT`/`DROP CONSTRAINT`/`DROP FOREIGN KEY`; **SQLite has no in-place
+FK ALTER**, so an add/drop there is an honest loud marker pointing at a hand-authored
+`raw(sqlite)` rebuild — never a silent skip (the full-rebuild engine is out of scope this
+iteration; from-scratch `create table` carries FKs inline on SQLite, so init works).
+
+**Codes.** `E0290` (bad target), `E0291` (custom-join), `E0292` (fk+no_fk conflict), `E0293`
+(set_null on required), `E0294` (unknown action), `E0295` (missing divergence reason), `W0110`
+(redundant decorator). Spec seam: relations.md (the real `@fk`/`@no_fk` spec, replacing the
+"no FK unless asked" hand-wave), models.md (decorators), migrations.md (FK diff/step).
+
+**Shipped (2026-07-23).** Implemented end to end as decided. Notes: `check` runs the
+structural pass (`validate_fk`); `check_foreign_keys` is the manifest-dependent divergence
+pass. `MemberKind::Forward` gained an `FkDecl` (presence intent + resolved actions + reason
+spans); `RModel` gained model-level `no_fk`. Tests: parser +/− (`@fk`/`@no_fk` forms), sema
++/− per code **in both toml directions incl. both redundancy lints** (`tests/fk.rs`, 18
+cases), DDL golden all three dialects, snapshot round-trip + add/drop/change diff (+ per-dialect
+render, incl. the SQLite honest-marker), fmt round-trip, a sema conformance golden
+(`fk_referential`), and a **live SQLite cascade proof** (bad-parent insert rejected → pragma
+on; parent delete cascades the child away). `make check` green end to end (fast gate + all
+three live suites + all examples + the axum-helpdesk smoke).

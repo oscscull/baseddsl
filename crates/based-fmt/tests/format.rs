@@ -295,3 +295,25 @@ tags: raw({postgres:"tsvector",mariadb:"text"})?
     assert!(out.contains(r#"@index raw("(lower(name))")"#), "\n{out}");
     assert_eq!(fmt(&out), out, "not idempotent");
 }
+
+#[test]
+fn fk_annotations_round_trip() {
+    // Bare, action-carrying, reason+action, and edge/model @no_fk all reprint verbatim.
+    let cases = [
+        "Order {\n  org: Org @fk\n}\n",
+        "Order {\n  org: Org @fk(on_delete: cascade)\n}\n",
+        "Order {\n  org: Org @fk(\"orders die with their org\", on_delete: cascade, on_update: restrict)\n}\n",
+        "Order {\n  org: Org @no_fk\n}\n",
+        "Order {\n  org: Org @no_fk(\"legacy table\")\n}\n",
+    ];
+    for c in cases {
+        let out = fmt(c);
+        assert_eq!(out, c, "fk annotation churned");
+        // Idempotent + reparses.
+        assert!(
+            based_parser::parse_file(&out, FileId(0)).is_ok(),
+            "did not reparse:\n{out}"
+        );
+        assert_eq!(fmt(&out), out, "not idempotent");
+    }
+}

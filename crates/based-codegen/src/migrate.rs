@@ -31,8 +31,11 @@
 //!
 //! table <name> [soft_delete=<col>:<mode>] [scope=(<Name>, …)]* [sort=(<col> <dir>, …)]
 //!   column <name> <type> null|not_null [default=<lit>] [unique] [fk=<Model>]
-//!   index  <name> (<col>, …) [unique] [inferred]
+//!   index  <name> (<col>, …) [unique] [using <method>]
+//!   fk     <col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]
 //! ```
+//! A `fk` line records a resolved foreign-key constraint (the toml `foreign_keys`
+//! convention ⊕ per-relation `@fk`/`@no_fk`), so adding/removing/changing an FK diffs.
 //! Named scopes serialize once as top-level `scope` decls (sorted by
 //! name, before the tables — the one place a scope column's/`$ctx` field's type lives) and
 //! are referenced on each governed table by name: one `scope=(…)` group per `@scope`
@@ -55,8 +58,8 @@ pub use diff::{
 };
 pub use lifecycle::{apply_spent_was, rename_hints, spent_was_edits, RenameHint, SpentWas};
 pub use model::{
-    snapshot, ColumnSnap, IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot,
-    TableSnap,
+    fk_spec_text, foreign_key_snaps, snapshot, target_pk_column, ColumnSnap, ForeignKeySnap,
+    IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot, TableSnap,
 };
 pub use sql::{content_hash, render_down, render_sql, sql_statements, up_mig_matches_snapshot};
 pub use up_mig::render_up;

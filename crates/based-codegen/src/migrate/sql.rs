@@ -125,6 +125,10 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
         Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
             vec![drop_index_sql(dialect, table, name)]
         }
+        Step::AddForeignKey { table, fk } => add_foreign_key_statements(table, fk, dialect)?,
+        Step::DropForeignKey { table, column } => {
+            drop_foreign_key_statements(table, column, dialect)?
+        }
         // Renames are a safe in-place ALTER on every target (Postgres always; MariaDB
         // ≥10.5.2 / SQLite ≥3.25 for `RENAME COLUMN`; `RENAME TO` universal) — existing
         // data survives, so this is a real rename, never a drop+recreate.
@@ -239,6 +243,14 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
         Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
             vec![drop_index_sql(dialect, table, &index.name)]
         }
+        // An added FK reverses to a drop (safe on PG/MariaDB; SQLite has no in-place drop,
+        // so its reverse is left to a hand-authored raw step — mark irreversible here).
+        Step::AddForeignKey { table, fk } => {
+            match drop_foreign_key_statements(table, &fk.column, dialect) {
+                Ok(stmts) => stmts,
+                Err(_) => return None,
+            }
+        }
         Step::RenameTable { from, to } => vec![format!(
             "ALTER TABLE {} RENAME TO {}",
             dialect.quote(to),
@@ -259,6 +271,7 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
         | Step::AlterColumn { .. }
         | Step::DropIndex { .. }
         | Step::DropUnique { .. }
+        | Step::DropForeignKey { .. }
         | Step::Raw { .. } => return None,
     })
 }
@@ -310,6 +323,12 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         }
     }
 
+    // Foreign-key constraints — inline in the create (works on all three, SQLite too), so a
+    // from-scratch migration builds the same FKs `based gen sql` emits.
+    for fk in &t.foreign_keys {
+        lines.push(crate::sql::fk_constraint_clause(dialect, &t.name, fk));
+    }
+
     // MariaDB inlines indexes as table clauses; SQLite/Postgres trail them as statements.
     // An opaque `raw` index is never a table clause — it always trails.
     if dialect == Dialect::MariaDb {
@@ -345,6 +364,66 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         stmts.push(create_index_sql(dialect, &t.name, i));
     }
     stmts
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …` on Postgres/MariaDB. SQLite cannot
+/// ALTER-add an FK (it requires the 12-step table rebuild the neutral vocabulary can't
+/// safely auto-generate) — surface a loud, greppable message pointing at a hand-authored
+/// `raw(sqlite)` rebuild, never a silently-skipped constraint.
+fn add_foreign_key_statements(
+    table: &str,
+    fk: &super::model::ForeignKeySnap,
+    dialect: Dialect,
+) -> Result<Vec<String>, String> {
+    if dialect == Dialect::Sqlite {
+        return Err(format!(
+            "SQLite cannot ALTER TABLE {table} ADD the foreign key on `{}`; author a raw(sqlite) table-rebuild migration.",
+            fk.column
+        ));
+    }
+    let name = index_name("fk", table, std::slice::from_ref(&fk.column));
+    let mut s = format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        dialect.quote(table),
+        dialect.quote(&name),
+        dialect.quote(&fk.column),
+        dialect.quote(&fk.ref_table),
+        dialect.quote(&fk.ref_column),
+    );
+    if let Some(a) = &fk.on_delete {
+        let _ = write!(s, " ON DELETE {}", crate::sql::fk_action_sql(a));
+    }
+    if let Some(a) = &fk.on_update {
+        let _ = write!(s, " ON UPDATE {}", crate::sql::fk_action_sql(a));
+    }
+    Ok(vec![s])
+}
+
+/// `ALTER TABLE … DROP CONSTRAINT` (Postgres) / `DROP FOREIGN KEY` (MariaDB). SQLite has no
+/// in-place FK drop either — same honest table-rebuild message.
+fn drop_foreign_key_statements(
+    table: &str,
+    column: &str,
+    dialect: Dialect,
+) -> Result<Vec<String>, String> {
+    let name = index_name("fk", table, std::slice::from_ref(&column.to_string()));
+    Ok(match dialect {
+        Dialect::Postgres => vec![format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            dialect.quote(table),
+            dialect.quote(&name),
+        )],
+        Dialect::MariaDb => vec![format!(
+            "ALTER TABLE {} DROP FOREIGN KEY {}",
+            dialect.quote(table),
+            dialect.quote(&name),
+        )],
+        Dialect::Sqlite => {
+            return Err(format!(
+                "SQLite cannot ALTER TABLE {table} DROP the foreign key on `{column}`; author a raw(sqlite) table-rebuild migration."
+            ))
+        }
+    })
 }
 
 fn alter_column_statements(
