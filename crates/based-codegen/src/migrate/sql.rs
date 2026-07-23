@@ -227,11 +227,20 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     }
 
     // MariaDB inlines indexes as table clauses; SQLite/Postgres trail them as statements.
+    // An opaque `raw` index is never a table clause — it always trails.
     if dialect == Dialect::MariaDb {
-        for i in &t.indexes {
+        for i in t.indexes.iter().filter(|i| i.raw.is_none()) {
             let cols = quote_cols(dialect, &i.columns);
-            let kind = if i.unique { "UNIQUE KEY" } else { "KEY" };
-            lines.push(format!("{kind} {} ({cols})", dialect.quote(&i.name)));
+            let (kind, using) = match i.method.as_deref() {
+                Some("fulltext") => ("FULLTEXT KEY", String::new()),
+                Some("spatial") => ("SPATIAL KEY", String::new()),
+                Some(m) => (
+                    if i.unique { "UNIQUE KEY" } else { "KEY" },
+                    format!(" USING {}", m.to_uppercase()),
+                ),
+                None => (if i.unique { "UNIQUE KEY" } else { "KEY" }, String::new()),
+            };
+            lines.push(format!("{kind} {} ({cols}){using}", dialect.quote(&i.name)));
         }
     }
 
@@ -244,10 +253,12 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         "CREATE TABLE {} (\n{body}\n)",
         dialect.quote(&t.name)
     )];
-    if dialect != Dialect::MariaDb {
-        for i in &t.indexes {
-            stmts.push(create_index_sql(dialect, &t.name, i));
-        }
+    for i in t
+        .indexes
+        .iter()
+        .filter(|i| dialect != Dialect::MariaDb || i.raw.is_some())
+    {
+        stmts.push(create_index_sql(dialect, &t.name, i));
     }
     stmts
 }
@@ -339,12 +350,17 @@ fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String 
     } else {
         "CREATE INDEX"
     };
-    format!(
-        "{kind} {} ON {} ({})",
-        dialect.quote(&index.name),
-        dialect.quote(table),
-        quote_cols(dialect, &index.columns),
-    )
+    let name = dialect.quote(&index.name);
+    let table_q = dialect.quote(table);
+    // An opaque index's body replaces the column list verbatim.
+    if let Some(raw) = &index.raw {
+        return format!("{kind} {name} ON {table_q} {}", raw_body(raw, dialect));
+    }
+    let cols = quote_cols(dialect, &index.columns);
+    match index.method.as_deref() {
+        Some(m) => format!("{kind} {name} ON {table_q} USING {m} ({cols})"),
+        None => format!("{kind} {name} ON {table_q} ({cols})"),
+    }
 }
 
 /// `DROP INDEX` — MySQL/MariaDB require the `ON <table>` qualifier; SQLite/Postgres
@@ -383,6 +399,10 @@ fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
         Some(b) => (b, true),
         None => (neutral, false),
     };
+    // An opaque column's type is the literal the author wrote — never a mapped primitive.
+    if neutral.starts_with("raw(") {
+        return raw_body(neutral, dialect);
+    }
     let prim = match base {
         "text" => Primitive::Text,
         "int" => Primitive::Int,
@@ -463,6 +483,77 @@ fn enum_check_values(neutral: &str) -> Option<Vec<String>> {
             .map(|s| format!("'{}'", s.trim().replace('\'', "''")))
             .collect(),
     )
+}
+
+/// The literal a canonical `raw(…)` body carries for this dialect: the bare form's one
+/// string, or the map's entry for the target (sema guarantees it exists — `E0270`).
+fn raw_body(canonical: &str, dialect: Dialect) -> String {
+    let Some(inner) = canonical
+        .strip_prefix("raw(")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return canonical.to_string();
+    };
+    let inner = inner.trim();
+    if let Some(map) = inner.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        let want = format!("{}:", dialect.name());
+        for entry in split_map_entries(map) {
+            let entry = entry.trim();
+            if let Some(v) = entry.strip_prefix(&want) {
+                return unquote_snap(v.trim());
+            }
+        }
+        return String::new();
+    }
+    unquote_snap(inner)
+}
+
+/// Split a canonical `raw({ a: "x, y", b: "z" })` map body on the commas that separate
+/// entries — never on one inside a quoted literal.
+fn split_map_entries(map: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_str = false;
+    let mut esc = false;
+    for c in map.chars() {
+        match c {
+            _ if esc => {
+                cur.push(c);
+                esc = false;
+            }
+            '\\' if in_str => {
+                cur.push(c);
+                esc = true;
+            }
+            '"' => {
+                in_str = !in_str;
+                cur.push(c);
+            }
+            ',' if !in_str => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// Unescape a snapshot string literal (`"…"` with `\"`/`\\` escapes).
+fn unquote_snap(s: &str) -> String {
+    let Some(inner) = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')) else {
+        return s.to_string();
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() {
+                out.push(n);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Quote a physical column list for the dialect, comma-joined.

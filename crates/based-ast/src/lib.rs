@@ -180,6 +180,92 @@ pub enum BaseType {
     Primitive(Primitive),
     /// UpperCamel model reference; resolves to a declared model.
     Model(Ident),
+    /// `raw("geometry(Point,4326)")` — a DB type the engine does not model. Only a
+    /// model field may carry one.
+    Raw(RawSpec),
+}
+
+/// An opaque `raw(…)` body: a DB type name or an index definition the engine stores and
+/// compares as a literal string but never interprets. One string for every target, or a
+/// per-dialect map when the spelling differs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawSpec {
+    pub body: RawSpecBody,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawSpecBody {
+    /// `raw("…")` — one literal for every compile target.
+    All(Spanned<String>),
+    /// `raw({ postgres: "…", mariadb: "…" })` — per-dialect literals, in source order.
+    PerDialect(Vec<RawDialect>),
+}
+
+/// One `dialect: "literal"` entry of a per-dialect `raw({ … })` map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawDialect {
+    pub dialect: Ident,
+    pub text: Spanned<String>,
+}
+
+impl RawSpec {
+    /// The literal for a compile target, or `None` when a per-dialect map omits it.
+    pub fn for_dialect(&self, dialect: &str) -> Option<&str> {
+        match &self.body {
+            RawSpecBody::All(s) => Some(s.node.as_str()),
+            RawSpecBody::PerDialect(es) => es
+                .iter()
+                .find(|e| e.dialect.node == dialect)
+                .map(|e| e.text.node.as_str()),
+        }
+    }
+
+    /// Every literal this spec carries, with its span — for emptiness checks.
+    pub fn literals(&self) -> Vec<&Spanned<String>> {
+        match &self.body {
+            RawSpecBody::All(s) => vec![s],
+            RawSpecBody::PerDialect(es) => es.iter().map(|e| &e.text).collect(),
+        }
+    }
+
+    /// Source-order rendering (`based fmt`).
+    pub fn render(&self) -> String {
+        self.render_with(false)
+    }
+
+    /// Dialect-sorted rendering — the canonical form the neutral snapshot stores, so a
+    /// diff is a plain string compare no matter what order the map was written in.
+    pub fn canonical(&self) -> String {
+        self.render_with(true)
+    }
+
+    fn render_with(&self, sorted: bool) -> String {
+        match &self.body {
+            RawSpecBody::All(s) => format!("raw({})", quote(&s.node)),
+            RawSpecBody::PerDialect(es) => {
+                let mut parts: Vec<(String, String)> = es
+                    .iter()
+                    .map(|e| (e.dialect.node.clone(), quote(&e.text.node)))
+                    .collect();
+                if sorted {
+                    parts.sort();
+                }
+                let inner = parts
+                    .iter()
+                    .map(|(d, t)| format!("{d}: {t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("raw({{ {inner} }})")
+            }
+        }
+    }
+}
+
+/// A double-quoted string literal with `\` and `"` escaped — the spelling both the
+/// formatter and the neutral snapshot round-trip through.
+fn quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +318,13 @@ pub enum DefaultVal {
 pub struct IndexDecl {
     pub columns: Vec<Ident>,
     pub unique: bool,
+    /// `using <method>` — the access method (`gist`/`gin`/`brin`/`hash`, MariaDB
+    /// `fulltext`/`spatial`). `None` = the dialect's default (B-tree).
+    pub method: Option<Ident>,
+    /// `@index raw("(lower(email))")` — an opaque index body the engine records and
+    /// diffs as a literal string. When set, `columns` is empty and `unique`/`method`
+    /// are absent (the raw text carries whatever the index needs).
+    pub raw: Option<RawSpec>,
     pub span: Span,
 }
 

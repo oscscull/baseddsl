@@ -622,3 +622,76 @@ fn int_enum_column_postgres_is_integer_with_int_check() {
     );
     assert!(ddl.contains("CHECK (\"priority\" IN (0, 1, 2))"), "\n{ddl}");
 }
+
+// ---------- opaque columns + exotic indexes --------------------------------
+
+const OPAQUE: &str = r#"
+    Place {
+      id:       Id
+      name:     text
+      location: raw("geometry(Point,4326)")?
+      search:   raw({ postgres: "tsvector", mariadb: "text", sqlite: "text" })?
+      @index raw("(lower(name))")
+    }
+    "#;
+
+#[test]
+fn opaque_column_type_is_the_literal_string_per_dialect() {
+    let pg = gen_pg(OPAQUE);
+    assert!(
+        pg.contains(r#""location" geometry(Point,4326) NULL"#),
+        "\n{pg}"
+    );
+    assert!(pg.contains(r#""search" tsvector NULL"#), "\n{pg}");
+
+    let maria = gen(OPAQUE);
+    assert!(
+        maria.contains("`location` geometry(Point,4326) NULL"),
+        "\n{maria}"
+    );
+    assert!(maria.contains("`search` text NULL"), "\n{maria}");
+
+    let lite = gen_sqlite(OPAQUE);
+    assert!(lite.contains("`search` text NULL"), "\n{lite}");
+}
+
+#[test]
+fn opaque_index_body_rides_verbatim_on_every_dialect() {
+    // The body replaces the column list; the name is content-derived, so it is
+    // identical across dialects and stable under reordering.
+    for ddl in [gen(OPAQUE), gen_sqlite(OPAQUE), gen_pg(OPAQUE)] {
+        let line = ddl
+            .lines()
+            .find(|l| l.contains("_raw_"))
+            .unwrap_or_else(|| panic!("no opaque index emitted:\n{ddl}"));
+        assert!(line.starts_with("CREATE INDEX "), "{line}");
+        assert!(line.ends_with("(lower(name));"), "{line}");
+    }
+    // Even on MariaDB, where ordinary indexes are inline `KEY` clauses.
+    assert!(
+        !gen(OPAQUE).contains("KEY `idx_place_raw"),
+        "\n{}",
+        gen(OPAQUE)
+    );
+}
+
+#[test]
+fn index_access_method_renders_per_dialect() {
+    let pg = gen_pg(r#"Place { id: Id, tags: raw("tsvector")?, @index tags using gin }"#);
+    assert!(
+        pg.contains(r#"CREATE INDEX "idx_place_tags" ON "place" USING gin ("tags");"#),
+        "\n{pg}"
+    );
+    // MariaDB spells its two exotic methods as index kinds, and btree/hash as a
+    // trailing `USING`.
+    let maria = gen(r#"Doc { id: Id, body: text, @index body using fulltext }"#);
+    assert!(
+        maria.contains("FULLTEXT KEY `idx_doc_body` (`body`)"),
+        "\n{maria}"
+    );
+    let hashed = gen(r#"Doc { id: Id, body: text, @index body using hash }"#);
+    assert!(
+        hashed.contains("KEY `idx_doc_body` (`body`) USING HASH"),
+        "\n{hashed}"
+    );
+}

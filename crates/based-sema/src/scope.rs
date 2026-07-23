@@ -70,6 +70,9 @@ fn resolve_term(
             }
             CtxField::Relation(m.node.clone())
         }
+        // A scope term is an injected equality filter, so its column can never be
+        // opaque; the parser rejects `raw(…)` outside a field type, so this is dead.
+        BaseType::Raw(_) => CtxField::Scalar(Primitive::Text),
     };
     // The binding must be `$ctx.<field>` (the restricted form) — else `E0180`.
     let ctx_field = if t.ctx.name.node == "ctx" && t.ctx.path.len() == 1 {

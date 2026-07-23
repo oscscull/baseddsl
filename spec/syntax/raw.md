@@ -10,6 +10,41 @@ Raw goes where the engine needs only a value. Forbidden where it needs meaning (
 - Raw predicate term: composes as one boolean leaf with `where`; engine still wraps soft-delete around it.
 - Raw whole query / raw join: full trapdoor. You own soft-delete predicates + dialect portability. Engine still gives param-binding + result-typing.
 
+## The one spelling: `raw`
+`raw` is the *only* escape-hatch keyword. `sql` is never a keyword, marker, or decorator
+anywhere in the language — we are Postgres-compatible, so `sql` reads ambiguously. Two
+positions share the word, distinguished by their delimiter:
+
+| form | position | what it holds |
+|------|----------|---------------|
+| ``raw`…` `` (backticks) | value / predicate / whole query / soft-delete override / `.mig` step | SQL text, with `${param}` bound and `{table}`/`{id}` interpolated |
+| `raw("…")` (parens) | a model field's **type**, a model's **`@index`** | an opaque literal string the engine stores and diffs but never interprets |
+
+## Opaque types + indexes — `raw("…")`
+The parenthesized form is the structural escape hatch: it lets one column or one index leave
+the engine's vocabulary without the whole model leaving the system.
+
+```
+location: raw("geometry(Point,4326)")?
+tags:     raw({ postgres: "tsvector", mariadb: "text" })?
+
+@index location using gist
+@index raw("(lower(email))")
+```
+
+The literal is carried verbatim into the DDL **and the neutral snapshot**, so the migration
+diff is a plain string compare: an opaque column/index is created, dropped, renamed, and
+rebuilt like any other, and the drift check still sees the whole table. The alternative — a
+raw migration adding the column behind the schema's back — makes the snapshot blind on a
+modeled table, loses the column to any sqlite table rebuild, and drops it from every generated
+surface.
+
+What the hatch forfeits, loudly: the value is opaque, so writing it is `E0273` (make it
+nullable or defaulted) and filtering/sorting/aggregating it is `E0271` — read it through the
+raw *value* leaf instead (`area = raw`ST_Area(location)``). Everything else on the model —
+CRUD, migrations, scope, soft-delete, the drift check — is unaffected. Details: models.md
+(Types), indexing.md (Exotic indexes).
+
 ## Guarantees through the hatch
 - `${input}` always interpolates as a bound parameter, never string concat.
 - All raw marked with the `raw` backtick form = greppable inventory of where guarantees stop.

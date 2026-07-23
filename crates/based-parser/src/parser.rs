@@ -521,18 +521,28 @@ impl<'a> Parser<'a> {
             return Err(());
         }
         let mut columns = Vec::new();
-        if self.eat(Tok::LParen) {
-            loop {
-                columns.push(self.lower_ident("index column")?);
-                if !self.eat(Tok::Comma) {
-                    break;
-                }
-            }
-            self.expect(Tok::RParen, "`)`")?;
+        let mut unique = false;
+        let mut method = None;
+        let mut raw = None;
+        if self.is_raw_spec_start() {
+            raw = Some(self.raw_spec()?);
         } else {
-            columns.push(self.lower_ident("index column")?);
+            if self.eat(Tok::LParen) {
+                loop {
+                    columns.push(self.lower_ident("index column")?);
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen, "`)`")?;
+            } else {
+                columns.push(self.lower_ident("index column")?);
+            }
+            unique = self.eat_kw("unique");
+            if self.eat_kw("using") {
+                method = Some(self.lower_ident("an index access method")?);
+            }
         }
-        let unique = self.eat_kw("unique");
         let end = self
             .toks
             .get(self.pos.saturating_sub(1))
@@ -541,6 +551,8 @@ impl<'a> Parser<'a> {
         Ok(IndexDecl {
             columns,
             unique,
+            method,
+            raw,
             span: Span {
                 file: self.file,
                 start: at.start,
@@ -551,7 +563,7 @@ impl<'a> Parser<'a> {
 
     fn field_after_colon(&mut self, name: Ident) -> PResult<Field> {
         let start = name.span.start;
-        let ty = self.type_expr()?;
+        let ty = self.type_expr_inner(true)?;
         let mut inverse = None;
         let mut modifiers = Vec::new();
         let mut relation_on = None;
@@ -711,7 +723,90 @@ impl<'a> Parser<'a> {
         Ok(n.min(u32::MAX as i64) as u32)
     }
 
+    /// A type in a non-field position (param annotation, scope term). An opaque
+    /// `raw(…)` type is a model field's alone, so it is not accepted here.
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        self.type_expr_inner(false)
+    }
+
+    /// `raw("…")` / `raw({ postgres: "…", … })` — an opaque body in type or index
+    /// position. The literal is stored verbatim; nothing here interprets it.
+    fn raw_spec(&mut self) -> PResult<RawSpec> {
+        let kw = self.expect(Tok::LowerIdent, "`raw`")?;
+        self.expect(Tok::LParen, "`(` (a `raw(…)` body)")?;
+        let body = if self.eat(Tok::LBrace) {
+            let mut entries = Vec::new();
+            loop {
+                let dialect = self.lower_ident("a dialect name")?;
+                self.expect(Tok::Colon, "`:`")?;
+                let s = self.expect(Tok::Str, "a quoted literal")?;
+                entries.push(RawDialect {
+                    dialect,
+                    text: Spanned {
+                        node: unquote(self.text(s)),
+                        span: self.span(s),
+                    },
+                });
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+                if self.at(Tok::RBrace) {
+                    break;
+                }
+            }
+            self.expect(Tok::RBrace, "`}`")?;
+            RawSpecBody::PerDialect(entries)
+        } else {
+            let s = self.expect(Tok::Str, "a quoted literal or a `{ dialect: \"…\" }` map")?;
+            RawSpecBody::All(Spanned {
+                node: unquote(self.text(s)),
+                span: self.span(s),
+            })
+        };
+        let end = self.expect(Tok::RParen, "`)`")?.end;
+        Ok(RawSpec {
+            body,
+            span: Span {
+                file: self.file,
+                start: kw.start,
+                end,
+            },
+        })
+    }
+
+    /// Is the cursor on a `raw(` opaque body (as opposed to the backtick raw-SQL form)?
+    fn is_raw_spec_start(&self) -> bool {
+        self.at_kw("raw") && self.tok_at(1) == Some(Tok::LParen)
+    }
+
+    fn type_expr_inner(&mut self, allow_raw: bool) -> PResult<TypeExpr> {
+        if self.is_raw_spec_start() {
+            if !allow_raw {
+                self.err("an opaque `raw(…)` type may only type a model field");
+                return Err(());
+            }
+            let spec = self.raw_spec()?;
+            let start = spec.span.start;
+            let mut end = spec.span.end;
+            let optional = self.at(Tok::Question);
+            if optional {
+                end = self.bump().unwrap().end;
+            }
+            if self.at(Tok::LBracket) {
+                self.err("an opaque `raw(…)` type has no array form");
+                return Err(());
+            }
+            return Ok(TypeExpr {
+                base: BaseType::Raw(spec),
+                optional,
+                many: false,
+                span: Span {
+                    file: self.file,
+                    start,
+                    end,
+                },
+            });
+        }
         let l = self.peek().ok_or_else(|| self.err_unit("a type"))?;
         // Most primitives end at the type keyword; `decimal(p, s)` extends past it.
         let mut base_end = l.end;

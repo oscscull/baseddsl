@@ -865,6 +865,15 @@ fn load_checked(root: &Path) -> Result<Loaded, CliError> {
         let (checked, diags) = based_sema::check(&all_decls);
         count(&diags, &mut errors, &mut warnings);
         render::render(&diags, &sources);
+        // Target-specific checks: what can only be judged once the manifest's compile
+        // target is known (an opaque `raw({…})` map missing it, an index access method
+        // it lacks).
+        let target = based_sema::check_target(
+            &checked,
+            based_codegen::Dialect::parse(&project.manifest.dialect).name(),
+        );
+        count(&target, &mut errors, &mut warnings);
+        render::render(&target, &sources);
         schema = checked;
     }
 

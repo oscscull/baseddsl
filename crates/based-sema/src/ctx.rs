@@ -245,6 +245,8 @@ fn term_to_ctx(t: &Terminal) -> CtxField {
     match t {
         Terminal::Scalar(p) => CtxField::Scalar(*p),
         Terminal::Relation(m) => CtxField::Relation(m.clone()),
+        // Unreachable: an opaque column is never a `$ctx` comparison operand (E0271).
+        Terminal::Opaque(_) => CtxField::Scalar(Primitive::Text),
     }
 }
 

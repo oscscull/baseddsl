@@ -78,14 +78,12 @@ is now COMPLETE (N0–N3, D84–D89)** on the `async-native` branch, with the me
 bar met (`make check` green end-to-end). **Track T (core DB parity) is now at T1–T5 done** —
 **T3 atomic update expressions (D100)**, **T4 aggregations + group-by + having (D101)**, **T5 upsert
 `create … on conflict update` + m2m-via-explicit-junction (D102)**. **The owner-flagged design
-follow-ups are now RESOLVED (D103–D107, owner-approved 2026-07-21), implementation queued:** NF11
-inferred-index/implicit-`id` → explicit-in-source (D103, keystone — reworded principle 8), NF9 opaque
-`raw(…)` column + exotic-index seam (D104), NF7 `@was` self-consuming gen (D105), NF8 snapshot-
-authoritative `up.mig` (D106), NF13 named `tx` bindings replacing `^` (D107). **Next: implement the
-decided items** (D103 keystone first — it retires the inferred-index machinery the others build on;
-then D104/D107/D105/D106), interleaved with **Track T6 (referential actions)** and the remaining T5
-m2m flattening-projection slice (now unblocked by D103). Batch-by-batch history is in
-`PLAN-archive.md`.
+follow-ups are RESOLVED (D103–D107, owner-approved 2026-07-21); NF11 (D103, keystone — reworded
+principle 8) and NF9 opaque `raw(…)` column + exotic-index seam (D104) are now shipped.** Remaining
+queued: NF7 `@was` self-consuming gen (D105), NF8 snapshot-authoritative `up.mig` (D106), NF13 named
+`tx` bindings replacing `^` (D107). **Next: implement the decided items** (D107/D105/D106),
+interleaved with **Track T6 (referential actions)** and the remaining T5 m2m flattening-projection
+slice (now unblocked by D103). Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -504,14 +502,23 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   `-- drop column X is irreversible; write your own or delete this file` comment; at
   minimum a commented template so the file exists and invites completion.
 
-- **NF9. ✅ DECIDED (D104), implementation queued. Exotic column + index passthrough via `raw(…)`.**
-  Resolution (owner 2026-07-21): opaque column type `col: raw("geometry(Point,4326)")?` (per-dialect
-  map `raw({ postgres: …, mariadb: … })` when names differ) — literal type-string in DDL+snapshot
-  (diff = string compare), opaque client value (excluded from create/update unless nullable/defaulted),
-  filter/sort rejected except via the raw leaf; two exotic-index tiers `@index(col) using <method>`
-  + opaque `@index raw("…")`, per-dialect validity checked loudly. Codes E0270–E0274. **Standing
-  convention: `sql` is banned as a keyword/marker anywhere (Postgres-compatible → confusing); `raw`
-  is the one spelling (D96).** Original writeup below.
+- **NF9. ✅ done (D104). Exotic column + index passthrough via `raw(…)`.**
+  Shipped end to end: opaque column type `col: raw("geometry(Point,4326)")?` (per-dialect map
+  `raw({ postgres: …, mariadb: … })` — canonical dialect-sorted in the snapshot so map order never
+  churns a diff) with the literal type-string in DDL+snapshot (diff = string compare, so
+  migrations/rebuilds/`@was` all work), an opaque client/OpenAPI value (`String`), excluded from
+  create/update unless nullable/defaulted, filter/sort/group/aggregate rejected except via the raw
+  value/predicate leaf. Two exotic-index tiers: `@index(col) using <method>` (btree/hash/gist/spgist/
+  gin/brin; MariaDB fulltext/spatial — Postgres leading `USING`, MariaDB inline kind/trailing `USING`)
+  and opaque `@index raw("…")` (content-hashed name, always a standalone `CREATE INDEX`, string-compare
+  diff). Two-phase check: dialect-free `check` (E0271/E0273/E0274 + unknown-method/dialect) plus a new
+  `check_target(&schema, dialect)` for target-decided errors (E0270 missing map dialect, E0272 method
+  unavailable on the target — e.g. every method on sqlite); CLI runs it with the manifest dialect, LSP
+  with the resolved project dialect. Exotic/opaque indexes never satisfy E0260 nor trip W0104. Proven
+  live on SQLite (opaque column + opaque index in real DDL, create-omits + read-back bare + via a raw
+  leaf) plus unit (+/− sema, DDL all three dialects, snapshot round-trip + diff, client/openapi),
+  conformance golden `raw_opaque`, fmt round-trip. **Standing convention upheld: `sql` is never a
+  keyword/marker; `raw` is the one spelling (D96).** Original writeup below.
   Problem: the primitive set (`text int bool timestamp date json uuid float decimal`) is
   closed — a column whose DB type we don't model (PostGIS `geometry`, `tsvector`, `inet`,
   vendor JSON variants) **cannot be declared at all**. First-class geo support is not

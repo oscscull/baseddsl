@@ -58,10 +58,17 @@ deco_args   = deco_arg { ',' deco_arg } ;
 deco_arg    = sort_term | predicate | ident | path | literal ;
 
 (* Field line: uniform for columns and relations — `name: Type (modifiers)` *)
-field       = field_name ':' type_expr [ inverse_ref ] [ modifiers ]
+field       = field_name ':' field_type [ inverse_ref ] [ modifiers ]
                                        [ relation_opts ] [ was_directive ]
                                        [ field_sort ] ;
 field_name  = lower_ident ;
+
+(* A model field may also carry an OPAQUE type: a DB type the engine does not model    *)
+(* (PostGIS `geometry`, `tsvector`, `inet`, …). The literal string rides verbatim into  *)
+(* the DDL and the neutral snapshot (diff = string compare), the value is opaque end to *)
+(* end, and filtering/sorting/writing it is rejected (models.md, raw.md). Only a field  *)
+(* position accepts it — a param annotation or a scope term does not.                   *)
+field_type  = type_expr | raw_spec [ '?' ] ;
 
 type_expr   = base_type { type_qualifier } ;
 base_type   = primitive | model_ref ;
@@ -99,10 +106,26 @@ relation_opts = '(' 'on' ':' predicate ')' ;
 (* Per-field sort override for a relation traversal (sorting.md).              *)
 field_sort  = '@sort' '(' sort_term { ',' sort_term } ')' ;
 
-(* Index declaration inside a model body.                                      *)
-index_decl  = '@index' ( column_name | '(' column_name { ',' column_name } ')' )
-              [ 'unique' ] ;
+(* Index declaration inside a model body. Two exotic tiers ride the same decl        *)
+(* (indexing.md): `using <method>` names a non-default access method (gist/gin/brin/   *)
+(* hash; MariaDB fulltext/spatial), checked per target in sema (E0272); `@index        *)
+(* raw("…")` is the opaque long tail (expression indexes, opclasses, partial WHERE),   *)
+(* whose body is everything after `ON <table>` and is diffed as a literal string.      *)
+index_decl  = '@index' ( raw_spec
+                       | ( column_name | '(' column_name { ',' column_name } ')' )
+                         [ 'unique' ] [ 'using' method_name ] ) ;
 column_name = lower_ident ;
+method_name = lower_ident ;      (* closed set enforced in sema, not here *)
+
+(* The opaque `raw(…)` body, in type and index position. One literal for every target,  *)
+(* or a per-dialect map when the spelling differs; a target absent from the map is      *)
+(* E0270. Distinct from the backtick `raw`…`` value/predicate form below — same         *)
+(* keyword, different position (D96: `raw` is the one escape-hatch spelling; `sql` is   *)
+(* never a keyword).                                                                    *)
+raw_spec    = 'raw' '(' ( STRING | dialect_map ) ')' ;
+dialect_map = '{' dialect_entry { ',' dialect_entry } '}' ;
+dialect_entry = dialect_name ':' STRING ;
+dialect_name  = 'mariadb' | 'postgres' | 'sqlite' ;
 
 (* Per-operation soft-delete override (soft-delete.md): `restore: raw`...``    *)
 soft_override = op_name ':' raw_sql ;

@@ -226,6 +226,9 @@ fn check_agg_call(agg: &AggCall, mi: usize, cx: &Cx, sink: &mut Sink) {
         ),
         (_, Some(arg)) => {
             if let Some(term) = resolve::resolve_path(arg, mi, cx, sink) {
+                if resolve::reject_opaque(&term, arg, "aggregate", sink) {
+                    return;
+                }
                 let is_enum = cx.terminal_enum(arg, mi).is_some();
                 if let Some(reason) = resolve::agg_operand_reason(func, &term, is_enum) {
                     let span = arg.segments.last().map(|s| s.span).unwrap_or(agg.span);
@@ -878,7 +881,9 @@ fn check_agg_query(
 
     // Group-by columns must resolve against the model.
     for p in &group_paths {
-        resolve::resolve_path(p, mi, cx, sink);
+        if let Some(term) = resolve::resolve_path(p, mi, cx, sink) {
+            resolve::reject_opaque(&term, p, "group", sink);
+        }
     }
     // Group-by consistency: every projected non-aggregate column must be grouped.
     for gc in &group_cols {
@@ -1400,6 +1405,21 @@ fn check_assign(
         unknown_field(cx, mi, &a.col, sink);
         return;
     };
+    // An opaque column holds a value the engine cannot construct or validate, so it is
+    // excluded from every write (`E0273`); the DB or a raw migration owns it.
+    if let Some(spec) = member.kind.opaque() {
+        sink.error_note(
+            code::OPAQUE_ASSIGN,
+            a.col.span,
+            format!(
+                "cannot write `{}` — a {} column is opaque",
+                a.col.node,
+                spec.render()
+            ),
+            "the engine does not model this type; set it from a raw migration or a DB default",
+        );
+        return;
+    }
     // An arithmetic RHS (`total = total + $n`) is its own world: numeric-only, and
     // valid only in an `update` (a `create` has no existing row to reference).
     let Some(value) = a.value.as_value() else {
@@ -1500,10 +1520,32 @@ fn check_create_required(
             || m.soft_delete.as_ref().map(|s| s.field.as_str()) == Some(name)
             || scope_cols.iter().any(|(f, _)| f == name)
     };
+    // A required *opaque* column can never be supplied (E0273 forbids writing one), so a
+    // create on this model is unwritable until the column is made nullable or defaulted.
+    let unsuppliable: Vec<&str> = m
+        .members
+        .iter()
+        .filter(|mem| is_required(&mem.kind) && mem.kind.opaque().is_some())
+        .map(|mem| mem.name.as_str())
+        .filter(|name| !managed(name))
+        .collect();
+    if !unsuppliable.is_empty() {
+        sink.error_note(
+            code::OPAQUE_ASSIGN,
+            at.span,
+            format!(
+                "`create {}` cannot supply the opaque column{} {}",
+                m.name,
+                if unsuppliable.len() == 1 { "" } else { "s" },
+                unsuppliable.join(", ")
+            ),
+            "an opaque `raw(…)` column is excluded from writes — make it nullable (`?`) or give it a `(default …)`",
+        );
+    }
     let missing: Vec<&str> = m
         .members
         .iter()
-        .filter(|mem| is_required(&mem.kind))
+        .filter(|mem| is_required(&mem.kind) && mem.kind.opaque().is_none())
         .map(|mem| mem.name.as_str())
         .filter(|name| !managed(name) && !assigned.contains(name))
         .collect();

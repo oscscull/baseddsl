@@ -582,6 +582,12 @@ fn lint_useless(ast: &Model, mi: usize, usage: &Usage, cx: &Cx, sink: &mut Sink)
         if idx.unique {
             continue; // a unique index is a constraint, not a perf structure
         }
+        // An exotic index (`using <method>` / opaque `raw(…)`) serves access paths the
+        // engine cannot see — a GIST/GIN lookup or an expression predicate reaches the
+        // DB through raw, never through a modelled filter. It is the author's assertion.
+        if idx.method.is_some() || idx.raw.is_some() {
+            continue;
+        }
         let Some(lead) = lead(m, idx) else { continue };
         // Leading with the soft-delete column alone: every generated query
         // filters it, so the index is used by construction.

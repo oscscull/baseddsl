@@ -1,0 +1,29 @@
+DIAGNOSTICS
+  E0260: query `bad_filter` will scan `Bad`: no index leads with any of (other, other)
+  E0271: cannot filter by `other` — a raw("inet") column is opaque
+  E0271: cannot sort by `other` — a raw("inet") column is opaque
+  E0272: unknown index access method `nope`
+  E0273: `create Bad` cannot supply the opaque column blob
+  E0273: cannot write `other` — a raw("inet") column is opaque
+  E0274: an empty `raw(…)` index body
+SCHEMA
+model Place  table=place
+  id: Id
+  name: text
+  location: raw("geometry(Point,4326)")?
+  search: raw({ postgres: "tsvector", mariadb: "text", sqlite: "text" })?
+  index(name)
+  index(location) using gist
+  index raw("(lower(name))")
+model Bad  table=bad
+  id: Id
+  blob: raw("bytea")
+  other: raw("inet")?
+  index(blob) using nope
+  index raw("")
+shape PlaceRow from Place
+shape BadRow from Bad
+query place  target=Place verb=get  shape=PlaceRow
+query by_name  target=Place verb=list many  shape=PlaceRow
+query bad_filter  target=Bad verb=list many  shape=BadRow
+mutation add_bad  ret=Bad

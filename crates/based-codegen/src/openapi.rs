@@ -873,6 +873,8 @@ fn base_schema(b: &BaseType) -> Value {
     match b {
         BaseType::Primitive(p) => primitive_schema(*p),
         BaseType::Model(_) => uuid_schema(),
+        // An opaque `raw(…)` value is an unmodelled string on the wire.
+        BaseType::Raw(_) => serde_json::json!({ "type": "string" }),
     }
 }
 

@@ -260,3 +260,76 @@ fn renamed_column_is_a_drop_add_pair_not_a_rename() {
         .iter()
         .any(|s| matches!(s, migrate::Step::AlterColumn { .. })));
 }
+
+// ---------- opaque columns + exotic indexes in the neutral snapshot ---------
+
+const OPAQUE: &str = r#"
+    Place {
+      id:       Id
+      name:     text
+      location: raw("geometry(Point,4326)")?
+      search:   raw({ sqlite: "text", postgres: "tsvector", mariadb: "text" })?
+      @index name using brin
+      @index raw("(lower(name))")
+    }
+    "#;
+
+#[test]
+fn opaque_types_and_exotic_indexes_round_trip_the_snapshot() {
+    let snap = Snapshot::from_schema(&checked(OPAQUE));
+    let text = snap.render();
+    assert!(
+        text.contains(r#"  column location raw("geometry(Point,4326)") null"#),
+        "\n{text}"
+    );
+    // The map is canonicalized dialect-sorted, so the diff never churns on order.
+    assert!(
+        text.contains(
+            r#"  column search raw({ mariadb: "text", postgres: "tsvector", sqlite: "text" }) null"#
+        ),
+        "\n{text}"
+    );
+    assert!(text.contains("using brin"), "\n{text}");
+    assert!(text.contains(r#"raw("(lower(name))")"#), "\n{text}");
+    assert_eq!(Snapshot::parse(&text).expect("re-parse"), snap);
+}
+
+#[test]
+fn changing_an_opaque_type_is_an_ordinary_column_diff() {
+    let prev = Snapshot::from_schema(&checked(OPAQUE));
+    let now = Snapshot::from_schema(&checked(
+        &OPAQUE.replace("geometry(Point,4326)", "geometry(Polygon,4326)"),
+    ));
+    let steps = migrate::diff_snapshots(&prev, &now);
+    let up = migrate::render_up(&steps);
+    assert!(
+        up.contains(r#"alter column place.location type raw("geometry(Polygon,4326)")"#),
+        "\n{up}"
+    );
+    let sql = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        sql.contains(r#"ALTER TABLE "place" ALTER COLUMN "location" TYPE geometry(Polygon,4326);"#),
+        "\n{sql}"
+    );
+}
+
+#[test]
+fn a_migration_recreates_opaque_columns_and_indexes_verbatim() {
+    let steps = migrate::diff_snapshots(
+        &Snapshot::default(),
+        &Snapshot::from_schema(&checked(OPAQUE)),
+    );
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(pg.contains(r#""search" tsvector NULL"#), "\n{pg}");
+    assert!(pg.contains(r#"USING brin ("name")"#), "\n{pg}");
+    assert!(pg.contains("ON \"place\" (lower(name));"), "\n{pg}");
+    // The from-scratch migration matches `based gen sql` byte-for-byte on the
+    // opaque column type — one type map, no second one to drift.
+    let ddl = sql::ddl(&checked(OPAQUE), Dialect::MariaDb);
+    let maria = migrate::render_sql(&steps, Dialect::MariaDb);
+    assert!(ddl.contains("`search` text NULL") && maria.contains("`search` text NULL"));
+    assert!(
+        maria.contains("KEY `idx_place_name` (`name`) USING BRIN"),
+        "\n{maria}"
+    );
+}

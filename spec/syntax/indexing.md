@@ -26,6 +26,45 @@ MariaDB/SQLite have no partial indexes, so the declared index still leads with t
 that selects. That is a rendering of the *written* index, not a second silent one; a unique
 `@index` is a constraint and is never reshaped.
 
+## Exotic indexes
+An opaque column you cannot index is dead weight — a `geometry` without GIST, a `tsvector`
+without GIN, is unusable. Two tiers ride the same declaration.
+
+**Access method — `using <method>`:**
+```
+@index location using gist
+@index(body, title) using fulltext
+```
+The method set is closed and per-target, checked **loudly** at generation time (`E0272`,
+never a silent downgrade to a plain index):
+
+| method | targets |
+|--------|---------|
+| `btree`, `hash` | postgres, mariadb |
+| `gist`, `spgist`, `gin`, `brin` | postgres |
+| `fulltext`, `spatial` | mariadb |
+
+SQLite has no access-method syntax at all, so **every** `using` is an error there. Postgres
+renders the leading `USING <m>`; MariaDB spells `fulltext`/`spatial` as index kinds
+(`FULLTEXT KEY`) and `btree`/`hash` as a trailing `USING`.
+
+**Opaque index — `@index raw("…")`:** the long tail (expression indexes, opclasses, partial
+`WHERE`) the neutral vocabulary does not model:
+```
+@index raw("(lower(email))")
+@index raw({ postgres: "USING gin (tags jsonb_path_ops)", mariadb: "(tags(64))" })
+```
+The body is **everything after `ON <table>`** and is emitted verbatim as a standalone
+`CREATE INDEX` on every dialect (never a MariaDB inline `KEY`). The snapshot records it as a
+literal string and diffs it by string compare, so create/drop/rebuild lifecycle stays
+in-system exactly as for an opaque column — no orphaned index, nothing lost to a sqlite table
+rebuild, nothing invisible to review. Its name is derived from the body
+(`idx_<table>_raw_<hash>`), so reordering a model's indexes never reads as a rename. An empty
+body is `E0274`.
+
+The engine cannot know what an exotic index covers, so it never satisfies `E0260` — it is the
+author's assertion, not a derived fact.
+
 ## Lint (declared indexes)
 - **`W0104` useless-index**: declared but no query filters, sorts, or joins on it -> drop (pure write-tax).
 - **`W0105` stale-annotation**: an `unindexed(…)` on a query that turns out indexed -> drop it.

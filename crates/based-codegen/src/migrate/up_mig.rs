@@ -5,7 +5,7 @@
 //! SQL is [`super::sql`]; the step vocabulary is [`super::diff`].
 
 use super::diff::{ColumnChange, ScopeChange, Step};
-use super::model::{render_scope_decl, ColumnSnap, TableSnap};
+use super::model::{index_spec_text, render_scope_decl, ColumnSnap, TableSnap};
 use std::fmt::Write as _;
 
 // ---------- `up.mig` rendering --------------------------------------------
@@ -50,23 +50,13 @@ fn render_step(out: &mut String, step: &Step) {
             let _ = writeln!(out, "alter column {table}.{column} {parts}{tail}");
         }
         Step::AddIndex { index, .. } => {
-            let _ = writeln!(
-                out,
-                "add index {} ({})",
-                index.name,
-                index.columns.join(", ")
-            );
+            let _ = writeln!(out, "add index {}", index_spec_text(index));
         }
         Step::DropIndex { name, .. } => {
             let _ = writeln!(out, "drop index {name}");
         }
         Step::AddUnique { index, .. } => {
-            let _ = writeln!(
-                out,
-                "add unique {} ({})  # DESTRUCTIVE",
-                index.name,
-                index.columns.join(", ")
-            );
+            let _ = writeln!(out, "add unique {}  # DESTRUCTIVE", index_spec_text(index));
         }
         Step::DropUnique { name, .. } => {
             let _ = writeln!(out, "drop unique {name}");
@@ -113,7 +103,7 @@ fn render_create_table(out: &mut String, t: &TableSnap) {
     }
     for i in &t.indexes {
         let kind = if i.unique { "unique" } else { "index" };
-        let _ = writeln!(out, "  {kind} {} ({})", i.name, i.columns.join(", "));
+        let _ = writeln!(out, "  {kind} {}", index_spec_text(i));
     }
     out.push_str("}\n");
 }

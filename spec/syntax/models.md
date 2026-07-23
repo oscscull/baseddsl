@@ -31,6 +31,34 @@ Uniform for columns and relations: `name: Type (modifiers)`
 - `int`, `float`, and `decimal` share one **numeric** family: a numeric literal compares/assigns to
   any of them, and they inter-compare with `= != < > <= >= in`.
 
+### Opaque columns — `raw("…")`
+The primitive set is closed. A column whose DB type the engine does not model — PostGIS
+`geometry`, `tsvector`, `inet`, a vendor JSON variant — is declared with the `raw` escape hatch
+in **type position**:
+
+```
+location: raw("geometry(Point,4326)")?
+tags:     raw({ postgres: "tsvector", mariadb: "text" })?
+```
+
+A bare `raw("…")` applies to every compile target; the map form names one literal per target
+(a target the map omits is `E0270`). The literal string rides **verbatim** into the DDL and into
+the neutral snapshot, so the diff is a plain string compare and migrations, sqlite table rebuilds,
+and `@was` renames all keep working on the model.
+
+The **value is opaque end to end**: the client sees a plain string, and the engine never reads
+into it.
+
+- Writing it is `E0273` — the engine cannot construct a value for a type it does not model. So an
+  opaque column must be **nullable (`?`) or `(default …)`**; a required one makes `create` on the
+  model impossible (also `E0273`), pointing at the fix.
+- `where` / `order` / `group by` / an aggregate on it is `E0271`. Reach it through the `raw` leaf
+  instead — a raw predicate term or a raw shape value (`area = raw`ST_Area(location)``, raw.md).
+- It has no array form (`raw("…")[]`), and only a **model field** may carry one (never a param
+  annotation or a scope term).
+
+Indexing an opaque column is `@index … using <method>` / `@index raw("…")` — indexing.md.
+
 ## Qualifiers
 - Type-intrinsic ride the type: `?` = nullable/optional, `[]` = to-many. (`User?`, `text[]`, `Order[]`)
 - Behavioral go in parens: `(unique)`, `(default "x")`, `(default now())`

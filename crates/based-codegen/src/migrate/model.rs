@@ -113,6 +113,11 @@ pub struct IndexSnap {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    /// `using <method>` — the declared access method, or `None` for the dialect default.
+    pub method: Option<String>,
+    /// An opaque `@index raw("…")` body, in its canonical `raw(…)` spelling. When set,
+    /// `columns` is empty and the diff compares this string.
+    pub raw: Option<String>,
 }
 
 impl Snapshot {
@@ -174,11 +179,17 @@ fn table_snap(schema: &CheckedSchema, model: &RModel) -> TableSnap {
                 unique,
                 default,
                 enum_name,
+                raw_type,
             } => columns.push(ColumnSnap {
                 name: column.clone(),
                 // An enum column captures its variants as `enum(v1,v2,…)` so a variant
                 // add/remove is a diffable type change; it maps to text SQL (+ CHECK).
-                ty: enum_neutral_type(schema, enum_name.as_deref())
+                // An opaque column carries its canonical `raw(…)` spelling, so a change
+                // to the literal type string is an ordinary column-type diff.
+                ty: raw_type
+                    .as_ref()
+                    .map(|r| r.canonical())
+                    .or_else(|| enum_neutral_type(schema, enum_name.as_deref()))
                     .unwrap_or_else(|| neutral_type(*ty, *many)),
                 nullable: *optional,
                 default: default.as_ref().map(|dv| {
@@ -302,6 +313,15 @@ fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
         .indexes
         .iter()
         .map(|idx| {
+            if let Some(spec) = &idx.raw {
+                return IndexSnap {
+                    name: crate::sql::raw_index_name(&model.table, spec),
+                    columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    raw: Some(spec.canonical()),
+                };
+            }
             let mut fields = idx.columns.clone();
             if !idx.unique {
                 if let Some(sd) = &model.soft_delete {
@@ -315,6 +335,8 @@ fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
                 name: index_name(if idx.unique { "uq" } else { "idx" }, &model.table, &cols),
                 columns: cols,
                 unique: idx.unique,
+                method: idx.method.clone(),
+                raw: None,
             }
         })
         .collect()
@@ -558,14 +580,24 @@ fn render_table(out: &mut String, t: &TableSnap) {
         out.push_str(&line);
     }
     for i in &t.indexes {
-        let cols = i.columns.join(", ");
-        let mut line = format!("  index {} ({cols})", i.name);
-        if i.unique {
-            line.push_str(" unique");
-        }
-        line.push('\n');
-        out.push_str(&line);
+        out.push_str(&format!("  index {}\n", index_spec_text(i)));
     }
+}
+
+/// The `<name> (<cols>) [unique] [using <m>]` / `<name> raw(…)` spec shared by the
+/// `schema.snap` index line and the `up.mig` index step, so both read identically.
+pub(crate) fn index_spec_text(i: &IndexSnap) -> String {
+    if let Some(raw) = &i.raw {
+        return format!("{} {raw}", i.name);
+    }
+    let mut line = format!("{} ({})", i.name, i.columns.join(", "));
+    if i.unique {
+        line.push_str(" unique");
+    }
+    if let Some(m) = &i.method {
+        line.push_str(&format!(" using {m}"));
+    }
+    line
 }
 
 // ---------- parsing (round-trip) ------------------------------------------
@@ -790,6 +822,30 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     })
 }
 
+/// Byte length of the balanced `raw(…)` token at the head of `s`, counting parens
+/// outside string literals. `None` when it never closes (a corrupt snapshot).
+fn balanced_end(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            _ if esc => esc = false,
+            '\\' if in_str => esc = true,
+            '"' => in_str = !in_str,
+            '(' if !in_str => depth += 1,
+            ')' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_column(rest: &str, line: usize) -> Result<ColumnSnap, ParseError> {
     // A quoted `default="…"` is the one attribute that may hold spaces; pull it out of
     // the raw text first so the rest tokenizes on whitespace cleanly.
@@ -804,15 +860,28 @@ fn parse_column(rest: &str, line: usize) -> Result<ColumnSnap, ParseError> {
         }
     }
 
+    // An opaque `raw(…)` type may hold spaces and commas; take it as one balanced token
+    // before whitespace-splitting the rest.
+    let mut raw_ty = None;
+    if let Some(idx) = remainder.find("raw(") {
+        if let Some(end) = balanced_end(&remainder[idx..]) {
+            raw_ty = Some(remainder[idx..idx + end].to_string());
+            remainder = format!("{}{}", &remainder[..idx], &remainder[idx + end..]);
+        }
+    }
+
     let mut toks = remainder.split_whitespace();
     let name = toks.next().ok_or_else(|| ParseError {
         line,
         message: "column has no name".to_string(),
     })?;
-    let ty = toks.next().ok_or_else(|| ParseError {
-        line,
-        message: "column has no type".to_string(),
-    })?;
+    let ty = match &raw_ty {
+        Some(t) => t.as_str(),
+        None => toks.next().ok_or_else(|| ParseError {
+            line,
+            message: "column has no type".to_string(),
+        })?,
+    };
     let nullability = toks.next().ok_or_else(|| ParseError {
         line,
         message: "column has no nullability".to_string(),
@@ -856,6 +925,19 @@ fn parse_column(rest: &str, line: usize) -> Result<ColumnSnap, ParseError> {
 }
 
 fn parse_index(rest: &str, line: usize) -> Result<IndexSnap, ParseError> {
+    // An opaque index is `<name> raw(…)`: everything after the name is the literal body.
+    if let Some((name, body)) = rest.trim().split_once(char::is_whitespace) {
+        let body = body.trim();
+        if body.starts_with("raw(") {
+            return Ok(IndexSnap {
+                name: name.trim().to_string(),
+                columns: Vec::new(),
+                unique: false,
+                method: None,
+                raw: Some(body.to_string()),
+            });
+        }
+    }
     let (name, after) = rest.split_once('(').ok_or_else(|| ParseError {
         line,
         message: format!("index missing column list: {rest}"),
@@ -874,11 +956,25 @@ fn parse_index(rest: &str, line: usize) -> Result<IndexSnap, ParseError> {
             .collect()
     };
     let flags = after[close + 1..].trim();
-    let unique = flags.split_whitespace().any(|f| f == "unique");
+    let mut toks = flags.split_whitespace().peekable();
+    let mut unique = false;
+    let mut method = None;
+    while let Some(tok) = toks.next() {
+        match tok {
+            "unique" => unique = true,
+            "using" => method = toks.next().map(str::to_string),
+            // Unknown flags are ignored, not rejected — a snapshot written by a newer or
+            // older engine (e.g. a pre-D103 `inferred` marker) must still parse so an
+            // existing ledger keeps applying.
+            _ => {}
+        }
+    }
 
     Ok(IndexSnap {
         name: name.trim().to_string(),
         columns,
         unique,
+        method,
+        raw: None,
     })
 }

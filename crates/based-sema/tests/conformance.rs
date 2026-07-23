@@ -166,10 +166,18 @@ fn summarize_model(m: &RModel) -> String {
         out.push_str(&format!("  {}\n", member(&mem.name, &mem.kind)));
     }
     for ix in &m.indexes {
+        if let Some(raw) = &ix.raw {
+            out.push_str(&format!("  index {}\n", raw.render()));
+            continue;
+        }
         out.push_str(&format!(
-            "  index{}({})\n",
+            "  index{}({}){}\n",
             if ix.unique { " unique" } else { "" },
-            ix.columns.join(", ")
+            ix.columns.join(", "),
+            match &ix.method {
+                Some(m) => format!(" using {m}"),
+                None => String::new(),
+            }
         ));
     }
     out
@@ -185,10 +193,15 @@ fn member(name: &str, kind: &MemberKind) -> String {
             unique,
             default,
             enum_name,
+            raw_type,
         } => {
             let mut s = format!(
                 "{name}: {}{}{}",
-                enum_name.clone().unwrap_or_else(|| prim(*ty).to_string()),
+                raw_type
+                    .as_ref()
+                    .map(|r| r.render())
+                    .or_else(|| enum_name.clone())
+                    .unwrap_or_else(|| prim(*ty).to_string()),
                 if *optional { "?" } else { "" },
                 if *many { "[]" } else { "" },
             );

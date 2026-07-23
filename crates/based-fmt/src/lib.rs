@@ -490,6 +490,9 @@ fn modifier(m: &Modifier) -> String {
 }
 
 fn index_decl(ix: &IndexDecl) -> String {
+    if let Some(spec) = &ix.raw {
+        return format!("@index {}", spec.render());
+    }
     let cols = if ix.columns.len() == 1 {
         ix.columns[0].node.clone()
     } else {
@@ -503,8 +506,12 @@ fn index_decl(ix: &IndexDecl) -> String {
         )
     };
     let sep = if ix.columns.len() == 1 { " " } else { "" };
+    let method = match &ix.method {
+        Some(m) => format!(" using {}", m.node),
+        None => String::new(),
+    };
     format!(
-        "@index{sep}{cols}{}",
+        "@index{sep}{cols}{}{method}",
         if ix.unique { " unique" } else { "" }
     )
 }
@@ -904,6 +911,7 @@ fn type_expr(t: &TypeExpr) -> String {
     let mut s = match &t.base {
         BaseType::Primitive(p) => primitive(*p),
         BaseType::Model(m) => m.node.clone(),
+        BaseType::Raw(spec) => spec.render(),
     };
     if t.optional {
         s.push('?');

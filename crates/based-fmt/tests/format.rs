@@ -273,3 +273,25 @@ fn upsert_reprints_conflict_clause() {
     assert!(based_parser::parse_file(&got, FileId(0)).is_ok());
     assert_eq!(fmt(&got), got);
 }
+
+#[test]
+fn opaque_types_and_exotic_indexes_reprint_canonically() {
+    let out = fmt(r#"Place {
+id: Id
+location:raw("geometry(Point,4326)")?
+tags: raw({postgres:"tsvector",mariadb:"text"})?
+@index location using gist
+@index raw("(lower(name))")
+}"#);
+    assert!(
+        out.contains(r#"location: raw("geometry(Point,4326)")?"#),
+        "\n{out}"
+    );
+    assert!(
+        out.contains(r#"tags:     raw({ postgres: "tsvector", mariadb: "text" })?"#),
+        "\n{out}"
+    );
+    assert!(out.contains("@index location using gist"), "\n{out}");
+    assert!(out.contains(r#"@index raw("(lower(name))")"#), "\n{out}");
+    assert_eq!(fmt(&out), out, "not idempotent");
+}

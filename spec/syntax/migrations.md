@@ -125,7 +125,12 @@ Each step renders to per-dialect SQL at `render`/`apply` time via the existing `
 ### Step forms
 
 Columns and types are named in the neutral vocabulary (`int`, `text`, `uuid`, `timestamp`, `date`,
-`bool`, `json`); the renderer maps them per dialect (D10/D28/D29). A step may carry a `destructive`
+`bool`, `json`); the renderer maps them per dialect (D10/D28/D29). An **opaque** column or index
+(models.md `raw("…")`) is the one exception: its neutral type *is* the literal string the author
+wrote (`raw("geometry(Point,4326)")`, or the canonical dialect-sorted map form), so the diff is a
+plain string compare and the renderer emits it verbatim. That keeps an unmodelled column/index
+inside the migration lifecycle — created, dropped, renamed, rebuilt like any other — instead of
+living behind the schema's back in a raw migration where the snapshot is blind to it. A step may carry a `destructive`
 marker (see the destructive policy) and, for a data-bearing change, its `raw` escape (below).
 
 ```
@@ -146,7 +151,8 @@ rename table <old> -> <new>
 rename column <table>.<old> -> <new>
 
 # indexes & uniqueness
-add index <name> (<col>…)
+add index <name> (<col>…) [using <method>]
+add index <name> raw("…")                            # opaque index; body diffed as a string
 drop index <name>
 add unique <name> (<col>…)                           # DESTRUCTIVE over existing data
 drop unique <name>

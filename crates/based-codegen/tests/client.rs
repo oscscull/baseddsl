@@ -844,3 +844,16 @@ fn aggregate_shape_types_each_function() {
         "\n{out}"
     );
 }
+
+#[test]
+fn opaque_column_projects_as_a_plain_string() {
+    let out = gen(r#"
+        Place { id: Id, name: text, location: raw("geometry(Point,4326)")? }
+        shape PlaceRow from Place { id, name, location, area = raw`ST_Area(location)` }
+        query place(id) -> PlaceRow;
+        "#);
+    assert!(out.contains("pub struct PlaceRow {"), "\n{out}");
+    // The opaque value is an unmodelled string; a raw shape value likewise.
+    assert!(out.contains("pub location: Option<String>"), "\n{out}");
+    assert!(out.contains("pub area: "), "\n{out}");
+}

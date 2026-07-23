@@ -117,6 +117,9 @@ pub enum Terminal {
     Scalar(Primitive),
     /// A relation edge; `.0` is the target model name. Comparable to its key (Id).
     Relation(String),
+    /// An opaque `raw(…)` column; `.0` is the declared type spelling. Projectable, but
+    /// never a filter/sort/group/aggregate operand (`E0271`).
+    Opaque(String),
 }
 
 /// A coarse operand-compatibility bucket. Deliberately loose — the goal is to
@@ -150,6 +153,8 @@ fn terminal_family(t: &Terminal) -> Family {
     match t {
         Terminal::Scalar(p) => prim_family(*p),
         Terminal::Relation(_) => Family::Key,
+        // Never reached in a comparison — an opaque operand is rejected first (E0271).
+        Terminal::Opaque(_) => Family::Json,
     }
 }
 
@@ -158,6 +163,7 @@ fn terminal_name(t: &Terminal) -> String {
     match t {
         Terminal::Scalar(p) => format!("`{}`", prim_name(*p)),
         Terminal::Relation(m) => format!("relation `{m}`"),
+        Terminal::Opaque(t) => format!("opaque column `{t}`"),
     }
 }
 
@@ -246,6 +252,9 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
         return;
     };
     let span = seg.span;
+    if reject_opaque(&lhs, path, "filter", sink) {
+        return;
+    }
 
     // 1. Operator applicability on the left operand.
     match op {
@@ -326,6 +335,9 @@ fn check_in_element_type(path: &Path, value: &Value, mi: usize, cx: &Cx, sink: &
     let Some(seg) = path.segments.last() else {
         return;
     };
+    if reject_opaque(&lhs, path, "filter", sink) {
+        return;
+    }
     let rf = match value {
         Value::Lit(l) => match lit_family(l) {
             Some(f) => f,
@@ -358,6 +370,10 @@ fn check_in_element_type(path: &Path, value: &Value, mi: usize, cx: &Cx, sink: &
 /// assigned — `None` skips the check (the misuse, if any, is out of scope here).
 fn member_family(kind: &MemberKind) -> Option<Family> {
     match kind {
+        // An opaque column is never assignable (E0273), so it contributes no family.
+        MemberKind::Scalar {
+            raw_type: Some(_), ..
+        } => None,
         MemberKind::Scalar { ty, .. } => Some(prim_family(*ty)),
         MemberKind::Forward { .. } => Some(Family::Key),
         MemberKind::Inverse { .. } => None,
@@ -566,6 +582,9 @@ pub fn check_param_type(ann: &TypeExpr, mapped: Mapped, sink: &mut Sink) {
                 );
             }
         }
+        // The parser rejects `raw(…)` outside a model field type, so an opaque
+        // annotation never reaches here.
+        (BaseType::Raw(_), _) => {}
         (BaseType::Model(m), Mapped::Scalar(pcol)) => sink.error(
             code::PARAM_TYPE,
             m.span,
@@ -617,9 +636,12 @@ pub fn resolve_path(path: &Path, start: usize, cx: &Cx, sink: &mut Sink) -> Opti
         };
         let last = i + 1 == n;
         match &mem.kind {
-            MemberKind::Scalar { ty, .. } => {
+            MemberKind::Scalar { ty, raw_type, .. } => {
                 if last {
-                    return Some(Terminal::Scalar(*ty));
+                    return Some(match raw_type {
+                        Some(spec) => Terminal::Opaque(spec.render()),
+                        None => Terminal::Scalar(*ty),
+                    });
                 }
                 sink.error(
                     code::TRAVERSE_SCALAR,
@@ -900,7 +922,29 @@ fn check_raw_params(raw: &RawSql, params: &[String], sink: &mut Sink) {
 }
 
 pub fn check_sort_term(t: &SortTerm, model: usize, cx: &Cx, sink: &mut Sink) {
-    resolve_path(&t.path, model, cx, sink);
+    if let Some(term) = resolve_path(&t.path, model, cx, sink) {
+        reject_opaque(&term, &t.path, "sort", sink);
+    }
+}
+
+/// An opaque `raw(…)` column has no type the engine can compare or order by, so it is
+/// never a filter / sort / group / aggregate operand (`E0271`). The read side stays open
+/// through the `raw` leaf — a raw predicate term or a raw shape value (`ST_Area(geom)`),
+/// where the SQL author owns the semantics.
+pub fn reject_opaque(term: &Terminal, path: &Path, what: &str, sink: &mut Sink) -> bool {
+    let Terminal::Opaque(ty) = term else {
+        return false;
+    };
+    let Some(seg) = path.segments.last() else {
+        return false;
+    };
+    sink.error_note(
+        code::OPAQUE_OPERAND,
+        seg.span,
+        format!("cannot {what} by `{}` — a {ty} column is opaque", seg.node),
+        "the engine does not model this type; reach it with a `raw` predicate term or a raw shape value",
+    );
+    true
 }
 
 /// Resolve a relation's custom `on:` join predicate.

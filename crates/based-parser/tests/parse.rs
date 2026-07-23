@@ -748,3 +748,66 @@ fn plain_create_has_no_conflict() {
         other => panic!("expected create, got {other:?}"),
     }
 }
+
+#[test]
+fn opaque_raw_types_and_exotic_indexes() {
+    let m = only_model(
+        r#"
+        Place {
+          id:       Id
+          location: raw("geometry(Point,4326)")?
+          search:   raw({ postgres: "tsvector", mariadb: "text" })
+          @index location using gist
+          @index raw("(lower(name))")
+          @index(a, b) unique
+        }
+        "#,
+    );
+    let fields: Vec<&Field> = m
+        .members
+        .iter()
+        .filter_map(|mem| match mem {
+            Member::Field(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+
+    let BaseType::Raw(spec) = &fields[1].ty.base else {
+        panic!("expected an opaque type, got {:?}", fields[1].ty.base)
+    };
+    assert!(fields[1].ty.optional);
+    assert_eq!(spec.for_dialect("sqlite"), Some("geometry(Point,4326)"));
+    assert_eq!(spec.render(), r#"raw("geometry(Point,4326)")"#);
+
+    let BaseType::Raw(map) = &fields[2].ty.base else {
+        panic!("expected an opaque type")
+    };
+    assert_eq!(map.for_dialect("postgres"), Some("tsvector"));
+    assert_eq!(map.for_dialect("sqlite"), None);
+
+    let indexes: Vec<&IndexDecl> = m
+        .members
+        .iter()
+        .filter_map(|mem| match mem {
+            Member::Index(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(indexes[0].method.as_ref().unwrap().node, "gist");
+    assert_eq!(indexes[0].columns[0].node, "location");
+    assert!(indexes[1].columns.is_empty());
+    assert_eq!(
+        indexes[1].raw.as_ref().unwrap().for_dialect("postgres"),
+        Some("(lower(name))")
+    );
+    assert!(indexes[2].unique && indexes[2].method.is_none());
+}
+
+#[test]
+fn opaque_raw_type_outside_a_field_is_a_parse_error() {
+    // A param annotation and a scope term are not field positions.
+    assert!(parse_file(r#"query q(p: raw("inet")) -> R;"#, FileId(0)).is_err());
+    assert!(parse_file(r#"scope S (net: raw("inet") = $ctx.net)"#, FileId(0)).is_err());
+    // An opaque type has no array form.
+    assert!(parse_file(r#"M { id: Id, a: raw("inet")[] }"#, FileId(0)).is_err());
+}

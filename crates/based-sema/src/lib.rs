@@ -32,6 +32,53 @@ use based_diagnostics::Diagnostic;
 use resolve::Cx;
 use std::collections::{HashMap, HashSet};
 
+/// The target-specific half of the checks: everything that can only be judged once the
+/// compile target is known. `dialect` is the canonical dialect name (`mariadb`,
+/// `postgres`, `sqlite`). Run after [`check`], by whoever resolved the manifest.
+///
+/// * a per-dialect `raw({…})` map that omits the target has no type to emit (`E0270`)
+/// * `@index … using <method>` on a target without that access method (`E0272`) — an
+///   error at generation time, never a silently downgraded index
+pub fn check_target(schema: &CheckedSchema, dialect: &str) -> Vec<Diagnostic> {
+    let mut sink = Sink::default();
+    for m in &schema.models {
+        for mem in &m.members {
+            if let Some(spec) = mem.kind.opaque() {
+                raw_spec_covers(spec, dialect, &mut sink);
+            }
+        }
+        for idx in &m.indexes {
+            if let Some(spec) = &idx.raw {
+                raw_spec_covers(spec, dialect, &mut sink);
+            }
+            let Some(method) = &idx.method else { continue };
+            let Some(targets) = index_method_targets(method) else {
+                continue; // unknown method: already reported dialect-free (E0272)
+            };
+            if !targets.contains(&dialect) {
+                sink.error_note(
+                    code::INDEX_METHOD,
+                    idx.span,
+                    format!("`using {method}` is not available on {dialect}"),
+                    format!("`{method}` indexes exist on: {}", targets.join(", ")),
+                );
+            }
+        }
+    }
+    sink.diags
+}
+
+fn raw_spec_covers(spec: &based_ast::RawSpec, dialect: &str, sink: &mut Sink) {
+    if spec.for_dialect(dialect).is_none() {
+        sink.error_note(
+            code::RAW_TYPE_DIALECT,
+            spec.span,
+            format!("this `raw({{…}})` map has no entry for the compile target {dialect}"),
+            format!("add `{dialect}: \"…\"`, or use the bare `raw(\"…\")` form for all targets"),
+        );
+    }
+}
+
 /// Resolve and check the whole declaration set (gathered from every `.bsl` file).
 pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let mut sink = Sink::default();

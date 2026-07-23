@@ -652,3 +652,14 @@ fn schema_without_an_ack_mutation_has_no_ack_component() {
         "#);
     assert!(doc["components"]["schemas"].get("Ack").is_none());
 }
+
+#[test]
+fn opaque_column_is_a_string_schema() {
+    let doc = gen(r#"
+        Place { id: Id, name: text, location: raw("geometry(Point,4326)")? }
+        shape PlaceRow from Place { id, name, location }
+        query place(id) -> PlaceRow;
+        "#);
+    let props = &doc["components"]["schemas"]["PlaceRow"]["properties"];
+    assert_eq!(props["location"]["type"], "string", "\n{doc:#}");
+}

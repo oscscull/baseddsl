@@ -6,7 +6,7 @@
 //! codegen reads (alongside the AST) — the resolution facts that are *not* in the
 //! AST (inferred verb, relation targets, table names, soft-delete mode) live here.
 
-use based_ast::{DefaultVal, Predicate, Primitive, SortTerm, Span, Verb};
+use based_ast::{DefaultVal, Predicate, Primitive, RawSpec, SortTerm, Span, Verb};
 use based_diagnostics::Diagnostic;
 use std::collections::HashMap;
 
@@ -137,6 +137,15 @@ pub mod code {
     pub const KEYLESS_KEYSET: &str = "E0263"; // a keyset `page` on a `@no_id` model whose sort has no unique tiebreaker (a non-deterministic cursor)
     pub const KEYLESS_CREATE: &str = "E0264"; // a create on a `@no_id` model with a declared read-back but no `(unique)` column set to read it back by
     pub const REL_TO_KEYLESS: &str = "E0265"; // a forward relation targets a `@no_id` model (its `id` doesn't exist to reference)
+
+    // opaque `raw(…)` column types + exotic indexes (E027x): the escape hatch for a DB
+    // type or index form the engine does not model. The literal string is stored and
+    // diffed verbatim; nothing here interprets it.
+    pub const RAW_TYPE_DIALECT: &str = "E0270"; // a per-dialect `raw({…})` map omits the compile target
+    pub const OPAQUE_OPERAND: &str = "E0271"; // filter/sort/group/aggregate on an opaque column (use a `raw` leaf)
+    pub const INDEX_METHOD: &str = "E0272"; // `using <method>` names an unknown method, or one this target lacks
+    pub const OPAQUE_ASSIGN: &str = "E0273"; // a create/update assigns an opaque column, or a create can't supply a required one
+    pub const RAW_EMPTY: &str = "E0274"; // an empty `raw(…)` body
 
     // --- upsert (`create … on conflict update`) ---
     pub const UPSERT_TARGET: &str = "E0250"; // the conflict target is not a declared unique key (unique column / `@index (…) unique` / pk)
@@ -435,6 +444,11 @@ pub enum MemberKind {
         /// stored as text (`ty` is `Text`), constrained to the enum's variants, emitted
         /// as a real enum in the client. `None` for an ordinary primitive column.
         enum_name: Option<String>,
+        /// `raw("geometry(Point,4326)")` — the column's opaque DB type. `Some` marks the
+        /// column engine-unmodelled: the literal string is what DDL and the snapshot
+        /// carry, the value is opaque to the client, and filtering/sorting/assigning it
+        /// is rejected. `ty` is `Text` so the value rides the ordinary text path.
+        raw_type: Option<RawSpec>,
     },
     /// To-one relation: FK lives on this table (`<field>_id`, or a custom join).
     Forward {
@@ -462,6 +476,13 @@ impl RMember {
 }
 
 impl MemberKind {
+    /// The column's opaque `raw(…)` type, when it has one.
+    pub fn opaque(&self) -> Option<&RawSpec> {
+        match self {
+            MemberKind::Scalar { raw_type, .. } => raw_type.as_ref(),
+            _ => None,
+        }
+    }
     pub fn is_relation(&self) -> bool {
         !matches!(self, MemberKind::Scalar { .. })
     }
@@ -491,6 +512,39 @@ pub struct SoftDelete {
 pub struct RIndex {
     pub columns: Vec<String>,
     pub unique: bool,
+    /// `using <method>` — the declared access method, lowercased. `None` = the
+    /// dialect's default.
+    pub method: Option<String>,
+    /// `@index raw("…")` — an opaque index body. When `Some`, `columns` is empty.
+    pub raw: Option<RawSpec>,
+    pub span: Span,
+}
+
+/// The compile targets a `raw({ … })` map and a `using <method>` check may name. The
+/// spelling is the canonical dialect name codegen reports.
+pub const DIALECTS: &[&str] = &["mariadb", "postgres", "sqlite"];
+
+/// The index access methods `using <method>` accepts, and which targets have them.
+/// SQLite has no access-method syntax at all, so every method is an error there
+/// (`E0272`) rather than a silent downgrade to a plain index.
+pub const INDEX_METHODS: &[(&str, &[&str])] = &[
+    ("btree", &["postgres", "mariadb"]),
+    ("hash", &["postgres", "mariadb"]),
+    ("gist", &["postgres"]),
+    ("spgist", &["postgres"]),
+    ("gin", &["postgres"]),
+    ("brin", &["postgres"]),
+    ("fulltext", &["mariadb"]),
+    ("spatial", &["mariadb"]),
+];
+
+/// The targets an index access method is valid on, or `None` when the name is not a
+/// known method at all.
+pub fn index_method_targets(method: &str) -> Option<&'static [&'static str]> {
+    INDEX_METHODS
+        .iter()
+        .find(|(m, _)| *m == method)
+        .map(|(_, ts)| *ts)
 }
 
 #[derive(Debug, Clone)]

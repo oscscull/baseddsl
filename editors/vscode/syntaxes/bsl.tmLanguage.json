@@ -55,7 +55,7 @@
           "name": "keyword.operator.word.bsl"
         },
         {
-          "match": "\\b(default|unique|column|now|asc|desc|max_rows|on|true|false|null)\\b",
+          "match": "\\b(default|unique|using|column|now|asc|desc|max_rows|on|true|false|null)\\b",
           "name": "constant.language.bsl"
         }
       ]

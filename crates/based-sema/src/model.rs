@@ -78,6 +78,7 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
                     unique: false, // PK, expressed as PRIMARY KEY not a UNIQUE constraint
                     default: None, // engine-generated on insert , no SQL default
                     enum_name: None,
+                    raw_type: None,
                 },
                 was: None,
                 sort: Vec::new(),
@@ -180,6 +181,19 @@ fn classify(f: &Field, enums: &HashMap<String, EnumKind>) -> MemberKind {
             unique,
             default: default(),
             enum_name: None,
+            raw_type: None,
+        },
+        // An opaque column: the engine carries the literal type string into DDL and the
+        // snapshot and treats the value as text everywhere else.
+        BaseType::Raw(spec) => MemberKind::Scalar {
+            ty: Primitive::Text,
+            optional: f.ty.optional,
+            many: false,
+            column: column(),
+            unique,
+            default: default(),
+            enum_name: None,
+            raw_type: Some(spec.clone()),
         },
         BaseType::Model(target) if enums.contains_key(&target.node) => MemberKind::Scalar {
             // An enum column stores its variant's wire value: text for a string enum,
@@ -195,6 +209,7 @@ fn classify(f: &Field, enums: &HashMap<String, EnumKind>) -> MemberKind {
             unique,
             default: default(),
             enum_name: Some(target.node.clone()),
+            raw_type: None,
         },
         BaseType::Model(target) => {
             // A to-many model edge, or one carrying an explicit inverse ref, is a
@@ -464,12 +479,65 @@ fn validate_indexes(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Si
                 );
             }
         }
+        if let Some(m) = &idx.method {
+            if index_method_targets(&m.node).is_none() {
+                let known = INDEX_METHODS
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sink.error_note(
+                    code::INDEX_METHOD,
+                    m.span,
+                    format!("unknown index access method `{}`", m.node),
+                    format!("known methods: {known}"),
+                );
+            }
+        }
+        if let Some(spec) = &idx.raw {
+            check_raw_spec(spec, "index", sink);
+        }
         indexes.push(RIndex {
             columns: idx.columns.iter().map(|c| c.node.clone()).collect(),
             unique: idx.unique,
+            method: idx.method.as_ref().map(|m| m.node.clone()),
+            raw: idx.raw.clone(),
+            span: idx.span,
         });
     }
     models[mi].indexes = indexes;
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        if let BaseType::Raw(spec) = &f.ty.base {
+            check_raw_spec(spec, "type", sink);
+        }
+    }
+}
+
+/// A `raw(…)` body must carry a non-empty literal for every dialect it names — an empty
+/// one would emit a syntactically broken column type or index (`E0274`).
+fn check_raw_spec(spec: &RawSpec, what: &str, sink: &mut Sink) {
+    for lit in spec.literals() {
+        if lit.node.trim().is_empty() {
+            sink.error(
+                code::RAW_EMPTY,
+                lit.span,
+                format!("an empty `raw(…)` {what} body"),
+            );
+        }
+    }
+    if let RawSpecBody::PerDialect(entries) = &spec.body {
+        for e in entries {
+            if !DIALECTS.contains(&e.dialect.node.as_str()) {
+                sink.error_note(
+                    code::RAW_TYPE_DIALECT,
+                    e.dialect.span,
+                    format!("unknown dialect `{}` in a `raw({{…}})` map", e.dialect.node),
+                    format!("compile targets: {}", DIALECTS.join(", ")),
+                );
+            }
+        }
+    }
 }
 
 fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Sink) {

@@ -31,7 +31,7 @@
 //! `(unique)` constraints stay inline in all three. Identifiers are backtick-quoted on
 //! MariaDB/SQLite and double-quoted on Postgres ([`Dialect::quote`]).
 
-use based_ast::{DefaultVal, Literal, Primitive};
+use based_ast::{DefaultVal, Literal, Primitive, RawSpec};
 use based_sema::{CheckedSchema, MemberKind, RModel};
 
 use crate::Dialect;
@@ -63,6 +63,10 @@ struct IndexSpec {
     name: String,
     columns: Vec<String>,
     unique: bool,
+    /// `using <method>` — an access method the target must have (checked in sema).
+    method: Option<String>,
+    /// An opaque `@index raw("…")` body: everything after `ON <table>`.
+    raw: Option<String>,
 }
 
 /// Every declared `@index` on a model, resolved to physical columns + a stable
@@ -70,11 +74,24 @@ struct IndexSpec {
 /// the always-filtered tombstone column is physically prepended (neither MariaDB nor
 /// SQLite has partial indexes), so the written index still leads with what selects. A
 /// unique index is a constraint — its column set is never reshaped.
-fn index_specs(model: &RModel) -> Vec<IndexSpec> {
+fn index_specs(model: &RModel, dialect: Dialect) -> Vec<IndexSpec> {
     model
         .indexes
         .iter()
         .map(|idx| {
+            if let Some(spec) = &idx.raw {
+                return IndexSpec {
+                    name: raw_index_name(&model.table, spec),
+                    columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    raw: Some(
+                        spec.for_dialect(dialect.name())
+                            .unwrap_or_default()
+                            .to_string(),
+                    ),
+                };
+            }
             let mut columns = idx.columns.clone();
             if !idx.unique {
                 if let Some(sd) = &model.soft_delete {
@@ -91,9 +108,29 @@ fn index_specs(model: &RModel) -> Vec<IndexSpec> {
                 ),
                 columns: columns.iter().map(|c| physical_col(model, c)).collect(),
                 unique: idx.unique,
+                method: idx.method.clone(),
+                raw: None,
             }
         })
         .collect()
+}
+
+/// A stable, order-independent name for an opaque index: `idx_<table>_raw_<hash>` over
+/// the canonical `raw(…)` body, so reordering a model's indexes never looks like a
+/// rename and two different bodies never collide in the snapshot.
+pub(crate) fn raw_index_name(table: &str, spec: &RawSpec) -> String {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in spec.canonical().as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("idx_{table}_raw_{:08x}", h as u32)
+}
+
+/// Is this index one MariaDB expresses as a table clause? The opaque `raw` form is
+/// always a standalone `CREATE INDEX` (its body is not a column list).
+fn inline_on_mariadb(spec: &IndexSpec) -> bool {
+    spec.raw.is_none()
 }
 
 /// One `CREATE TABLE` for a model: columns in declaration order, then the table
@@ -112,12 +149,21 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
                 column,
                 default,
                 enum_name,
+                raw_type,
                 unique: _,
             } => {
                 let en = enum_name.as_deref().and_then(|n| schema.enum_(n));
+                // An opaque column's DB type is the literal the author wrote.
+                let col_ty = match raw_type {
+                    Some(spec) => spec
+                        .for_dialect(dialect.name())
+                        .unwrap_or_default()
+                        .to_string(),
+                    None => sql_type(*ty, *many, dialect),
+                };
                 lines.push(column_line(
                     column,
-                    &sql_type(*ty, *many, dialect),
+                    &col_ty,
                     *optional,
                     default.as_ref(),
                     en,
@@ -188,12 +234,12 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
         }
     }
 
-    let specs = index_specs(model);
+    let specs = index_specs(model, dialect);
 
     // MariaDB inlines the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
     // have no inline form, so they trail the table as `CREATE INDEX` statements.
     if dialect == Dialect::MariaDb {
-        for spec in &specs {
+        for spec in specs.iter().filter(|s| inline_on_mariadb(s)) {
             lines.push(inline_index_clause(dialect, spec));
         }
     }
@@ -208,10 +254,11 @@ fn create_table(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Str
         dialect.quote(&model.table)
     );
 
-    if dialect != Dialect::MariaDb {
-        for spec in &specs {
-            out.push_str(&create_index_stmt(dialect, &model.table, spec));
-        }
+    for spec in specs
+        .iter()
+        .filter(|s| dialect != Dialect::MariaDb || !inline_on_mariadb(s))
+    {
+        out.push_str(&create_index_stmt(dialect, &model.table, spec));
     }
     out
 }
@@ -248,30 +295,57 @@ fn inline_index_clause(dialect: Dialect, spec: &IndexSpec) -> String {
         .map(|c| dialect.quote(c))
         .collect::<Vec<_>>()
         .join(", ");
-    let kind = if spec.unique { "UNIQUE KEY" } else { "KEY" };
-    format!("{kind} {name} ({cols})", name = dialect.quote(&spec.name))
+    // MariaDB spells its two exotic access methods as index *kinds* (`FULLTEXT KEY`),
+    // and its B-tree/hash choice as a trailing `USING` — never Postgres's leading form.
+    let (kind, using) = match spec.method.as_deref() {
+        Some("fulltext") => ("FULLTEXT KEY", String::new()),
+        Some("spatial") => ("SPATIAL KEY", String::new()),
+        Some(m) => (
+            if spec.unique { "UNIQUE KEY" } else { "KEY" },
+            format!(" USING {}", m.to_uppercase()),
+        ),
+        None => (
+            if spec.unique { "UNIQUE KEY" } else { "KEY" },
+            String::new(),
+        ),
+    };
+    format!(
+        "{kind} {name} ({cols}){using}",
+        name = dialect.quote(&spec.name)
+    )
 }
 
 /// A declared/inferred index as a standalone `CREATE INDEX` statement (SQLite and
 /// Postgres have no inline table-index clause). A unique index becomes `CREATE UNIQUE
 /// INDEX`.
 fn create_index_stmt(dialect: Dialect, table: &str, spec: &IndexSpec) -> String {
+    format!("{};\n", create_index_sql(dialect, table, spec))
+}
+
+/// A standalone `CREATE [UNIQUE] INDEX`, bare (no trailing `;`). An opaque index's body
+/// rides verbatim in place of the column list; `using <method>` renders as Postgres's
+/// leading `USING <m>` (MariaDB spells methods inline — see `inline_index_clause`).
+fn create_index_sql(dialect: Dialect, table: &str, spec: &IndexSpec) -> String {
+    let kind = if spec.unique {
+        "CREATE UNIQUE INDEX"
+    } else {
+        "CREATE INDEX"
+    };
+    let name = dialect.quote(&spec.name);
+    let table_q = dialect.quote(table);
+    if let Some(raw) = &spec.raw {
+        return format!("{kind} {name} ON {table_q} {raw}");
+    }
     let cols = spec
         .columns
         .iter()
         .map(|c| dialect.quote(c))
         .collect::<Vec<_>>()
         .join(", ");
-    let kind = if spec.unique {
-        "CREATE UNIQUE INDEX"
-    } else {
-        "CREATE INDEX"
-    };
-    format!(
-        "{kind} {name} ON {table} ({cols});\n",
-        name = dialect.quote(&spec.name),
-        table = dialect.quote(table),
-    )
+    match spec.method.as_deref() {
+        Some(m) => format!("{kind} {name} ON {table_q} USING {m} ({cols})"),
+        None => format!("{kind} {name} ON {table_q} ({cols})"),
+    }
 }
 
 /// Physical column backing a field: a scalar's column, or a forward relation's FK.

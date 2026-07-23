@@ -475,6 +475,9 @@ fn query_param_family(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) 
     if let Some(t) = &p.ty {
         let family = match &t.base {
             BaseType::Primitive(prim) => Family::of(*prim),
+            // An opaque `raw(…)` value binds as plain text (sema keeps it out of
+            // params, so this is only reached through a hand-built plan).
+            BaseType::Raw(_) => Family::Text,
             // An UpperCamel annotation: an enum param carries the enum's wire value
             // (its storage family); a relation param carries the target's key (uuid).
             BaseType::Model(name) => enum_or_uuid(schema, &name.node),
@@ -495,6 +498,7 @@ fn mutation_param_family(compiled: &Compiled, ast: &Mutation, p: &Param) -> (Fam
     if let Some(t) = &p.ty {
         let family = match &t.base {
             BaseType::Primitive(prim) => Family::of(*prim),
+            BaseType::Raw(_) => Family::Text,
             BaseType::Model(name) => enum_or_uuid(&compiled.schema, &name.node),
         };
         return (family, t.optional || p.default.is_some());

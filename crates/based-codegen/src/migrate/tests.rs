@@ -75,6 +75,8 @@ fn render_then_parse_round_trips_every_attribute() {
                 name: "idx_order_status".to_string(),
                 columns: vec!["status".to_string()],
                 unique: false,
+                method: None,
+                raw: None,
             }],
         }],
 
@@ -132,6 +134,8 @@ fn add_column_and_add_index_between_versions() {
         name: "idx_product_barcode".to_string(),
         columns: vec!["barcode".to_string()],
         unique: false,
+        method: None,
+        raw: None,
     });
     let now = Snapshot {
         scopes: Vec::new(),
@@ -228,6 +232,8 @@ fn adding_a_unique_index_is_destructive_over_existing_data() {
         name: "uq_t_email".to_string(),
         columns: vec!["email".to_string()],
         unique: true,
+        method: None,
+        raw: None,
     });
     let now = Snapshot {
         scopes: Vec::new(),
@@ -388,6 +394,8 @@ fn create_table_indexes_inline_on_mariadb_standalone_elsewhere() {
         name: "idx_item_sku".to_string(),
         columns: vec!["sku".to_string()],
         unique: false,
+        method: None,
+        raw: None,
     });
     let steps = vec![Step::CreateTable(t)];
 
@@ -513,6 +521,8 @@ fn index_add_and_drop_render_per_dialect() {
         name: "uq_u_email".to_string(),
         columns: vec!["email".to_string()],
         unique: true,
+        method: None,
+        raw: None,
     };
     let add = vec![Step::AddUnique {
         table: "u".to_string(),
@@ -545,6 +555,8 @@ fn sql_statements_are_bare_and_one_per_statement() {
         name: "idx_thing_name".to_string(),
         columns: vec!["name".to_string()],
         unique: false,
+        method: None,
+        raw: None,
     });
     let steps = vec![
         Step::CreateTable(t),

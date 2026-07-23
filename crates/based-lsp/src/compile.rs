@@ -1558,6 +1558,7 @@ const KEYWORDS: &[&str] = &[
     "unindexed",
     "index",
     "unique",
+    "using",
     "default",
     "column",
     "asc",
@@ -2214,6 +2215,7 @@ fn type_str(ty: &TypeExpr) -> String {
     let mut s = match &ty.base {
         BaseType::Primitive(p) => primitive_str(*p),
         BaseType::Model(id) => id.node.clone(),
+        BaseType::Raw(spec) => spec.render(),
     };
     if ty.optional {
         s.push('?');
@@ -2283,6 +2285,10 @@ fn field_hover(f: &Field) -> String {
             let card = if f.ty.many { "to-many" } else { "to-one" };
             format!("```based\n{sig}\n```\n{card} relation to `{}`", m.node)
         }
+        BaseType::Raw(_) => format!(
+            "```based\n{sig}\n```\nopaque column — the engine stores this DB type verbatim \
+             and never reads into it"
+        ),
         BaseType::Primitive(_) => format!("```based\n{sig}\n```"),
     }
 }
@@ -2563,8 +2569,9 @@ fn latest_snapshot(root: &Path) -> Option<based_codegen::migrate::Snapshot> {
 pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
     match based_manifest::discover(root) {
         Ok(project) => {
+            let dialect = based_codegen::Dialect::parse(&project.manifest.dialect);
             let paths = project.files.into_iter().map(|f| f.path).collect();
-            compile_paths(paths, overlays, Vec::new(), Some(root))
+            compile_paths(paths, overlays, Vec::new(), Some(root), Some(dialect))
         }
         // Manifest present but unreadable/malformed: surface it as a project-level
         // diagnostic and still compile this project's open buffers so the editor
@@ -2576,7 +2583,7 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
                 .cloned()
                 .collect();
             ps.sort();
-            compile_paths(ps, overlays, diags, Some(root))
+            compile_paths(ps, overlays, diags, Some(root), None)
         }
     }
 }
@@ -2584,7 +2591,7 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
 /// Compile a single `.bsl` file under no manifest in isolation (the fallback for a
 /// file that belongs to no project — cross-file references cannot resolve here).
 pub fn compile_loose(file: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
-    compile_paths(vec![file.to_path_buf()], overlays, Vec::new(), None)
+    compile_paths(vec![file.to_path_buf()], overlays, Vec::new(), None, None)
 }
 
 /// Read + parse + check a fixed file set, preferring open buffers over disk, into a
@@ -2594,6 +2601,7 @@ fn compile_paths(
     overlays: &HashMap<PathBuf, String>,
     project_diagnostics: Vec<Diagnostic>,
     migrations_root: Option<&Path>,
+    dialect: Option<based_codegen::Dialect>,
 ) -> Snapshot {
     // Read every file, preferring an open buffer over disk.
     let mut sources: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
@@ -2625,6 +2633,11 @@ fn compile_paths(
     if parse_ok {
         let (schema, diags) = based_sema::check(&decls);
         diagnostics.extend(diags);
+        // Target-specific checks need the manifest's compile target; a loose file
+        // (no project) has none, so they are skipped there.
+        if let Some(d) = dialect {
+            diagnostics.extend(based_sema::check_target(&schema, d.name()));
+        }
         facts = based_facts::facts(&schema, &decls);
         // Offline migration-drift diagnostic: if the project has captured migrations and
         // the `.bsl` has structural changes not yet in one, flag them.

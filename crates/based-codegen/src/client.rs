@@ -993,6 +993,10 @@ mod rust {
         match b {
             BaseType::Primitive(p) => primitive(*p),
             BaseType::Model(_) => "Uuid",
+            // An opaque `raw(…)` value crosses the wire as a string; the engine models
+            // nothing about it. (Only a model field may carry one, so this is the
+            // shape-projection path.)
+            BaseType::Raw(_) => "String",
         }
     }
 

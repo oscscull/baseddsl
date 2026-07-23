@@ -4602,6 +4602,34 @@ binds all future syntax.)*
 (the type/index positions of `raw`; the `sql`-is-banned convention), migrations.md (opaque diff =
 string compare). Codes `E0270`–`E0274`.
 
+**Shipped (2026-07-23).** Implemented end to end as decided. Notes on the as-built:
+
+- **Syntax + AST.** `BaseType::Raw(RawSpec)` (a model-field-only base type; the parser rejects an
+  opaque type in a param annotation, a scope term, or with a `[]` array suffix — an opaque value has
+  no array form). `RawSpec` is `All(String)` or `PerDialect([{dialect, text}])` with `for_dialect`,
+  `render` (source order), and `canonical` (dialect-sorted — the snapshot form, so map order never
+  churns a diff). `IndexDecl` grows `method: Option<Ident>` + `raw: Option<RawSpec>`. `raw(…)` (parens)
+  and ``raw`…` `` (backticks) share the keyword, disambiguated by the following token.
+- **The two-phase check.** The dialect-free `check` catches everything target-independent (opaque
+  operand `E0271`, opaque assign `E0273`, empty body `E0274`, unknown method / unknown map dialect).
+  A new **`check_target(&schema, dialect)`** catches what only a compile target decides — a
+  per-dialect map missing the target (`E0270`) and `using <method>` on a target lacking it (`E0272`,
+  e.g. every method on sqlite). The CLI runs it with the manifest dialect; the LSP with the resolved
+  project dialect (skipped for a loose file with no project). `Terminal::Opaque` threads the opaque
+  marker through the shared resolver so filter/sort/group/aggregate all reject via one `reject_opaque`.
+- **Index method map.** `btree`/`hash` → postgres+mariadb; `gist`/`spgist`/`gin`/`brin` → postgres;
+  `fulltext`/`spatial` → mariadb; sqlite has none. Postgres renders the leading `USING <m>`; MariaDB
+  spells `fulltext`/`spatial` as index *kinds* (`FULLTEXT KEY`) and `btree`/`hash` as a trailing
+  `USING`. An opaque `@index raw("…")` always emits as a standalone `CREATE INDEX` (never a MariaDB
+  inline `KEY`); its name is content-derived (`idx_<table>_raw_<hash>` over the canonical body), so
+  reordering a model’s indexes never reads as a rename. Exotic + opaque indexes never satisfy `E0260`
+  and never trip `W0104` (the engine can’t see the access path they serve — the author asserts it).
+- **Live proof.** SQLite integration test: an opaque column + opaque index in the generated DDL,
+  a `create` that omits the opaque column, and a read-back both bare (opaque string) and through a
+  `raw` value leaf (`length(shape)`). Also unit (+/− sema, DDL all three dialects, snapshot
+  round-trip + string-compare diff, client/openapi String), a conformance golden (`raw_opaque`), and
+  a fmt round-trip.
+
 ## D105 — `@was` lifecycle: `gen` self-consumes + teach-at-checkpoint (NF7)
 
 **Decision.** `@was("old")` is a one-shot gen-time rename hint; today it lingers after
