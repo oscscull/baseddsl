@@ -113,3 +113,56 @@ fn gen_writes_the_next_incremental_migration() {
     let snap = std::fs::read_to_string(next.join("schema.snap")).unwrap();
     assert!(snap.contains("column barcode text null"), "\n{snap}");
 }
+
+#[test]
+fn gen_self_consumes_a_was_and_captures_the_rename() {
+    let s = Scratch::new("was");
+    s.write("based.toml", MANIFEST);
+    s.write("shop.bsl", "Product { id: Id  upc: text }\n");
+    assert!(run_gen(&s.0, Some("init")).status.success());
+
+    // Rename the column with `@was` — the data-preserving gesture.
+    s.write(
+        "shop.bsl",
+        "Product { id: Id  barcode: text @was(\"upc\") }\n",
+    );
+    let out = run_gen(&s.0, Some("rename upc"));
+    assert!(out.status.success(), "{out:#?}");
+
+    // The migration captured a data-preserving rename step (not drop+add).
+    let up = std::fs::read_to_string(s.0.join("migrations/0002_rename_upc/up.mig")).unwrap();
+    assert!(
+        up.contains("rename column product.upc -> barcode"),
+        "\n{up}"
+    );
+
+    // gen self-consumed the now-spent @was from source, reporting it on stdout.
+    let source = std::fs::read_to_string(s.0.join("shop.bsl")).unwrap();
+    assert!(!source.contains("@was"), "@was should be retired: {source}");
+    assert_eq!(source, "Product { id: Id  barcode: text }\n", "{source}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("removed spent @was"), "stdout: {stdout}");
+
+    // A re-gen now finds nothing (source clean, rename captured) — idempotent.
+    let out3 = run_gen(&s.0, None);
+    assert!(out3.status.success());
+    assert!(String::from_utf8_lossy(&out3.stdout).contains("no schema changes"));
+}
+
+#[test]
+fn gen_teaches_was_when_a_rename_looks_like_a_drop_add() {
+    let s = Scratch::new("teach");
+    s.write("based.toml", MANIFEST);
+    s.write("shop.bsl", "Product { id: Id  label: text }\n");
+    assert!(run_gen(&s.0, Some("init")).status.success());
+
+    // Rename WITHOUT @was: the diff is a drop+add, ambiguous with a rename.
+    s.write("shop.bsl", "Product { id: Id  title: text }\n");
+    let out = run_gen(&s.0, Some("relabel"));
+    assert!(out.status.success(), "{out:#?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("hint:") && stdout.contains("@was(\"label\")"),
+        "expected a rename teach hint, stdout: {stdout}"
+    );
+}

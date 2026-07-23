@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 
 /// Parse + check a multi-decl snippet into a `CheckedSchema`, asserting it is clean.
 fn checked(src: &str) -> CheckedSchema {
+    checked_with_decls(src).1
+}
+
+/// Like [`checked`], but also returns the parsed declarations — needed by the `@was`
+/// self-consume helpers, which locate the directive in source via the AST spans.
+fn checked_with_decls(src: &str) -> (Vec<based_ast::Decl>, CheckedSchema) {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
     let errs: Vec<_> = diags
@@ -22,7 +28,12 @@ fn checked(src: &str) -> CheckedSchema {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    schema
+    (sf.decls, schema)
+}
+
+/// The single-file `sources` vector (path, text) the self-consume helper indexes by FileId.
+fn sources(src: &str) -> Vec<(PathBuf, String)> {
+    vec![(PathBuf::from("schema.bsl"), src.to_string())]
 }
 
 /// Load + check the whole commerce example the way the CLI does.
@@ -259,6 +270,130 @@ fn renamed_column_is_a_drop_add_pair_not_a_rename() {
     assert!(!steps
         .iter()
         .any(|s| matches!(s, migrate::Step::AlterColumn { .. })));
+}
+
+// ---------- `@was` lifecycle: self-consume + teach-at-checkpoint (D105) ------
+
+#[test]
+fn gen_self_consumes_a_field_was_it_captured() {
+    // A `@was` field rename: gen emits the rename step AND retires the now-spent directive
+    // from source (the rename lives durably in the migration ledger).
+    let base = "Widget { id: Id  upc: text }";
+    let evolved = "Widget { id: Id  barcode: text @was(\"upc\") (unique) }";
+    let prev = Snapshot::from_schema(&checked(base));
+    let (decls, schema) = checked_with_decls(evolved);
+    let steps = migrate::diff(&prev, &schema);
+
+    // The migration captures the rename (data-preserving, not drop+add).
+    assert!(steps
+        .iter()
+        .any(|s| matches!(s, migrate::Step::RenameColumn { from, to, .. }
+            if from == "upc" && to == "barcode")));
+
+    let edits = migrate::spent_was_edits(&steps, &schema, &decls, &sources(evolved));
+    assert_eq!(edits.len(), 1, "one spent @was consumed");
+    assert!(edits[0].label.contains("Widget.barcode"), "{:?}", edits[0]);
+
+    let rewritten = migrate::apply_spent_was(evolved, &edits);
+    assert!(
+        !rewritten.contains("@was"),
+        "directive removed: {rewritten}"
+    );
+    // Surgical: the rest of the field (and its other modifier) is byte-clean.
+    assert_eq!(
+        rewritten, "Widget { id: Id  barcode: text (unique) }",
+        "{rewritten}"
+    );
+    // The rewritten source still parses + checks cleanly.
+    checked(&rewritten);
+}
+
+#[test]
+fn gen_self_consumes_a_model_was_on_its_own_line() {
+    let base = "Legacy { id: Id  name: text }";
+    let evolved = "@was(\"legacy\")\nWidget { id: Id  name: text }";
+    let prev = Snapshot::from_schema(&checked(base));
+    let (decls, schema) = checked_with_decls(evolved);
+    let steps = migrate::diff(&prev, &schema);
+
+    assert!(steps
+        .iter()
+        .any(|s| matches!(s, migrate::Step::RenameTable { from, to }
+            if from == "legacy" && to == "widget")));
+
+    let edits = migrate::spent_was_edits(&steps, &schema, &decls, &sources(evolved));
+    assert_eq!(edits.len(), 1);
+    let rewritten = migrate::apply_spent_was(evolved, &edits);
+    // The whole decorator line (incl its newline) is removed, leaving the model intact.
+    assert_eq!(rewritten, "Widget { id: Id  name: text }", "{rewritten}");
+    checked(&rewritten);
+}
+
+#[test]
+fn a_spent_was_is_not_consumed() {
+    // A `@was` whose rename is already captured (the new name is already in the prior
+    // snapshot) produces no rename step, so gen must NOT strip it — that is W0107's job,
+    // and stripping it here would silently edit source on an unrelated `gen`.
+    let already = "Widget { id: Id  barcode: text @was(\"upc\") }";
+    let prev = Snapshot::from_schema(&checked("Widget { id: Id  barcode: text }"));
+    let (decls, schema) = checked_with_decls(already);
+    // A real, unrelated change rides along so the diff is non-empty.
+    let evolved = "Widget { id: Id  barcode: text @was(\"upc\")  note: text? }";
+    let (decls2, schema2) = checked_with_decls(evolved);
+    let steps = migrate::diff(&prev, &schema2);
+    assert!(steps
+        .iter()
+        .any(|s| matches!(s, migrate::Step::AddColumn { column, .. } if column.name == "note")));
+    assert!(!steps
+        .iter()
+        .any(|s| matches!(s, migrate::Step::RenameColumn { .. })));
+
+    // No rename step for the spent @was ⇒ nothing consumed, in either schema state.
+    assert!(migrate::spent_was_edits(
+        &migrate::diff(&prev, &schema),
+        &schema,
+        &decls,
+        &sources(already)
+    )
+    .is_empty());
+    assert!(migrate::spent_was_edits(&steps, &schema2, &decls2, &sources(evolved)).is_empty());
+}
+
+#[test]
+fn rename_hints_fire_on_a_drop_add_same_family() {
+    // A rename spelled without `@was` reads as drop+add; the teach hint points at `@was`.
+    let base = "Widget { id: Id  label: text }";
+    let evolved = "Widget { id: Id  title: text }";
+    let prev = Snapshot::from_schema(&checked(base));
+    let now = Snapshot::from_schema(&checked(evolved));
+    let hints = migrate::rename_hints(&prev, &now);
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    let msg = hints[0].message();
+    assert!(
+        msg.contains("label") && msg.contains("title") && msg.contains("@was(\"label\")"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn rename_hint_is_silent_when_the_rename_is_declared() {
+    // With `@was`, the diff is a rename step, not a drop+add — no ambiguity, no hint.
+    let base = "Widget { id: Id  label: text }";
+    let evolved = "Widget { id: Id  title: text @was(\"label\") }";
+    let prev = Snapshot::from_schema(&checked(base));
+    let now = Snapshot::from_schema(&checked(evolved));
+    assert!(migrate::rename_hints(&prev, &now).is_empty());
+}
+
+#[test]
+fn rename_hint_is_silent_across_different_type_families() {
+    // Dropping a text column and adding an int one is unlikely to be a rename — no hint,
+    // so the signal stays low-false-positive.
+    let base = "Widget { id: Id  label: text }";
+    let evolved = "Widget { id: Id  count: int }";
+    let prev = Snapshot::from_schema(&checked(base));
+    let now = Snapshot::from_schema(&checked(evolved));
+    assert!(migrate::rename_hints(&prev, &now).is_empty());
 }
 
 // ---------- opaque columns + exotic indexes in the neutral snapshot ---------

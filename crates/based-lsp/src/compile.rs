@@ -2561,6 +2561,18 @@ fn drift_diagnostics(
             }
             by_span.entry(key).or_default().push(step.describe());
         }
+        // Teach-at-checkpoint: a drop-one/add-one-same-family diff on a table is ambiguous
+        // with a rename, so the drift note points at `@was` (D105).
+        let now = migrate::Snapshot::from_schema(schema);
+        for hint in migrate::rename_hints(&prev, &now) {
+            if let Some(span) = self_model_span(schema, decls, &hint.table) {
+                let key = (span.file.0, span.start, span.end);
+                if !by_span.contains_key(&key) {
+                    order.push(span);
+                }
+                by_span.entry(key).or_default().push(hint.message());
+            }
+        }
         for span in order {
             let key = (span.file.0, span.start, span.end);
             let note = by_span.remove(&key).unwrap_or_default().join("; ");
@@ -3844,6 +3856,36 @@ mod tests {
             snap.diagnostics.iter().any(|d| d.code == "W0108"),
             "expected W0108 drift, got {:?}",
             snap.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// A drop-one/add-one-same-family diff (a rename spelled as drop+add) tags the W0108
+    /// drift note with the teach-`@was` hint, so the ambiguity is self-revealing (D105).
+    #[test]
+    fn drift_note_teaches_was_on_a_drop_add_rename() {
+        let ws = TempWorkspace::new("teach");
+        ws.write("based.toml", "");
+        // Source renames `upc` → `barcode` WITHOUT @was — an ambiguous drop+add.
+        ws.write("schema.bsl", "Product {\n  barcode: text\n}\n");
+        ws.write(
+            "migrations/0001_init/schema.snap",
+            "snapshot v1 dialect=neutral\n\ntable product\n  column upc text not_null\n",
+        );
+        ws.write("migrations/0001_init/up.mig", "# up\n");
+
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let w0108: Vec<_> = snap
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "W0108")
+            .collect();
+        assert!(!w0108.is_empty(), "expected W0108 drift");
+        assert!(
+            w0108
+                .iter()
+                .any(|d| d.notes.iter().any(|n| n.contains("@was(\"upc\")"))),
+            "drift note should teach @was: {:?}",
+            w0108.iter().map(|d| &d.notes).collect::<Vec<_>>()
         );
     }
 

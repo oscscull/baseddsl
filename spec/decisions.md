@@ -4668,6 +4668,31 @@ rename gesture never appears in any PR, so users never learn it — and a rename
 Rejected: interactive gen prompts; keep-forever Terraform-`moved`-style hints (the ledger already
 holds transition history). Spec seam: migrations.md E5.
 
+**Shipped (2026-07-23).** `based-codegen::migrate::lifecycle` holds the two offline helpers on the
+existing diff engine:
+- `spent_was_edits(steps, schema, decls, sources) -> Vec<SpentWas>` keys off the `rename` steps the
+  migration **actually emitted** (a spent/inert `@was` produces none), maps each back to its
+  field/model `@was` via the schema's physical-column/table names, and returns the surgical byte range
+  to remove. Field-level removal reconstructs the full `@was("…")` extent from the string-literal span
+  the parser keeps (the only span it stores) by scanning out to `@was(` and `)`, then eats the single
+  separating whitespace so `text? @was("x") (unique)` → `text? (unique)`. Model-level removal takes the
+  full decorator span; when it sits alone on its line the whole line (incl newline) goes, else the
+  minimal directive±one-space edit. `apply_spent_was` applies highest-offset-first (idempotent). The
+  **ambiguity D105 didn't pin — a `@was` sharing a line with other decorators — is resolved to the
+  least-surprising minimal edit** (directive + one adjacent space, decl untouched), noted in the source
+  doc, not an owner-level policy.
+- `rename_hints(prev, now) -> Vec<RenameHint>`: one hint per table with **exactly one** dropped column
+  and **exactly one** added column of the **same neutral type family** (a 2-drop/2-add table is left
+  silent — the pairing would be a guess, precisely what `@was` makes explicit). `RenameHint::message()`
+  is the shared string.
+
+Wiring: `based-cli` `cmd_migrate_gen` runs the self-consume (writes each touched `.bsl` back, logs each)
+then prints the hints; `cmd_migrate_apply` prints the offending migration's hints at the
+`MigrateError::Destructive` gate. `based-runtime` `PlannedMigration` gained `rename_hints` (computed in
+`load_migrations` from the same per-migration `prev → snap` diff). `based-lsp` `drift_diagnostics`
+appends the hint to the matching model's `W0108` note. `W0107` (spent-`@was`) is unchanged. Gate: full
+`make check` green (fast gate + all three live suites + all examples + the axum-helpdesk smoke).
+
 ## D106 — `up.mig` is snapshot-authoritative: honest contract + a real editable surface (NF8)
 
 **Decision.** The generated `up.mig` header says “edit if needed, then apply,” but apply/render

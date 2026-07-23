@@ -378,7 +378,7 @@ fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
 fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     use based_codegen::migrate;
 
-    let (_project, schema, _decls, _sources, _warnings) = load_checked(root)?;
+    let (_project, schema, decls, sources, _warnings) = load_checked(root)?;
     let migrations_dir = root.join("migrations");
 
     // The baseline is the highest-NNNN migration's snapshot (empty for 0001_init).
@@ -424,6 +424,52 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
             String::new()
         }
     );
+
+    // Self-consume any `@was` this migration just captured: the rename now lives durably in
+    // the migration ledger (schema.snap + the `rename` step), so the source hint is dead
+    // weight. Only a directive whose `rename` step was actually emitted is removed — a
+    // still-live or spent `@was` is never touched.
+    let edits = migrate::spent_was_edits(&steps, &schema, &decls, &sources);
+    if !edits.is_empty() {
+        consume_spent_was(&sources, &edits, &dir_name)?;
+    }
+
+    // Teach-at-checkpoint: when this diff drops one column and adds one same-family column
+    // on a table, it is ambiguous with a rename — point at `@was` so the gesture is
+    // discoverable with zero prior knowledge (D105).
+    let now = migrate::Snapshot::from_schema(&schema);
+    for hint in migrate::rename_hints(&prev, &now) {
+        println!("hint: {}", hint.message());
+    }
+    Ok(())
+}
+
+/// Apply the [`spent_was_edits`](based_codegen::migrate::spent_was_edits) removals to the
+/// `.bsl` sources they touch and write each file back, logging every consumed `@was`. The
+/// removal is surgical (just the directive), so the rest of each declaration is byte-clean.
+fn consume_spent_was(
+    sources: &[(PathBuf, String)],
+    edits: &[based_codegen::migrate::SpentWas],
+    dir_name: &str,
+) -> Result<(), CliError> {
+    use based_codegen::migrate;
+    use std::collections::BTreeMap;
+
+    let mut by_file: BTreeMap<usize, Vec<migrate::SpentWas>> = BTreeMap::new();
+    for e in edits {
+        by_file.entry(e.file).or_default().push(e.clone());
+    }
+    for (fid, file_edits) in by_file {
+        let (path, src) = &sources[fid];
+        let rewritten = migrate::apply_spent_was(src, &file_edits);
+        std::fs::write(path, &rewritten).map_err(|e| io_at("writing", path, e))?;
+    }
+    for e in edits {
+        println!(
+            "removed spent {} (rename captured in migrations/{dir_name}/)",
+            e.label
+        );
+    }
     Ok(())
 }
 
@@ -540,10 +586,24 @@ async fn cmd_migrate_apply(
     let urls = shard_urls(database_url)?;
     for url in &urls {
         let backend = backend(dialect, url)?;
-        let report = migrate::apply(&*backend, dialect, &migrations, &opts)
-            .await
-            .map_err(|e| CliError::migrate(format!("applying migrations to {}", redact(url)), e))?;
-        report_apply(&report, &redact(url));
+        match migrate::apply(&*backend, dialect, &migrations, &opts).await {
+            Ok(report) => report_apply(&report, &redact(url)),
+            Err(e) => {
+                // At the destructive gate, teach `@was`: the refused migration may be a
+                // rename spelled as a drop+add (D105).
+                if let migrate::MigrateError::Destructive { id } = &e {
+                    if let Some(m) = migrations.iter().find(|m| &m.id == id) {
+                        for hint in &m.rename_hints {
+                            eprintln!("hint: {hint}");
+                        }
+                    }
+                }
+                return Err(CliError::migrate(
+                    format!("applying migrations to {}", redact(url)),
+                    e,
+                ));
+            }
+        }
     }
     Ok(())
 }

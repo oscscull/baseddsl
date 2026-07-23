@@ -81,10 +81,10 @@ bar met (`make check` green end-to-end). **Track T (core DB parity) is now at T1
 follow-ups are RESOLVED (D103–D107, owner-approved 2026-07-21); NF11 (D103, keystone — reworded
 principle 8), NF9 opaque `raw(…)` column + exotic-index seam (D104), and **NF13 named `tx` step
 bindings `create … as name;` / `$name.field` replacing `^` (D107) are now shipped — `^`/`E0170`
-retired**.** Remaining queued: NF7 `@was` self-consuming gen (D105), NF8 snapshot-authoritative
-`up.mig` (D106). **Next: implement the remaining decided items** (D105/D106), interleaved with
-**Track T6 (referential actions)** and the remaining T5 m2m flattening-projection slice (now
-unblocked by D103). Batch-by-batch history is in `PLAN-archive.md`.
+retired**; NF7 `@was` self-consuming gen + teach-at-checkpoint (D105) is now shipped.** Remaining
+queued: NF8 snapshot-authoritative `up.mig` (D106). **Next: implement the remaining decided item**
+(D106), interleaved with **Track T6 (referential actions)** and the remaining T5 m2m
+flattening-projection slice (now unblocked by D103). Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -433,11 +433,20 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   never a `200 null` the typed client can't decode. Same response for absent vs out-of-scope
   (no existence leak); a not-found releases the idempotency claim. Proven unit + live SQLite +
   the helpdesk smoke's new cross-tenant status-update assertion.
-- **NF7. ✅ DECIDED (D105), implementation queued. `@was` lifecycle.** Resolution (owner 2026-07-21):
-  **`gen` self-consumes** the spent `@was` from source (visible log line; the rename lives durably in
-  the ledger) + **teach-at-checkpoint** — a drop-X/add-Y-same-family diff prints "if this renames X→Y,
-  add `@was(\"X\")`" in gen/`W0108`/destructive-gate; editor-rename insert already shipped (D80).
-  `W0107` kept as fallback. Original writeup below (implementation context).
+- **NF7. ✅ done (D105). `@was` lifecycle.** Shipped end to end (owner-approved 2026-07-21):
+  **`gen` self-consumes** the spent `@was` — after `based migrate gen` writes a migration that emitted a
+  `rename` step, it surgically strips that exact directive from the `.bsl` source and logs it
+  (`removed spent @was("old") from Model.field …`); the rewrite is conservative (only a directive whose
+  rename step was actually emitted, never a spent/still-live one) and idempotent. **Teach-at-checkpoint**
+  — a single-table drop-one/add-one-same-family diff prints `if this renames X → Y, add @was("X") …` in
+  `based migrate gen` stdout, the `W0108` drift note, and the `based migrate apply` destructive gate.
+  `W0107` kept as the fallback lint for a hand-authored migration. Editor-rename `@was` insert already
+  shipped (D80). New: `based-codegen::migrate::lifecycle` (`spent_was_edits`/`apply_spent_was`/
+  `rename_hints`); wired through `based-cli` gen + apply and `based-lsp` drift; `PlannedMigration.rename_hints`.
+  Proven: codegen unit (consume field/model, spent-not-consumed, hint fires/silent), CLI e2e
+  (source rewritten, hint printed, re-gen no-op), runtime unit (hint on the destructive migration), LSP
+  (W0108 note carries hint; W0107 still fires), `make check` green (live + examples + helpdesk smoke).
+  Original writeup below (implementation context).
   Symptom: `@was` is a one-shot gen-time hint, so after `migrate gen` it is dead weight —
   either it lingers (W0107 cruft, a second commit to remove) or the author strips it
   pre-commit and no PR ever shows the gesture, so users never learn it and hand-write

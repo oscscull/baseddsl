@@ -44,6 +44,7 @@
 //! a model that declares a non-default `id` records it explicitly.
 
 mod diff;
+mod lifecycle;
 mod model;
 mod sql;
 mod up_mig;
@@ -52,6 +53,7 @@ pub use diff::{
     diff, diff_snapshots, drift, has_raw_step, parse_raw_steps, strip_raw_steps, ColumnChange,
     ScopeChange, Step,
 };
+pub use lifecycle::{apply_spent_was, rename_hints, spent_was_edits, RenameHint, SpentWas};
 pub use model::{
     snapshot, ColumnSnap, IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot,
     TableSnap,

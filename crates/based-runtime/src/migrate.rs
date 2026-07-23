@@ -54,6 +54,9 @@ pub struct PlannedMigration {
     /// Any up step is destructive (a drop / narrowing / new not-null-without-default /
     /// new unique) → apply requires `--allow-destructive`.
     pub destructive: bool,
+    /// Teach-at-checkpoint messages: a drop-one-column/add-one-same-family-column pair on a
+    /// table is ambiguous with a rename, so the destructive gate points at `@was` (D105).
+    pub rename_hints: Vec<String>,
     /// The author-written `down.mig` (raw per-dialect SQL, split into statements), if present.
     pub down_sql: Option<Vec<String>>,
 }
@@ -202,6 +205,12 @@ pub fn load_migrations(
         );
         let up_hash = migrate::content_hash(&up_text);
         let destructive = steps.iter().any(|s| s.destructive());
+        // The rename teach hint keys off this migration's own diff (prev → this snapshot),
+        // so the destructive gate can point a drop+add at `@was` (D105).
+        let rename_hints = migrate::rename_hints(&prev, &snap)
+            .iter()
+            .map(|h| h.message())
+            .collect();
 
         let down_path = path.join("down.mig");
         let down_sql = if down_path.is_file() {
@@ -216,6 +225,7 @@ pub fn load_migrations(
             up_sql,
             up_hash,
             destructive,
+            rename_hints,
             down_sql,
         });
         prev = snap;
@@ -597,8 +607,45 @@ mod tests {
             up_sql: vec![],
             up_hash: hash.to_string(),
             destructive: false,
+            rename_hints: vec![],
             down_sql: None,
         }
+    }
+
+    #[test]
+    fn load_migrations_carries_the_rename_teach_hint() {
+        // A migration that drops one column and adds one same-family column (a rename
+        // spelled as drop+add) is destructive AND carries the teach hint the destructive
+        // gate surfaces (D105).
+        let dir = std::env::temp_dir().join(format!("based-mig-hint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let m1 = dir.join("migrations/0001_init");
+        let m2 = dir.join("migrations/0002_relabel");
+        std::fs::create_dir_all(&m1).unwrap();
+        std::fs::create_dir_all(&m2).unwrap();
+        std::fs::write(
+            m1.join("schema.snap"),
+            "snapshot v1 dialect=neutral\n\ntable widget\n  column label text not_null\n",
+        )
+        .unwrap();
+        std::fs::write(m1.join("up.mig"), "# up\n").unwrap();
+        std::fs::write(
+            m2.join("schema.snap"),
+            "snapshot v1 dialect=neutral\n\ntable widget\n  column title text not_null\n",
+        )
+        .unwrap();
+        std::fs::write(m2.join("up.mig"), "# up\n").unwrap();
+
+        let migs = load_migrations(&dir, Dialect::Postgres).expect("load");
+        assert_eq!(migs.len(), 2);
+        assert!(migs[1].destructive, "drop column is destructive");
+        assert_eq!(migs[1].rename_hints.len(), 1, "one rename hint");
+        assert!(
+            migs[1].rename_hints[0].contains("label") && migs[1].rename_hints[0].contains("title"),
+            "{:?}",
+            migs[1].rename_hints
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

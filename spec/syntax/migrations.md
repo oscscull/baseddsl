@@ -271,13 +271,31 @@ Product { ... }
   present and `upc` present in the snapshot, emits `rename column product.upc -> barcode` instead of
   a drop+add pair.
 - **Model-level** `@was("old_table")` is a decorator; it drives `rename table`.
-- **`@was` is a diff-time directive, transient by nature.** Once the rename migration is generated
-  and the snapshot updated, the `@was` has done its job — the new name is now the snapshot's name.
-  Leaving it is harmless (the diff finds no matching old name and ignores it); the LSP surfaces a
-  spent `@was` as a lint (**TODO E5:** `W01xx` "rename already captured — remove `@was`"). This keeps
-  `@was` from accreting as permanent schema noise.
+- **`@was` is a diff-time directive, transient by nature — and `gen` retires it for you.** Once
+  `based migrate gen` writes a migration that *consumes* a `@was` (its `rename` step is emitted), it
+  **self-consumes the spent directive**: it strips that exact `@was("old")` token from the `.bsl`
+  source and prints a visible line (`removed spent @was("old") from Model.field (rename captured in
+  migrations/NNNN_slug/)`). The rename now lives durably in the ledger — the `rename` step in `up.mig`
+  and the new name in `schema.snap` (principle 4, one source of truth) — so the source hint is dead
+  weight the moment it is captured. The removal is surgical: only the directive (and its adjacent
+  separator, or its whole line for a model-level decorator that sits alone on one line) is removed, so
+  the rest of the declaration's formatting is untouched. The rewrite is conservative — **only** a
+  `@was` whose `rename` step was actually emitted is removed, so a spent or still-live `@was` (which
+  produces no step) is never silently edited. For the case where `gen` didn't run (a hand-authored
+  migration), the LSP still flags a lingering spent `@was` as **`W0107`** "rename already captured —
+  remove it" (the fallback).
+- **Teach-at-checkpoint — `@was` reveals itself at the ambiguous moment.** A rename authored *without*
+  `@was` is, to a structural diff, a drop of X plus an add of Y — indistinguishable from a genuine
+  drop+add, and applied as a destructive drop. So when a single-table diff **drops one column X and
+  adds one same-family column Y**, the tool prints a hint — `if this renames X → Y, add @was("X") on Y
+  and re-run based migrate gen; otherwise X is dropped (data loss)` — in three places: `based migrate
+  gen` stdout, the offline `W0108` drift note, and the `based migrate apply` destructive gate. This
+  gives `@was` a self-revealing property over the run→read→edit→re-run loop with zero prior knowledge,
+  and needs no interactive prompt (which would hang a non-TTY harness and make `gen` non-reproducible).
 - **No cross-inference.** `@was` maps exactly one old name to one new name. The tool never chains or
   guesses a rename from a type/position match; a rename you don't declare is a drop+add, full stop.
+  (The teach hint *suggests* `@was` at the one-drop/one-add moment; it never applies one — a two-drop
+  or two-add diff is left silent precisely because the pairing would be a guess.)
 
 `@was` is the *only* new authored `.bsl` surface migrations introduce — the migrations themselves
 are generated artifacts, not written by hand. It is added to `grammar.ebnf` as a `modifier`
