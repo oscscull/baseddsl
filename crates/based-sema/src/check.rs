@@ -1075,13 +1075,22 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         }
         ret
     };
-    // At the top level there is no enclosing `tx`, so no back-reference is in scope.
+    // At the top level there is no enclosing `tx`, so no step binding is in scope.
     // A mutation may opt out of `@scope` on its write models  — that both drops
     // the injected guard and lets a `create` assign the (otherwise engine-managed)
     // scope column, so the flag rides into every write check.
     let unscoped = m.unscoped.is_some();
+    let bindings = Bindings::default();
     for stmt in &m.body {
-        check_write(stmt, cx, &params, None, m.scoped.as_ref(), unscoped, sink);
+        check_write(
+            stmt,
+            cx,
+            &params,
+            &bindings,
+            m.scoped.as_ref(),
+            unscoped,
+            sink,
+        );
     }
 
     // A create on a keyless return model has no generated `id` to read the row back by,
@@ -1260,9 +1269,6 @@ fn check_shape_on_real_delete(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut 
     }
 }
 
-/// Check one write statement. `back` is the model of the immediately preceding
-/// `create` in the enclosing `tx` (`None` at the top level or before the first
-/// create) — the model a `^.field` back-reference resolves against.
 /// The query's `page` clause, if any (inline or block body).
 fn page_clause(body: &QueryBody) -> Option<&PageClause> {
     let clauses: &[Clause] = match body {
@@ -1318,7 +1324,7 @@ fn check_write(
     stmt: &WriteStmt,
     cx: &Cx,
     params: &[String],
-    back: Option<usize>,
+    bindings: &Bindings,
     scoped: Option<&Scoped>,
     unscoped: bool,
     sink: &mut Sink,
@@ -1328,10 +1334,13 @@ fn check_write(
             model,
             assigns,
             conflict,
+            binding: _,
         } => {
             if let Some(mi) = write_model(model, cx, sink) {
                 for a in assigns {
-                    check_assign(a, mi, cx, params, back, /* in_update = */ false, sink);
+                    check_assign(
+                        a, mi, cx, params, bindings, /* in_update = */ false, sink,
+                    );
                 }
                 check_scope_assign(mi, assigns, unscoped, cx, sink);
                 check_create_required(mi, assigns, model, scoped, unscoped, cx, sink);
@@ -1348,7 +1357,9 @@ fn check_write(
             if let Some(mi) = write_model(model, cx, sink) {
                 resolve::check_predicate(where_, Some(mi), cx, params, sink);
                 for a in assigns {
-                    check_assign(a, mi, cx, params, back, /* in_update = */ true, sink);
+                    check_assign(
+                        a, mi, cx, params, bindings, /* in_update = */ true, sink,
+                    );
                 }
             }
         }
@@ -1373,12 +1384,46 @@ fn check_write(
             }
         }
         WriteStmt::Tx(inner) => {
-            // `^` reads the immediately preceding `create`; track it as we descend.
-            let mut prev = back;
+            // Named step bindings (`create … as name`): a binding reaches any *prior*
+            // step. Pre-scan every binding name in this tx so a forward reference is
+            // distinguishable from a plain unbound name (both E0281); then descend,
+            // growing the reachable set after each bound create and flagging a binding
+            // that shadows a param or duplicates another (E0280).
+            let mut binds = bindings.clone();
             for s in inner {
-                check_write(s, cx, params, prev, scoped, unscoped, sink);
-                if let WriteStmt::Create { model, .. } = s {
-                    prev = write_model(model, cx, &mut Sink::default());
+                if let WriteStmt::Create {
+                    binding: Some(b), ..
+                } = s
+                {
+                    binds.all.insert(b.node.clone());
+                }
+            }
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for s in inner {
+                check_write(s, cx, params, &binds, scoped, unscoped, sink);
+                if let WriteStmt::Create {
+                    model,
+                    binding: Some(b),
+                    ..
+                } = s
+                {
+                    if params.iter().any(|p| p == &b.node) {
+                        sink.error_note(
+                            code::BINDING_SHADOW,
+                            b.span,
+                            format!("step binding `{}` shadows a parameter", b.node),
+                            "rename the binding — `$…` must name one thing",
+                        );
+                    } else if !seen.insert(b.node.as_str()) {
+                        sink.error(
+                            code::BINDING_SHADOW,
+                            b.span,
+                            format!("duplicate step binding `{}` in this `tx`", b.node),
+                        );
+                    }
+                    if let Some(mi) = write_model(model, cx, &mut Sink::default()) {
+                        binds.resolved.insert(b.node.clone(), mi);
+                    }
                 }
             }
         }
@@ -1397,7 +1442,7 @@ fn check_assign(
     mi: usize,
     cx: &Cx,
     params: &[String],
-    back: Option<usize>,
+    bindings: &Bindings,
     in_update: bool,
     sink: &mut Sink,
 ) {
@@ -1435,6 +1480,16 @@ fn check_assign(
         );
         return;
     };
+    // A `$name.field` reference to a prior `tx` step binding (D107): `$` unifies params
+    // + step bindings, so a `$name` that is neither `$ctx` nor a declared param must be a
+    // step binding — resolve it against the bound step's model, not the model being
+    // assigned. Type-check happens inside; nothing else applies to a binding reference.
+    if let Value::Param(pr) = value {
+        if pr.name.node != "ctx" && !params.iter().any(|p| p == &pr.name.node) {
+            check_binding_ref(pr, bindings, &member.kind, &a.col, cx, sink);
+            return;
+        }
+    }
     // Assigning an enum column takes a bare variant (`status = paid`), not a column
     // path — check membership (E0154) instead of resolving it as a field.
     if let MemberKind::Scalar {
@@ -1448,16 +1503,10 @@ fn check_assign(
             }
         }
     }
-    // A `^.field` back-reference resolves against the preceding create's model, not
-    // the model being assigned; delegate the rest of the value to the shared checker.
-    if let Value::Back(b) = value {
-        check_back(b, back, cx, sink);
-    } else {
-        resolve::check_value(value, Some(mi), cx, params, sink);
-    }
+    resolve::check_value(value, Some(mi), cx, params, sink);
     // The assigned value's type must agree with the target column (E0153); silent
     // when either side failed to resolve above.
-    resolve::check_assign_type(&member.kind, &a.col, value, mi, back, cx, sink);
+    resolve::check_assign_type(&member.kind, &a.col, value, mi, cx, sink);
 }
 
 /// On a scoped model  the `@scope` column is engine-managed on `create`: it is
@@ -1649,8 +1698,17 @@ fn check_upsert(
 
     // The update branch is an ordinary update — check its assigns — but it may not assign
     // a conflict column (moving the key would break the conflict + the read-back).
+    let no_bindings = Bindings::default();
     for a in &oc.update {
-        check_assign(a, mi, cx, params, None, /* in_update = */ true, sink);
+        check_assign(
+            a,
+            mi,
+            cx,
+            params,
+            &no_bindings,
+            /* in_update = */ true,
+            sink,
+        );
         if target.iter().any(|t| *t == a.col.node) {
             sink.error_note(
                 code::UPSERT_TARGET_SET,
@@ -1696,21 +1754,52 @@ fn is_required(kind: &MemberKind) -> bool {
     }
 }
 
-/// Resolve a `^.field` back-reference: there must be a preceding `create` in the
-/// enclosing `tx` (`back`), and `field` must be one of its columns.
-fn check_back(b: &BackRef, back: Option<usize>, cx: &Cx, sink: &mut Sink) {
-    match back {
-        None => sink.error(
-            code::BACKREF_SCOPE,
-            b.span,
-            "`^` needs a preceding `create` in the same `tx`",
-        ),
-        Some(mi) => {
-            if cx.model(mi).member(&b.field.node).is_none() {
-                unknown_field(cx, mi, &b.field, sink);
-            }
-        }
-    }
+/// The `tx` step bindings in scope while checking a write (D107). `resolved` maps a
+/// binding name reachable *now* (a create at a prior step, `create … as name`) to its
+/// model; `all` is every binding name declared anywhere in the enclosing `tx`, so a
+/// forward reference (`$x` used before its `as x`) reads distinctly from a plain typo.
+#[derive(Clone, Default)]
+struct Bindings {
+    resolved: std::collections::HashMap<String, usize>,
+    all: std::collections::HashSet<String>,
+}
+
+/// Resolve a `$name.field` reference to a `tx` step binding: `name` must name a binding
+/// reachable from here (a prior step), the reference is field-access only (one segment),
+/// and `field` must be a column of the bound step's model, its family agreeing with the
+/// assigned column. `E0281` covers an unbound / forward-referenced name and a malformed
+/// (non single-field) reference.
+fn check_binding_ref(
+    pr: &ParamRef,
+    bindings: &Bindings,
+    target: &MemberKind,
+    col: &Ident,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let name = &pr.name.node;
+    let Some(&mi) = bindings.resolved.get(name) else {
+        let msg = if bindings.all.contains(name) {
+            format!("`${name}` is bound by a later step — a step binding reaches only prior steps")
+        } else {
+            format!("`${name}` is not a parameter or a bound step (`create … as {name}`)")
+        };
+        sink.error(code::BINDING_UNBOUND, pr.name.span, msg);
+        return;
+    };
+    let [field] = pr.path.as_slice() else {
+        sink.error(
+            code::BINDING_UNBOUND,
+            pr.name.span,
+            format!("reference a bound step's field as `${name}.field` (e.g. `${name}.id`)"),
+        );
+        return;
+    };
+    let Some(member) = cx.model(mi).member(&field.node) else {
+        unknown_field(cx, mi, field, sink);
+        return;
+    };
+    resolve::check_field_assign_type(target, col, &member.kind, sink);
 }
 
 fn write_model(name: &Ident, cx: &Cx, sink: &mut Sink) -> Option<usize> {

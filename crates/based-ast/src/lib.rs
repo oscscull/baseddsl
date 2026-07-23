@@ -559,6 +559,9 @@ pub enum WriteStmt {
         assigns: Vec<Assign>,
         /// `on conflict (cols) update { … }` — upsert. `None` for a plain insert.
         conflict: Option<OnConflict>,
+        /// `create … as <name>` — binds this step's produced row so a later `tx` step
+        /// can reference a column of it as `$name.field`. `None` for an unbound step.
+        binding: Option<Ident>,
     },
     Update {
         model: Ident,
@@ -692,20 +695,10 @@ pub enum Value {
     Path(Path),
     Lit(Literal),
     Func(FuncCall),
-    /// `^.field` — a tx back-reference. Reads a field of the row the
-    /// immediately preceding `create` in the enclosing `tx` produced (the FK-wiring
-    /// case is `user = ^.id`). Legal only in a `tx` write body.
-    Back(BackRef),
 }
 
-/// `^.field` — see `Value::Back`. `span` covers the whole `^.field` for diagnostics.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BackRef {
-    pub field: Ident,
-    pub span: Span,
-}
-
-/// `$name` or `$ctx.org`.
+/// `$name`, `$ctx.org`, or `$step.field` — a param, `$ctx` bag field, or a `tx` step
+/// binding (`create … as step`) reference; `$` unifies to "a value bound in this callable".
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamRef {
     pub name: Ident,

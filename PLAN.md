@@ -79,11 +79,12 @@ bar met (`make check` green end-to-end). **Track T (core DB parity) is now at T1
 **T3 atomic update expressions (D100)**, **T4 aggregations + group-by + having (D101)**, **T5 upsert
 `create … on conflict update` + m2m-via-explicit-junction (D102)**. **The owner-flagged design
 follow-ups are RESOLVED (D103–D107, owner-approved 2026-07-21); NF11 (D103, keystone — reworded
-principle 8) and NF9 opaque `raw(…)` column + exotic-index seam (D104) are now shipped.** Remaining
-queued: NF7 `@was` self-consuming gen (D105), NF8 snapshot-authoritative `up.mig` (D106), NF13 named
-`tx` bindings replacing `^` (D107). **Next: implement the decided items** (D107/D105/D106),
-interleaved with **Track T6 (referential actions)** and the remaining T5 m2m flattening-projection
-slice (now unblocked by D103). Batch-by-batch history is in `PLAN-archive.md`.
+principle 8), NF9 opaque `raw(…)` column + exotic-index seam (D104), and **NF13 named `tx` step
+bindings `create … as name;` / `$name.field` replacing `^` (D107) are now shipped — `^`/`E0170`
+retired**.** Remaining queued: NF7 `@was` self-consuming gen (D105), NF8 snapshot-authoritative
+`up.mig` (D106). **Next: implement the remaining decided items** (D105/D106), interleaved with
+**Track T6 (referential actions)** and the remaining T5 m2m flattening-projection slice (now
+unblocked by D103). Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -633,13 +634,23 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   (wire contract; the miss is a loud E0111, not silent). The irrelevant resolved-query/ctx
   hover sections remain NF10's whole-decl-span bleed, filed there.
 
-- **NF13. ✅ DECIDED (D107), implementation queued. Named `tx` step bindings replace `^`.**
-  Resolution (owner 2026-07-21): bind a step with `create … as name;`, reference `$name.field`
-  (reaches any prior step, unifies `$` = a value bound in this callable, single-assignment /
-  field-access only). **`^` removed entirely — no back-compat shim** ("bin it off mercilessly"):
-  `Tok::Caret`/`Value::Back`/`BackRef`/`BackCtx` + `E0170` all go; a `^` is a parse error pointing to
-  `as`. Codes E0280 (shadow/dup binding) / E0281 (unbound/forward name). Migrate helpdesk
-  `open_ticket` + goldens. Original writeup below.
+- **NF13. ✅ done (D107). Named `tx` step bindings replace `^`.** Bind a step with
+  `create … as name;` and reference a column of it from **any** later step as `$name.field`; `$`
+  unifies to "a value bound in this callable" (params + `$ctx` + step bindings), single-assignment
+  and field-access only (principle 5 intact). **`^` removed entirely — no back-compat shim**:
+  `Tok::Caret` / `Value::Back` / `BackRef` / `BackCtx` and `E0170` are all **retired**; a `^` in
+  source is now an `E0001` parse error whose message points at `create … as <name>;` + `$name.field`.
+  A binding shadowing a param or duplicating another is **E0280**; an unbound or forward-referenced
+  `$name` is **E0281** (an unknown field on the bound step reuses `E0111`). Shipped end to end —
+  grammar.ebnf + parser (`as name`, no `Caret`), AST (`Create.binding`, `Value::Back` gone), sema
+  (Bindings env reaching any prior step; E0280/E0281), codegen (name-addressed `BackCtx` map; same
+  `:id_<step>` lowering, any prior step), based-fmt (`as name` round-trip), and the editor surface
+  (a binding is a go-to-def / find-refs / rename site; `$name.field` resolves to it; hover names its
+  model). Helpdesk `open_ticket` + tests migrated off `^`. Verified: parser +/- (as-binds; bare `^`
+  errors → `as`), sema +/- (E0280 shadow/dup, E0281 unbound/forward, happy 3-step tx where step 3
+  reaches step 1), codegen SQL (3-step reach-any-prior-step), conformance golden `tx_bindings`, fmt
+  round-trip, LSP nav/rename/hover, and **live** via `make check` (the helpdesk `open_ticket` tx ran
+  green against live Postgres/MariaDB). Original writeup below.
   Today a `tx` step back-references the prior step only via `^`
   (`create Comment { ticket = ^.id, … }`, mutations.md). Owner: the tx form is neat and
   stays, but `^.id` oversteps the keystrokes-vs-intuition line — unintuitive, ungreppable,

@@ -103,6 +103,11 @@ impl Snapshot {
         if let Some(s) = self.param_ref_at(fid, offset) {
             return Some(s);
         }
+        // A `tx` step binding (`create … as user` decl or a `$user.field` reference) →
+        // the binding decl's name. Callable-local, like a param.
+        if let Some(s) = self.binding_ref_at(fid, offset) {
+            return Some(s);
+        }
         // A `$ctx.<field>` bag field (a callable use or a `scope … = $ctx.field` term) →
         // the field's canonical occurrence. The `$ctx` bag is coherent by name across
         // the schema, so one field renames everywhere it is used.
@@ -210,6 +215,20 @@ impl Snapshot {
             if let Some(p) = decl_params(d).iter().find(|p| p.name.span == target) {
                 for pr in callable_param_refs(d) {
                     if pr.path.is_empty() && pr.name.node == p.name.node {
+                        out.push(pr.name.span);
+                    }
+                }
+            }
+        }
+        // Step-binding uses: every `$name.field` reference to the `create … as name`
+        // binding under the cursor, within its owning callable (bindings are local).
+        for d in &self.decls {
+            if let Some(b) = callable_binding_decls(d)
+                .into_iter()
+                .find(|b| b.span == target)
+            {
+                for pr in callable_param_refs(d) {
+                    if !pr.path.is_empty() && pr.name.node == b.node {
                         out.push(pr.name.span);
                     }
                 }
@@ -425,6 +444,35 @@ impl Snapshot {
                 if pr.path.is_empty() && under(&pr.name) {
                     if let Some(p) = params.iter().find(|p| p.name.node == pr.name.node) {
                         return Some(p.name.span);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The step-binding decl-name span a cursor resolves to — whether it sits on a
+    /// `create … as name` binding declaration or on the `$name` head of a `$name.field`
+    /// reference to it. `None` off any binding. Bindings are callable-local, so the span
+    /// identifies exactly one mutation's binding.
+    fn binding_ref_at(&self, fid: usize, offset: u32) -> Option<Span> {
+        let under = |id: &Ident| {
+            id.span.file.0 as usize == fid && id.span.start <= offset && offset < id.span.end
+        };
+        for d in &self.decls {
+            let binds = callable_binding_decls(d);
+            if binds.is_empty() {
+                continue;
+            }
+            if let Some(b) = binds.iter().find(|b| under(b)) {
+                return Some(b.span);
+            }
+            // A `$name.field` head (path non-empty → a step reference, not a bare param)
+            // naming one of this callable's bindings.
+            for pr in callable_param_refs(d) {
+                if !pr.path.is_empty() && under(&pr.name) {
+                    if let Some(b) = binds.iter().find(|b| b.node == pr.name.node) {
+                        return Some(b.span);
                     }
                 }
             }
@@ -719,6 +767,12 @@ impl Snapshot {
         if let Some(h) = self.binding_hover(fid, offset) {
             return Some(h);
         }
+        // A `tx` step binding (`as name` decl or a `$name.field` reference) → what it is:
+        // the model of the row it binds. Tried before field references so the `$name`
+        // head is never misread.
+        if let Some(h) = self.step_binding_hover(fid, offset) {
+            return Some(h);
+        }
         // A field reference (path segment) → the field's signature.
         if let Some(f) = self.field_ref_at(fid, offset) {
             return Some(field_hover(f));
@@ -737,6 +791,23 @@ impl Snapshot {
         }
         // Otherwise the cursor may sit on a declaration's own name.
         self.decl_site_hover(fid, offset)
+    }
+
+    /// Hover for a `tx` step binding: names the model of the row it binds, so a reader
+    /// knows what `$name.field` reaches. `None` off any binding decl / `$name` head.
+    fn step_binding_hover(&self, fid: usize, offset: u32) -> Option<String> {
+        let target = self.binding_ref_at(fid, offset)?;
+        let name = self.span_text(target)?.to_string();
+        for d in &self.decls {
+            if let Decl::Mutation(m) = d {
+                if let Some(model) = binding_model(&m.body, target) {
+                    return Some(format!(
+                        "```based\nstep binding {name}: {model}\n```\nthe row this `tx` step creates — reference it as `${name}.field`",
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// The field a reference path segment under the cursor names. Every path in a
@@ -1113,6 +1184,7 @@ impl Snapshot {
                     model,
                     assigns,
                     conflict,
+                    binding: _,
                 } => {
                     self.assign_variant_sites(model.node.as_str(), assigns, out);
                     if let Some(oc) = conflict {
@@ -1606,7 +1678,7 @@ fn decorator_items() -> Vec<CompletionItem> {
 
 /// The dotted identifier chain immediately before a `.` in `head` (which ends with
 /// that `.`) — the base path a field completion resolves. `["a", "b"]` for `a.b.`;
-/// empty when the char before the `.` is not an identifier (e.g. `^.`, `$ctx` aside).
+/// empty when the char before the `.` is not an identifier (`$ctx` aside).
 fn trailing_path(head: &str) -> Vec<String> {
     let Some(mut rest) = head.strip_suffix('.') else {
         return Vec::new();
@@ -2010,7 +2082,7 @@ fn pred_paths<'a>(p: &'a Predicate, root: &'a str, out: &mut Vec<(&'a str, &'a [
 }
 
 /// A value's field path, when it is one (a column reference or a function argument
-/// that is itself a column); params, literals, and `^.field` back-refs carry none.
+/// that is itself a column); params, literals, and `$name.field` step refs carry none.
 fn value_paths<'a>(v: &'a Value, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
     match v {
         Value::Path(p) => out.push((root, &p.segments)),
@@ -2032,6 +2104,7 @@ fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>)
                 model,
                 assigns,
                 conflict,
+                binding: _,
             } => {
                 assign_paths(assigns, model.node.as_str(), out);
                 if let Some(oc) = conflict {
@@ -2114,6 +2187,49 @@ fn clause_param_refs<'a>(c: &'a Clause, out: &mut Vec<&'a ParamRef>) {
     if let Clause::Where(p) = c {
         pred_param_refs(p, out);
     }
+}
+
+/// Every `create … as name` step-binding declaration ident in a callable body — a
+/// mutation only (queries/filters have no writes), recursing through `tx`.
+fn callable_binding_decls(d: &Decl) -> Vec<&Ident> {
+    let mut out = Vec::new();
+    if let Decl::Mutation(m) = d {
+        collect_binding_decls(&m.body, &mut out);
+    }
+    out
+}
+
+fn collect_binding_decls<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
+    for w in body {
+        match w {
+            WriteStmt::Create {
+                binding: Some(b), ..
+            } => out.push(b),
+            WriteStmt::Tx(inner) => collect_binding_decls(inner, out),
+            _ => {}
+        }
+    }
+}
+
+/// The model name of the `create … as name` binding whose decl span is `target`, if it
+/// is in this write body (recursing through `tx`).
+fn binding_model(body: &[WriteStmt], target: Span) -> Option<&str> {
+    for w in body {
+        match w {
+            WriteStmt::Create {
+                model,
+                binding: Some(b),
+                ..
+            } if b.span == target => return Some(model.node.as_str()),
+            WriteStmt::Tx(inner) => {
+                if let Some(m) = binding_model(inner, target) {
+                    return Some(m);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
@@ -4345,6 +4461,60 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
         let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
         assert!(out.contains("query heavy(floor: int)"), "{out}");
         assert!(out.contains("${min}"), "raw text must be untouched: {out}");
+    }
+
+    /// A `tx` step binding (`create … as name`) is a first-class editor symbol: the
+    /// `$name.field` head resolves to the `as name` decl (go-to-def), find-references
+    /// lists the use, rename rewrites the decl + every use, and hover names its model.
+    #[test]
+    fn tx_step_binding_navigates_and_renames() {
+        let ws = TempWorkspace::new("tx_binding");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "User { name: text }\n\
+             Address { user: User, city: text }\n\
+             shape UserRow from User { name }\n\
+             mutation signup(city: text) -> UserRow {\n\
+               tx {\n\
+                 create User { name = \"x\" } as user;\n\
+                 create Address { user = $user.id, city = $city };\n\
+               }\n\
+             }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // Go-to-def on the `$user` head resolves to the `as user` binding decl.
+        let use_off = (src.find("$user.id").unwrap() + 1) as u32;
+        let def = snap.definition_at(fid, use_off).expect("$user resolves");
+        let decl_off = (src.find("as user").unwrap() + "as ".len()) as u32;
+        let decl = snap
+            .definition_at(fid, decl_off)
+            .expect("binding decl resolves to itself");
+        assert_eq!(
+            def, decl,
+            "the `$user` head points at its `as user` binding"
+        );
+
+        // Find-references from the decl lists the `$user.id` use.
+        let refs = snap.references_at(fid, decl_off, false);
+        assert!(!refs.is_empty(), "the `$user.id` use should be listed");
+
+        // Hover on the binding names the model of the row it binds.
+        let hov = snap.hover_at(fid, decl_off).expect("binding hover");
+        assert!(hov.contains("User"), "{hov}");
+
+        // Rename `user` -> `owner` rewrites the decl and the use, not `$city`.
+        let changes = snap
+            .rename_edits(fid, decl_off, "owner")
+            .expect("binding is renameable");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        assert!(out.contains("} as owner;"), "{out}");
+        assert!(out.contains("user = $owner.id"), "{out}");
+        assert!(out.contains("city = $city"), "$city untouched: {out}");
     }
 
     impl Drop for TempWorkspace {

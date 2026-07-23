@@ -23,8 +23,8 @@
 //!   `@scope` still applies).
 //! - `tx { ... }` -> the inner statements, run in one engine-owned transaction
 //!   (the engine, not this SQL, owns BEGIN/COMMIT). Sibling `create`s
-//!   get distinct id binds (`:id_<step>`), and a `^.field` back-reference reads the
-//!   immediately preceding create — `^.id` binds that create's generated id.
+//!   get distinct id binds (`:id_<step>`), and a `create … as name` binding lets a
+//!   later step reach any prior step's row — `$name.id` binds that create's generated id.
 //!
 //! ## Returning the declared shape (create-keyed + where-keyed)
 //! Every mutation reads its written row back in its declared shape via a trailing
@@ -47,6 +47,8 @@
 //! ... FROM j WHERE <on> AND ...` / `DELETE FROM m USING j WHERE <on> AND ...` (Postgres
 //! has no inline join in a write, so the join `ON` folds into the WHERE). Postgres
 //! also forbids the target alias in `SET`, so a SET column is emitted bare there.
+
+use std::collections::HashMap;
 
 use based_ast::*;
 use based_sema::{CheckedSchema, RModel, ScopeInject, SoftDelete, SoftMode};
@@ -171,9 +173,18 @@ fn lower_mutation<'a>(
         .map(|rm| rm.scope_inject.as_slice())
         .unwrap_or(&[]);
     let mut stmts = Vec::new();
+    let no_bindings = HashMap::new();
     for stmt in &m.body {
         lower_write(
-            schema, decls, stmt, "id", None, unscoped, inject, dialect, &mut stmts,
+            schema,
+            decls,
+            stmt,
+            "id",
+            &no_bindings,
+            unscoped,
+            inject,
+            dialect,
+            &mut stmts,
         );
     }
     // Re-select the declared shape whenever the written row survives the mutation. Two
@@ -355,19 +366,19 @@ fn flat_writes(body: &[WriteStmt]) -> Vec<&WriteStmt> {
 
 /// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`
 /// is the bind name a `create`'s app-generated `id` is emitted under (`id` at top
-/// level, `id_<step>` inside a `tx` so sibling creates stay distinct); `back` is the
-/// preceding create a `^.field` reads from. A `tx` flattens: it
-/// pushes its inner writes inline and prepends the tx banner to the first of them.
-// The lowering context (schema/decls/dialect) + the per-write threading (id_param, back,
-// unscoped) genuinely need to ride together; bundling them into a struct would obscure more
-// than the arg count costs. The linted trio is intentional.
+/// level, `id_<step>` inside a `tx` so sibling creates stay distinct); `bindings` is the
+/// set of reachable `create … as name` step rows a `$name.field` reads from. A `tx`
+/// flattens: it pushes its inner writes inline and prepends the tx banner to the first.
+// The lowering context (schema/decls/dialect) + the per-write threading (id_param,
+// bindings, unscoped) genuinely need to ride together; bundling them into a struct would
+// obscure more than the arg count costs. The linted set is intentional.
 #[allow(clippy::too_many_arguments)]
 fn lower_write<'a>(
     schema: &'a CheckedSchema,
     decls: &'a [Decl],
     stmt: &'a WriteStmt,
     id_param: &str,
-    back: Option<BackCtx<'a>>,
+    bindings: &HashMap<&'a str, BackCtx<'a>>,
     unscoped: bool,
     inject: &'a [ScopeInject],
     dialect: Dialect,
@@ -378,6 +389,7 @@ fn lower_write<'a>(
             model,
             assigns,
             conflict,
+            binding: _,
         } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_create(
@@ -387,7 +399,7 @@ fn lower_write<'a>(
                     assigns,
                     conflict.as_ref(),
                     id_param,
-                    back,
+                    bindings,
                     unscoped,
                     inject,
                     dialect,
@@ -401,7 +413,7 @@ fn lower_write<'a>(
         } => {
             if let Some(m) = schema.model(&model.node) {
                 out.push(lower_update(
-                    schema, decls, m, where_, assigns, back, unscoped, inject, dialect,
+                    schema, decls, m, where_, assigns, bindings, unscoped, inject, dialect,
                 ));
             }
         }
@@ -428,9 +440,10 @@ fn lower_write<'a>(
         }
         WriteStmt::Tx(inner) => {
             let start = out.len();
-            // `^` reads the immediately preceding create; number creates so their
-            // generated ids get distinct binds and a back-reference can name one.
-            let mut prev: Option<BackCtx<'a>> = back;
+            // Number creates so their generated ids get distinct binds (`:id_<step>`);
+            // a `create … as name` binding records that step's row so a later
+            // `$name.field` (reaching any prior step) resolves against it.
+            let mut binds = bindings.clone();
             let mut step = 0usize;
             for st in inner {
                 let idp = match st {
@@ -438,21 +451,21 @@ fn lower_write<'a>(
                     _ => "id".to_string(),
                 };
                 lower_write(
-                    schema,
-                    decls,
-                    st,
-                    &idp,
-                    prev.clone(),
-                    unscoped,
-                    inject,
-                    dialect,
-                    out,
+                    schema, decls, st, &idp, &binds, unscoped, inject, dialect, out,
                 );
-                if let WriteStmt::Create { assigns, .. } = st {
-                    prev = Some(BackCtx {
-                        id_param: idp,
-                        assigns,
-                    });
+                if let WriteStmt::Create {
+                    assigns, binding, ..
+                } = st
+                {
+                    if let Some(name) = binding {
+                        binds.insert(
+                            name.node.as_str(),
+                            BackCtx {
+                                id_param: idp,
+                                assigns,
+                            },
+                        );
+                    }
                     step += 1;
                 }
             }
@@ -489,13 +502,13 @@ fn lower_create<'a>(
     assigns: &'a [Assign],
     conflict: Option<&'a OnConflict>,
     id_param: &str,
-    back: Option<BackCtx<'a>>,
+    bindings: &HashMap<&'a str, BackCtx<'a>>,
     unscoped: bool,
     inject: &'a [ScopeInject],
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect)
-        .with_back(back)
+        .with_bindings(bindings.clone())
         .with_scope_inject(!unscoped)
         .with_scope_terms(inject);
     let mut cols: Vec<String> = Vec::new();
@@ -656,13 +669,13 @@ fn lower_update<'a>(
     model: &RModel,
     where_: &Predicate,
     assigns: &'a [Assign],
-    back: Option<BackCtx<'a>>,
+    bindings: &HashMap<&'a str, BackCtx<'a>>,
     unscoped: bool,
     inject: &'a [ScopeInject],
     dialect: Dialect,
 ) -> LoweredWrite {
     let mut sel = Select::new(schema, decls, model, dialect)
-        .with_back(back)
+        .with_bindings(bindings.clone())
         .with_scope_inject(!unscoped)
         .with_scope_terms(inject);
     let mut sets: Vec<String> = Vec::new();

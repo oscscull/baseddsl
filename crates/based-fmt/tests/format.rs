@@ -171,11 +171,11 @@ fn stream_return_form_round_trips() {
 #[test]
 fn mutation_body_and_tx() {
     let got = fmt(
-        "mutation m(e: text, c: text) -> R { tx { create User { email = $e } create Addr { user = ^.id, city = $c } } }",
+        "mutation m(e: text, c: text) -> R { tx { create User { email = $e } as u create Addr { user = $u.id, city = $c } } }",
     );
     assert_eq!(
         got,
-        "mutation m(e: text, c: text) -> R {\n  tx {\n    create User { email = $e };\n    create Addr { user = ^.id, city = $c };\n  }\n}\n"
+        "mutation m(e: text, c: text) -> R {\n  tx {\n    create User { email = $e } as u;\n    create Addr { user = $u.id, city = $c };\n  }\n}\n"
     );
 }
 

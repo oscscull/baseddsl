@@ -506,7 +506,11 @@ spans *two* tables and refers to columns table-qualified, so it needs its own re
   sides is a codegen concern); **lowering** the custom predicate into the emitted JOIN — codegen still
   joins on the convention `fk_col`, so `on:` is checked but not yet honored in SQL.
 
-## D16 — tx back-references (`^`, mutations.md)
+## D16 — tx back-references (`^`, mutations.md) — SUPERSEDED by D107
+> **Superseded (D107).** `^` is removed; a `tx` step is bound with `create … as name` and
+> referenced as `$name.field`, reaching any prior step. The lowering below (distinct
+> `:id_<step>` binds, `id`-reuse) is retained, now name-addressed. Kept for that lowering history.
+
 `tx { create A{…}; create B{ x = ^.id } }` wires a just-created row's key into the next write. How it
 resolves and lowers (lexer `^` token → AST `Value::Back(BackRef)` → parser → `based-sema` → `based-codegen`).
 - **`^` reads the *immediately preceding* `create`** in the enclosing `tx`. Not "any prior step" — the
@@ -4738,3 +4742,20 @@ back-compat shim (owner: “bin it off mercilessly”): the `Tok::Caret` / `Valu
 `create … as <name>;` + `$name.field`. Spec seam: mutations.md Atomic groups + grammar.ebnf; the
 helpdesk `open_ticket` (uses `^`) + conformance goldens migrate to `as`. Codes `E0280`/`E0281`;
 `E0170` retired.
+
+**Shipped.** `create … as name` binds after any `on conflict` tail (`create_stmt` in grammar.ebnf);
+the reference is an ordinary `ParamRef` (`$user.id`) — no new AST `Value` variant, so `$` genuinely
+unifies params + `$ctx` + step bindings at parse time, and sema/codegen disambiguate by name (a
+`$name` that is neither `$ctx` nor a declared param is a step binding). Sema threads a `Bindings`
+env (`resolved`: name→model reachable *now*; `all`: every binding in the tx, so a forward reference
+reads distinctly from a typo) — E0280 shadow/dup on the binding decl, E0281 unbound/forward at the
+reference, `E0111` for an unknown field on the bound model, `E0153` for a family clash typed through
+the bound field. Codegen keeps D16's lowering exactly — sibling creates still get distinct `:id_<step>`
+binds and `$name.id` resolves to the bound step's `:id_<step>`, a non-`id` field reuses that create's
+assigned value — but keyed by a `BackCtx` **map** reaching any prior step (was a single slot). The
+runtime is unchanged (it already binds every create's `gen_id`). `^` is gone from the lexer, so a bare
+`^` lexes as an unrecognized byte and the parser renders it as an `E0001` pointing at `as`. Editor
+surface: a binding decl (`as name`) and every `$name.field` head are one callable-local symbol —
+go-to-def, find-refs, rename, and a hover naming the bound model. Migrated: helpdesk `open_ticket`;
+tests across parser/sema/codegen/fmt/runtime/LSP + a new sema conformance golden `tx_bindings`. Live
+via `make check` (the `open_ticket` tx ran green against Postgres/MariaDB).

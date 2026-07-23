@@ -69,9 +69,10 @@ pub mod code {
     pub const CTX_BAD_PATH: &str = "E0160"; // $ctx used without exactly one field segment
     pub const CTX_CONFLICT: &str = "E0161"; // $ctx.<field> used at incompatible types across uses
 
-    // tx back-references: `^.field` reads the immediately preceding
-    // `create` in the same `tx`.
-    pub const BACKREF_SCOPE: &str = "E0170"; // `^` outside a `tx`, or with no preceding `create`
+    // tx step bindings: `create … as name` binds a step's produced row, referenced by a
+    // later step as `$name.field` (`$` unifies params + step bindings).
+    pub const BINDING_SHADOW: &str = "E0280"; // a step binding shadows a param, or duplicates another binding
+    pub const BINDING_UNBOUND: &str = "E0281"; // `$name` names no param or *prior* step binding (unbound / forward reference)
 
     // Named scope: a `scope` decl referenced by
     // `@scope Name` on a model + `scoped Name` on every callable that touches it.

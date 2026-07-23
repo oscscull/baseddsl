@@ -18,8 +18,8 @@
 //!
 //! ## Write path (mutations)
 //! [`plan::plan_mutation`] mirrors the read path, then generates each `create`'s engine
-//! `id` ([`id::IdGen`]) and binds every write statement positionally (a `^.id`
-//! back-reference reuses the value its create generated). [`run::run_mutation`] executes
+//! `id` ([`id::IdGen`]) and binds every write statement positionally (a `$name.id`
+//! step reference reuses the value its create generated). [`run::run_mutation`] executes
 //! the writes in order under one engine-owned transaction.
 //!
 //! A mutation may carry an **idempotency key** ([`idempotency`]): a keyed mutation runs

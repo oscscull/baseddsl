@@ -76,13 +76,30 @@ target list — the uniqueness of the validated key is what makes the two agree)
 auto-set and the read-back's scope/live guards apply exactly as on a plain `create`.
 
 ## Atomic groups
-`tx { ... }` runs a static set of writes in one transaction; rolls back together. Back-reference a prior step with `^`:
+`tx { ... }` runs a static set of writes in one transaction; rolls back together. Bind a
+step's produced row with `create … as <name>`, and reference a column of it from **any
+later step** as `$name.field`:
 ```
 tx {
-  create User { email = $email };
-  create Address { user = ^.id, city = $city };
+  create User { email = $email } as user;
+  create Address { user = $user.id, city = $city };
+  create Log { actor = $user.id };            # reaches the first step
 }
 ```
+`$` unifies to "a value bound in this callable" — a param, a `$ctx` field, or a step
+binding. A binding is **single-assignment** and **field-access only** (`$user.id`, never a
+deeper traversal or a rebinding), so nothing Turing-complete enters the DSL (principle 5).
+The overwhelming use is `$name.id`, wiring a just-created row's key into a later write; a
+non-`id` field reuses the value that create assigned it.
+
+- **`as <name>` is a keyword** — the bare trailing form (`create … user;`) would be two
+  adjacent bare tokens, banned by principle 3.
+- A binding name that **shadows a param**, or **duplicates** another binding in the same
+  `tx`, is `E0280` — `$name` must name one thing.
+- A `$name` that names **no param and no *prior* step binding** — an unknown name, or a
+  **forward reference** to a binding declared later — is `E0281`; a binding reaches only
+  the steps before it. `$name.field` where `field` isn't a column of the bound step's
+  model reuses `unknown_field` (`E0111`).
 
 ## Scope acknowledgement (`scoped` / `unscoped`)
 A mutation whose target model is in a scope **must** acknowledge it (auth.md Handle 2 / D46), exactly

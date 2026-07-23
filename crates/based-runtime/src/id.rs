@@ -6,8 +6,8 @@
 //! deterministic [`SeqIdGen`] so a planned INSERT's bound id is predictable.
 
 /// Produces fresh ids for engine-generated `id` columns. Called once per `create`
-/// (and once more is never needed — a `^.id` back-reference *reuses* the value the
-/// prior create already generated, it does not draw a new one). Minting takes `&self`
+/// (and once more is never needed — a `$name.id` step reference *reuses* the value the
+/// bound create already generated, it does not draw a new one). Minting takes `&self`
 /// and may run from any number of concurrent requests, so an implementation with
 /// state synchronizes it internally (an atomic or a short std `Mutex`) — dispatch
 /// never wraps the generator in a lock of its own, which is what lets a guard call
@@ -49,8 +49,8 @@ impl IdGen for SeqIdGen {
 
 /// The production generator: a fresh random v4 uuid per `create`. Unpredictable and
 /// globally unique — no coordination with the database, so a `create`'s id is known
-/// before the INSERT, which is what lets a `^.id` back-reference bind the same value the
-/// INSERT used. Stateless, so concurrent mints need no synchronization.
+/// before the INSERT, which is what lets a `$name.id` step reference bind the same value
+/// the INSERT used. Stateless, so concurrent mints need no synchronization.
 #[cfg(feature = "serve")]
 #[derive(Default)]
 pub struct UuidGen;

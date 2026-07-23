@@ -295,24 +295,47 @@ fn tx_renders_each_write_in_order() {
 }
 
 #[test]
-fn tx_backref_binds_prior_create_id() {
+fn tx_step_ref_binds_bound_create_id() {
     let out = gen(r#"
         User { id: Id, email: text }
         Address { id: Id, user: User, city: text }
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
           tx {
-            create User { email = $email };
-            create Address { user = ^.id, city = $city };
+            create User { email = $email } as user;
+            create Address { user = $user.id, city = $city };
           }
         }
         "#);
-    // `^.id` binds the preceding create's generated id (`:id_0`); Address's own id is `:id_1`.
+    // `$user.id` binds the bound create's generated id (`:id_0`); Address's own id is `:id_1`.
     assert!(
         out.contains("INSERT INTO `address` (`id`, `user_id`, `city`)"),
         "\n{out}"
     );
     assert!(out.contains("VALUES (:id_1, :id_0, :city)"), "\n{out}");
+}
+
+#[test]
+fn tx_step_ref_reaches_any_prior_step() {
+    // A 3-step tx where step 3 references step 1 — the case `^` (immediately-preceding
+    // only) could not express. `$org.id` at step 3 must bind step 1's `:id_0`.
+    let out = gen(r#"
+        Org { id: Id, name: text }
+        User { id: Id, org: Org, email: text }
+        Log { id: Id, org: Org, actor: User }
+        shape OrgCard from Org { name }
+        mutation onboard(name: text, email: text) -> OrgCard {
+          tx {
+            create Org { name = $name } as org;
+            create User { org = $org.id, email = $email } as user;
+            create Log { org = $org.id, actor = $user.id };
+          }
+        }
+        "#);
+    // Step 2 (User, `:id_1`) references step 1's org (`:id_0`).
+    assert!(out.contains("VALUES (:id_1, :id_0, :email)"), "\n{out}");
+    // Step 3 (Log, `:id_2`) references step 1's org (`:id_0`) AND step 2's user (`:id_1`).
+    assert!(out.contains("VALUES (:id_2, :id_0, :id_1)"), "\n{out}");
 }
 
 #[test]

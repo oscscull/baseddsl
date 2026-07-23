@@ -320,8 +320,8 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
 /// Plan a mutation request against a compiled project. Validates the args + `$ctx`
 /// (exactly like a query), then generates the engine `id` for every `create` and
 /// binds every write statement positionally. The generated ids are seeded into the
-/// value environment *before* binding, so a `^.id` back-reference — which lowers to
-/// the prior create's `:id_<step>` — resolves to the same value the INSERT used.
+/// value environment *before* binding, so a `$name.id` step reference — which lowers to
+/// the bound create's `:id_<step>` — resolves to the same value the INSERT used.
 pub fn plan_mutation(
     compiled: &Compiled,
     req: &Request,
@@ -558,6 +558,7 @@ fn param_use_in_stmts(compiled: &Compiled, stmts: &[WriteStmt], name: &str) -> O
                 model,
                 assigns,
                 conflict,
+                binding: _,
             } => param_use_in_assigns(schema, &model.node, assigns, name).or_else(|| {
                 conflict
                     .as_ref()

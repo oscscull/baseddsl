@@ -256,7 +256,11 @@ write_stmt  = create_stmt | update_stmt | delete_stmt
 (* same self-referential arithmetic an ordinary `update` allows) instead of inserting;     *)
 (* the winning row reads back keyed on the conflict target. Postgres/SQLite lower to        *)
 (* `ON CONFLICT (cols) DO UPDATE`, MariaDB to `ON DUPLICATE KEY UPDATE`. Sema E0250-E0254.  *)
-create_stmt = 'create' model_ref assign_block [ on_conflict ] ;
+(* `as <name>` binds this step's produced row so a later `tx` step reaches a column of it   *)
+(* as `$name.field` (mutations.md Atomic groups). `as` is a keyword — the bare trailing     *)
+(* form is two adjacent bare tokens, banned by principle 3.                                 *)
+create_stmt = 'create' model_ref assign_block [ on_conflict ] [ 'as' binding_name ] ;
+binding_name = lower_ident ;
 on_conflict = 'on' 'conflict' '(' column_name { ',' column_name } ')' 'update' assign_block ;
 update_stmt = 'update' model_ref where_clause assign_block ;
 delete_stmt = 'delete' model_ref where_clause ;
@@ -276,7 +280,8 @@ arith_expr   = arith_term { ( '+' | '-' ) arith_term } ;
 arith_term   = arith_factor { ( '*' | '/' ) arith_factor } ;
 arith_factor = value | '(' arith_expr ')' ;
 
-(* Atomic group; back-reference a prior step's row with `^`.                   *)
+(* Atomic group. Bind a step's produced row with `create … as name`; reference a  *)
+(* column of it from any later step as `$name.field` (mutations.md Atomic groups). *)
 tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;
 
 (* ---------- Read statement (query block body) ----------------------------- *)
@@ -340,9 +345,11 @@ op          = '=' | '!=' | '>' | '<' | '>=' | '<='
 
 (* ---------- Values, paths, literals --------------------------------------- *)
 
-value       = param_ref | back_ref | path | literal | func_call ;
-param_ref   = '$' param_name { '.' lower_ident } ;   (* $id, $ctx.org          *)
-back_ref    = '^' '.' lower_ident ;                  (* tx back-ref: `^.id`     *)
+value       = param_ref | path | literal | func_call ;
+(* `$` unifies to "a value bound in this callable": a param (`$id`), a `$ctx` bag  *)
+(* field (`$ctx.org`), or a `tx` step binding (`$user.id` — one field of the row a  *)
+(* `create … as user` produced). Which one a `$name` is resolves in sema.          *)
+param_ref   = '$' param_name { '.' lower_ident } ;   (* $id, $ctx.org, $user.id *)
 path        = lower_ident { '.' lower_ident } ;       (* dotted traversal       *)
 
 func_call   = func_name '(' [ value { ',' value } ] ')' ;

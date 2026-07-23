@@ -46,8 +46,8 @@ const SCHEMA: &str = r#"
     query export_users() -> stream UserCard;
     mutation signup(email: text, city: text) -> UserCard {
         tx {
-            create User { email = $email };
-            create Address { user = ^.id, city = $city };
+            create User { email = $email } as user;
+            create Address { user = $user.id, city = $city };
         }
     }
 "#;

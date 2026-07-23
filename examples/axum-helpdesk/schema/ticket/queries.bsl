@@ -16,13 +16,13 @@ filter overdue = raw`created_at < now() - interval '3 days'`;
 query my_tickets() -> TicketRow[] scoped Requester { list Ticket; }
 
 # One transaction: the ticket and its first comment land together or not at all.
-# `^` reads the row the preceding create produced. The scope columns (`org`,
-# `requester`) are engine-set from `$ctx` — a caller can't file into another
-# tenant. Retries ride the client's `open_ticket_with_key` twin.
+# `create … as ticket` binds the new ticket's row; `$ticket.id` wires its key into
+# the comment. The scope columns (`org`, `requester`) are engine-set from `$ctx` — a
+# caller can't file into another tenant. Retries ride the client's `open_ticket_with_key` twin.
 mutation open_ticket(subject: text, body: text, priority: Priority = normal) -> TicketDetail scoped Tenant, Requester {
   tx {
-    create Ticket { subject = $subject, priority = $priority };
-    create Comment { ticket = ^.id, author = $ctx.user, body = $body };
+    create Ticket { subject = $subject, priority = $priority } as ticket;
+    create Comment { ticket = $ticket.id, author = $ctx.user, body = $body };
   }
 }
 

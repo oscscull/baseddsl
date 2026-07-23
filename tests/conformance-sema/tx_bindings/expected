@@ -1,0 +1,16 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model User  table=user
+  id: Id
+  org: -> Org  fk=org_id
+  email: text
+model Log  table=log
+  id: Id
+  org: -> Org  fk=org_id
+  actor: -> User  fk=actor_id
+shape OrgCard from Org
+mutation onboard  ret=Org

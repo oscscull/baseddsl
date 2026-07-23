@@ -307,9 +307,8 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
         },
         // A param's type is checked at its declaration (check_param); a `$ctx.field`
         // is typed by inference from *this* comparison (ctx.rs), so it never clashes
-        // here; a function's return type is not modelled yet. A `^` back-reference is
-        // only valid in a write assign (not a predicate), reported there.
-        Value::Param(_) | Value::Func(_) | Value::Back(_) => return,
+        // here; a function's return type is not modelled yet.
+        Value::Param(_) | Value::Func(_) => return,
     };
     if !compatible(lf, rf) {
         sink.error(
@@ -348,9 +347,8 @@ fn check_in_element_type(path: &Path, value: &Value, mi: usize, cx: &Cx, sink: &
             None => return, // unresolved element: name error already reported
         },
         // Same skips as the single-value comparison: params are typed at their
-        // declaration, `$ctx` by inference, functions are unmodelled, and a `^`
-        // back-reference is rejected by `check_value`.
-        Value::Param(_) | Value::Func(_) | Value::Back(_) => return,
+        // declaration, `$ctx` by inference, functions are unmodelled.
+        Value::Param(_) | Value::Func(_) => return,
     };
     if !compatible(terminal_family(&lhs), rf) {
         sink.error(
@@ -382,18 +380,16 @@ fn member_family(kind: &MemberKind) -> Option<Family> {
 
 /// Type-check one `create`/`update` assignment: the value's family must agree with
 /// the target column's — the write-side twin of the `=` compatibility rule
-/// (`check_cmp_types`). A literal or another column is family-checked; a `^`
-/// back-reference is typed by the field it reads on the preceding create (`back`,
-/// the same model `check::check_back` resolved it against). Params (typed at their
-/// declaration / `$ctx` inferred) and functions (return type unmodelled) are
+/// (`check_cmp_types`). A literal or another column is family-checked. Params (typed at
+/// their declaration / `$ctx` inferred) and functions (return type unmodelled) are
 /// skipped, exactly as on the read side. Silent when a side fails to resolve — that
-/// name error is already reported by the caller.
+/// name error is already reported by the caller. A `$step.field` tx binding reference is
+/// checked separately (`check::check_binding_ref` → `check_field_assign_type`).
 pub fn check_assign_type(
     target: &MemberKind,
     col: &Ident,
     value: &Value,
     mi: usize,
-    back: Option<usize>,
     cx: &Cx,
     sink: &mut Sink,
 ) {
@@ -409,15 +405,29 @@ pub fn check_assign_type(
             Some(t) => terminal_family(&t),
             None => return, // unresolved column: name error already reported
         },
-        Value::Back(b) => match back.and_then(|bm| cx.model(bm).member(&b.field.node)) {
-            Some(m) => match member_family(&m.kind) {
-                Some(f) => f,
-                None => return,
-            },
-            None => return, // scope / unknown-field error already reported
-        },
         Value::Param(_) | Value::Func(_) => return,
     };
+    report_assign_family(target, col, rf, lf, sink);
+}
+
+/// Family-check a `$step.field` tx binding assignment (D107): the bound field's family
+/// must agree with the target column's, the same rule `check_assign_type` applies to a
+/// column/literal RHS. Silent when either side has no modellable family.
+pub fn check_field_assign_type(
+    target: &MemberKind,
+    col: &Ident,
+    source: &MemberKind,
+    sink: &mut Sink,
+) {
+    let (Some(lf), Some(rf)) = (member_family(target), member_family(source)) else {
+        return;
+    };
+    report_assign_family(target, col, rf, lf, sink);
+}
+
+/// Emit `E0153` when an assigned value's family (`rf`) is incompatible with the target
+/// column's (`lf`). Shared by the column/literal and the tx-binding assign checks.
+fn report_assign_family(target: &MemberKind, col: &Ident, rf: Family, lf: Family, sink: &mut Sink) {
     if !compatible(lf, rf) {
         let target_desc = match target {
             MemberKind::Scalar { ty, .. } => format!("`{}`", prim_name(*ty)),
@@ -530,7 +540,7 @@ fn check_arith_operands(
                         );
                     }
                 }
-                Value::Param(_) | Value::Func(_) | Value::Back(_) => {}
+                Value::Param(_) | Value::Func(_) => {}
             }
         }
     }
@@ -843,14 +853,6 @@ pub fn check_value(
         }
         Value::Lit(_) => {}
         Value::Func(f) => check_func(f, model, cx, params, sink),
-        // A `^` back-reference is only meaningful in a `tx` write assign, where
-        // `check::check_assign` resolves it against the preceding create. Reaching it
-        // here (a predicate, a function argument, a query) is a misuse.
-        Value::Back(b) => sink.error(
-            code::BACKREF_SCOPE,
-            b.span,
-            "`^` back-reference is only valid in a `tx` write (e.g. `user = ^.id`)",
-        ),
     }
 }
 
@@ -1000,11 +1002,6 @@ fn check_join_value(value: &Value, near: usize, far: usize, cx: &Cx, sink: &mut 
             code::JOIN_FORM,
             f.name.span,
             "a custom join is static structure — functions aren't allowed in an `on:` condition",
-        ),
-        Value::Back(b) => sink.error(
-            code::JOIN_FORM,
-            b.span,
-            "`^` back-reference is only valid in a `tx` write, not a custom join",
         ),
     }
 }

@@ -950,9 +950,10 @@ pub(crate) struct Select<'a> {
     /// Shape references currently mid-expansion; sema rejects reference cycles
     /// (`E0134`), so this only keeps codegen terminating on an unchecked schema.
     shape_stack: Vec<&'a str>,
-    /// The immediately preceding `create` in an enclosing `tx`, so a `^.field`
-    /// back-reference can bind to it. `None` outside a `tx`.
-    back: Option<BackCtx<'a>>,
+    /// The `create … as name` step bindings reachable in an enclosing `tx`, keyed by
+    /// binding name, so a `$name.field` reference resolves to that step's produced row.
+    /// Reaches any prior step, not just the immediately preceding one. Empty outside a `tx`.
+    bindings: HashMap<&'a str, BackCtx<'a>>,
     /// Whether to inject a *joined* scoped model's `@scope` into its join `ON`.
     /// True by default; set false for an `unscoped` callable, which opts out of
     /// *all* scope handling — the joined tables included, not just the root. The
@@ -979,12 +980,12 @@ pub(crate) struct Select<'a> {
     bare_cols: bool,
 }
 
-/// What a `^.field` back-reference resolves to: the preceding `create`'s bound `id`
-/// parameter and its assigns (to reuse a caller-supplied value for a non-`id` field).
+/// What a `$name.field` tx step reference resolves to: the bound `create`'s app-generated
+/// `id` bind and its assigns (to reuse a caller-supplied value for a non-`id` field).
 #[derive(Clone)]
 pub(crate) struct BackCtx<'a> {
-    /// The bind name the prior create's app-generated `id` was emitted under
-    /// (`id_<step>` inside a tx). `^.id` lowers to this.
+    /// The bind name the bound create's app-generated `id` was emitted under
+    /// (`id_<step>` inside a tx). `$name.id` lowers to this.
     pub(crate) id_param: String,
     pub(crate) assigns: &'a [Assign],
 }
@@ -1020,7 +1021,7 @@ impl<'a> Select<'a> {
             filter_stack: Vec::new(),
             shapes,
             shape_stack: Vec::new(),
-            back: None,
+            bindings: HashMap::new(),
             inject_scope: true,
             scope_inject: &[],
             sub_counter: 0,
@@ -1060,10 +1061,10 @@ impl<'a> Select<'a> {
         self.dialect.qcol(table, column)
     }
 
-    /// Attach a tx back-reference context so a `^.field` in this statement's assigns
-    /// binds to the preceding `create`.
-    pub(crate) fn with_back(mut self, back: Option<BackCtx<'a>>) -> Self {
-        self.back = back;
+    /// Attach the reachable tx step bindings so a `$name.field` in this statement's
+    /// assigns resolves to the bound `create`'s produced row.
+    pub(crate) fn with_bindings(mut self, bindings: HashMap<&'a str, BackCtx<'a>>) -> Self {
+        self.bindings = bindings;
         self
     }
 
@@ -1235,7 +1236,7 @@ impl<'a> Select<'a> {
             // Shape refs mid-expansion carry across the subquery boundary, so a
             // reference cycle spanning a to-many nest still terminates.
             shape_stack: self.shape_stack.clone(),
-            back: None,
+            bindings: HashMap::new(),
             inject_scope: self.inject_scope,
             scope_inject: self.scope_inject,
             sub_counter: self.sub_counter,
@@ -1772,6 +1773,11 @@ impl<'a> Select<'a> {
 
     pub(crate) fn value(&mut self, v: &Value, model: &RModel) -> String {
         match v {
+            // A `$name.field` that names a reachable tx step binding resolves to that
+            // step's produced row; any other `$…` is an ordinary bound parameter.
+            Value::Param(pr) if self.bindings.contains_key(pr.name.node.as_str()) => {
+                self.binding_value(pr)
+            }
             Value::Param(pr) => format!(":{}", param_key(pr)),
             Value::Path(p) => {
                 let (alias, col) = self.resolve(p, model);
@@ -1783,37 +1789,38 @@ impl<'a> Select<'a> {
             }
             Value::Lit(l) => render_lit(self.dialect, l),
             Value::Func(f) => render_func(f),
-            Value::Back(b) => self.back_value(b),
         }
     }
 
-    /// Lower a `^.field` back-reference. `^.id` binds to the preceding
-    /// create's app-generated id (`:id_<step>`); any other field reuses the value the
-    /// prior create assigned to it (a caller param/literal), which the engine already
-    /// binds. Sema (E0170) guarantees a prior create and a real field exist.
-    fn back_value(&self, b: &BackRef) -> String {
-        let Some(back) = &self.back else {
-            return "NULL /* ^ needs a prior create */".to_string();
-        };
-        // Reuse the value the prior create assigned to this field (a caller
+    /// Lower a `$name.field` tx step reference. `$name.id` binds to the bound create's
+    /// app-generated id (`:id_<step>`, reaching any prior step); any other field reuses
+    /// the value that create assigned to it (a caller param/literal the engine already
+    /// binds). Sema (E0281) guarantees the binding and the field resolve.
+    fn binding_value(&self, pr: &ParamRef) -> String {
+        let ctx = &self.bindings[pr.name.node.as_str()];
+        let field = pr.path.first().map(|s| s.node.as_str()).unwrap_or("");
+        // Reuse the value the bound create assigned to this field (a caller
         // param/literal the engine already binds), if it set one.
-        if let Some(a) = back.assigns.iter().find(|a| a.col.node == b.field.node) {
+        if let Some(a) = ctx.assigns.iter().find(|a| a.col.node == field) {
             return match a.value.as_value() {
                 Some(Value::Param(pr)) => format!(":{}", param_key(pr)),
                 Some(Value::Lit(l)) => render_lit(self.dialect, l),
                 Some(Value::Func(f)) => render_func(f),
-                // A path, nested back-ref, or arithmetic RHS in the prior create is not
-                // a plain bind; leave a visible marker rather than emit something
-                // unbindable. (A create never carries arithmetic — sema E0230.)
-                _ => format!("NULL /* ^.{} unresolved */", b.field.node),
+                // A path or arithmetic RHS in the bound create is not a plain bind; leave
+                // a visible marker rather than emit something unbindable. (A create never
+                // carries arithmetic — sema E0230.)
+                _ => format!("NULL /* ${}.{field} unresolved */", pr.name.node),
             };
         }
-        // Otherwise: `^.id` is the app-generated id the prior create binds under
+        // Otherwise: `$name.id` is the app-generated id the bound create binds under
         // `:id_<step>`; any other unset field needs a re-select (runtime).
-        if b.field.node == "id" {
-            format!(":{}", back.id_param)
+        if field == "id" {
+            format!(":{}", ctx.id_param)
         } else {
-            format!("NULL /* ^.{} not set by prior create */", b.field.node)
+            format!(
+                "NULL /* ${}.{field} not set by bound create */",
+                pr.name.node
+            )
         }
     }
 

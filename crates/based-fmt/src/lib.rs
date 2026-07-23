@@ -680,6 +680,7 @@ fn write_line(w: &WriteStmt) -> String {
             model,
             assigns,
             conflict,
+            binding,
         } => {
             let mut s = format!("create {} {}", model.node, assign_block(assigns));
             if let Some(oc) = conflict {
@@ -692,6 +693,9 @@ fn write_line(w: &WriteStmt) -> String {
                         .join(", "),
                     assign_block(&oc.update)
                 ));
+            }
+            if let Some(b) = binding {
+                s.push_str(&format!(" as {}", b.node));
             }
             s
         }
@@ -850,7 +854,6 @@ fn value(v: &Value) -> String {
         Value::Path(p) => path(p),
         Value::Lit(l) => literal(l),
         Value::Func(f) => func_call(f),
-        Value::Back(b) => format!("^.{}", b.field.node),
     }
 }
 

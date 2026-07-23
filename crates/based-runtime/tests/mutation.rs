@@ -5,7 +5,7 @@
 //!
 //! Headline assertions: (1) a `create`'s engine `id` is generated and bound as the
 //! leading `?`; (2) args + `$ctx` bind exactly as on the read side; (3) a `tx`
-//! numbers sibling creates and a `^.id` back-reference reuses the prior create's
+//! numbers sibling creates and a `$name.id` step reference reuses the bound create's
 //! generated id; (4) the whole body runs between one `begin`/`commit`.
 
 use based_ast::FileId;
@@ -301,7 +301,7 @@ async fn zero_row_update_is_not_found_and_rolls_back() {
 }
 
 #[tokio::test]
-async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
+async fn tx_numbers_sibling_creates_and_step_ref_reuses_prior_id() {
     let c = compile(
         r#"
         User { id: Id, email: text }
@@ -309,8 +309,8 @@ async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
         shape UserCard from User { email }
         mutation signup(email: text, city: text) -> UserCard {
             tx {
-                create User { email = $email };
-                create Address { user = ^.id, city = $city };
+                create User { email = $email } as user;
+                create Address { user = $user.id, city = $city };
             }
         }
         "#,
@@ -337,8 +337,8 @@ async fn tx_numbers_sibling_creates_and_backref_reuses_prior_id() {
             SqlValue::Text("a@b.c".into())
         ]
     );
-    // Address: its own generated id (`id-1`), the `^.id` back-reference reusing the
-    // User's `id-0`, then the city — the back-ref binds the *same* value the User got.
+    // Address: its own generated id (`id-1`), the `$user.id` step reference reusing the
+    // User's `id-0`, then the city — the reference binds the *same* value the User got.
     assert!(
         plan.stmts[1].sql.contains("INSERT INTO `address`"),
         "{}",

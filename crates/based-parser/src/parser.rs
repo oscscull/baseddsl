@@ -26,8 +26,15 @@ pub fn parse(src: &str, file: FileId) -> Result<SchemaFile, Vec<Diagnostic>> {
         diags: Vec::new(),
     };
     for (start, end) in lexing.errors {
+        // `^` was the tx back-reference marker (`^.id`), removed in favour of named
+        // step bindings; point the user at the replacement rather than a bare "bad char".
+        let msg = if src[start as usize..end as usize].contains('^') {
+            "`^` tx back-references were removed — bind the step with `create … as <name>;` and reference it as `$name.field`"
+        } else {
+            "unexpected character"
+        };
         p.diags
-            .push(Diagnostic::error("E0001", "unexpected character").at(Span { file, start, end }));
+            .push(Diagnostic::error("E0001", msg).at(Span { file, start, end }));
     }
 
     let mut decls = Vec::new();
@@ -1266,10 +1273,17 @@ impl<'a> Parser<'a> {
             let model = self.upper_ident("model")?;
             let assigns = self.assign_block()?;
             let conflict = self.on_conflict()?;
+            // `as <name>` binds this step's produced row for a later `$name.field` in the tx.
+            let binding = if self.eat_kw("as") {
+                Some(self.lower_ident("a step binding name after `as`")?)
+            } else {
+                None
+            };
             Ok(WriteStmt::Create {
                 model,
                 assigns,
                 conflict,
+                binding,
             })
         } else if self.eat_kw("update") {
             let model = self.upper_ident("model")?;
@@ -1585,7 +1599,6 @@ impl<'a> Parser<'a> {
     fn value(&mut self) -> PResult<Value> {
         match self.peek().map(|l| l.tok) {
             Some(Tok::Dollar) => Ok(Value::Param(self.param_ref()?)),
-            Some(Tok::Caret) => Ok(Value::Back(self.back_ref()?)),
             Some(Tok::Int | Tok::Float | Tok::Str) => Ok(Value::Lit(self.literal()?)),
             Some(Tok::LowerIdent) => match self.ident_at(0) {
                 Some("true") | Some("false") | Some("null") => Ok(Value::Lit(self.literal()?)),
@@ -1671,20 +1684,6 @@ impl<'a> Parser<'a> {
             .and_then(|i| self.toks.get(i))
             .map(|l| l.end)
             .unwrap_or(0)
-    }
-
-    /// `^.field` — a tx back-reference. One field segment: the reference is to a
-    /// just-created row's column (`^.id` for FK wiring).
-    fn back_ref(&mut self) -> PResult<BackRef> {
-        let caret = self.expect(Tok::Caret, "`^`")?;
-        self.expect(Tok::Dot, "`.` after `^`")?;
-        let field = self.lower_ident("field name")?;
-        let span = Span {
-            file: self.file,
-            start: caret.start,
-            end: field.span.end,
-        };
-        Ok(BackRef { field, span })
     }
 
     fn param_ref(&mut self) -> PResult<ParamRef> {

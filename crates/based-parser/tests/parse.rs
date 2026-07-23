@@ -11,6 +11,13 @@ fn parse_ok(src: &str) -> SchemaFile {
     }
 }
 
+fn parse_err(src: &str) -> Vec<based_diagnostics::Diagnostic> {
+    match parse_file(src, FileId(0)) {
+        Ok(_) => panic!("expected a parse error, got a clean parse"),
+        Err(diags) => diags,
+    }
+}
+
 fn only_model(src: &str) -> Model {
     match parse_ok(src).decls.into_iter().next() {
         Some(Decl::Model(m)) => m,
@@ -398,13 +405,13 @@ fn mutation_with_create_and_param_refs() {
 }
 
 #[test]
-fn tx_create_with_backreference() {
+fn tx_create_binds_and_references_step() {
     let sf = parse_ok(
         r#"
         mutation signup(email: text, city: text) -> UserCard {
           tx {
-            create User { email = $email };
-            create Address { user = ^.id, city = $city };
+            create User { email = $email } as user;
+            create Address { user = $user.id, city = $city };
           }
         }
         "#,
@@ -417,16 +424,46 @@ fn tx_create_with_backreference() {
         WriteStmt::Tx(inner) => inner,
         other => panic!("expected tx, got {other:?}"),
     };
+    // Step 1 binds the produced row as `user`.
+    match &inner[0] {
+        WriteStmt::Create { binding, .. } => {
+            assert_eq!(binding.as_ref().map(|b| b.node.as_str()), Some("user"));
+        }
+        other => panic!("expected create, got {other:?}"),
+    }
+    // Step 2 references it as `$user.id` (an ordinary `$name.field` param ref).
     match &inner[1] {
         WriteStmt::Create { assigns, .. } => {
             assert!(
-                matches!(assigns[0].value.as_value(), Some(Value::Back(b)) if b.field.node == "id"),
-                "expected `^.id` back-reference, got {:?}",
+                matches!(
+                    assigns[0].value.as_value(),
+                    Some(Value::Param(pr)) if pr.name.node == "user"
+                        && pr.path.len() == 1 && pr.path[0].node == "id"
+                ),
+                "expected `$user.id` step reference, got {:?}",
                 assigns[0].value
             );
         }
         other => panic!("expected create, got {other:?}"),
     }
+}
+
+#[test]
+fn bare_caret_is_a_parse_error_pointing_to_as() {
+    let diags = parse_err(
+        r#"
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email };
+            create Address { user = ^.id, city = $city };
+          }
+        }
+        "#,
+    );
+    assert!(
+        diags.iter().any(|d| d.message.contains("as")),
+        "a bare `^` should point the user at `create … as <name>;`, got {diags:?}"
+    );
 }
 
 #[test]
@@ -724,6 +761,7 @@ fn upsert_parses_conflict_target_and_update_branch() {
             model,
             assigns,
             conflict,
+            ..
         } => {
             assert_eq!(model.node, "Page");
             assert_eq!(assigns.len(), 2);

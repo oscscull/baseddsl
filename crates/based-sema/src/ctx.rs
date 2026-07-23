@@ -101,6 +101,7 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
             model,
             assigns,
             conflict,
+            binding: _,
         } => {
             if let Some(mi) = cx.find(&model.node) {
                 for a in assigns {

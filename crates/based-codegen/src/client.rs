@@ -410,6 +410,7 @@ mod rust {
                 model,
                 assigns,
                 conflict,
+                binding: _,
             } => {
                 let m = schema.model(&model.node);
                 for a in assigns {
