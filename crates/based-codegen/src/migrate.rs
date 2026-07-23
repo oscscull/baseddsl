@@ -50,15 +50,15 @@ mod sql;
 mod up_mig;
 
 pub use diff::{
-    diff, diff_snapshots, drift, has_raw_step, parse_raw_steps, strip_raw_steps, ColumnChange,
-    ScopeChange, Step,
+    diff, diff_snapshots, drift, has_raw_step, parse_raw_steps, raw_modeled_tables,
+    strip_raw_steps, ColumnChange, ScopeChange, Step,
 };
 pub use lifecycle::{apply_spent_was, rename_hints, spent_was_edits, RenameHint, SpentWas};
 pub use model::{
     snapshot, ColumnSnap, IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot,
     TableSnap,
 };
-pub use sql::{content_hash, render_sql, sql_statements};
+pub use sql::{content_hash, render_down, render_sql, sql_statements, up_mig_matches_snapshot};
 pub use up_mig::render_up;
 
 #[cfg(test)]

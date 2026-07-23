@@ -26,6 +26,26 @@
           ".bsl"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "based-mig",
+        "aliases": [
+          "Based Migration"
+        ],
+        "extensions": [
+          ".mig"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "based-snap",
+        "aliases": [
+          "Based Snapshot"
+        ],
+        "extensions": [
+          ".snap"
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
@@ -33,6 +53,19 @@
         "language": "bsl",
         "scopeName": "source.bsl",
         "path": "./syntaxes/bsl.tmLanguage.json"
+      },
+      {
+        "language": "based-mig",
+        "scopeName": "source.mig",
+        "path": "./syntaxes/mig.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql"
+        }
+      },
+      {
+        "language": "based-snap",
+        "scopeName": "source.snap",
+        "path": "./syntaxes/snap.tmLanguage.json"
       }
     ],
     "configuration": {

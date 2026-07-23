@@ -718,6 +718,159 @@ fn raw_step_renders_only_for_its_dialect() {
     );
 }
 
+/// The generated header states the honest contract (structural steps derive from the
+/// snapshot; the editable surface is `raw`/`down.mig`) and drops the old "edit if needed".
+#[test]
+fn render_up_header_states_the_honest_contract() {
+    let steps = vec![Step::AddColumn {
+        table: "product".to_string(),
+        column: col("barcode", "text", true),
+    }];
+    let up = render_up(&steps);
+    assert!(up.contains("derived from schema.snap"), "\n{up}");
+    assert!(up.contains("raw(<dialect>)"), "\n{up}");
+    assert!(up.contains("down.mig"), "\n{up}");
+    assert!(!up.contains("edit if needed"), "\n{up}");
+    // Every header line is a `#` comment, so it never affects the tamper hash.
+    let bare = "add column product.barcode text null\n";
+    assert_eq!(content_hash(&up), content_hash(bare));
+}
+
+/// A `raw(dialect)` step may span multiple lines as a backtick-delimited block: it parses to
+/// one step with the whole body, `strip_raw_steps` removes the entire block (not just the
+/// opening line), and `has_raw_step` sees it.
+#[test]
+fn multi_line_raw_block_round_trips() {
+    let up = "add column widget.size int null\n\
+              raw(sqlite) `\n\
+              CREATE TABLE widget_new (id text);\n\
+              INSERT INTO widget_new SELECT id FROM widget;\n\
+              DROP TABLE widget;\n\
+              ALTER TABLE widget_new RENAME TO widget;\n\
+              `\n\
+              add index idx_widget_size (size)\n";
+    assert!(has_raw_step(up));
+    let raws = parse_raw_steps(up);
+    assert_eq!(raws.len(), 1);
+    match &raws[0] {
+        Step::Raw { dialect, sql } => {
+            assert_eq!(*dialect, Sqlite);
+            assert!(sql.contains("CREATE TABLE widget_new"), "{sql}");
+            assert!(
+                sql.contains("ALTER TABLE widget_new RENAME TO widget"),
+                "{sql}"
+            );
+            // The block body is exactly the four inner lines, nothing of the opener/closer.
+            assert_eq!(sql.lines().count(), 4);
+        }
+        other => panic!("{other:?}"),
+    }
+    // The structural residue drops the whole block, keeping the surrounding steps.
+    let residue = strip_raw_steps(up);
+    assert!(
+        residue.contains("add column widget.size int null"),
+        "{residue}"
+    );
+    assert!(
+        residue.contains("add index idx_widget_size (size)"),
+        "{residue}"
+    );
+    assert!(!residue.contains("CREATE TABLE widget_new"), "{residue}");
+    assert!(!residue.contains("raw("), "{residue}");
+}
+
+/// `up_mig_matches_snapshot`: a byte/cosmetic-only edit still matches; a structural line
+/// edit is drift; adding a `raw` line leaves the structural residue matching.
+#[test]
+fn up_mig_matches_snapshot_detects_structural_drift_only() {
+    let steps = vec![Step::AddColumn {
+        table: "widget".to_string(),
+        column: col("size", "int", true),
+    }];
+    // Generated form (with header) matches.
+    assert!(up_mig_matches_snapshot(&render_up(&steps), &steps));
+    // Cosmetic edit (blank lines, comment, indentation) still matches.
+    assert!(up_mig_matches_snapshot(
+        "\n  add column widget.size int null  \n# a note\n",
+        &steps
+    ));
+    // A structural edit (null -> not_null) is drift.
+    assert!(!up_mig_matches_snapshot(
+        "add column widget.size int not_null\n",
+        &steps
+    ));
+    // An added raw line rides separately — the structural residue still matches.
+    assert!(up_mig_matches_snapshot(
+        "add column widget.size int null\nraw(sqlite) `UPDATE widget SET size = 0`\n",
+        &steps
+    ));
+}
+
+/// `render_down` prefills real reverse SQL for mechanically reversible steps and a loud
+/// irreversible comment for the rest, newest step first.
+#[test]
+fn render_down_prefills_reversible_and_flags_the_rest() {
+    let steps = vec![
+        Step::CreateTable(table("gadget", vec![col("name", "text", false)])),
+        Step::AddColumn {
+            table: "widget".to_string(),
+            column: col("size", "int", true),
+        },
+        Step::DropColumn {
+            table: "widget".to_string(),
+            column: "legacy".to_string(),
+        },
+        Step::RenameColumn {
+            table: "widget".to_string(),
+            from: "upc".to_string(),
+            to: "barcode".to_string(),
+        },
+    ];
+    let down = render_down(&steps, Sqlite);
+    // Reversible steps became real reverse SQL.
+    assert!(
+        down.contains("ALTER TABLE `widget` DROP COLUMN `size`;"),
+        "\n{down}"
+    );
+    assert!(down.contains("DROP TABLE `gadget`;"), "\n{down}");
+    assert!(
+        down.contains("ALTER TABLE `widget` RENAME COLUMN `barcode` TO `upc`;"),
+        "\n{down}"
+    );
+    // The drop-column can't be reversed → a loud comment inviting a hand-written reverse.
+    assert!(
+        down.contains("is irreversible (data loss); write your own or delete this file"),
+        "\n{down}"
+    );
+    // Reverse order: the rename (last up step) is reversed before the create (first up step).
+    let rename_at = down.find("RENAME COLUMN").unwrap();
+    let drop_table_at = down.find("DROP TABLE `gadget`").unwrap();
+    assert!(rename_at < drop_table_at, "\n{down}");
+}
+
+/// `raw_modeled_tables` flags a raw step touching a snapshot-modeled table (word-boundary,
+/// so `order` doesn't match inside `order_line`).
+#[test]
+fn raw_modeled_tables_matches_whole_identifiers_only() {
+    let snap = Snapshot {
+        scopes: vec![],
+        tables: vec![
+            table("order", vec![col("total", "int", false)]),
+            table("audit_log", vec![col("msg", "text", false)]),
+        ],
+        renames: vec![],
+    };
+    // Names a modeled table → flagged.
+    assert_eq!(
+        raw_modeled_tables("UPDATE \"order\" SET total = 0", &snap),
+        vec!["order".to_string()]
+    );
+    // A substring inside another identifier is not a match.
+    assert!(raw_modeled_tables("SELECT * FROM order_line", &snap).is_empty());
+    // An unmodeled object (a view) is safe blindness — no match.
+    assert!(raw_modeled_tables("CREATE VIEW recent AS SELECT 1", &snap).is_empty());
+}
+
 #[test]
 fn content_hash_ignores_comments_and_whitespace_but_not_steps() {
     let a = "# generated header\nadd column product.barcode text null\n";

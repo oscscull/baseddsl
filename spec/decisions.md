@@ -4739,6 +4739,33 @@ a `W0109` lint flags a raw migration step naming a modeled table (lower-priority
 Spec seam: migrations.md (E5 + raw structural effects), raw.md, editors/vscode. Runtime
 `MigrateError::UpMigDrift`; lint `W0109`.
 
+**Shipped.** All six landed. (a) `render_up`'s header (`migrate/up_mig.rs`) states the real
+contract — structural steps derive from `schema.snap`, editing one has no effect, the editable
+surface is `raw(<dialect>)` lines (which run after all structural steps, any file position) + a
+hand-authored `down.mig`; every header line is a `#` comment, so the tamper hash is unchanged. (b)
+One shared drift check, `migrate::up_mig_matches_snapshot` (`content_hash(strip_raw_steps(up)) ==
+content_hash(render_up(steps))`), is called by runtime `load_migrations` (→ `MigrateError::UpMigDrift`,
+refusing apply/status), CLI `render` (→ a CLI error), and `verify` (which already flagged it) — so a
+structural hand-edit is refused at the moment of harm, not silently ignored; it canonicalizes like the
+content hash (cosmetic edits tolerated) and strips `raw` lines first (a `raw`-line edit is Tamper, not
+drift, keeping both guards meaningful). (c) `.mig` + `.snap` tmLanguage grammars
+(`editors/vscode/syntaxes/{mig,snap}.tmLanguage.json`, embedded `source.sql` in raw blocks, a loud
+`# DESTRUCTIVE` scope) + two `languages`/`grammars` contributions in `package.json`. (d) `parse_raw_steps`
+/`strip_raw_steps`/`has_raw_step` rewritten onto one block-aware `scan_raw`: a `raw(<dialect>)` opener
+takes either a single-line SQL (closing backtick on the same line) or a multi-line block (opening
+backtick last on the line, closing backtick alone on its own line); the whole `up.mig` stays hashed, no
+sidecars. (e) `gen` writes `down.mig` via new per-dialect `migrate::render_down` — real reverse SQL for
+mechanically reversible steps (add⇄drop column/index, create⇄drop table, rename⇄rename), a loud
+`-- <step> is irreversible (data loss); write your own or delete this file` for the rest; `load_migrations`
+treats an all-comment (zero-statement) `down.mig` as absent, so an untouched placeholder stays
+roll-forward-only (a `--down` is a loud `NoDown`, not a silent no-op). (f) migrations.md + raw.md document
+the safe (unmodeled: views/triggers/extensions) vs dangerous (modeled: table/column/index) raw boundary;
+`W0109` (`migrate::raw_modeled_tables`, whole-identifier scan) surfaces in `based migrate verify` when a
+raw step's SQL names a modeled table. Tests: codegen units (honest header, multi-line raw round-trip,
+drift helper, down-prefill, `raw_modeled_tables` word-boundary), runtime (UpMigDrift refused at load,
+multi-line raw applies live on SQLite, the two Tamper tests reworked to a `raw`-line append), CLI
+(down.mig prefill + irreversible placeholder, W0109 in verify). Green via `make check`.
+
 ## D107 — named `tx` step bindings replace `^` (NF13)
 
 **Decision.** A `tx` step back-references a prior step only via `^.field`, which today (sema `prev`

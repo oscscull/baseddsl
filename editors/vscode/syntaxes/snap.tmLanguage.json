@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Based Snapshot",
+  "scopeName": "source.snap",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#params" },
+    { "include": "#raw" },
+    { "include": "#types" },
+    { "include": "#strings" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.snap"
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "^\\s*(snapshot|table|column|index|scope)\\b",
+          "name": "keyword.control.snap"
+        },
+        {
+          "match": "\\b(rename|table|column|soft_delete|scope|sort|default|fk|unique|inferred|null|not_null|dialect)\\b",
+          "name": "constant.language.snap"
+        },
+        { "match": "->", "name": "keyword.operator.rename.snap" }
+      ]
+    },
+    "params": {
+      "match": "\\$[A-Za-z_][A-Za-z0-9_.]*",
+      "name": "variable.parameter.snap"
+    },
+    "raw": {
+      "begin": "`",
+      "end": "`",
+      "name": "string.quoted.other.raw.snap"
+    },
+    "types": {
+      "match": "\\b(text|int|bool|timestamp|date|json|uuid|float|decimal)\\b",
+      "name": "support.type.primitive.snap"
+    },
+    "strings": {
+      "name": "string.quoted.double.snap",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.snap" }]
+    },
+    "numbers": {
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b",
+      "name": "constant.numeric.snap"
+    }
+  }
+}

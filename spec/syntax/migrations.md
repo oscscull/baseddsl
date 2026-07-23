@@ -15,13 +15,19 @@ The `.bsl` schema is the single source of truth (principle 4). A **migration** i
 reviewable, editable derivative that carries a database from schema-state N → N+1. This is the
 *versioned* model (Prisma/Atlas-versioned), **not** live declarative-apply: the tool never diffs
 the running database and mutates it in place. It diffs your `.bsl` against the **last captured
-snapshot** and writes a migration file you read, edit if needed, commit, and later apply.
+snapshot** and writes a migration you read, commit, and later apply.
 
 ```
-edit *.bsl  ──▶  based migrate gen  ──▶  migrations/NNNN_slug/{up.mig, schema.snap[, down.mig]}
+edit *.bsl  ──▶  based migrate gen  ──▶  migrations/NNNN_slug/{up.mig, schema.snap, down.mig}
                      │
                      └─ diff( last schema.snap , current .bsl )  →  neutral step list
 ```
+
+The **structural** steps in `up.mig` are snapshot-authoritative: `apply`/`render` re-derive them
+from the `schema.snap` chain, so a hand-edit to a structural step line has **no effect** — and is
+now **refused** (a hard error), not silently ignored (below). The genuinely **editable** surface is
+a `raw(<dialect>)` line (a data backfill or dialect-specific change the neutral vocabulary can't
+express) and a hand-authored `down.mig`; `up.mig`'s generated header states this contract.
 
 Everything the generator needs is **offline and deterministic**: the diff is `.bsl` (parsed +
 checked) against a stored snapshot, no database round-trip. That is what makes the artifacts
@@ -46,7 +52,7 @@ migrations/
   0002_add_product_barcode/
     up.mig
     schema.snap
-    down.mig          # OPTIONAL, author-written (never generated)
+    down.mig          # prefilled reverse SQL where reversible, else a loud placeholder
 ```
 
 - **`NNNN` — zero-padded, sequential, gap-free.** Four digits (`0001`…). The number is the total
@@ -122,6 +128,16 @@ steps produce?" **without a database**, which is only tractable if the steps are
 Each step renders to per-dialect SQL at `render`/`apply` time via the existing `Dialect` seam
 (D21/D28/D29), so the SQL can never drift from the neutral step (principle 4).
 
+**Structural steps are snapshot-authoritative — and a divergent edit is refused.** `apply`/`render`
+re-derive the structural steps from the `schema.snap` chain (`diff(snapshot[N-1], snapshot[N])`),
+not by parsing `up.mig`; the `up.mig` text is the reviewable artifact and the tamper anchor. So a
+hand-edit to a *structural* line can't change what applies — and, rather than silently ignore it,
+`apply`/`render` now **refuse** the migration (a hard error) when its structural lines diverge from
+the snapshot-derived SQL (principle 1 — a dangerous silent-ignore becomes an explicit stop at the
+moment of harm). The compare canonicalizes like the content hash, so cosmetic whitespace/comment
+edits are tolerated; the real editable surface is a `raw(<dialect>)` line and `down.mig`. To change
+a structural step, edit the `.bsl` and re-run `based migrate gen`.
+
 ### Step forms
 
 Columns and types are named in the neutral vocabulary (`int`, `text`, `uuid`, `timestamp`, `date`,
@@ -178,12 +194,41 @@ dialect-specific `USING` cast. The escape is a first-class step, mirroring `raw.
 raw(postgres) `update "order" set status = 'pending' where status is null`
 ```
 
+A raw step's SQL is either a **single line** between backticks (an inner backtick — a MariaDB
+identifier quote — rides through unharmed) or a **backtick-delimited multi-line block** for a
+multi-statement change the single line can't hold readably (the SQLite table-rebuild, for one):
+
+```
+raw(sqlite) `
+create table order_new ( … );
+insert into order_new select … from "order";
+drop table "order";
+alter table order_new rename to "order";
+`
+```
+
+The opening backtick is the last token on the `raw(…)` line; the closing backtick is alone on its
+own line. The whole `up.mig` — the raw block included — is covered by the content hash, so the
+one-file artifact keeps its tamper guarantee with **no sidecar files**.
+
+- **Raw runs AFTER all structural steps, regardless of file position.** Structural steps are
+  snapshot-derived and applied first; then every raw line for the matching dialect runs, in file
+  order. (A raw step's placement in `up.mig` is documentation, not sequencing against structural
+  steps.)
 - **`${param}` interpolation is *not* available here** — a migration takes no request args. A raw
   step is literal SQL for one dialect. (The `{table}`/`{id}` overrides of `raw.md` are a query-time
   facility; migrations have no bound row.)
 - **Per-dialect.** A raw step names its dialect. To support all three targets you write the step
   once per dialect (`raw(sqlite)…`, `raw(mariadb)…`, `raw(postgres)…`); a target with no matching
   raw step for a required change fails `render`/`apply` loudly rather than silently skipping.
+- **The raw/snapshot boundary — where raw is safe vs. dangerously blind.** Raw on an object the
+  snapshot does **not** model (a view, trigger, extension, stored function) is *safe blindness*: the
+  snapshot never tracked it, so raw is the only way to touch it and nothing is lost. Raw on a
+  snapshot-*modeled* object (a `table`/`column`/`index`) is *dangerous blindness*: the snapshot still
+  believes the modeled definition, so a raw that mutates it (renaming a column, rebuilding a table)
+  makes the snapshot silently wrong with no shadow-DB to catch the divergence. **Prefer a modeled
+  step (or `@was`) for a modeled object; reserve raw for the unmodeled.** `based migrate verify`
+  emits **`W0109`** when a raw step's SQL names a modeled table, so the blindness is at least visible.
 - **Marked "not offline-verifiable" (principle 6, never silent).** A migration carrying any `raw`
   step is flagged: the tool **cannot** compute the resulting schema state from opaque SQL without a
   SQL parser or a shadow DB (both declined for the baseline). So `schema.snap` for a raw-carrying
@@ -210,7 +255,8 @@ Product {
 writes `migrations/0002_add_product_barcode/up.mig`:
 
 ```
-# migrations/0002_add_product_barcode/up.mig — generated; edit if needed, then apply.
+# up.mig — generated by `based migrate gen`. (Header trimmed; structural steps derive from
+# schema.snap — edit the schema, not these lines. The editable surface is raw(<dialect>) + down.mig.)
 add column product.barcode text null
 add index idx_product_barcode (barcode)
 ```
@@ -346,15 +392,21 @@ not by reversing the last. Reason: an auto-generated "down" is a fiction (droppi
 restore its data; reversing a backfill needs the pre-image), and a fiction that looks like a safety
 net is the worst quadrant of principle 1.
 
-- **No `down.mig` is ever auto-generated.** Silence here is honest: the tool will not pretend a
-  reverse exists.
-- **An OPTIONAL author-written `down.mig` is honored if present.** When you *can* write a correct
-  reverse (a pure additive migration, a reversible rename), you author `down.mig` by hand as **raw
-  per-dialect SQL** (`;`-terminated statements — the honest form for a hand-written reverse, D42): a
+- **A correct reverse is never *invented* — but `gen` prefills a `down.mig` placeholder to complete.**
+  An auto-*applied* down would be a fiction, so the engine never fabricates one it would then run
+  blind. What `gen` does write is a **placeholder**: real reverse SQL for the manifest dialect where
+  the step is **mechanically reversible** (`add`⇄`drop`, `rename`⇄`rename`, `create table`⇄`drop
+  table`), and a loud `-- <step> is irreversible (data loss); write your own or delete this file`
+  comment for the rest. The file exists so a reverse is *there to finish* rather than never written —
+  without the invitation, down migrations don't get authored.
+- **A `down.mig` is honored only when it carries an executable statement.** It is **raw per-dialect
+  SQL** (`;`-terminated statements — the honest form for a hand-written reverse, D42): a
   neutral-vocabulary down would need a lossless neutral-step *text parser* the engine deliberately
   doesn't have (the up path is snapshot-authoritative, not text-parsed — E3/E4), and someone writing a
-  reverse is writing SQL anyway (this mirrors the `raw(dialect)` escape). Its absence means "this
-  migration is roll-forward only," which is stated in `status`, not hidden.
+  reverse is writing SQL anyway (this mirrors the `raw(dialect)` escape). A placeholder left
+  all-comment (every step irreversible, nothing completed) has no executable statement, so it counts
+  as **absent** — the migration is roll-forward only, and `--down` on it is a loud error, not a silent
+  no-op. Roll-forward-only is stated in `status`, not hidden.
 - **Down-invocation surface (resolved E4).** `based migrate apply --down` rolls back the single most-
   recently-applied migration; `based migrate apply --to <NNNN>` reconciles the applied set to exactly
   `{≤ NNNN}` — rolling *forward* pending migrations up to `NNNN`, or rolling *back* (newest first, each
@@ -389,7 +441,13 @@ _based_migrations
   already-applied migration is compared to the current file's hash. **A mismatch — the `up.mig` was
   edited after it was applied — is a hard error**, never a silent re-apply. An applied migration is
   immutable history; if it was wrong, you fix forward with a new migration. (Editing a *not-yet-
-  applied* migration is fine and expected — that's the review loop.)
+  applied* migration's `raw`/`down.mig` surface is fine and expected — that's the review loop.)
+- **Structural-drift rule (loud, principle 1):** distinct from the ledger tamper check — this one
+  needs no ledger and fires on *any* migration, applied or pending. Because structural steps are
+  re-derived from `schema.snap`, `apply`/`render` compare each `up.mig`'s structural residue (`raw`
+  lines stripped) to the snapshot-derived SQL and **refuse** the migration when they diverge, rather
+  than silently applying the snapshot's version of an edited line. Canonicalized like the content hash
+  (cosmetic edits tolerated). Fix by editing the `.bsl` and re-running `based migrate gen`.
 
 Applied migrations run **in `NNNN` order**; a gap or an out-of-order pending migration is a `status`
 error (the total order is the ledger's invariant).
@@ -420,11 +478,11 @@ offline LSP path.
 
 | Command | What it does |
 |---------|--------------|
-| `based migrate gen [name]` | Diff current `.bsl` vs. the latest `schema.snap`; write the next `migrations/NNNN_slug/{up.mig, schema.snap}`. No-op (exits clean, writes nothing) if the diff is empty. Offline. |
-| `based migrate render [--number NNNN] [--dialect D]` | Render migrations' steps to per-dialect SQL and print it — the review-the-SQL step (E3, done). `--number` picks one migration, else all in order; `--dialect` overrides the manifest target. Offline: re-derives each migration's steps as `diff(snapshot[N-1], snapshot[N])` from the stored `schema.snap`s (the snapshot-authoritative model, which `verify` asserts equals the `up.mig`), so no `up.mig` parser is needed yet. Does not touch a DB. |
-| `based migrate apply [--allow-destructive] [--to NNNN] [--down]` | Apply pending migrations in order, each in one transaction, inserting the ledger row. Checks the tamper hash first; gates destructive steps on the ack. Honors a `down.mig` for `--down`. Live DB. |
+| `based migrate gen [name]` | Diff current `.bsl` vs. the latest `schema.snap`; write the next `migrations/NNNN_slug/{up.mig, schema.snap, down.mig}` (a prefilled `down.mig` placeholder — reverse SQL where reversible, else a loud comment). No-op (exits clean, writes nothing) if the diff is empty. Offline. |
+| `based migrate render [--number NNNN] [--dialect D]` | Render migrations' steps to per-dialect SQL and print it — the review-the-SQL step (E3, done). `--number` picks one migration, else all in order; `--dialect` overrides the manifest target. Offline: re-derives each migration's structural steps as `diff(snapshot[N-1], snapshot[N])` from the stored `schema.snap`s (snapshot-authoritative), appends the authored `raw` steps, and **refuses** a migration whose structural `up.mig` lines diverge from the snapshot. Does not touch a DB. |
+| `based migrate apply [--allow-destructive] [--to NNNN] [--down]` | Apply pending migrations in order, each in one transaction, inserting the ledger row. **Refuses** a structural `up.mig` line edited away from `schema.snap`; checks the tamper hash; gates destructive steps on the ack. Honors a `down.mig` (with an executable statement) for `--down`. Live DB. |
 | `based migrate status` | Show applied vs. pending migrations, flag any hash mismatch, any gap/out-of-order, and (if a DB is reachable) the ledger state. |
-| `based migrate verify` | Offline: confirm each `schema.snap` equals its predecessor + its `up.mig` steps applied, and that the latest snapshot matches the current `.bsl` (no uncaptured drift). Reports raw-carrying migrations as `partial`. The CI gate. |
+| `based migrate verify` | Offline: confirm each `schema.snap` equals its predecessor + its `up.mig` steps applied, and that the latest snapshot matches the current `.bsl` (no uncaptured drift). Reports raw-carrying migrations as `partial`, and `W0109` for a raw step naming a modeled table. The CI gate. |
 
 ---
 
@@ -436,7 +494,8 @@ offline LSP path.
 - **Multi-instance apply coordination** (two deployers racing `apply`): the ledger's per-migration
   transaction gives single-writer safety, but an advisory-lock/leader story for concurrent deployers
   is deferred (parallels D25's durable-idempotency-store deferral).
-- **Down-migration auto-generation** — deliberately never built (see Rollback).
+- **Down-migration auto-*application*** — deliberately never built (see Rollback). `gen` prefills a
+  `down.mig` placeholder to complete, but the engine never fabricates a reverse it would then run.
 - **Raw-step structural effect declaration** — see the `raw(dialect)` TODO; until pinned, raw steps
   are data-only and their migration is `verify: partial`.
 - **Snapshot format as authored grammar** — `schema.snap` is a generated artifact; it gets a grammar

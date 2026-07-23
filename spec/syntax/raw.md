@@ -45,6 +45,21 @@ raw *value* leaf instead (`area = raw`ST_Area(location)``). Everything else on t
 CRUD, migrations, scope, soft-delete, the drift check — is unaffected. Details: models.md
 (Types), indexing.md (Exotic indexes).
 
+## The `.mig` `raw(<dialect>)` step — and where it's safe
+A migration's escape hatch is `raw(<dialect>) `<sql>`` (single line, or a backtick-delimited
+multi-line block; migrations.md). It's the right tool for a change the neutral step vocabulary
+can't express — a data backfill, a `CHECK`, a dialect-specific cast — but only when it touches an
+object the snapshot does **not** model:
+
+- **Safe blindness — unmodeled objects.** A view, trigger, extension, or stored function was never
+  in the snapshot, so raw is the only way to touch it and nothing is lost.
+- **Dangerous blindness — modeled objects.** A `table`/`column`/`index` the snapshot models still
+  reads by its modeled definition; a raw step that mutates it (renaming a column, rebuilding a table)
+  makes the snapshot silently wrong, with no shadow-DB to catch the divergence. Prefer a modeled step
+  (or `@was`) for a modeled object; if the change genuinely needs raw (a SQLite table-rebuild), keep
+  the snapshot's modeled definition in agreement by hand. `based migrate verify` emits **`W0109`** when
+  a raw step's SQL names a modeled table — the blindness is made visible, never silent (principle 6).
+
 ## Guarantees through the hatch
 - `${input}` always interpolates as a bound parameter, never string concat.
 - All raw marked with the `raw` backtick form = greppable inventory of where guarantees stop.

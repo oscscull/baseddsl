@@ -166,3 +166,69 @@ fn gen_teaches_was_when_a_rename_looks_like_a_drop_add() {
         "expected a rename teach hint, stdout: {stdout}"
     );
 }
+
+fn run_verify(root: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_based"))
+        .arg("migrate")
+        .arg("verify")
+        .arg(root)
+        .output()
+        .expect("run based migrate verify")
+}
+
+#[test]
+fn gen_prefills_down_mig_with_reverse_sql() {
+    let s = Scratch::new("down");
+    s.write("based.toml", MANIFEST);
+    s.write("shop.bsl", "Product { id: Id  name: text }\n");
+    assert!(run_gen(&s.0, Some("init")).status.success());
+
+    // A pure additive migration is mechanically reversible, so down.mig prefills real SQL.
+    s.write(
+        "shop.bsl",
+        "Product { id: Id  name: text  barcode: text?  @index barcode }\n",
+    );
+    assert!(run_gen(&s.0, Some("add barcode")).status.success());
+
+    let down = std::fs::read_to_string(s.0.join("migrations/0002_add_barcode/down.mig")).unwrap();
+    assert!(
+        down.contains("ALTER TABLE `product` DROP COLUMN `barcode`;"),
+        "\n{down}"
+    );
+    assert!(
+        down.contains("DROP INDEX `idx_product_barcode`"),
+        "\n{down}"
+    );
+
+    // A migration that drops a column can't be reversed → a loud placeholder, no SQL.
+    s.write("shop.bsl", "Product { id: Id  name: text }\n");
+    assert!(run_gen(&s.0, Some("drop barcode")).status.success());
+    let down3 = std::fs::read_to_string(s.0.join("migrations/0003_drop_barcode/down.mig")).unwrap();
+    assert!(
+        down3.contains("is irreversible (data loss); write your own or delete this file"),
+        "\n{down3}"
+    );
+}
+
+#[test]
+fn verify_flags_a_raw_step_touching_a_modeled_table() {
+    let s = Scratch::new("w0109");
+    s.write("based.toml", MANIFEST);
+    s.write("shop.bsl", "Product { id: Id  name: text }\n");
+    assert!(run_gen(&s.0, Some("init")).status.success());
+
+    // Hand-author a raw step naming a modeled table (a data backfill on `product`).
+    let up_path = s.0.join("migrations/0001_init/up.mig");
+    let mut up = std::fs::read_to_string(&up_path).unwrap();
+    up.push_str("raw(mariadb) `UPDATE `product` SET name = 'x'`\n");
+    std::fs::write(&up_path, up).unwrap();
+
+    let out = run_verify(&s.0);
+    // Still verifies (a warning, not a failure), and names W0109 + the touched table.
+    assert!(out.status.success(), "{out:#?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("W0109") && stdout.contains("product"),
+        "stdout: {stdout}"
+    );
+}

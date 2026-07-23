@@ -98,6 +98,7 @@ pub mod code {
     pub const STALE_UNSCOPED: &str = "W0106"; // unscoped(...) on a callable whose model has no @scope
     pub const WAS_SPENT: &str = "W0107"; // `@was` rename already captured — remove it (offline, LSP)
     pub const MIGRATE_DRIFT: &str = "W0108"; // schema is ahead of migrations — run `based migrate gen` (offline, LSP)
+    pub const RAW_MIGRATION_MODELED: &str = "W0109"; // a raw migration step names a snapshot-modeled table (the snapshot is blind to it)
 
     // streaming: the `-> stream Shape` return form (E02xx)
     pub const STREAM_GET: &str = "E0200"; // stream body verb must be `list` (`get` is a cardinality mismatch)

@@ -468,60 +468,139 @@ pub fn drift(prev: &Snapshot, schema: &CheckedSchema) -> Vec<Step> {
 /// Parse the `raw(<dialect>) `<sql>`` escape steps out of an `up.mig`.
 /// The diff never *generates* these (opaque SQL the neutral vocabulary can't model), so
 /// `apply`/`render` recover them from the authored `up.mig` and layer them onto the
-/// snapshot-derived structural steps. One step per matching line; a line whose dialect
-/// token isn't a known dialect is skipped (parse is lenient — `verify` flags the file).
+/// snapshot-derived structural steps. A single-line form (`raw(sqlite) `…``) and a
+/// backtick-delimited multi-line block (opening backtick last on the line, closing backtick
+/// alone on its own line) are both accepted; a block whose dialect token isn't a known
+/// dialect is skipped (parse is lenient — `verify` flags the file).
 pub fn parse_raw_steps(up_text: &str) -> Vec<Step> {
-    let mut out = Vec::new();
-    for line in up_text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("raw(") else {
-            continue;
-        };
-        let Some(close) = rest.find(')') else {
-            continue;
-        };
-        let dialect_tok = rest[..close].trim();
-        // The SQL is delimited by the first and last backtick on the line, so an inner
-        // backtick (a MariaDB identifier quote) rides through unharmed.
-        let after = &rest[close + 1..];
-        let Some(open_q) = after.find('`') else {
-            continue;
-        };
-        let Some(close_q) = after.rfind('`') else {
-            continue;
-        };
-        if close_q <= open_q {
-            continue;
-        }
-        let sql = after[open_q + 1..close_q].trim().to_string();
-        if sql.is_empty() {
-            continue;
-        }
-        // Only the three known dialects are raw targets; an unknown token is left out so
-        // it can't masquerade as (say) MariaDB via `Dialect::parse`'s permissive fallback.
-        let dialect = match dialect_tok {
-            "sqlite" => Dialect::Sqlite,
-            "mariadb" | "mysql" => Dialect::MariaDb,
-            "postgres" | "postgresql" => Dialect::Postgres,
-            _ => continue,
-        };
-        out.push(Step::Raw { dialect, sql });
-    }
-    out
+    scan_raw(up_text).0
 }
 
 /// Does an `up.mig` carry any `raw(...)` escape step? A raw-carrying migration is
 /// "not offline-verifiable" — `verify` reports it `partial`.
 pub fn has_raw_step(up_text: &str) -> bool {
-    up_text.lines().any(|l| l.trim_start().starts_with("raw("))
+    scan_raw(up_text).2
 }
 
-/// An `up.mig` with its `raw(...)` lines removed — the structural residue `verify`
-/// compares against the snapshot-derived (raw-free) regeneration.
+/// An `up.mig` with its `raw(...)` steps (single-line and multi-line blocks) removed — the
+/// structural residue `verify`/`apply` compare against the snapshot-derived (raw-free)
+/// regeneration.
 pub fn strip_raw_steps(up_text: &str) -> String {
-    up_text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("raw("))
-        .collect::<Vec<_>>()
-        .join("\n")
+    scan_raw(up_text).1.join("\n")
+}
+
+/// Walk an `up.mig` once, splitting it into the parsed `raw` escape steps, the structural
+/// residue lines (everything not inside a `raw` block), and whether any `raw` region was
+/// seen. A `raw(<dialect>)` line opens either a single-line SQL (a closing backtick later on
+/// the same line) or a multi-line block (opening backtick last on the line, closing backtick
+/// alone on a line). Both are one [`Step::Raw`]; an inner backtick (a MariaDB identifier
+/// quote) inside a single line rides through unharmed.
+fn scan_raw(up_text: &str) -> (Vec<Step>, Vec<&str>, bool) {
+    let mut steps = Vec::new();
+    let mut structural: Vec<&str> = Vec::new();
+    let mut saw_raw = false;
+
+    let lines: Vec<&str> = up_text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let raw = lines[i];
+        if let Some((dialect_tok, opener)) = raw_line_opener(raw) {
+            // Single-line: a closing backtick sits after the opener on this same line.
+            if let Some(close_rel) = opener.rfind('`') {
+                let sql = opener[..close_rel].trim().to_string();
+                push_raw_step(&mut steps, dialect_tok, sql);
+                saw_raw = true;
+                i += 1;
+                continue;
+            }
+            // Multi-line block: collect until a line that is a lone closing backtick.
+            let mut body = String::new();
+            if !opener.trim().is_empty() {
+                body.push_str(opener);
+            }
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < lines.len() {
+                if lines[j].trim() == "`" {
+                    closed = true;
+                    break;
+                }
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(lines[j]);
+                j += 1;
+            }
+            if closed {
+                push_raw_step(&mut steps, dialect_tok, body.trim().to_string());
+                saw_raw = true;
+                i = j + 1;
+                continue;
+            }
+            // An unterminated block is corrupt — leave the line structural so the drift
+            // check surfaces it rather than swallowing the rest of the file.
+        }
+        structural.push(raw);
+        i += 1;
+    }
+    (steps, structural, saw_raw)
+}
+
+/// If `line` opens a `raw(<dialect>)` step, return `(dialect token, rest after the opening
+/// backtick)`. `None` when the line isn't a raw opener (no `raw(`, no `)`, no backtick).
+fn raw_line_opener(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("raw(")?;
+    let close = rest.find(')')?;
+    let dialect_tok = rest[..close].trim();
+    let after = &rest[close + 1..];
+    let open_q = after.find('`')?;
+    Some((dialect_tok, &after[open_q + 1..]))
+}
+
+/// Push one [`Step::Raw`] for a parsed dialect token + SQL, skipping an empty body or an
+/// unknown dialect token (so it can't masquerade as MariaDB via `Dialect::parse`'s fallback).
+fn push_raw_step(out: &mut Vec<Step>, dialect_tok: &str, sql: String) {
+    if sql.is_empty() {
+        return;
+    }
+    let dialect = match dialect_tok {
+        "sqlite" => Dialect::Sqlite,
+        "mariadb" | "mysql" => Dialect::MariaDb,
+        "postgres" | "postgresql" => Dialect::Postgres,
+        _ => return,
+    };
+    out.push(Step::Raw { dialect, sql });
+}
+
+/// The modeled tables a `raw` step's SQL names — the dangerous-blindness case (`W0109`):
+/// raw that mutates a snapshot-*modeled* object escapes the snapshot's view, where raw on an
+/// unmodeled object (a view/trigger/extension) is safe. Heuristic word-boundary scan of the
+/// SQL against the snapshot's table names; unmodeled objects never match.
+pub fn raw_modeled_tables(raw_sql: &str, snap: &Snapshot) -> Vec<String> {
+    let lower = raw_sql.to_ascii_lowercase();
+    snap.tables
+        .iter()
+        .filter(|t| sql_names_word(&lower, &t.name.to_ascii_lowercase()))
+        .map(|t| t.name.clone())
+        .collect()
+}
+
+/// Does `haystack` (already lowercased SQL) contain `word` as a whole identifier — bounded
+/// by a non-identifier character (or a string edge) on each side? Avoids matching `order`
+/// inside `order_line`.
+fn sql_names_word(haystack: &str, word: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(word) {
+        let start = from + rel;
+        let end = start + word.len();
+        let before_ok = start == 0 || !haystack[..start].chars().next_back().is_some_and(is_ident);
+        let after_ok = haystack[end..].chars().next().is_none_or(|c| !is_ident(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }

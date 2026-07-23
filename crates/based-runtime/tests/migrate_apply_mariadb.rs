@@ -140,10 +140,11 @@ async fn editing_an_applied_migration_is_a_tamper_error_live() {
         .await
         .unwrap();
 
-    // Edit an applied migration's up.mig; the recorded ledger hash no longer matches.
+    // Append a `raw` line to an applied migration: the structural residue still matches
+    // schema.snap (not drift), but the recorded ledger hash no longer matches (tamper).
     std::fs::write(
         s.up_path("0002_add_size"),
-        "add column widget.size int not_null\n",
+        "add column widget.size int null\nraw(mariadb) `SELECT 1`\n",
     )
     .unwrap();
     let tampered = load_migrations(&s.0, Dialect::MariaDb).unwrap();

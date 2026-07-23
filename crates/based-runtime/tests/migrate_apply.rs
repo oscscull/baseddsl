@@ -205,10 +205,12 @@ async fn a_migration_edited_after_apply_is_a_tamper_error() {
         .await
         .unwrap();
 
-    // Edit an already-applied migration's up.mig — the content hash now diverges from the ledger.
+    // Append a `raw` line to an already-applied migration — the structural residue still
+    // matches schema.snap (so this isn't structural drift), but the content hash now diverges
+    // from the ledger, so the tamper guard fires.
     std::fs::write(
         s.up_path("0002_add_size"),
-        "add column widget.size int not_null\n",
+        "add column widget.size int null\nraw(sqlite) `SELECT 1`\n",
     )
     .unwrap();
     let tampered = load_migrations(&s.0, Dialect::Sqlite).unwrap();
@@ -216,6 +218,49 @@ async fn a_migration_edited_after_apply_is_a_tamper_error() {
         .await
         .unwrap_err();
     assert!(matches!(err, MigrateError::Tamper { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_structural_up_mig_edit_is_refused_at_load() {
+    let (s, _backend) = scenario("drift");
+    // Edit a structural step line away from its schema.snap (null -> not_null). Structural
+    // steps derive from the snapshot, so this hand-edit would otherwise be silently ignored;
+    // `load_migrations` refuses it instead.
+    std::fs::write(
+        s.up_path("0002_add_size"),
+        "add column widget.size int not_null\n",
+    )
+    .unwrap();
+    let err = load_migrations(&s.0, Dialect::Sqlite).unwrap_err();
+    assert!(matches!(err, MigrateError::UpMigDrift { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_multi_line_raw_block_applies_after_the_structural_steps() {
+    let s = Scratch::new("multiraw");
+    s.migration("0001_init", INIT_UP, INIT_SNAP, None);
+    // 0002 adds a nullable column (structural) plus a multi-line raw block that seeds a row
+    // using that new column — the raw runs after the structural step, in the same migration.
+    let up = "add column widget.note text null\n\
+              raw(sqlite) `\n\
+              INSERT INTO widget (id, name, note) VALUES ('w1', 'seed', 'x')\n\
+              `\n";
+    let snap = "snapshot v1 dialect=neutral\n\ntable widget\n  column name text not_null\n  column note text null\n";
+    s.migration("0002_seed", up, snap, None);
+    let backend = SqliteBackend::in_memory().unwrap();
+
+    let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+
+    assert!(has_column(&backend, "note").await);
+    let mut db = backend.checkout("").await.unwrap();
+    let rows = fetch_all(db.fetch("SELECT note FROM widget WHERE id = 'w1'", &[]))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the multi-line raw block did not run");
+    assert_eq!(rows[0]["note"].as_str(), Some("x"));
 }
 
 #[tokio::test]

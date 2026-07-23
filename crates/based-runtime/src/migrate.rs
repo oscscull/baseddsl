@@ -122,6 +122,11 @@ pub enum MigrateError {
         applied: String,
         current: String,
     },
+    /// A migration's structural `up.mig` lines diverge from the SQL its `schema.snap` chain
+    /// implies — a hand-edit to a structural step, which apply re-derives from the snapshot
+    /// and would otherwise silently ignore. Edit the schema and re-run `based migrate gen`,
+    /// or (for SQL the neutral vocabulary can't express) use a `raw(<dialect>)` line.
+    UpMigDrift { id: String },
     /// A pending migration is destructive and no `--allow-destructive` ack was given.
     Destructive { id: String },
     /// A rollback target has no `down.mig` — that migration is roll-forward only.
@@ -147,6 +152,12 @@ impl std::fmt::Display for MigrateError {
                 f,
                 "migration `{id}` was edited after it was applied (ledger hash {applied}, current {current}); \
                  applied history is immutable — fix forward with a new migration"
+            ),
+            MigrateError::UpMigDrift { id } => write!(
+                f,
+                "migration `{id}` has a structural up.mig line edited away from schema.snap; \
+                 structural steps derive from schema.snap — edit the schema and re-run \
+                 `based migrate gen`, or use a raw(<dialect>) line for SQL the steps can't express"
             ),
             MigrateError::Destructive { id } => write!(
                 f,
@@ -195,6 +206,11 @@ pub fn load_migrations(
             .map_err(|e| MigrateError::Artifact(format!("{}/up.mig: {e}", name)))?;
 
         let up_text = read_file(&path.join("up.mig"))?;
+        // Structural steps are authoritative from `schema.snap`; a hand-edit to a structural
+        // `up.mig` line would otherwise be silently ignored at apply. Refuse it instead.
+        if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
+            return Err(MigrateError::UpMigDrift { id: name.clone() });
+        }
         // `raw(<dialect>)` escape steps can't be re-derived from the snapshots (opaque
         // SQL) — recover them from the authored `up.mig` and layer them after the
         // structural steps for the matching target.
@@ -212,9 +228,15 @@ pub fn load_migrations(
             .map(|h| h.message())
             .collect();
 
+        // A `down.mig` counts only if it carries an executable statement. `gen` prefills one
+        // with `-- … is irreversible …` comment lines for steps it can't mechanically
+        // reverse; an untouched all-comment placeholder splits to zero statements, so the
+        // migration stays roll-forward only (a `--down` on it is a loud `NoDown`, not a
+        // silent no-op) until the author completes it.
         let down_path = path.join("down.mig");
         let down_sql = if down_path.is_file() {
-            Some(split_sql(&read_file(&down_path)?))
+            let stmts = split_sql(&read_file(&down_path)?);
+            (!stmts.is_empty()).then_some(stmts)
         } else {
             None
         };
@@ -623,18 +645,22 @@ mod tests {
         let m2 = dir.join("migrations/0002_relabel");
         std::fs::create_dir_all(&m1).unwrap();
         std::fs::create_dir_all(&m2).unwrap();
-        std::fs::write(
-            m1.join("schema.snap"),
-            "snapshot v1 dialect=neutral\n\ntable widget\n  column label text not_null\n",
-        )
-        .unwrap();
-        std::fs::write(m1.join("up.mig"), "# up\n").unwrap();
-        std::fs::write(
-            m2.join("schema.snap"),
-            "snapshot v1 dialect=neutral\n\ntable widget\n  column title text not_null\n",
-        )
-        .unwrap();
-        std::fs::write(m2.join("up.mig"), "# up\n").unwrap();
+        // The `up.mig` must agree with its `schema.snap` (structural steps are
+        // snapshot-authoritative), so derive each one from its snapshot rather than a
+        // placeholder — else `load_migrations` refuses it as drift.
+        let snap1 = "snapshot v1 dialect=neutral\n\ntable widget\n  column label text not_null\n";
+        let snap2 = "snapshot v1 dialect=neutral\n\ntable widget\n  column title text not_null\n";
+        let up_for = |prev_text: Option<&str>, now_text: &str| {
+            let prev = prev_text
+                .map(|t| Snapshot::parse(t).unwrap())
+                .unwrap_or_default();
+            let now = Snapshot::parse(now_text).unwrap();
+            migrate::render_up(&migrate::diff_snapshots(&prev, &now))
+        };
+        std::fs::write(m1.join("schema.snap"), snap1).unwrap();
+        std::fs::write(m1.join("up.mig"), up_for(None, snap1)).unwrap();
+        std::fs::write(m2.join("schema.snap"), snap2).unwrap();
+        std::fs::write(m2.join("up.mig"), up_for(Some(snap1), snap2)).unwrap();
 
         let migs = load_migrations(&dir, Dialect::Postgres).expect("load");
         assert_eq!(migs.len(), 2);

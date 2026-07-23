@@ -1,0 +1,80 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Based Migration",
+  "scopeName": "source.mig",
+  "patterns": [
+    { "include": "#destructive" },
+    { "include": "#comments" },
+    { "include": "#raw" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#strings" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "destructive": {
+      "match": "#\\s*DESTRUCTIVE\\b.*$",
+      "name": "invalid.deprecated.destructive.mig"
+    },
+    "comments": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.mig"
+    },
+    "raw": {
+      "patterns": [
+        {
+          "match": "\\b(raw)\\s*(\\()\\s*(sqlite|mariadb|mysql|postgres|postgresql)\\s*(\\))",
+          "captures": {
+            "1": { "name": "keyword.control.raw.mig" },
+            "3": { "name": "constant.language.dialect.mig" }
+          }
+        },
+        {
+          "begin": "`",
+          "end": "`",
+          "name": "meta.embedded.block.sql",
+          "contentName": "meta.embedded.block.sql",
+          "patterns": [{ "include": "source.sql" }]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(create|drop|add|alter|rename)\\s+(table|column|index|unique|scope)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.mig" },
+            "2": { "name": "keyword.control.mig" }
+          }
+        },
+        {
+          "match": "\\b(create|drop|add|alter|rename|table|column|index|unique|scope|type)\\b",
+          "name": "keyword.control.mig"
+        },
+        {
+          "match": "\\b(unsafe|unscoped)\\b",
+          "name": "keyword.other.acknowledgement.mig"
+        },
+        {
+          "match": "\\b(null|not_null|default|unique|using|inferred)\\b",
+          "name": "constant.language.mig"
+        },
+        { "match": "->", "name": "keyword.operator.rename.mig" }
+      ]
+    },
+    "types": {
+      "match": "\\b(text|int|bool|timestamp|date|json|uuid|float|decimal)\\b",
+      "name": "support.type.primitive.mig"
+    },
+    "strings": {
+      "name": "string.quoted.double.mig",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.mig" }]
+    },
+    "numbers": {
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b",
+      "name": "constant.numeric.mig"
+    }
+  }
+}

@@ -378,7 +378,7 @@ fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
 fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     use based_codegen::migrate;
 
-    let (_project, schema, decls, sources, _warnings) = load_checked(root)?;
+    let (project, schema, decls, sources, _warnings) = load_checked(root)?;
     let migrations_dir = root.join("migrations");
 
     // The baseline is the highest-NNNN migration's snapshot (empty for 0001_init).
@@ -409,10 +409,17 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
 
     let up = migrate::render_up(&steps);
     let snap = migrate::snapshot(&schema);
+    // Prefill a `down.mig` for the manifest dialect: real reverse SQL where the step is
+    // mechanically reversible, a loud irreversible comment otherwise, so a reverse exists to
+    // complete instead of being silently never written.
+    let dialect = Dialect::parse(&project.manifest.dialect);
+    let down = migrate::render_down(&steps, dialect);
     let up_path = dir.join("up.mig");
     let snap_path = dir.join("schema.snap");
+    let down_path = dir.join("down.mig");
     std::fs::write(&up_path, &up).map_err(|e| io_at("writing", &up_path, e))?;
     std::fs::write(&snap_path, &snap).map_err(|e| io_at("writing", &snap_path, e))?;
+    std::fs::write(&down_path, &down).map_err(|e| io_at("writing", &down_path, e))?;
 
     let destructive = steps.iter().filter(|s| s.destructive()).count();
     println!(
@@ -533,13 +540,23 @@ fn cmd_migrate_render(
         };
         let now = read_snap(dir)?;
         let mut steps = migrate::diff_snapshots(&prev, &now);
-        // `raw(<dialect>)` escapes are authored into `up.mig`, not derivable from the
-        // snapshots — append them so the rendered SQL matches what `apply` runs.
+        let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
+        // Structural steps are snapshot-authoritative; refuse to render SQL for a migration
+        // whose structural `up.mig` lines were hand-edited away from `schema.snap` (else the
+        // rendered SQL would silently ignore the edit). `raw(<dialect>)` escapes are authored
+        // into `up.mig`, not derivable from the snapshots — append them so the rendered SQL
+        // matches what `apply` runs.
         if let Ok(up_text) = std::fs::read_to_string(dir.join("up.mig")) {
+            if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
+                return Err(CliError::failure(format!(
+                    "migration {} has a structural up.mig line edited away from schema.snap; \
+                     edit the schema and re-run `based migrate gen`, or use a raw(<dialect>) line",
+                    name.as_deref().unwrap_or("?")
+                )));
+            }
             steps.extend(migrate::parse_raw_steps(&up_text));
         }
 
-        let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
         println!("-- migrations/{}/up.mig", name.as_deref().unwrap_or("?"));
         print!("{}", migrate::render_sql(&steps, dialect));
         println!();
@@ -697,26 +714,33 @@ fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
                 continue;
             }
         };
-        // The up.mig the snapshots imply must still match the stored one (byte-canonical).
-        // A `raw(<dialect>)` escape isn't derivable from the snapshots (opaque SQL), so it
-        // is compared against the stored up.mig with its raw lines stripped and the
-        // migration reported `partial` (not offline-verifiable).
+        // The structural steps the snapshots imply must still match the stored `up.mig`
+        // (byte-canonical, `raw` lines stripped). A `raw(<dialect>)` escape isn't derivable
+        // from the snapshots (opaque SQL), so a raw-carrying migration is reported `partial`
+        // (not offline-verifiable).
         let steps = migrate::diff_snapshots(&prev, &snap);
-        let expected = migrate::render_up(&steps);
         let up_path = dir.join("up.mig");
         let stored =
             std::fs::read_to_string(&up_path).map_err(|e| io_at("reading", &up_path, e))?;
-        let partial = migrate::has_raw_step(&stored);
-        let structural = if partial {
-            migrate::strip_raw_steps(&stored)
-        } else {
-            stored.clone()
-        };
-        if migrate::content_hash(&expected) != migrate::content_hash(&structural) {
+        if !migrate::up_mig_matches_snapshot(&stored, &steps) {
             eprintln!("  {name}: up.mig has drifted from schema.snap (re-run `based migrate gen`)");
             problems += 1;
-        } else if partial {
+        } else if migrate::has_raw_step(&stored) {
             println!("  {name}: partial (carries a raw step — not offline-verifiable)");
+        }
+        // `W0109`: a raw step that mutates a snapshot-*modeled* table makes the snapshot blind
+        // to the change (a raw on a view/trigger/extension is safe). A warning, not a failure.
+        for step in migrate::parse_raw_steps(&stored) {
+            if let migrate::Step::Raw { sql, .. } = &step {
+                let touched = migrate::raw_modeled_tables(sql, &snap);
+                if !touched.is_empty() {
+                    println!(
+                        "  {name}: {} raw step touches modeled table(s) {} — the snapshot is blind to it",
+                        based_sema::code::RAW_MIGRATION_MODELED,
+                        touched.join(", ")
+                    );
+                }
+            }
         }
         prev = snap;
     }

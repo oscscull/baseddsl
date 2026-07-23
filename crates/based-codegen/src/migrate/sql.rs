@@ -6,9 +6,9 @@
 //! tamper guard. The neutral type map goes through [`crate::sql::sql_type`], so a
 //! migration's DDL can never drift from `based gen sql`.
 
-use super::diff::{ColumnChange, Step};
+use super::diff::{strip_raw_steps, ColumnChange, Step};
 use super::model::{index_name, ColumnSnap, IndexSnap, TableSnap};
-use super::up_mig::scope_change_line;
+use super::up_mig::{render_up, scope_change_line};
 use crate::Dialect;
 use based_ast::Primitive;
 use std::fmt::Write as _;
@@ -177,6 +177,90 @@ pub fn content_hash(up_text: &str) -> String {
         mix(b"\n");
     }
     format!("{h:016x}")
+}
+
+/// Does the stored `up.mig`'s structural (non-`raw`) residue still match the steps its
+/// `schema.snap` chain implies? The snapshot-authoritative drift check shared by `apply`,
+/// `render`, and `verify`: structural steps derive from `schema.snap`, so a hand-edit that
+/// changes a structural line's canonical form is drift and must be refused rather than
+/// silently ignored. Canonicalized like [`content_hash`] (cosmetic whitespace/comment edits
+/// are tolerated; `raw(dialect)` escapes ride separately and are stripped before compare).
+pub fn up_mig_matches_snapshot(up_text: &str, steps: &[Step]) -> bool {
+    content_hash(&strip_raw_steps(up_text)) == content_hash(&render_up(steps))
+}
+
+/// Render a prefilled `down.mig` (raw per-dialect SQL) reversing `steps`, newest step first.
+/// A mechanically reversible step (`add`⇄`drop`, `rename`⇄`rename`, `create table`⇄`drop
+/// table`) becomes real reverse SQL; anything that loses data or whose forward form doesn't
+/// carry enough to reconstruct (a `drop`, an `alter column`, a `raw` escape) becomes a loud
+/// `-- … is irreversible …` comment inviting a hand-written reverse. A `down.mig` that ends
+/// up all-comment (no executable statement) is treated as absent — the migration stays
+/// roll-forward only until the author completes it.
+pub fn render_down(steps: &[Step], dialect: Dialect) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "-- down.mig — reverse of up.mig (raw {} SQL). Prefilled where mechanically reversible;",
+        dialect.name()
+    );
+    out.push_str(
+        "-- complete or delete the irreversible steps below before relying on rollback.\n",
+    );
+    for step in steps.iter().rev() {
+        out.push('\n');
+        match reverse_statements(step, dialect) {
+            Some(stmts) => {
+                for s in stmts {
+                    let _ = writeln!(out, "{s};");
+                }
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "-- {} is irreversible (data loss); write your own or delete this file",
+                    step.describe()
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The reverse SQL for a step, or `None` when it isn't mechanically reversible. `Some(vec![])`
+/// (a scope change — no DDL either way) contributes nothing but isn't "irreversible".
+fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
+    Some(match step {
+        Step::CreateTable(t) => vec![format!("DROP TABLE {}", dialect.quote(&t.name))],
+        Step::AddColumn { table, column } => vec![format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            dialect.quote(table),
+            dialect.quote(&column.name),
+        )],
+        Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
+            vec![drop_index_sql(dialect, table, &index.name)]
+        }
+        Step::RenameTable { from, to } => vec![format!(
+            "ALTER TABLE {} RENAME TO {}",
+            dialect.quote(to),
+            dialect.quote(from),
+        )],
+        Step::RenameColumn { table, from, to } => vec![format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            dialect.quote(table),
+            dialect.quote(to),
+            dialect.quote(from),
+        )],
+        // A scope change emits no DDL forward, so its reverse is likewise a no-op — present
+        // but empty, never flagged irreversible.
+        Step::ScopeChange(_) => vec![],
+        // Drops/alters lose the prior state; a raw escape is opaque. Not reversible.
+        Step::DropTable(_)
+        | Step::DropColumn { .. }
+        | Step::AlterColumn { .. }
+        | Step::DropIndex { .. }
+        | Step::DropUnique { .. }
+        | Step::Raw { .. } => return None,
+    })
 }
 
 /// The statement(s) for a full `CREATE TABLE` from a neutral snapshot table. Mirrors

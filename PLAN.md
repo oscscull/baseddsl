@@ -79,11 +79,11 @@ bar met (`make check` green end-to-end). **Track T (core DB parity) is now at T1
 **T3 atomic update expressions (D100)**, **T4 aggregations + group-by + having (D101)**, **T5 upsert
 `create … on conflict update` + m2m-via-explicit-junction (D102)**. **The owner-flagged design
 follow-ups are RESOLVED (D103–D107, owner-approved 2026-07-21); NF11 (D103, keystone — reworded
-principle 8), NF9 opaque `raw(…)` column + exotic-index seam (D104), and **NF13 named `tx` step
-bindings `create … as name;` / `$name.field` replacing `^` (D107) are now shipped — `^`/`E0170`
-retired**; NF7 `@was` self-consuming gen + teach-at-checkpoint (D105) is now shipped.** Remaining
-queued: NF8 snapshot-authoritative `up.mig` (D106). **Next: implement the remaining decided item**
-(D106), interleaved with **Track T6 (referential actions)** and the remaining T5 m2m
+principle 8), NF9 opaque `raw(…)` column + exotic-index seam (D104), **NF13 named `tx` step
+bindings `create … as name;` / `$name.field` replacing `^` (D107) — `^`/`E0170` retired**, NF7
+`@was` self-consuming gen + teach-at-checkpoint (D105), and **NF8 honest snapshot-authoritative
+`up.mig` contract + drift-refusal + editable surface (D106) are now shipped.** All D103–D107
+follow-ups are done. **Next: Track T6 (referential actions)** and the remaining T5 m2m
 flattening-projection slice (now unblocked by D103). Batch-by-batch history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
@@ -469,48 +469,23 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   rename only by hand-editing `up.mig` (stays legal as escape hatch). Spec seam:
   migrations.md E5 + decisions entry when resolved.
 
-- **NF8. ✅ DECIDED (D106), implementation queued. `up.mig` snapshot-authoritative contract.**
-  Resolution (owner 2026-07-21): honest header; **apply/render refuse (hard error `MigrateError::UpMigDrift`)**
-  on a structural `up.mig` line that diverges from the snapshot-derived SQL (was silently ignored);
-  multi-line `raw` backtick blocks; prefilled `down.mig` placeholder; `.mig` (+ minimal `.snap`)
-  language/grammar; document the raw-touches-modeled-object boundary (`W0109`). Original writeup below.
-  The header says "edit if needed, then apply", but the model is snapshot-authoritative:
-  `apply`/`render` re-derive structural SQL from the `schema.snap` chain and only *parse*
-  `raw(<dialect>)` lines out of `up.mig` (based-runtime migrate::load_migrations). So a
-  hand edit to a *neutral* step line is **silently ignored at apply** — executed SQL comes
-  from the snapshots; only offline `based migrate verify` catches the byte-drift, and only
-  if it runs. The genuinely editable surface is: add `raw(dialect)` lines + hand-author
-  `down.mig`. Nothing in the artifact says this. Compounding subtleties: (1) raw steps
-  execute *after* all structural steps of their migration regardless of where the line sits
-  in the file — position looks meaningful and isn't; (2) `.mig`/`.snap` have zero editor
-  support — the VS Code extension contributes only `.bsl` (editors/vscode/package.json), so
-  the one artifact users are invited to hand-edit is plain text with no highlighting and no
-  diagnostics. Candidate fixes (not yet decided, cheap→deep): (a) rewrite the generated
-  header to state the real contract ("structural steps derive from schema.snap; meaningful
-  edits are raw(dialect) lines and down.mig; raw runs after structural steps"); (b)
-  apply-time drift check — `load_migrations` already reads both `up.mig` and `schema.snap`
-  per migration, so the verify byte-compare is nearly free there; refuse (or loudly warn)
-  on a neutral-line edit instead of silently ignoring it, closing the verify-didn't-run
-  hole; (c) a `.mig` tmLanguage grammar + language contribution (steps, `raw(dialect)`,
-  destructive markers; embedded SQL inside raw backticks), optionally `.snap` too; (d) the
-  already-open spec question (migrations.md, raw structural effects: `produces:` note vs
-  paired neutral step) — raw touching objects the snapshot *models* (tables/columns/indexes)
-  makes the snapshot blind with no shadow-DB to catch it, while raw on unmodeled objects
-  (views, triggers, extensions) is safe blindness; document that boundary at minimum.
-  Owner-added 2026-07-16, same theme: (e) raw SQL ergonomics — `parse_raw_steps` is
-  line-based, so a raw step is **single-line only** today; the spec's own cited use (the
-  sqlite table-rebuild, migrations.md) is unwritable readably. Options: multi-line backtick
-  blocks in `.mig` (keeps the one-file artifact + ledger hash contract; pair with the
-  tmLanguage SQL injection from (c)) vs. sidecar files (`NNNN_slug/raw.postgres.sql`
-  referenced from `up.mig`) which get free IDE SQL support but require extending the ledger
-  `up_hash` + `verify` to cover sidecars, else post-apply edits to them dodge the tamper
-  check. (f) **down.mig placeholder (owner-endorsed: without an invitation in the artifact,
-  down migrations will simply never be written).** Gen writes only {up.mig, schema.snap};
-  candidate: gen also emits `down.mig` prefilled — diff knows the steps and most are
-  mechanically reversible (add⇄drop, rename⇄rename, create⇄drop table), so prefill real
-  reverse SQL for the manifest dialect and mark irreversible steps with a loud
-  `-- drop column X is irreversible; write your own or delete this file` comment; at
-  minimum a commented template so the file exists and invites completion.
+- **NF8. ✅ done (D106). Honest snapshot-authoritative `up.mig` contract + a real editable surface.**
+  All six sub-items shipped: (a) the generated `up.mig` header now states the real contract (structural
+  steps derive from `schema.snap`; editing a structural line has no effect; the editable surface is
+  `raw(<dialect>)` lines + a hand-authored `down.mig`); (b) `apply`/`render` **refuse** (`MigrateError::
+  UpMigDrift` / a CLI error) a migration whose structural `up.mig` residue diverges from the
+  snapshot-derived SQL — the "verify-didn't-run" hole is closed (shared `migrate::up_mig_matches_snapshot`
+  canonicalizes like `content_hash`, so cosmetic edits are tolerated and `raw` lines ride separately, still
+  Tamper-guarded); (c) `.mig` + `.snap` tmLanguage grammars + VS Code language contributions (embedded SQL
+  in raw blocks); (d) multi-line `raw(<dialect>)` backtick blocks (`parse_raw_steps`/`strip_raw_steps`/
+  `has_raw_step` rewritten to a shared block-aware scanner — one-file artifact + hash contract kept, no
+  sidecars); (e) `gen` prefills `down.mig` with real reverse SQL where mechanically reversible (add⇄drop,
+  rename⇄rename, create⇄drop table) and a loud `-- … is irreversible …` comment otherwise (an all-comment
+  placeholder counts as absent → roll-forward-only, not a silent no-op rollback); (f) migrations.md/raw.md
+  document the raw/snapshot boundary and a `W0109` verify lint flags a raw step naming a modeled table.
+  Tests: codegen units (header, multi-line raw round-trip, drift helper, down prefill, `raw_modeled_tables`
+  word-boundary), runtime (UpMigDrift refusal at load, multi-line raw applies, Tamper reworked to a raw-line
+  append), CLI (down.mig prefill, W0109 verify). Live via `make check`.
 
 - **NF9. ✅ done (D104). Exotic column + index passthrough via `raw(…)`.**
   Shipped end to end: opaque column type `col: raw("geometry(Point,4326)")?` (per-dialect map
