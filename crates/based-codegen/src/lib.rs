@@ -21,9 +21,13 @@ pub mod sql;
 
 /// The SQL compile target (manifest `dialect`). MariaDB is the default.
 ///
-/// - `MariaDb` — the original target. MySQL maps here too (a MariaDB fork; the
-///   emitted SQL — backtick idents, `DATETIME`, `MEMBER OF`, positional `?` — is
-///   MySQL-8-compatible).
+/// - `MariaDb` — the original target. Backtick idents, `DATETIME`, `MEMBER OF`,
+///   positional `?`.
+/// - `MySql` — Oracle MySQL. Shares MariaDB's wire protocol, quoting, operators, and
+///   DDL syntax, so the *driver* is shared; a distinct codegen variant because the two
+///   diverge on type support (e.g. MySQL has no native `UUID` type) and will diverge
+///   further. The MySQL/MariaDB *family* ([`Dialect::is_mysql_family`]) shares almost
+///   every branch.
 /// - `Sqlite` — the infra-free backend + its DDL. Backtick idents, `IS NULL`, `= TRUE`,
 ///   positional `?` all run on SQLite too, so only DDL branches.
 /// - `Postgres` — the standards-track target. It diverges the most: identifiers are
@@ -39,6 +43,7 @@ pub mod sql;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     MariaDb,
+    MySql,
     Sqlite,
     Postgres,
 }
@@ -51,7 +56,8 @@ impl Dialect {
         match s {
             "sqlite" => Self::Sqlite,
             "postgres" | "postgresql" => Self::Postgres,
-            "mariadb" | "mysql" => Self::MariaDb,
+            "mysql" => Self::MySql,
+            "mariadb" => Self::MariaDb,
             _ => Self::MariaDb,
         }
     }
@@ -61,9 +67,16 @@ impl Dialect {
     pub fn name(self) -> &'static str {
         match self {
             Self::MariaDb => "mariadb",
+            Self::MySql => "mysql",
             Self::Sqlite => "sqlite",
             Self::Postgres => "postgres",
         }
+    }
+
+    /// The MySQL/MariaDB family — the two share a wire protocol, backtick quoting,
+    /// operators, and DDL syntax, so nearly every branch treats them identically.
+    pub fn is_mysql_family(self) -> bool {
+        matches!(self, Self::MariaDb | Self::MySql)
     }
 
     /// Quote a single SQL identifier for this dialect. MySQL/MariaDB and SQLite use
@@ -73,7 +86,7 @@ impl Dialect {
     /// through here rather than hardcoded at each `format!` site.
     pub fn quote(self, ident: &str) -> String {
         match self {
-            Self::MariaDb | Self::Sqlite => {
+            Self::MariaDb | Self::MySql | Self::Sqlite => {
                 format!("`{}`", ident.replace('`', "``"))
             }
             Self::Postgres => format!("\"{}\"", ident.replace('"', "\"\"")),
@@ -89,7 +102,7 @@ impl Dialect {
     /// keywords; SQLite stores bools as integers, so it is `1`/`0`.
     pub fn bool_lit(self, b: bool) -> &'static str {
         match self {
-            Self::MariaDb | Self::Postgres => {
+            Self::MariaDb | Self::MySql | Self::Postgres => {
                 if b {
                     "TRUE"
                 } else {
@@ -112,7 +125,7 @@ impl Dialect {
     pub fn json_object_fn(self) -> &'static str {
         match self {
             Self::Sqlite => "json_object",
-            Self::MariaDb => "JSON_OBJECT",
+            Self::MariaDb | Self::MySql => "JSON_OBJECT",
             Self::Postgres => "json_build_object",
         }
     }
@@ -131,7 +144,9 @@ impl Dialect {
         };
         match self {
             Self::Sqlite => format!("json_group_array({ordered})"),
-            Self::MariaDb => format!("COALESCE(JSON_ARRAYAGG({ordered}), JSON_ARRAY())"),
+            Self::MariaDb | Self::MySql => {
+                format!("COALESCE(JSON_ARRAYAGG({ordered}), JSON_ARRAY())")
+            }
             Self::Postgres => format!("COALESCE(json_agg({ordered}), '[]'::json)"),
         }
     }
@@ -144,12 +159,24 @@ mod tests {
     #[test]
     fn parse_maps_names_and_defaults_to_mariadb() {
         assert_eq!(Dialect::parse("mariadb"), Dialect::MariaDb);
-        assert_eq!(Dialect::parse("mysql"), Dialect::MariaDb);
+        assert_eq!(Dialect::parse("mysql"), Dialect::MySql);
         assert_eq!(Dialect::parse("sqlite"), Dialect::Sqlite);
         assert_eq!(Dialect::parse("postgres"), Dialect::Postgres);
         assert_eq!(Dialect::parse("postgresql"), Dialect::Postgres);
         // an unknown value is not a schema error — fall back to the documented default.
         assert_eq!(Dialect::parse("nope"), Dialect::MariaDb);
+    }
+
+    #[test]
+    fn mysql_shares_the_mariadb_family_spellings() {
+        assert!(Dialect::MySql.is_mysql_family());
+        assert!(Dialect::MariaDb.is_mysql_family());
+        assert!(!Dialect::Postgres.is_mysql_family());
+        assert!(!Dialect::Sqlite.is_mysql_family());
+        assert_eq!(Dialect::MySql.name(), "mysql");
+        assert_eq!(Dialect::MySql.quote("order"), "`order`");
+        assert_eq!(Dialect::MySql.bool_lit(true), "TRUE");
+        assert_eq!(Dialect::MySql.json_object_fn(), "JSON_OBJECT");
     }
 
     #[test]

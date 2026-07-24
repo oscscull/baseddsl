@@ -377,7 +377,7 @@ fn create_table_renders_id_pk_and_types_per_dialect() {
 
     let maria = render_sql(&steps, MariaDb);
     assert!(maria.contains("CREATE TABLE `account` ("), "\n{maria}");
-    assert!(maria.contains("`id` UUID NOT NULL"), "\n{maria}");
+    assert!(maria.contains("`id` CHAR(36) NOT NULL"), "\n{maria}");
     assert!(maria.contains("`email` VARCHAR(255) NOT NULL"), "\n{maria}");
     assert!(maria.contains("`age` BIGINT NULL"), "\n{maria}");
     assert!(maria.contains("PRIMARY KEY (`id`)"), "\n{maria}");

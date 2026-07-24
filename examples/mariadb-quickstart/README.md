@@ -71,8 +71,8 @@ based gen client -o src/client.rs --embedded   # src/client.rs (the typed client
 ```
 
 The only differences from the SQLite slice are the **driver** (a pooled `ShardRouter`/`MariaDb`
-over your live `DATABASE_URL`) and the **id generator** (`UuidGen` — MariaDB's native `UUID` id
-columns reject non-uuid ids). The schema, the generated client, and every scenario assertion
+over your live `DATABASE_URL`) and the **id generator** (`UuidGen` — the app mints the v4 uuid
+the `CHAR(36)` id columns store). The schema, the generated client, and every scenario assertion
 are the SQLite example's — the engine is driver-agnostic, so an app moves between dialects by
 swapping the driver + manifest `dialect`, nothing else.
 

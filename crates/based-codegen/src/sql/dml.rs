@@ -527,7 +527,7 @@ fn agg_sql(
 /// `BIGINT` to decimal/numeric, which would decode as a string; the cast keeps it a number.
 fn int_cast_type(dialect: Dialect) -> Option<&'static str> {
     match dialect {
-        Dialect::MariaDb => Some("SIGNED"),
+        Dialect::MariaDb | Dialect::MySql => Some("SIGNED"),
         Dialect::Postgres => Some("BIGINT"),
         Dialect::Sqlite => None,
     }
@@ -537,7 +537,7 @@ fn int_cast_type(dialect: Dialect) -> Option<&'static str> {
 /// on every dialect (Postgres `AVG` of an int/numeric is otherwise a numeric string).
 fn double_cast_type(dialect: Dialect) -> &'static str {
     match dialect {
-        Dialect::MariaDb => "DOUBLE",
+        Dialect::MariaDb | Dialect::MySql => "DOUBLE",
         Dialect::Postgres => "DOUBLE PRECISION",
         Dialect::Sqlite => "REAL",
     }
@@ -1524,7 +1524,7 @@ impl<'a> Select<'a> {
         }
         match self.dialect {
             Dialect::Postgres => format!("({qcol})::text"),
-            Dialect::MariaDb => format!("CAST({qcol} AS CHAR)"),
+            Dialect::MariaDb | Dialect::MySql => format!("CAST({qcol} AS CHAR)"),
             Dialect::Sqlite => qcol,
         }
     }

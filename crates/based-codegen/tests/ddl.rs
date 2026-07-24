@@ -32,13 +32,38 @@ fn gen_pg(src: &str) -> String {
 }
 
 #[test]
-fn implicit_id_is_uuid_primary_key() {
+fn implicit_id_is_char36_primary_key() {
+    // The MySQL/MariaDB family holds the app-minted v4 uuid string as `CHAR(36)` — it
+    // runs on every version (MySQL has no `UUID` type; MariaDB added it only in 10.7).
     let ddl = gen("Org { id: Id, name: text }");
     assert!(ddl.contains("CREATE TABLE `org` ("), "\n{ddl}");
-    assert!(ddl.contains("`id` UUID NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("`id` CHAR(36) NOT NULL"), "\n{ddl}");
     assert!(ddl.contains("PRIMARY KEY (`id`)"), "\n{ddl}");
     // implicit id carries no SQL default (app-generated)
-    assert!(!ddl.contains("`id` UUID NOT NULL DEFAULT"), "\n{ddl}");
+    assert!(!ddl.contains("`id` CHAR(36) NOT NULL DEFAULT"), "\n{ddl}");
+}
+
+#[test]
+fn mysql_dialect_matches_the_mariadb_family_char36_id() {
+    // `mysql` is its own dialect but shares the family DDL: same backtick quoting and the
+    // portable `CHAR(36)` id (native `UUID` is a MariaDB-10.7+ opt-in via `raw`, not here).
+    let ddl = gen_for("Org { id: Id, name: text }", Dialect::MySql);
+    assert!(ddl.contains("CREATE TABLE `org` ("), "\n{ddl}");
+    assert!(ddl.contains("`id` CHAR(36) NOT NULL"), "\n{ddl}");
+    assert!(!ddl.contains("UUID"), "\n{ddl}");
+}
+
+#[test]
+fn native_uuid_id_via_raw_propagates_to_fk_columns() {
+    // MariaDB 10.7+ opts into native `UUID` on the PK via `raw`; an FK to that PK must
+    // carry the same `UUID` type (the escape hatch composes across the relation).
+    let src = r#"
+        Org { id: raw("UUID"), name: text }
+        User { id: Id, org: Org }
+    "#;
+    let ddl = gen(src);
+    assert!(ddl.contains("`id` UUID NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("`org_id` UUID NOT NULL"), "\n{ddl}");
 }
 
 #[test]
@@ -180,9 +205,9 @@ fn forward_relation_emits_fk_column_no_constraint() {
         Org { id: Id, name: text }
         Order { id: Id, org: Org, buyer: Org? }
         "#);
-    // FK column named `<field>_id`, typed as the target's PK (uuid); optional -> NULL
-    assert!(ddl.contains("`org_id` UUID NOT NULL"), "\n{ddl}");
-    assert!(ddl.contains("`buyer_id` UUID NULL"), "\n{ddl}");
+    // FK column named `<field>_id`, typed as the target's PK (uuid -> CHAR(36)); optional -> NULL
+    assert!(ddl.contains("`org_id` CHAR(36) NOT NULL"), "\n{ddl}");
+    assert!(ddl.contains("`buyer_id` CHAR(36) NULL"), "\n{ddl}");
     // no FK constraints by default
     assert!(!ddl.contains("FOREIGN KEY"), "\n{ddl}");
     assert!(!ddl.contains("REFERENCES"), "\n{ddl}");

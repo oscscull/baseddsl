@@ -13,8 +13,8 @@
 //!
 //! There is **no raw SQL here** and **no hand-written transport bridge**. The only things
 //! that differ from the SQLite slice are the *driver* (a pooled `ShardRouter`/`MariaDb` over
-//! a live URL) and the *id generator* (`UuidGen` — MariaDB's native `UUID` id columns reject
-//! non-uuid ids). The schema, the client, and the scenario are identical.
+//! a live URL) and the *id generator* (`UuidGen` — the app mints the v4 uuid the `CHAR(36)`
+//! id columns store). The schema, the client, and the scenario are identical.
 
 use based_runtime::driver::{PoolConfig, ShardRouter};
 use based_runtime::id::UuidGen;
@@ -50,8 +50,8 @@ async fn main() {
 
     // The `Engine` is the library twin of `based serve`, minus the socket: it owns the
     // schema, the `Backend`, and an id generator, and runs each call through the same async
-    // dispatch core. `UuidGen` is the production generator (the MariaDB `UUID` id columns
-    // require it).
+    // dispatch core. `UuidGen` is the production generator (it mints the v4 uuid the
+    // `CHAR(36)` id columns store).
     let engine = Engine::new(compiled, router, UuidGen);
 
     // `client::embedded(&engine)` is the entire bridge — a typed, in-process client

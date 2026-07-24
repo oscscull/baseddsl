@@ -180,8 +180,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
 
 ## D1 — `Id` type, default PK = uuid
 `Id` is a primitive scalar: the opaque primary-key type. The concrete column type of the
-implicit `id` is **`uuid` by default** (distributed-friendly, non-enumerable; MariaDB native
-`UUID` where available, else `BINARY(16)`).
+implicit `id` is **`uuid` by default** (distributed-friendly, non-enumerable). Its physical DDL
+type is per-dialect: `CHAR(36)` on the MySQL/MariaDB family (the app-minted v4 string; portable
+across every version — D112), native `UUID` on Postgres, `TEXT` on SQLite. (`BINARY(16)` — half
+the storage — is deferred: it needs a runtime uuid↔16-byte value-map, D112.)
 - A model whose key is something else declares it explicitly (deviation visible, principle 2).
 - `Id` is the type of the implicit `id` column and of any relation's foreign-key value.
 - In query params, `org: Id` means "the key of the referenced row." Same-name binding
@@ -334,8 +336,10 @@ footgun, and this is a DB-first tool:
   CURRENT_TIMESTAMP` on the first timestamp column and the 2038 range cap. `@created`/`@updated` are
   engine-managed explicitly, so no implicit column behavior is wanted.
 - `date` -> `DATE`; `json` -> `JSON`.
-- `uuid` / `Id` -> **`UUID`** (native MariaDB type, D1). The implicit `id` is app-generated, so it
-  gets no SQL `DEFAULT`; a relation's FK column takes the target's PK type (default `UUID`).
+- `uuid` / `Id` -> **`CHAR(36)`** (holds the app-minted v4 string; runs on every MySQL/MariaDB
+  version — D112). The implicit `id` is app-generated, so it gets no SQL `DEFAULT`; a relation's FK
+  column takes the target's PK type (default `CHAR(36)`, or the PK's `raw` type when it has one).
+  Native `UUID` (MariaDB 10.7+) is an opt-in via `raw`.
 - A to-many scalar (`text[]`) has no columnar form -> `JSON` (a JSON array).
 
 Relations emit the FK *column* (`<field>_id`) but **no** `FOREIGN KEY` constraint — constraints are
@@ -5119,7 +5123,7 @@ goldens + a live junction example. Spec: `spec/syntax/models.md` + `spec/syntax/
 
 ## D112 — Split a real `mysql` dialect from `mariadb`; portable `CHAR(36)` id default for the family
 
-**Status: spec-only; owner-approved 2026-07-24. Implementation is PLAN PR8.** Fixes the PR5 miscompile: the
+**Status: implemented (PR8).** Fixes the PR5 miscompile: the
 `uuid`/`Id` column emitted `UUID` unconditionally on the MariaDb dialect (`sql.rs:491`), which is
 non-executable on `dialect="mysql"` (MySQL has no `UUID` type at any version) and on MariaDB < 10.7 (added
 in 10.7; 10.6 LTS lacks it) — silent, with the crate claiming MySQL-8 compatibility (`lib.rs:24-26`).
@@ -5141,3 +5145,16 @@ in 10.7; 10.6 LTS lacks it) — silent, with the crate claiming MySQL-8 compatib
 family `uuid`→`CHAR(36)`) + `fk_type` raw_type propagation; snapshot/migration dialect handling; the live
 test matrix (a `mysql` target alongside `mariadb` only where behaviour diverges — the dialect-divergent
 rule); doc-truth (`lib.rs:24-26` becomes accurate). Spec: `spec/syntax/models.md` type table.
+
+**Impl note (PR8).** `Dialect::MySql` is its own variant (`based-codegen::lib`); `Dialect::parse` maps
+`"mysql"`→`MySql`, `"mariadb"`→`MariaDb` (unknown still falls back to `MariaDb`). A
+`Dialect::is_mysql_family()` helper (`MariaDb | MySql`) carries the shared branches — the two are
+identical everywhere today (quoting, operators, DDL, DML, migration renderer, the runtime driver:
+`ShardRouter` serves both, MySQL sharing MariaDB's wire protocol), so the split is honest-output +
+future-proofing, not present divergence. `sql_type` emits `CHAR(36)` for `uuid`/`Id` on the whole
+family (was unconditional `UUID`); `fk_type` now reads the target PK member's `opaque()` raw type and
+propagates its per-dialect literal, so `id: Id raw("UUID")` makes both the PK and every FK to it
+`UUID`. Verified via `based-codegen` unit + DDL tests and the live `mariadb:11.4` suite (the family's
+one live target — the divergent-only rule); no separate MySQL live suite added. `BINARY(16)` remains
+deferred. Doc-truth corrected: `lib.rs` dialect docs, `sql.rs` type table, D1 (phantom `BINARY(16)`),
+this entry's line 337, and the mariadb-quickstart comments.

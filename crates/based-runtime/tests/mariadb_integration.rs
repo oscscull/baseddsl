@@ -37,9 +37,9 @@ use based_sema::check;
 
 use docker_mariadb::MariaDbContainer;
 
-// Valid v4-shaped UUIDs for the seed rows — MariaDB's native `UUID` column (which the
-// generated DDL emits) rejects a non-UUID string like `'org-1'`, so the fixtures use real
-// UUID literals. The trailing digits keep them human-readable across the assertions.
+// Valid v4-shaped UUIDs for the seed rows — the generated `id`/FK columns are `CHAR(36)`
+// holding the app-minted v4 string, so the fixtures use real 36-char UUID literals. The
+// trailing digits keep them human-readable across the assertions.
 const ORG_1: &str = "00000000-0000-4000-8000-0000000000a1";
 const USER_1: &str = "00000000-0000-4000-8000-0000000000b1";
 const ORDER_1: &str = "00000000-0000-4000-8000-0000000000c1";
@@ -74,8 +74,8 @@ async fn live() -> Option<(Compiled, ShardRouter, MariaDbContainer)> {
     container.exec_batch(&ddl).await;
     container
         .exec_batch(
-            // `total` is DECIMAL(12,2) (returned as its exact string); ids/uuids ride as text (real UUID literals — MariaDB validates
-            // the native `UUID` column). `deleted_at` defaults NULL (live rows).
+            // `total` is DECIMAL(12,2) (returned as its exact string); ids/uuids ride as text
+            // (36-char v4 literals in the `CHAR(36)` id columns). `deleted_at` defaults NULL (live rows).
             &format!(
                 "INSERT INTO `org` (`id`, `name`, `slug`) VALUES ('{ORG_1}', 'Acme', 'acme');\n\
                  INSERT INTO `user` (`id`, `email`, `name`) VALUES ('{USER_1}', 'a@x.com', 'Ada');\n\

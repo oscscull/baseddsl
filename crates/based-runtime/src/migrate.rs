@@ -322,7 +322,7 @@ pub async fn ensure_ledger<D: DbRead + ?Sized>(
 fn create_ledger_sql(dialect: Dialect) -> String {
     // Portable column types per dialect: a text id + hash, and a timestamp the DB stamps.
     let (id_ty, hash_ty, ts_ty) = match dialect {
-        Dialect::MariaDb => ("VARCHAR(255)", "VARCHAR(64)", "DATETIME"),
+        Dialect::MariaDb | Dialect::MySql => ("VARCHAR(255)", "VARCHAR(64)", "DATETIME"),
         Dialect::Postgres => ("TEXT", "TEXT", "TIMESTAMP"),
         Dialect::Sqlite => ("TEXT", "TEXT", "TEXT"),
     };
@@ -373,9 +373,9 @@ fn str_field(r: &Row, key: &str) -> String {
 
 fn placeholder(dialect: Dialect, n: usize) -> String {
     match dialect {
-        // Postgres binds `$1, $2, …`; MariaDB/SQLite bind `?`.
+        // Postgres binds `$1, $2, …`; MySQL/MariaDB/SQLite bind `?`.
         Dialect::Postgres => format!("${n}"),
-        Dialect::MariaDb | Dialect::Sqlite => "?".to_string(),
+        Dialect::MariaDb | Dialect::MySql | Dialect::Sqlite => "?".to_string(),
     }
 }
 

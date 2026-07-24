@@ -620,7 +620,8 @@ fn push_raw_step(out: &mut Vec<Step>, dialect_tok: &str, sql: String) {
     }
     let dialect = match dialect_tok {
         "sqlite" => Dialect::Sqlite,
-        "mariadb" | "mysql" => Dialect::MariaDb,
+        "mysql" => Dialect::MySql,
+        "mariadb" => Dialect::MariaDb,
         "postgres" | "postgresql" => Dialect::Postgres,
         _ => return,
     };

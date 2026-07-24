@@ -331,9 +331,9 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         lines.push(crate::sql::fk_constraint_clause(dialect, &t.name, fk));
     }
 
-    // MariaDB inlines indexes as table clauses; SQLite/Postgres trail them as statements.
+    // MySQL/MariaDB inline indexes as table clauses; SQLite/Postgres trail them as statements.
     // An opaque `raw` index is never a table clause — it always trails.
-    if dialect == Dialect::MariaDb {
+    if dialect.is_mysql_family() {
         for i in t.indexes.iter().filter(|i| i.raw.is_none()) {
             let cols = quote_cols(dialect, &i.columns);
             let (kind, using) = match i.method.as_deref() {
@@ -361,7 +361,7 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     for i in t
         .indexes
         .iter()
-        .filter(|i| dialect != Dialect::MariaDb || i.raw.is_some())
+        .filter(|i| !dialect.is_mysql_family() || i.raw.is_some())
     {
         stmts.push(create_index_sql(dialect, &t.name, i));
     }
@@ -415,7 +415,7 @@ fn drop_foreign_key_statements(
             dialect.quote(table),
             dialect.quote(&name),
         )],
-        Dialect::MariaDb => vec![format!(
+        Dialect::MariaDb | Dialect::MySql => vec![format!(
             "ALTER TABLE {} DROP FOREIGN KEY {}",
             dialect.quote(table),
             dialect.quote(&name),
@@ -458,9 +458,9 @@ fn alter_column_statements(
                 )
             })
             .collect(),
-        // MariaDB: a type/null change needs a full `MODIFY COLUMN` (no piecemeal form);
+        // MySQL/MariaDB: a type/null change needs a full `MODIFY COLUMN` (no piecemeal form);
         // a default-only change uses `ALTER COLUMN … SET/DROP DEFAULT`.
-        Dialect::MariaDb => {
+        Dialect::MariaDb | Dialect::MySql => {
             let structural = changes.iter().any(|c| {
                 matches!(
                     c,
@@ -532,7 +532,7 @@ fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String 
 /// drop by index name alone. Bare (no trailing `;`).
 fn drop_index_sql(dialect: Dialect, table: &str, name: &str) -> String {
     match dialect {
-        Dialect::MariaDb => format!(
+        Dialect::MariaDb | Dialect::MySql => format!(
             "DROP INDEX {} ON {}",
             dialect.quote(name),
             dialect.quote(table)

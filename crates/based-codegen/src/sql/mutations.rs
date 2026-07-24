@@ -643,7 +643,9 @@ fn conflict_update_sets(
 /// conflict-target column list, MariaDB does not (`ON DUPLICATE KEY UPDATE`).
 fn upsert_tail(dialect: Dialect, oc: &OnConflict, model: &RModel, sets: &[String]) -> String {
     match dialect {
-        Dialect::MariaDb => format!("\nON DUPLICATE KEY UPDATE {}", sets.join(", ")),
+        Dialect::MariaDb | Dialect::MySql => {
+            format!("\nON DUPLICATE KEY UPDATE {}", sets.join(", "))
+        }
         Dialect::Postgres | Dialect::Sqlite => {
             let target: Vec<String> = oc
                 .target
@@ -805,7 +807,7 @@ fn lower_restore(
 fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
     match sel.dialect {
         Dialect::Postgres | Dialect::Sqlite => sel.dialect.quote(col),
-        Dialect::MariaDb => sel.qcol(&sel.root_alias, col),
+        Dialect::MariaDb | Dialect::MySql => sel.qcol(&sel.root_alias, col),
     }
 }
 

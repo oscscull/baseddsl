@@ -807,7 +807,7 @@ fn backend(dialect: Dialect, url: &str) -> Result<Box<dyn based_runtime::Backend
 
     let connecting = || format!("connecting to {}", redact(url));
     let backend: Box<dyn based_runtime::Backend> = match dialect {
-        Dialect::MariaDb => Box::new(
+        Dialect::MariaDb | Dialect::MySql => Box::new(
             ShardRouter::single(url, PoolConfig::default())
                 .map_err(|e| CliError::db(connecting(), e))?,
         ),
@@ -1046,7 +1046,7 @@ async fn cmd_serve(
     // one shared database), so it neither shards nor pools.
     let ctx = TrustedHeaderContext;
     match dialect {
-        Dialect::MariaDb => {
+        Dialect::MariaDb | Dialect::MySql => {
             let router = ShardRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
             run_listener(compiled, router, ctx, config).await

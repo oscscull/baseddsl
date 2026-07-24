@@ -202,13 +202,18 @@ on the onboarding critical path.
     column list (no phantom-id re-synthesis) and round-trips. FK-to-renamed-PK already resolved via
     `target_pk_column`. Goldens: `ddl.rs` (per-dialect renamed PK + FK), `migrate.rs` (from-scratch +
     round-trip). D3 impl note added.
-  - **PR8 (miscompile — design RESOLVED, D112). `id UUID` is rejected on `dialect="mysql"` and MariaDB
-    < 10.7.** Fix (D112, owner-approved 2026-07-24): **split a real `mysql` dialect** from `mariadb` (own
-    `Dialect::MySql`, no longer aliased at `lib.rs:54`); **default `uuid`/`Id` to `CHAR(36)`** for the
-    MySQL/MariaDB family (matches the app-minted v4 string → zero runtime change; executes on every
-    version); native `UUID` opt-in for MariaDB 10.7+ (via raw for now); **`BINARY(16)` deferred** (needs a
-    runtime uuid↔16-byte value-map). Also fix `fk_type` (`sql.rs:542-551`) to propagate the target PK's
-    `raw_type` so the raw hatch composes across FK columns. Lives in the same id-DDL code PR4 will touch.
+  - **PR8 ✅ DONE (miscompile, D112). `id UUID` rejected on `dialect="mysql"` and MariaDB < 10.7.**
+    Fixed: real `Dialect::MySql` variant (no longer aliased in `Dialect::parse`); a
+    `Dialect::is_mysql_family()` helper carries the shared branches (the two are identical today —
+    quoting, DDL/DML, migration renderer, and the `ShardRouter` driver, MySQL sharing MariaDB's wire
+    protocol — so the split is honest-output + future-proofing). `sql_type` emits `CHAR(36)` for
+    `uuid`/`Id` across the family (matches the app-minted v4 string; runs on every version); native
+    `UUID` stays opt-in for MariaDB 10.7+ via `raw`. `fk_type` now propagates the target PK's `raw`
+    type so `id: Id raw("UUID")` composes across FK columns. `BINARY(16)` deferred. Goldens: `ddl.rs`
+    (family CHAR(36) + `mysql` coverage + native-UUID-via-raw FK propagation), `lib.rs` (family
+    spellings). Verified on the live `mariadb:11.4` suite (family's one live target). PR4 note: the
+    id-DDL type now lives in `sql_type`'s `MariaDb | MySql` arm + `fk_type`; a DB-generated/serial PK
+    will branch there.
   - **PR9 (bug + miscompile). Non-default schema/database table unrepresentable.** No schema/namespace
     concept; `@table("analytics.events")` silently emits a table *named* `"analytics.events"` in the
     default schema (neither feature nor raw reaches it). Fix: a `@schema("…")` seam (schema field in the
@@ -219,9 +224,10 @@ on the onboarding critical path.
     column rewrite); VIEW-backed model (`@view`; today no path routes reads to a view — detour is modelling
     the base tables). DB-generated PK is PR4. Coexistence with *unmanaged* indexes/constraints is already
     fine (drift check only drops objects in its own snapshot).
-  - **Doc-truth drift to correct (own cleanup item):** D1 (phantom `BINARY(16)`; calls `id` "implicit" —
-    explicit since D103, only D2 got the banner); `sql.rs:22` + `lib.rs:24-26` (`UUID` "native"/"MySQL-8
-    compatible" false for MySQL/<10.7); D11/D12/D13
+  - **Doc-truth drift to correct (own cleanup item):** D1 phantom `BINARY(16)` ✅ (corrected in PR8 —
+    now per-dialect physical types; BINARY(16) noted deferred); `sql.rs` type table + `lib.rs` dialect
+    docs ✅ (PR8 — accurate for the split MySQL/MariaDB family). Remaining: D1 calls `id` "implicit"
+    (explicit since D103, only D2 got the banner); D11/D12/D13
     "Deferred…" tails describing *shipped* features (nested shapes D55/D57, named-filter inlining D14, tx
     back-refs D107) + the retired `sql` keyword spelling (→`raw`, D96); `sql.rs:156-157` stale PK comment.
 

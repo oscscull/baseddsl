@@ -19,7 +19,7 @@
 //! | `timestamp` | `DATETIME`     | `TEXT`    | `TIMESTAMPTZ` | MariaDB dodges `TIMESTAMP`'s implicit ON UPDATE + 2038; Postgres has a real tz-aware type |
 //! | `date`      | `DATE`         | `TEXT`    | `DATE`        | |
 //! | `json`      | `JSON`         | `TEXT`    | `JSONB`       | Postgres `JSONB` is the indexable/`@>`-queryable form (matches the DML `has` -> `@>`) |
-//! | `uuid`/`Id` | `UUID`         | `TEXT`    | `UUID`        | native on MariaDB + Postgres; app-generated, no default. SQLite has no UUID type |
+//! | `uuid`/`Id` | `CHAR(36)`     | `TEXT`    | `UUID`        | holds the app-minted v4 string; runs on every MySQL/MariaDB version. Native `UUID` (MariaDB 10.7+) via `raw`. Postgres has a native type. |
 //!
 //! A to-many scalar (`text[]`) has no columnar form; it maps to the dialect's JSON
 //! type (a JSON array) — `JSON` on MariaDB, `TEXT` on SQLite, `JSONB` on Postgres.
@@ -163,9 +163,9 @@ fn create_table(
 
     let specs = index_specs(model, dialect);
 
-    // MariaDB inlines the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
+    // MySQL/MariaDB inline the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
     // have no inline form, so they trail the table as `CREATE INDEX` statements.
-    if dialect == Dialect::MariaDb {
+    if dialect.is_mysql_family() {
         for spec in specs.iter().filter(|s| inline_on_mariadb(s)) {
             lines.push(inline_index_clause(dialect, spec));
         }
@@ -183,7 +183,7 @@ fn create_table(
 
     for spec in specs
         .iter()
-        .filter(|s| dialect != Dialect::MariaDb || !inline_on_mariadb(s))
+        .filter(|s| !dialect.is_mysql_family() || !inline_on_mariadb(s))
     {
         out.push_str(&create_index_stmt(dialect, &model.table, spec));
     }
@@ -478,7 +478,10 @@ fn constraint_name(prefix: &str, table: &str, columns: &[String]) -> String {
 /// through the *same* table — one dialect type map, never a second that can drift.
 pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
     match dialect {
-        Dialect::MariaDb => {
+        // The MySQL/MariaDB family. `uuid`/`Id` is `CHAR(36)` — it holds the app-minted v4
+        // string exactly and executes on every version (MySQL has no `UUID` type; MariaDB
+        // added it only in 10.7). Native `UUID` (MariaDB 10.7+) stays reachable via `raw`.
+        Dialect::MariaDb | Dialect::MySql => {
             if many {
                 return "JSON".into();
             }
@@ -489,7 +492,7 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
                 Primitive::Timestamp => "DATETIME".into(),
                 Primitive::Date => "DATE".into(),
                 Primitive::Json => "JSON".into(),
-                Primitive::Uuid | Primitive::Id => "UUID".into(),
+                Primitive::Uuid | Primitive::Id => "CHAR(36)".into(),
                 Primitive::Float => "DOUBLE".into(),
                 Primitive::Decimal { precision, scale } => format!("DECIMAL({precision}, {scale})"),
             }
@@ -538,14 +541,21 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
 }
 
 /// The SQL type of a relation's FK column — the target model's primary-key type.
-/// Defaults to the dialect's id type (from the implicit `id`) when the target or
-/// its key is missing, which sema would already have flagged.
+/// A PK with a `raw` type (e.g. native `UUID`) propagates that literal so the escape
+/// hatch composes across the FK. Defaults to the dialect's id type (from the implicit
+/// `id`) when the target or its key is missing, which sema would already have flagged.
 fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> String {
-    match schema
+    let id_kind = schema
         .model(target)
         .and_then(|m| m.member("id"))
-        .map(|m| &m.kind)
-    {
+        .map(|m| &m.kind);
+    if let Some(spec) = id_kind.and_then(|k| k.opaque()) {
+        return spec
+            .for_dialect(dialect.name())
+            .unwrap_or_default()
+            .to_string();
+    }
+    match id_kind {
         Some(MemberKind::Scalar { ty, .. }) => sql_type(*ty, false, dialect),
         _ => sql_type(Primitive::Uuid, false, dialect),
     }
