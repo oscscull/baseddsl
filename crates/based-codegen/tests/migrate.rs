@@ -598,3 +598,44 @@ fn now_schema_fk() -> CheckedSchema {
         "{FK_ORG}Order {{ id: Id  org: Org @fk(on_delete: cascade) }}"
     ))
 }
+
+#[test]
+fn serial_pk_migration_matches_generated_ddl() {
+    // A from-scratch migration for a `serial` model emits the same auto-increment column
+    // + PK as `based gen sql`, and a serial FK column stays a plain integer (not identity).
+    let now = Snapshot::from_schema(&checked(
+        "Org { id: serial  name: text }\nTicket { id: serial  org: Org  title: text }",
+    ));
+    let steps = migrate::diff_snapshots(&Snapshot::default(), &now);
+
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#""id" BIGINT GENERATED ALWAYS AS IDENTITY"#),
+        "\n{pg}"
+    );
+    assert!(pg.contains(r#""org_id" BIGINT NOT NULL"#), "\n{pg}");
+    assert!(
+        !pg.contains(r#""org_id" BIGINT GENERATED ALWAYS AS IDENTITY"#),
+        "an FK column must not be an identity column\n{pg}"
+    );
+
+    // SQLite: inline `INTEGER PRIMARY KEY AUTOINCREMENT`, no separate PK clause; the FK
+    // column is a plain INTEGER.
+    let sqlite = migrate::render_sql(&steps, Dialect::Sqlite);
+    assert!(
+        sqlite.contains("`id` INTEGER PRIMARY KEY AUTOINCREMENT"),
+        "\n{sqlite}"
+    );
+    assert!(sqlite.contains("`org_id` INTEGER NOT NULL"), "\n{sqlite}");
+
+    // The create-table renderer matches `based gen sql` for the same schema.
+    let ddl = sql::ddl(
+        &checked("Org { id: serial  name: text }\nTicket { id: serial  org: Org  title: text }"),
+        Dialect::Postgres,
+    );
+    assert!(
+        ddl.contains(r#""id" BIGINT GENERATED ALWAYS AS IDENTITY"#),
+        "\n{ddl}"
+    );
+    assert!(ddl.contains(r#""org_id" BIGINT NOT NULL"#), "\n{ddl}");
+}

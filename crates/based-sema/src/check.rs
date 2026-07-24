@@ -1975,6 +1975,20 @@ fn check_binding_ref(
         );
         return;
     };
+    // A `$name.id` of a `serial` (DB-generated) create can't bind a sibling step: the id
+    // is unknown until the row is written (D110). App-minted keys (uuid/ulid) are known at
+    // plan time, so they bind fine; only the DB-generated strategy has no value to reach.
+    if field.node == "id" && cx.model(mi).pk_is_db_generated() {
+        sink.error_note(
+            code::PK_SERIAL_BACKREF,
+            pr.name.span,
+            format!(
+                "`${name}.id` reaches a `serial` create — a DB-generated id is unknown until the row is written"
+            ),
+            "make the referenced model's key app-minted (`id: uuid`/`id: ulid`) to reference it across `tx` steps",
+        );
+        return;
+    }
     let Some(member) = cx.model(mi).member(&field.node) else {
         unknown_field(cx, mi, field, sink);
         return;

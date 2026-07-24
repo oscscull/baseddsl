@@ -1301,6 +1301,92 @@ fn no_id_requires_a_non_empty_reason() {
 }
 
 #[test]
+fn manifest_id_default_resolves_bare_id() {
+    use based_sema::{resolve_pk_default, PkStrategy};
+    // `id: Id` follows the project default. Unresolved (no manifest pass) it reads as uuid.
+    let (mut schema, _) = analyze("Org { id: Id  name: text }");
+    assert_eq!(
+        schema.model("Org").unwrap().pk_strategy(),
+        Some(PkStrategy::Uuid)
+    );
+    // A `serial` project default rewrites `id: Id` to a serial PK.
+    resolve_pk_default(&mut schema, PkStrategy::Serial);
+    assert_eq!(
+        schema.model("Org").unwrap().pk_strategy(),
+        Some(PkStrategy::Serial)
+    );
+    // An explicit per-model type is never overridden by the default.
+    let (mut schema, _) = analyze("Org { id: uuid  name: text }");
+    resolve_pk_default(&mut schema, PkStrategy::Serial);
+    assert_eq!(
+        schema.model("Org").unwrap().pk_strategy(),
+        Some(PkStrategy::Uuid)
+    );
+}
+
+#[test]
+fn bare_int_id_is_rejected() {
+    // A DB-generated integer key must be spelled `serial` (its generation is visible),
+    // not a bare `int` — E0266.
+    let (_, d) = analyze("Counter { id: int  name: text }");
+    assert_eq!(errors(&d), ["E0266"]);
+    // A string natural key stays fine.
+    let (_, d) = analyze("Country { id: text  name: text }");
+    assert!(errors(&d).is_empty(), "{:?}", errors(&d));
+}
+
+#[test]
+fn serial_and_ulid_are_pk_only_types() {
+    // `serial`/`ulid` are primary-key generation strategies — not ordinary column types.
+    let (_, d) = analyze("Widget { id: Id  seq: serial }");
+    assert_eq!(errors(&d), ["E0267"]);
+    let (_, d) = analyze("Widget { id: Id  code: ulid }");
+    assert_eq!(errors(&d), ["E0267"]);
+    // As the `id`, both are legal.
+    let (_, d) = analyze("A { id: serial  name: text }\nB { id: ulid  name: text }");
+    assert!(errors(&d).is_empty(), "{:?}", errors(&d));
+}
+
+#[test]
+fn serial_id_cannot_be_reached_across_tx_steps() {
+    // `$name.id` of a `serial` create is unknown until the row is written, so it can't
+    // bind a sibling step — E0268. (An app-minted uuid parent is fine.)
+    let src = r#"
+        Org { id: serial  name: text }
+        Note { id: Id  org: Org  body: text }
+        shape NoteCard from Note { body }
+        mutation setup(name, body) -> NoteCard {
+          tx {
+            create Org { name = $name } as o;
+            create Note { org = $o.id, body = $body };
+          }
+        }
+    "#;
+    assert!(
+        errors(&analyze(src).1).contains(&"E0268"),
+        "{:?}",
+        errors(&analyze(src).1)
+    );
+    // The same shape with a uuid parent binds fine.
+    let ok = r#"
+        Org { id: Id  name: text }
+        Note { id: Id  org: Org  body: text }
+        shape NoteCard from Note { body }
+        mutation setup(name, body) -> NoteCard {
+          tx {
+            create Org { name = $name } as o;
+            create Note { org = $o.id, body = $body };
+          }
+        }
+    "#;
+    assert!(
+        !errors(&analyze(ok).1).contains(&"E0268"),
+        "{:?}",
+        errors(&analyze(ok).1)
+    );
+}
+
+#[test]
 fn keyless_get_must_key_on_a_unique_field() {
     // No `id` to key on: a `get` on a non-unique field is the ordinary E0144.
     let (_, d) = analyze(

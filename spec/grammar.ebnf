@@ -73,7 +73,9 @@ field_type  = type_expr | raw_spec [ '?' ] ;
 type_expr   = base_type { type_qualifier } ;
 base_type   = primitive | model_ref ;
 primitive   = 'text' | 'int' | 'bool' | 'timestamp' | 'date'
-            | 'json' | 'uuid' | 'Id' | 'float' | decimal ;
+            | 'json' | 'uuid' | 'Id' | 'ulid' | 'serial' | 'float' | decimal ;
+(* `ulid`/`serial` are primary-key generation strategies — valid only as the `id`  *)
+(* type (D110). `serial` = a DB-generated sequential integer PK.                    *)
 (* Fixed base-10 numeric. Bare `decimal` = `decimal(38, 9)`; args are compile-time  *)
 (* INT literals, sema validates `1 <= scale <= precision <= 38` (E0159). models.md.  *)
 decimal     = 'decimal' [ '(' INT ',' INT ')' ] ;

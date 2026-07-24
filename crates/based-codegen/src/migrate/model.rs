@@ -488,6 +488,10 @@ fn neutral_type(ty: Primitive, many: bool) -> String {
         Primitive::Date => "date",
         Primitive::Json => "json",
         Primitive::Uuid | Primitive::Id => "uuid",
+        // `ulid`/`serial` are recorded distinctly so a PK generation-strategy change
+        // diffs (the renderer maps them back through `neutral_sql_type`).
+        Primitive::Ulid => "ulid",
+        Primitive::Serial => "serial",
         Primitive::Float => "float",
         // `decimal(p,s)` in the snapshot so a precision/scale change diffs as an
         // `alter column` (the renderer parses it back through `neutral_sql_type`).
@@ -537,13 +541,19 @@ fn enum_neutral_type(schema: &CheckedSchema, enum_name: Option<&str>) -> Option<
     })
 }
 
-/// A relation FK's neutral type: the target model's key type (default uuid).
+/// A relation FK's neutral type: the target model's key *storage* type (default uuid). A
+/// `serial` target contributes a plain `int` — the FK stores the integer value, it is not
+/// itself an auto-increment/identity column (only the referenced PK is).
 fn fk_type(schema: &CheckedSchema, target: &str) -> String {
     match schema
         .model(target)
         .and_then(|m| m.member("id"))
         .map(|m| &m.kind)
     {
+        Some(MemberKind::Scalar {
+            ty: Primitive::Serial,
+            ..
+        }) => "int".to_string(),
         Some(MemberKind::Scalar { ty, .. }) => neutral_type(*ty, false),
         _ => "uuid".to_string(),
     }

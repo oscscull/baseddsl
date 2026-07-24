@@ -56,7 +56,9 @@ impl Family {
     /// The family a primitive coerces to.
     pub fn of(prim: Primitive) -> Self {
         match prim {
-            Primitive::Int => Self::Int,
+            // `serial` is a DB-generated 64-bit integer id — it binds and reads back as
+            // an `int` (a JSON number), never a uuid string.
+            Primitive::Int | Primitive::Serial => Self::Int,
             Primitive::Float => Self::Float,
             Primitive::Bool => Self::Bool,
             Primitive::Json => Self::Json,
@@ -64,7 +66,8 @@ impl Family {
             Primitive::Text => Self::Text,
             Primitive::Timestamp => Self::Timestamp,
             Primitive::Date => Self::Date,
-            Primitive::Uuid | Primitive::Id => Self::Uuid,
+            // `ulid` is an app-minted sortable string id — same wire family as `uuid`.
+            Primitive::Uuid | Primitive::Id | Primitive::Ulid => Self::Uuid,
         }
     }
 

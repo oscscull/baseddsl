@@ -20,6 +20,8 @@
 //! | `date`      | `DATE`         | `TEXT`    | `DATE`        | |
 //! | `json`      | `JSON`         | `TEXT`    | `JSONB`       | Postgres `JSONB` is the indexable/`@>`-queryable form (matches the DML `has` -> `@>`) |
 //! | `uuid`/`Id` | `CHAR(36)`     | `TEXT`    | `UUID`        | holds the app-minted v4 string; runs on every MySQL/MariaDB version. Native `UUID` (MariaDB 10.7+) via `raw`. Postgres has a native type. |
+//! | `ulid`      | `CHAR(26)`     | `TEXT`    | `TEXT`        | an app-minted 26-char sortable string (not a valid `UUID` value) — a PK strategy (D110), valid only as `id` |
+//! | `serial`    | `BIGINT`+AI    | `INTEGER` | `BIGINT`+ID   | a DB-generated sequential PK — `AUTO_INCREMENT` / `PRIMARY KEY AUTOINCREMENT` / `GENERATED ALWAYS AS IDENTITY` on the id column (see `serial_pk_column`); an FK to it is a plain integer |
 //!
 //! A to-many scalar (`text[]`) has no columnar form; it maps to the dialect's JSON
 //! type (a JSON array) — `JSON` on MariaDB, `TEXT` on SQLite, `JSONB` on Postgres.
@@ -154,8 +156,11 @@ fn create_table(
     let mut lines: Vec<String> = column_lines(schema, model, dialect);
 
     // Primary key — the `id` member's physical column (its `(column "…")` override, else
-    // `id`). A `@no_id` (keyless legacy) table has none.
-    if !model.no_id {
+    // `id`). A `@no_id` (keyless legacy) table has none. SQLite spells a `serial` PK
+    // inline on the column (`INTEGER PRIMARY KEY AUTOINCREMENT`), so it needs no separate
+    // clause; every other case (and every other dialect's serial) gets the clause.
+    let sqlite_serial = dialect == Dialect::Sqlite && model.pk_is_db_generated();
+    if !model.no_id && !sqlite_serial {
         let pk = model.member("id").map_or("id", RMember::physical_col);
         lines.push(format!("PRIMARY KEY ({})", dialect.quote(pk)));
     }
@@ -192,9 +197,15 @@ fn create_table(
 
 /// The column definitions: scalars and forward-relation FKs. Inverse edges store nothing.
 fn column_lines(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec<String> {
+    let serial_pk = model.pk_is_db_generated();
     let mut lines = Vec::new();
     for mem in &model.members {
         match &mem.kind {
+            // A `serial` primary key: the DB owns the value, so its column carries the
+            // dialect's auto-increment/identity clause instead of a plain type.
+            MemberKind::Scalar { column, .. } if serial_pk && mem.name == "id" => {
+                lines.push(serial_pk_column(dialect, column));
+            }
             MemberKind::Scalar {
                 ty,
                 optional,
@@ -471,6 +482,21 @@ fn constraint_name(prefix: &str, table: &str, columns: &[String]) -> String {
     name
 }
 
+/// The full column definition for a `serial` (DB-generated sequential) primary key, from
+/// one neutral spelling: MySQL/MariaDB `BIGINT NOT NULL AUTO_INCREMENT`, Postgres `BIGINT
+/// GENERATED ALWAYS AS IDENTITY`, SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` (SQLite's
+/// only native auto-increment form is inline on the column, so the PK clause is omitted
+/// for it — see `create_table`). Shared with the migration create-table renderer so a
+/// from-scratch migration matches `based gen sql`.
+pub(crate) fn serial_pk_column(dialect: Dialect, column: &str) -> String {
+    let col = dialect.quote(column);
+    match dialect {
+        Dialect::MariaDb | Dialect::MySql => format!("{col} BIGINT NOT NULL AUTO_INCREMENT"),
+        Dialect::Postgres => format!("{col} BIGINT GENERATED ALWAYS AS IDENTITY"),
+        Dialect::Sqlite => format!("{col} INTEGER PRIMARY KEY AUTOINCREMENT"),
+    }
+}
+
 /// SQL column type for a scalar primitive, per dialect (see the module type table).
 /// A to-many scalar has no columnar form, so it is stored as a JSON array — the
 /// dialect's JSON type (`JSON` on MariaDB, `TEXT` on SQLite, which has no JSON type).
@@ -493,6 +519,11 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
                 Primitive::Date => "DATE".into(),
                 Primitive::Json => "JSON".into(),
                 Primitive::Uuid | Primitive::Id => "CHAR(36)".into(),
+                // `ulid` is a 26-char Crockford-base32 string (not a UUID) — a fixed CHAR.
+                Primitive::Ulid => "CHAR(26)".into(),
+                // `serial`'s *storage* type — a plain `BIGINT` (the `AUTO_INCREMENT`
+                // clause rides the PK column definition, not here; FK columns mirror this).
+                Primitive::Serial => "BIGINT".into(),
                 Primitive::Float => "DOUBLE".into(),
                 Primitive::Decimal { precision, scale } => format!("DECIMAL({precision}, {scale})"),
             }
@@ -513,7 +544,9 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
                 Primitive::Int | Primitive::Bool => "INTEGER".into(),
                 Primitive::Timestamp | Primitive::Date => "TEXT".into(),
                 Primitive::Json => "TEXT".into(),
-                Primitive::Uuid | Primitive::Id => "TEXT".into(),
+                Primitive::Uuid | Primitive::Id | Primitive::Ulid => "TEXT".into(),
+                // `serial`'s storage type (the `PRIMARY KEY AUTOINCREMENT` rides the column).
+                Primitive::Serial => "INTEGER".into(),
                 Primitive::Float => "REAL".into(),
                 Primitive::Decimal { .. } => "TEXT".into(),
             }
@@ -533,6 +566,11 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
                 Primitive::Date => "DATE".into(),
                 Primitive::Json => "JSONB".into(),
                 Primitive::Uuid | Primitive::Id => "UUID".into(),
+                // `ulid` is a 26-char string, not a valid `UUID` value — store as text.
+                Primitive::Ulid => "TEXT".into(),
+                // `serial`'s storage type (the `GENERATED … AS IDENTITY` clause rides the
+                // PK column definition; FK columns mirror this plain `BIGINT`).
+                Primitive::Serial => "BIGINT".into(),
                 Primitive::Float => "DOUBLE PRECISION".into(),
                 Primitive::Decimal { precision, scale } => format!("NUMERIC({precision}, {scale})"),
             }

@@ -17,29 +17,38 @@ pub type Timestamp = String;
 pub type Date = String;
 pub type Json = serde_json::Value;
 
-/// A typed id: the primary key of entity `E`, carried on the wire as its raw string
-/// (`#[serde(transparent)]`, so the wire is unchanged). The `E` marker keeps ids of
-/// different entities distinct types, so a `User` id can't be passed where an `Org` id
-/// is wanted. A `create_*` result already hands one back typed; turn a raw string into
-/// one only through the explicit, greppable `Id::from_raw`.
-#[derive(Serialize, Deserialize)]
-#[serde(transparent, bound = "")]
+/// A typed id: the primary key of entity `E`. The wire repr is honest to the entity's
+/// key strategy — a `uuid`/`ulid` id is a JSON string, a `serial` id a JSON number — so
+/// this (de)serializes transparently as either (`numeric` records which). The `E` marker
+/// keeps ids of different entities distinct types, so a `User` id can't be passed where an
+/// `Org` id is wanted. A `create_*` result already hands one back typed; turn a raw value
+/// into one only through the explicit, greppable `Id::from_raw` / `Id::from_int`.
 pub struct Id<E> {
     raw: String,
-    #[serde(skip)]
+    /// A `serial` (integer) id serializes as a JSON number; a uuid/ulid id as a string.
+    numeric: bool,
     _entity: PhantomData<fn() -> E>,
 }
 
 impl<E> Id<E> {
-    /// Wrap a raw id string as a typed id — the explicit escape from an untyped string,
-    /// used only where the string's entity is known (an id from outside the client).
+    /// Wrap a raw string id (a uuid/ulid) as a typed id — the explicit escape from an
+    /// untyped string, used only where the string's entity is known.
     pub fn from_raw(raw: impl Into<String>) -> Self {
         Id {
             raw: raw.into(),
+            numeric: false,
             _entity: PhantomData,
         }
     }
-    /// The underlying id string.
+    /// Wrap an integer id (a `serial` key) as a typed id — it serializes as a JSON number.
+    pub fn from_int(n: i64) -> Self {
+        Id {
+            raw: n.to_string(),
+            numeric: true,
+            _entity: PhantomData,
+        }
+    }
+    /// The underlying id as a string (a `serial` id's decimal form).
     pub fn as_str(&self) -> &str {
         &self.raw
     }
@@ -49,12 +58,45 @@ impl<E> Id<E> {
     }
 }
 
+impl<E> Serialize for Id<E> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // A serial id crosses the wire as a JSON number; a uuid/ulid id as a string.
+        match (self.numeric, self.raw.parse::<i64>()) {
+            (true, Ok(n)) => s.serialize_i64(n),
+            _ => s.serialize_str(&self.raw),
+        }
+    }
+}
+
+impl<'de, E> Deserialize<'de> for Id<E> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<E>(PhantomData<fn() -> E>);
+        impl<E> serde::de::Visitor<'_> for V<E> {
+            type Value = Id<E>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string or integer id")
+            }
+            fn visit_str<Err>(self, v: &str) -> Result<Id<E>, Err> {
+                Ok(Id::from_raw(v))
+            }
+            fn visit_i64<Err>(self, v: i64) -> Result<Id<E>, Err> {
+                Ok(Id::from_int(v))
+            }
+            fn visit_u64<Err>(self, v: u64) -> Result<Id<E>, Err> {
+                Ok(Id::from_int(v as i64))
+            }
+        }
+        d.deserialize_any(V(PhantomData))
+    }
+}
+
 // Hand-written so the marker `E` carries no trait bounds (a derive would demand
 // `E: Clone`, `E: Ord`, … of a type that only ever tags).
 impl<E> Clone for Id<E> {
     fn clone(&self) -> Self {
         Id {
             raw: self.raw.clone(),
+            numeric: self.numeric,
             _entity: PhantomData,
         }
     }

@@ -68,6 +68,31 @@ pub fn check_target(schema: &CheckedSchema, dialect: &str) -> Vec<Diagnostic> {
     sink.diags
 }
 
+/// Resolve every `id: Id` primary key to the project's default generation strategy
+/// (`[schema] id`). A model that writes its PK type explicitly (`id: uuid | ulid |
+/// serial`) is untouched — its member already carries the concrete primitive. Run after
+/// [`check`], by whoever resolved the manifest (the CLI/LSP/runtime loader); the
+/// dialect-free [`check`] leaves `Primitive::Id` in place, which reads as `uuid` (the
+/// default) when this pass never runs. Only a non-uuid default rewrites anything.
+pub fn resolve_pk_default(schema: &mut CheckedSchema, default: PkStrategy) {
+    let prim = match default {
+        PkStrategy::Uuid => return, // `Id` already reads as uuid — nothing to rewrite.
+        PkStrategy::Ulid => based_ast::Primitive::Ulid,
+        PkStrategy::Serial => based_ast::Primitive::Serial,
+    };
+    for m in &mut schema.models {
+        for mem in &mut m.members {
+            if mem.name == "id" {
+                if let MemberKind::Scalar { ty, .. } = &mut mem.kind {
+                    if *ty == based_ast::Primitive::Id {
+                        *ty = prim;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The FK-convention half of the checks: the divergence-reason rule, which can only be
 /// judged once the project's `foreign_keys` convention is known. Run after [`check`], by
 /// whoever resolved the manifest — the CLI with the manifest value, the LSP with the

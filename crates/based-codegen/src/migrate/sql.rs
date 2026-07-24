@@ -296,10 +296,19 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
             crate::sql::sql_type(Primitive::Uuid, false, dialect),
         ));
     }
+    // A `serial` primary key carries the dialect's auto-increment/identity clause on its
+    // column (SQLite spells it inline as `INTEGER PRIMARY KEY AUTOINCREMENT`, so it needs
+    // no separate PK clause). The serial column is never elided from the snapshot.
+    let serial_pk = t.columns.iter().any(|c| c.ty == "serial");
     for c in &t.columns {
-        lines.push(column_ddl(c, dialect));
+        if c.ty == "serial" {
+            lines.push(crate::sql::serial_pk_column(dialect, &c.name));
+        } else {
+            lines.push(column_ddl(c, dialect));
+        }
     }
-    if !t.no_id {
+    let sqlite_serial = dialect == Dialect::Sqlite && serial_pk;
+    if !t.no_id && !sqlite_serial {
         lines.push(format!("PRIMARY KEY ({})", dialect.quote(pk_col)));
     }
 
@@ -576,6 +585,8 @@ fn neutral_sql_type(neutral: &str, dialect: Dialect) -> String {
         "date" => Primitive::Date,
         "json" => Primitive::Json,
         "uuid" => Primitive::Uuid,
+        "ulid" => Primitive::Ulid,
+        "serial" => Primitive::Serial,
         "float" => Primitive::Float,
         // `decimal(p,s)` carries its precision/scale so the renderer emits the exact
         // `DECIMAL(p,s)`/`NUMERIC(p,s)` — a precision/scale change is a real column-type diff.

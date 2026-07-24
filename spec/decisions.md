@@ -4985,8 +4985,31 @@ and a soft-deleted far course excluded. `make check` green end to end. Spec:
 
 ## D110 — Primary-key generation-strategy axis (`uuid` / `ulid` / `serial`, DB-generated ids)
 
-**Status: spec-only; owner-approved 2026-07-24. Implementation is PLAN PR4 (single-column) + PR6
-(composite).** A PK's *generation strategy* is a first-class, per-model design choice — not a fixed
+**Status: single-column axis implemented (PR4); composite is PR6. Owner-approved 2026-07-24.**
+
+**Impl note (PR4).** The full single-column axis shipped: `Primitive::Ulid`/`Primitive::Serial`
+(parser keywords `ulid`/`serial`); a `[schema] id` manifest default resolved onto `id: Id` members by
+`based_sema::resolve_pk_default` (CLI/LSP/runtime-loader call it after `check`); `RModel::pk_strategy()`
+(`PkStrategy` uuid/ulid/serial) reads the id member's primitive. Sema: `E0266` (bare-int PK → use
+`serial`), `E0267` (`serial`/`ulid` on a non-`id` column), `E0268` (`$name.id` of a serial create can't
+bind a `tx` sibling — the id is unknown until the INSERT runs). DDL (`sql.rs` `serial_pk_column`): MariaDB
+`BIGINT NOT NULL AUTO_INCREMENT`, Postgres `BIGINT GENERATED ALWAYS AS IDENTITY`, SQLite `INTEGER PRIMARY
+KEY AUTOINCREMENT` (inline, no separate PK clause); `sql_type(Serial)` is the plain storage type so FK
+columns mirror a plain `BIGINT`/`INTEGER`, and the migration `fk_type` maps a serial target to neutral
+`int` (an FK is never an identity column). Wire honesty: OpenAPI serial id → `{type: integer}`, ulid →
+string; the generated client `Id<E>` (de)serializes int-or-string (hand-written serde, `from_int`); the
+runtime `Family::of(Serial)` = int, and relation FK/`$ctx` families mirror the target PK. Read-back
+planner: a serial `create` omits the id (`serial_return` on `LoweredWrite`) and appends `RETURNING <id>`
+(Postgres/SQLite); the driver gains `execute_returning_id` (default fetches RETURNING; MariaDB overrides
+with `last_insert_id()`); `plan_mutation`/`apply_once` capture the id at run time and bind the create-keyed
+re-select on it (`SerialReadback`). Minting is per-model (`IdGen::next_ulid`, prod `UlidGen` via the
+`ulid` crate; `serial` mints in the DB). **Proven live** on real SQLite
+(`tests/serial_integration.rs`: create → DB-assigned incrementing integer id → read-back, and an FK to a
+serial parent → get-by-id). **Deferred to a follow-up:** `@key(field)` natural single-column key (the
+nominate-the-PK decorator, shared with composite PR6/D111) — noted so the strategy axis landed as one
+clean, green, fully-tested commit; `@key` is unblocked and small.
+
+A PK's *generation strategy* is a first-class, per-model design choice — not a fixed
 uuid. Sequential DB-assigned ids are a legitimate default for many schemas (index locality, storage,
 human-readable keys), and onboarding an existing production database requires representing whatever key
 it already has. uuid stays the project default (non-enumerable, distributed-friendly, free under this

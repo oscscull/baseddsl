@@ -157,6 +157,55 @@ pub struct MutationPlan {
     /// 404 `not_found`, mirroring a surviving write's empty re-select. `None` for a
     /// shape-returning mutation.
     pub ack_check: Option<usize>,
+    /// For a `serial` (DB-generated primary key) create whose row the mutation returns:
+    /// the run stage must capture the id the INSERT assigns (unknown at plan time) and
+    /// key the declared-shape re-select on it. Carries which statement is that INSERT and
+    /// the *unbound* re-select (its `:result_id` supplied at run time from the captured
+    /// id). `None` for an app-minted mutation — its ids are known at plan time, so
+    /// [`ret_select`](Self::ret_select) is pre-bound and `result_id` is already set.
+    pub serial: Option<SerialReadback>,
+}
+
+/// The `serial` read-back: capture a DB-generated id, then re-select the written row on
+/// it. The re-select is bound late because the id does not exist until the INSERT runs.
+#[derive(Debug, Clone)]
+pub struct SerialReadback {
+    /// Index into [`MutationPlan::stmts`] of the serial INSERT whose assigned id keys the
+    /// re-select (executed via the driver's `execute_returning_id`).
+    pub insert_idx: usize,
+    /// The unbound declared-shape re-select SQL (`… WHERE id = :result_id [AND scope]`),
+    /// or `None` when the mutation declares no shape (the response is `{ id }`).
+    pub ret_sql: Option<String>,
+    /// The bound value environment for the re-select (scope `:ctx_*` binds etc.); the run
+    /// stage adds `:result_id` from the captured id before binding.
+    env: std::collections::HashMap<String, SqlValue>,
+    dialect: based_codegen::Dialect,
+}
+
+impl SerialReadback {
+    /// Bind the re-select for the captured DB-generated `id`, or `None` when the mutation
+    /// declares no shape (the caller falls back to `{ id }`).
+    pub fn bind(&self, id: i64) -> Result<Option<Stmt>, PlanError> {
+        let Some(sql) = &self.ret_sql else {
+            return Ok(None);
+        };
+        let (sql, params) = to_positional(sql, self.dialect, |name| {
+            if name == "result_id" {
+                Some(SqlValue::Int(id))
+            } else {
+                self.env.get(name).cloned()
+            }
+        })
+        .map_err(PlanError::UnboundPlaceholder)?;
+        Ok(Some(Stmt { sql, params }))
+    }
+
+    /// The captured id as the `{ id }` fallback response value (no declared shape).
+    pub fn id_response(id: i64) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".into(), serde_json::Value::Number(id.into()));
+        serde_json::Value::Object(obj)
+    }
 }
 
 /// Why a request could not be planned — all boundary failures, before any SQL.
@@ -280,7 +329,10 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         );
     }
     for c in &rq.ctx_requires {
-        env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
+        env.insert(
+            format!("ctx_{}", c.field),
+            bind_ctx(&compiled.schema, c, req)?,
+        );
     }
     if offset_paginated(ast) {
         env.insert("offset".to_string(), bind_offset(req)?);
@@ -358,7 +410,10 @@ pub fn plan_mutation(
         );
     }
     for c in &rm.ctx_requires {
-        env.insert(format!("ctx_{}", c.field), bind_ctx(c, req)?);
+        env.insert(
+            format!("ctx_{}", c.field),
+            bind_ctx(&compiled.schema, c, req)?,
+        );
     }
 
     // 2. Generate the engine `id` for each create. Record the id of the first create
@@ -367,7 +422,16 @@ pub fn plan_mutation(
     let mut result_id = None;
     for w in &low.stmts {
         if let Some(bind) = &w.gen_id {
-            let id = id_gen.next_id();
+            // Mint per the model's strategy: a `ulid` create draws a sortable id, a `uuid`
+            // create a random v4 (a `serial` create has no `gen_id` — the DB mints it).
+            let id = match compiled
+                .schema
+                .model(&w.model)
+                .and_then(RModel::pk_strategy)
+            {
+                Some(based_sema::PkStrategy::Ulid) => id_gen.next_ulid(),
+                _ => id_gen.next_id(),
+            };
             if result_id.is_none() && w.model == rm.ret_model {
                 result_id = Some(id.clone());
             }
@@ -382,20 +446,40 @@ pub fn plan_mutation(
         .map(|w| env.bind(&w.sql))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // A `serial` (DB-generated PK) create for the return model: its id is unknown until
+    // the INSERT runs, so the re-select is bound late (from the captured id) by the run
+    // stage rather than pre-bound here.
+    let serial_idx = low
+        .stmts
+        .iter()
+        .position(|w| w.serial_return && w.model == rm.ret_model);
+
     // 4. The declared-shape re-select: bind it whenever codegen emitted one (codegen and
     //    this planner apply the same survives-the-write rule, so they agree). A create-keyed
     //    re-select needs `:result_id` = this create's engine id; a where-keyed one
     //    (update/soft-delete/restore) reuses the write's own params/`$ctx`, already in
     //    `env`. Seeding `:result_id` only when a create produced one is harmless for the
     //    where-keyed form — `to_positional` binds only the placeholders each statement carries.
-    let ret_select = match &low.ret_select {
-        Some(sql) => {
-            if let Some(id) = &result_id {
-                env.insert("result_id".to_string(), SqlValue::Uuid(id.clone()));
+    let (ret_select, serial) = if let Some(insert_idx) = serial_idx {
+        // Defer the re-select to run time — the id comes from the DB-generated INSERT.
+        let readback = SerialReadback {
+            insert_idx,
+            ret_sql: low.ret_select.clone(),
+            env: env.snapshot(),
+            dialect: compiled.dialect,
+        };
+        (None, Some(readback))
+    } else {
+        let ret_select = match &low.ret_select {
+            Some(sql) => {
+                if let Some(id) = &result_id {
+                    env.insert("result_id".to_string(), SqlValue::Uuid(id.clone()));
+                }
+                Some(env.bind(sql)?)
             }
-            Some(env.bind(sql)?)
-        }
-        None => None,
+            None => None,
+        };
+        (ret_select, None)
     };
 
     // 5. An `-> ok` mutation has no re-select; its not-found signal is the primary
@@ -412,6 +496,7 @@ pub fn plan_mutation(
         result_id,
         ret_select,
         ack_check,
+        serial,
     })
 }
 
@@ -435,6 +520,11 @@ impl Env {
 
     fn insert(&mut self, name: String, v: SqlValue) {
         self.values.insert(name, v);
+    }
+
+    /// A clone of the bound values — the seed a deferred (serial) re-select binds from.
+    fn snapshot(&self) -> std::collections::HashMap<String, SqlValue> {
+        self.values.clone()
     }
 
     /// Rewrite one statement to positional form, resolving each `:name` from the
@@ -535,7 +625,8 @@ fn binding_field(p: &Param) -> &str {
 }
 
 /// The family of the member a dotted path terminates in: a scalar is its primitive,
-/// a relation terminal is the target's key (a uuid). `None` when unresolved.
+/// a relation terminal is the target's key (mirroring the target PK — a uuid/ulid string,
+/// or a serial integer). `None` when unresolved.
 fn member_family(schema: &CheckedSchema, model: &RModel, path: &[&str]) -> Option<Family> {
     let mut cur = model;
     let n = path.len();
@@ -545,13 +636,27 @@ fn member_family(schema: &CheckedSchema, model: &RModel, path: &[&str]) -> Optio
             MemberKind::Scalar { ty, .. } => return Some(Family::of(*ty)),
             MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
                 if last {
-                    return Some(Family::Uuid);
+                    return Some(target_key_family(schema, target));
                 }
                 cur = schema.model(target)?;
             }
         }
     }
     None
+}
+
+/// The coercion family of a model's primary key — the value an inbound relation FK
+/// carries. Mirrors the target's `id` type (serial → int, uuid/ulid → uuid string);
+/// defaults to uuid when the target or its id is unresolved.
+fn target_key_family(schema: &CheckedSchema, target: &str) -> Family {
+    match schema
+        .model(target)
+        .and_then(|m| m.member("id"))
+        .map(|m| &m.kind)
+    {
+        Some(MemberKind::Scalar { ty, .. }) => Family::of(*ty),
+        _ => Family::Uuid,
+    }
 }
 
 /// Find the family of the first column `$name` fills or filters across the write body.
@@ -679,11 +784,12 @@ fn find_filter<'a>(decls: &'a [Decl], name: &str) -> Option<&'a NamedFilter> {
 
 /// Bind one `$ctx.<field>` requirement from the request context. Always required —
 /// the callable cannot run without the context it reads.
-fn bind_ctx(c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
+fn bind_ctx(schema: &CheckedSchema, c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
     let family = match &c.ty {
         CtxField::Scalar(prim) => Family::of(*prim),
-        // A relation-typed context field carries the model's key: a uuid.
-        CtxField::Relation(_) => Family::Uuid,
+        // A relation-typed context field carries the model's key — mirroring the target
+        // PK (serial → int, uuid/ulid → string).
+        CtxField::Relation(target) => target_key_family(schema, target),
     };
     match req.ctx.get(&c.field) {
         Some(v) => coerce(v, family, false).map_err(|e| PlanError::BadCtx {

@@ -972,6 +972,12 @@ fn load_checked(root: &Path) -> Result<Loaded, CliError> {
         count(&fk, &mut errors, &mut warnings);
         render::render(&fk, &sources);
         schema = checked;
+        // Resolve `id: Id` primary keys to the project's default generation strategy
+        // (`[schema] id`) so codegen sees the concrete uuid/ulid/serial type.
+        based_sema::resolve_pk_default(
+            &mut schema,
+            based_sema::PkStrategy::parse(&project.manifest.schema.id),
+        );
     }
 
     let n = sources.len();

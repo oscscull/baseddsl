@@ -107,6 +107,11 @@ pub struct LoweredWrite {
     /// re-select keys on it since there is no generated `id`. `None` for a keyed model /
     /// any other write.
     pub read_key: Option<Vec<(String, String)>>,
+    /// For a `create` on a **`serial`** (DB-generated PK) model: the id is unknown until
+    /// the INSERT runs, so the id column is omitted and the runtime reads the assigned id
+    /// back — `RETURNING <id>` (Postgres/SQLite) rides the SQL here, MariaDB/MySQL use
+    /// `LAST_INSERT_ID()` in the driver. `true` marks such an INSERT for the run stage.
+    pub serial_return: bool,
 }
 
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
@@ -211,9 +216,12 @@ fn lower_mutation<'a>(
             let keyless = stmts
                 .iter()
                 .find(|w| w.read_key.is_some() && w.model == rm.ret_model);
+            // A create of the return row keys the re-select on that row's id — whether the
+            // id is app-minted (`gen_id`) or DB-generated (`serial_return`, bound late by
+            // the runtime from the captured id). Both use `WHERE id = :result_id`.
             let creates_ret = stmts
                 .iter()
-                .any(|w| w.gen_id.is_some() && w.model == rm.ret_model);
+                .any(|w| (w.gen_id.is_some() || w.serial_return) && w.model == rm.ret_model);
             let key = if let Some(w) = upsert {
                 RetKey::Conflict(w.conflict_key.clone().unwrap_or_default())
             } else if let Some(w) = keyless {
@@ -487,6 +495,7 @@ fn lower_write<'a>(
             gen_id: None,
             conflict_key: None,
             read_key: None,
+            serial_return: false,
         }),
     }
 }
@@ -545,11 +554,12 @@ fn lower_create<'a>(
         }
     }
 
-    // Implicit `id` is app-generated (uuid, no SQL default) — bind it unless the
-    // model declares its own `id` that the caller sets explicitly. Only then does the
-    // engine generate the id at runtime, under this bind name. A keyless (`@no_id`)
-    // model has no `id` column at all — nothing to insert or generate.
-    let gen_id = if model.no_id {
+    // The primary key. A `serial` PK is DB-generated: the INSERT *omits* the id column
+    // entirely and the runtime reads the assigned value back (`serial_return`). An
+    // app-minted `id` (uuid/ulid, no SQL default) is bound as `:id[_step]` unless the
+    // caller set it explicitly. A keyless (`@no_id`) model has no `id` column at all.
+    let serial_return = model.pk_is_db_generated();
+    let gen_id = if model.no_id || serial_return {
         None
     } else if !assigned.iter().any(|c| c == "id") {
         cols.insert(0, dialect.quote("id"));
@@ -603,18 +613,45 @@ fn lower_create<'a>(
 
     LoweredWrite {
         header: format!("-- create {}\n", model.name),
-        sql: format!(
-            "INSERT INTO {} ({})\nVALUES ({}){};\n",
-            dialect.quote(&model.table),
-            cols.join(", "),
-            vals.join(", "),
-            tail
-        ),
+        sql: insert_sql(dialect, model, &cols, &vals, &tail, serial_return),
         model: model.name.clone(),
         gen_id,
         conflict_key,
         read_key,
+        serial_return,
     }
+}
+
+/// Assemble the `INSERT` statement text. A `serial` create reads its DB-assigned id back —
+/// `RETURNING <id>` on Postgres/SQLite (the MariaDB/MySQL driver uses `LAST_INSERT_ID()`
+/// instead) — and a create that sets no columns uses the dialect's default-values form.
+fn insert_sql(
+    dialect: Dialect,
+    model: &RModel,
+    cols: &[String],
+    vals: &[String],
+    tail: &str,
+    serial_return: bool,
+) -> String {
+    let table = dialect.quote(&model.table);
+    let returning = if serial_return && matches!(dialect, Dialect::Postgres | Dialect::Sqlite) {
+        format!(" RETURNING {}", dialect.quote(&physical_col(model, "id")))
+    } else {
+        String::new()
+    };
+    if cols.is_empty() {
+        return match dialect {
+            Dialect::Postgres | Dialect::Sqlite => {
+                format!("INSERT INTO {table} DEFAULT VALUES{returning};\n")
+            }
+            Dialect::MariaDb | Dialect::MySql => format!("INSERT INTO {table} () VALUES ();\n"),
+        };
+    }
+    format!(
+        "INSERT INTO {table} ({})\nVALUES ({}){tail}{returning};\n",
+        cols.join(", "),
+        vals.join(", "),
+    )
 }
 
 /// The `SET col = value` fragments for an upsert's `update` branch. Columns render **bare**
@@ -701,6 +738,7 @@ fn lower_update<'a>(
         gen_id: None,
         conflict_key: None,
         read_key: None,
+        serial_return: false,
     }
 }
 
@@ -736,6 +774,7 @@ fn lower_delete(
             gen_id: None,
             conflict_key: None,
             read_key: None,
+            serial_return: false,
         };
     }
 
@@ -754,6 +793,7 @@ fn lower_delete(
         gen_id: None,
         conflict_key: None,
         read_key: None,
+        serial_return: false,
     }
 }
 
@@ -792,6 +832,7 @@ fn lower_restore(
         gen_id: None,
         conflict_key: None,
         read_key: None,
+        serial_return: false,
     }
 }
 

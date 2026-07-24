@@ -220,6 +220,20 @@ impl DbRead for MariaDb {
             .map(|d| d.rows_affected())
             .map_err(map_mysql_err)
     }
+
+    async fn execute_returning_id(
+        &mut self,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<i64, DbError> {
+        // MariaDB/MySQL have no `RETURNING` on INSERT — the auto-increment value is on the
+        // result's `LAST_INSERT_ID()`.
+        let res = bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)
+            .execute(&mut *self.conn)
+            .await
+            .map_err(map_mysql_err)?;
+        Ok(res.last_insert_id() as i64)
+    }
 }
 
 #[async_trait]
@@ -255,6 +269,18 @@ impl DbRead for MariaTx {
             .await
             .map(|d| d.rows_affected())
             .map_err(map_mysql_err)
+    }
+
+    async fn execute_returning_id(
+        &mut self,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<i64, DbError> {
+        let res = bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)
+            .execute(&mut *self.tx)
+            .await
+            .map_err(map_mysql_err)?;
+        Ok(res.last_insert_id() as i64)
     }
 }
 

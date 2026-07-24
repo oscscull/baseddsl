@@ -307,6 +307,15 @@ pub enum Primitive {
     Json,
     Uuid,
     Id,
+    /// `ulid` — an app-minted, lexicographically sortable 128-bit id, carried as a
+    /// 26-char string (same storage as `uuid`: `CHAR(36)` family / `TEXT` / `UUID`-less
+    /// text). A primary-key type only; the engine mints it before the INSERT.
+    Ulid,
+    /// `serial` — a DB-generated sequential integer primary key (`BIGINT AUTO_INCREMENT`
+    /// / `GENERATED ALWAYS AS IDENTITY` / `INTEGER PRIMARY KEY AUTOINCREMENT`). The id is
+    /// unknown until the row is written, so the engine reads it back. A primary-key type
+    /// only — a bare `int` is not a legal PK (its generation would be invisible).
+    Serial,
     /// 64-bit binary floating point (`float`). Wire JSON number, client `f64`.
     Float,
     /// Fixed-precision base-10 numeric (`decimal(p, s)` — precision `p`, scale `s`; bare

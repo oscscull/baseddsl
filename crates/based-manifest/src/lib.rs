@@ -33,12 +33,20 @@ pub struct SchemaConfig {
     /// per-relation/per-model decorator always wins over this default.
     #[serde(default = "default_foreign_keys")]
     pub foreign_keys: String,
+    /// `id = "uuid" | "ulid" | "serial"` — the project-wide default primary-key
+    /// generation strategy an `id: Id` field resolves to. `"uuid"` (default): an
+    /// app-minted random v4 string. `"ulid"`: an app-minted sortable string. `"serial"`:
+    /// a DB-generated sequential integer. A model overrides per-model by writing the PK
+    /// type directly (`id: serial`).
+    #[serde(default = "default_id")]
+    pub id: String,
 }
 
 impl Default for SchemaConfig {
     fn default() -> Self {
         Self {
             foreign_keys: default_foreign_keys(),
+            id: default_id(),
         }
     }
 }
@@ -51,6 +59,9 @@ fn default_client() -> String {
 }
 fn default_foreign_keys() -> String {
     "none".to_string()
+}
+fn default_id() -> String {
+    "uuid".to_string()
 }
 
 /// One `.bsl` source file located by discovery.

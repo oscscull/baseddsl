@@ -821,3 +821,53 @@ fn foreign_keys_none_default_emits_no_constraint() {
     let ddl = gen("Org { id: Id  name: text }\nOrder { id: Id  org: Org }");
     assert!(!ddl.contains("FOREIGN KEY"), "\n{ddl}");
 }
+
+// ---------- PK generation-strategy axis (uuid / ulid / serial, D110) ----------
+
+#[test]
+fn serial_pk_is_auto_increment_per_dialect() {
+    let src = "Org { id: serial  name: text }";
+    // MariaDB/MySQL: BIGINT AUTO_INCREMENT + a PRIMARY KEY clause.
+    let m = gen(src);
+    assert!(m.contains("`id` BIGINT NOT NULL AUTO_INCREMENT"), "\n{m}");
+    assert!(m.contains("PRIMARY KEY (`id`)"), "\n{m}");
+    // Postgres: BIGINT GENERATED ALWAYS AS IDENTITY + a PRIMARY KEY clause.
+    let p = gen_pg(src);
+    assert!(
+        p.contains(r#""id" BIGINT GENERATED ALWAYS AS IDENTITY"#),
+        "\n{p}"
+    );
+    assert!(p.contains(r#"PRIMARY KEY ("id")"#), "\n{p}");
+    // SQLite: INTEGER PRIMARY KEY AUTOINCREMENT inline — and *no* separate PK clause.
+    let s = gen_sqlite(src);
+    assert!(
+        s.contains("`id` INTEGER PRIMARY KEY AUTOINCREMENT"),
+        "\n{s}"
+    );
+    assert!(!s.contains("PRIMARY KEY (`id`)"), "\n{s}");
+}
+
+#[test]
+fn fk_to_a_serial_model_is_a_plain_integer_column() {
+    // A relation FK mirrors the target PK type — a serial parent gives a BIGINT/INTEGER FK,
+    // never a uuid column.
+    let src = "Org { id: serial  name: text }\nOrder { id: serial  org: Org }";
+    let m = gen(src);
+    assert!(m.contains("`org_id` BIGINT NOT NULL"), "\n{m}");
+    let s = gen_sqlite(src);
+    assert!(s.contains("`org_id` INTEGER NOT NULL"), "\n{s}");
+    let p = gen_pg(src);
+    assert!(p.contains(r#""org_id" BIGINT NOT NULL"#), "\n{p}");
+}
+
+#[test]
+fn ulid_pk_is_a_fixed_char_string() {
+    let src = "Doc { id: ulid  slug: text }";
+    // The MySQL/MariaDB family stores the 26-char ULID as CHAR(26) (not a uuid CHAR(36)).
+    let m = gen(src);
+    assert!(m.contains("`id` CHAR(26) NOT NULL"), "\n{m}");
+    assert!(m.contains("PRIMARY KEY (`id`)"), "\n{m}");
+    // Postgres: text (a ULID is not a valid UUID value).
+    let p = gen_pg(src);
+    assert!(p.contains(r#""id" TEXT NOT NULL"#), "\n{p}");
+}

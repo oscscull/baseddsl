@@ -960,6 +960,8 @@ impl<'a> Parser<'a> {
                     "date" => Primitive::Date,
                     "json" => Primitive::Json,
                     "uuid" => Primitive::Uuid,
+                    "ulid" => Primitive::Ulid,
+                    "serial" => Primitive::Serial,
                     "float" => Primitive::Float,
                     "decimal" => {
                         let (precision, scale, end) = self.decimal_args(l.end)?;

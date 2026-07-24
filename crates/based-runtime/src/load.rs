@@ -63,10 +63,16 @@ impl Compiled {
             return Err(LoadError::Check(diags));
         }
 
-        let (schema, sema_diags) = check(&decls);
+        let (mut schema, sema_diags) = check(&decls);
         if sema_diags.iter().any(|d| d.severity == Severity::Error) {
             return Err(LoadError::Check(sema_diags));
         }
+        // Resolve `id: Id` primary keys to the project's default generation strategy
+        // (`[schema] id`) before lowering, so serial/ulid DDL + minting see the concrete type.
+        based_sema::resolve_pk_default(
+            &mut schema,
+            based_sema::PkStrategy::parse(&project.manifest.schema.id),
+        );
 
         Ok(Self::from_checked(schema, decls, dialect))
     }

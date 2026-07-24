@@ -104,7 +104,9 @@ history is in `PLAN-archive.md`.
 
 Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
 system into an existing production environment as a pluggable replacement — plus two example/quality
-fixes that surfaced alongside. **Priority order: PR4 → PR6 → PR5 → PR2 → PR3 → PR1.** The primary-key
+fixes that surfaced alongside. **Priority order: ~~PR4~~ → PR4-key (`@key`) → PR6 → PR5 → PR2 → PR3 →
+PR1.** PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); its `@key(field)` natural-key
+sub-item is a clean follow-up (next). The primary-key
 story (**PR4 single-column + PR6 composite**) is priority 1 — owner: the single most important capability
 the system is missing for the pluggable-replacement goal; a schema whose keys can't be represented can't
 be onboarded at all. Its design fork is **resolved and owner-approved (D110)** — build to that. PR5's
@@ -131,11 +133,18 @@ on the onboarding critical path.
   a table in the same DB). The strong form commits the key in the **same transaction** as the mutation →
   genuine exactly-once even when a retry lands on another app instance, and it is on-brand for a DB-first
   engine (more correct than Redis; Redis stays a viable TTL-friendly alternative). Depends on PR2's seam.
-- **PR4. PK generation-strategy axis — single-column (design resolved, D110; priority 1).** Today the id
-  *value* is unconditionally **app-minted** (`IdGen::next_id() -> String`, `UuidGen` v4), bound *before*
-  the INSERT; the synthesized PK carries `default: None // engine-generated on insert`, and there is no
-  path for a DB-generated PK. Make the generation strategy a per-model, type-driven choice, parallel to
-  `foreign_keys`/`@fk` and `@soft_delete`. **Resolved shape (D110):**
+- **PR4. ✅ DONE (D110 impl), `@key` deferred. PK generation-strategy axis — single-column.** The full
+  type-driven axis shipped: `id: uuid | ulid | serial` (+ `[schema] id` default resolving `id: Id`),
+  `serial` DDL per dialect, wire honesty (serial id = JSON number, OpenAPI `{type:integer}`, client
+  `Id<E>` int-or-string, FK columns mirror the target PK), per-model minting (`ulid`/`uuid`), and the
+  **serial read-back planner** (create omits id → `RETURNING`/`LAST_INSERT_ID()` → engine binds the
+  create-keyed re-select on the captured id). New sema errors `E0266` (bare-int PK), `E0267`
+  (`serial`/`ulid` off `id`), `E0268` (`$name.id` of a serial create can't bind a `tx` sibling).
+  **Proven live on all three dialects** (SQLite in-memory `serial_integration.rs`; live Postgres +
+  MariaDB serial read-back added to the docker integration suites — RETURNING and LAST_INSERT_ID paths
+  both green). **Deferred to a clean follow-up:** the `@key(field)` natural single-column key (the
+  nominate-the-PK decorator, unified with composite PR6/D111) — split out so the strategy axis landed as
+  one green, fully-tested commit; `@key` is unblocked and small. Original design detail (D110):
   - `[schema] id = "uuid"` toml default (stays uuid — non-enumerable, free here); `id: Id` resolves to it.
   - Per-model override by PK *type*, strategy implied-with-override: `id: uuid` (app v4 string), `id: ulid`
     (app sortable string), **`id: serial`** (DB-generated sequential `BIGINT`). `serial`, not bare `int`

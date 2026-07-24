@@ -708,13 +708,35 @@ fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, Value, b
                 wrap(primitive_schema(*ty), *many),
                 !*optional,
             )),
-            MemberKind::Forward { optional, .. } => {
-                fields.push((mem.name.clone(), uuid_schema(), !*optional));
+            MemberKind::Forward {
+                optional, target, ..
+            } => {
+                // The FK's wire schema mirrors the target model's primary-key type — a
+                // uuid string, a ulid string, or a serial integer.
+                fields.push((
+                    mem.name.clone(),
+                    fk_target_schema(schema, target),
+                    !*optional,
+                ));
             }
             MemberKind::Inverse { .. } => {}
         }
     }
     fields
+}
+
+/// The wire schema of a foreign key: the target model's primary-key schema (uuid/ulid
+/// string, or serial integer). Falls back to a uuid string when the target or its id is
+/// unresolved (sema would have flagged it).
+fn fk_target_schema(schema: &CheckedSchema, target: &str) -> Value {
+    match schema
+        .model(target)
+        .and_then(|m| m.member("id"))
+        .map(|m| &m.kind)
+    {
+        Some(MemberKind::Scalar { ty, .. }) => primitive_schema(*ty),
+        _ => uuid_schema(),
+    }
 }
 
 // ---------- input object schemas -------------------------------------------
@@ -846,7 +868,7 @@ fn reach_schema(schema: &CheckedSchema, model: Option<&RModel>, path: &[&str]) -
                 target, optional, ..
             }) => {
                 if last {
-                    return (uuid_schema(), !*optional);
+                    return (fk_target_schema(schema, target), !*optional);
                 }
                 match schema.model(target) {
                     Some(m) => cur = m,
@@ -855,8 +877,11 @@ fn reach_schema(schema: &CheckedSchema, model: Option<&RModel>, path: &[&str]) -
             }
             Some(MemberKind::Inverse { target, .. }) => {
                 if last {
-                    // Terminal to-many reach: an array of ids.
-                    return (json!({ "type": "array", "items": uuid_schema() }), true);
+                    // Terminal to-many reach: an array of the target's key schema.
+                    return (
+                        json!({ "type": "array", "items": fk_target_schema(schema, target) }),
+                        true,
+                    );
                 }
                 match schema.model(target) {
                     Some(m) => cur = m,
@@ -889,6 +914,9 @@ fn primitive_schema(p: Primitive) -> Value {
         Primitive::Date => json!({ "type": "string", "format": "date" }),
         Primitive::Json => json_schema(),
         Primitive::Uuid | Primitive::Id => uuid_schema(),
+        // A `ulid` is a 26-char string (not a uuid); a `serial` id is a JSON integer.
+        Primitive::Ulid => json!({ "type": "string" }),
+        Primitive::Serial => json!({ "type": "integer", "format": "int64" }),
         Primitive::Float => json!({ "type": "number", "format": "double" }),
         // A decimal is a string on the wire (lossless), never a JSON float.
         Primitive::Decimal { .. } => json!({ "type": "string", "format": "decimal" }),
@@ -963,6 +991,8 @@ fn primitive_name(p: Primitive) -> &'static str {
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "Id",
+        Primitive::Ulid => "ulid",
+        Primitive::Serial => "serial",
         Primitive::Float => "float",
         Primitive::Decimal { .. } => "decimal",
     }

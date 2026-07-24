@@ -13,7 +13,15 @@
 /// never wraps the generator in a lock of its own, which is what lets a guard call
 /// back into its own engine.
 pub trait IdGen: Send + Sync {
+    /// Mint a fresh `uuid` id (the default primary-key strategy).
     fn next_id(&self) -> String;
+
+    /// Mint a fresh `ulid` id — a lexicographically-sortable string. The default falls
+    /// back to [`next_id`](IdGen::next_id) (so a test generator stays deterministic);
+    /// the production generator overrides it with a real ULID.
+    fn next_ulid(&self) -> String {
+        self.next_id()
+    }
 }
 
 /// A deterministic generator for tests: `<prefix>-0`, `<prefix>-1`, … in call order.
@@ -59,5 +67,9 @@ pub struct UuidGen;
 impl IdGen for UuidGen {
     fn next_id(&self) -> String {
         uuid::Uuid::new_v4().to_string()
+    }
+    fn next_ulid(&self) -> String {
+        // A monotonic ULID: sortable by creation time, unpredictable in its random tail.
+        ulid::Ulid::new().to_string()
     }
 }

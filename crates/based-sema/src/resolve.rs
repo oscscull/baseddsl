@@ -141,9 +141,12 @@ fn prim_family(ty: Primitive) -> Family {
         Primitive::Text
         | Primitive::Uuid
         | Primitive::Id
+        | Primitive::Ulid
         | Primitive::Timestamp
         | Primitive::Date => Family::Textual,
-        Primitive::Int | Primitive::Float | Primitive::Decimal { .. } => Family::Numeric,
+        Primitive::Int | Primitive::Serial | Primitive::Float | Primitive::Decimal { .. } => {
+            Family::Numeric
+        }
         Primitive::Bool => Family::Bool,
         Primitive::Json => Family::Json,
     }
@@ -177,6 +180,8 @@ fn prim_name(p: Primitive) -> &'static str {
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "id",
+        Primitive::Ulid => "ulid",
+        Primitive::Serial => "serial",
         Primitive::Float => "float",
         Primitive::Decimal { .. } => "decimal",
     }

@@ -10,6 +10,7 @@ Uniform for columns and relations: `name: Type (modifiers)`
 
 ## Types
 - Primitives lowercase: `text int bool timestamp date json uuid float decimal`
+- Primary-key strategy types (valid only as `id`, see Defaults): `uuid ulid serial`
 - Models capitalized: `User Order`
 - Casing is load-bearing + committed: capital = relation, lowercase = column. Never lowercase a model or capitalize a primitive.
 
@@ -72,6 +73,27 @@ Indexing an opaque column is `@index … using <method>` / `@index raw("…")` �
 - A genuinely keyless legacy table — one with **no primary key at all** — opts out with
   `@no_id("reason")` (below). It then forfeits the id-keyed operations.
 - Not-null default. `?` opts into nullable.
+
+### Primary-key generation strategy (`id: uuid | ulid | serial`, D110)
+A PK's *generation strategy* — how its value comes to exist — is a per-model choice,
+written in the `id` type (its generation is consequential, so it is visible, not implied).
+
+- `id: Id` resolves to the project default (`[schema] id` in `based.toml`, default `uuid`).
+- `id: uuid` — an app-minted random v4 string (`CHAR(36)` / `TEXT` / native `UUID`).
+- `id: ulid` — an app-minted lexicographically-sortable string (`CHAR(26)` / `TEXT`).
+- `id: serial` — a **DB-generated** sequential integer: MariaDB/MySQL `BIGINT
+  AUTO_INCREMENT`, Postgres `BIGINT GENERATED ALWAYS AS IDENTITY`, SQLite `INTEGER PRIMARY
+  KEY AUTOINCREMENT`. The `create` omits the id column; the engine reads the assigned value
+  back (`RETURNING id`, or MariaDB's `LAST_INSERT_ID()`) to key the declared-shape return.
+
+A bare `int` (or other numeric) as the `id` is `E0266` — a DB-generated integer key must be
+spelled `serial` so its generation is visible; an app-owned key stays a string. `serial` and
+`ulid` are strategies, not column types: on any non-`id` column they are `E0267`. **Wire
+honesty:** a `serial` id is a JSON *number* (OpenAPI `{type: integer}`), a uuid/ulid id a
+string; a relation's FK column mirrors the target PK type (a serial parent → a `BIGINT` FK).
+Heterogeneous strategies across one schema are allowed. A serial-created row's id is unknown
+until the INSERT runs, so a `tx` step cannot reference it via `$name.id` (`E0268` — make the
+referenced model app-minted to reach it across steps).
 
 ### `@no_id("reason")` — keyless legacy tables
 Some adopted tables have no primary key whatsoever. `@no_id("reason")` records that fact:

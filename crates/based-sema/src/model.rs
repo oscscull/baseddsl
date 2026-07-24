@@ -48,6 +48,8 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         });
     }
 
+    check_pk_types(m, sink);
+
     // `@no_id("reason")` opts a genuinely keyless legacy table out of the primary key
     // (the reason is mandatory, so the PR shows why — `E0262`).
     let no_id = model_no_id(m, sink);
@@ -109,6 +111,59 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         no_fk_span: no_fk.map(|(_, s)| s),
         unique_cols: Vec::new(),
         was: model_was(m),
+    }
+}
+
+/// Validate primary-key generation-strategy types (D110). `serial`/`ulid` are PK
+/// generation strategies: valid only as the `id` column's type, never on an ordinary
+/// column (`E0267`). And a bare numeric type (`int`/`float`/`decimal`) as the `id` PK is
+/// rejected (`E0266`) — a DB-generated integer key must be spelled `serial` so its
+/// generation is visible (principles 1, 2, 8); an app-owned natural key stays a string
+/// (`text`/`uuid`). A `@no_id` model has no `id`, so neither rule fires on it.
+fn check_pk_types(m: &Model, sink: &mut Sink) {
+    for mem in &m.members {
+        let Member::Field(f) = mem else { continue };
+        let is_id = f.name.node == "id";
+        let BaseType::Primitive(p) = &f.ty.base else {
+            continue;
+        };
+        match (is_id, p) {
+            // A PK strategy type on a non-`id` column — it is not an ordinary column type.
+            (false, Primitive::Serial | Primitive::Ulid) => sink.error_note(
+                code::PK_STRATEGY_MISPLACED,
+                f.ty.span,
+                format!(
+                    "`{}` is a primary-key generation strategy, not a column type",
+                    if matches!(p, Primitive::Serial) {
+                        "serial"
+                    } else {
+                        "ulid"
+                    }
+                ),
+                "`serial`/`ulid` are valid only as the `id` primary key's type",
+            ),
+            // A bare numeric `id` — its generation (app-set vs DB-owned) is invisible.
+            (true, Primitive::Int | Primitive::Float | Primitive::Decimal { .. }) => sink
+                .error_note(
+                    code::PK_BARE_INT,
+                    f.ty.span,
+                    format!("`id: {}` is not a legal primary key", prim_source_name(p)),
+                    "a DB-generated integer key is spelled `id: serial` (its generation is \
+                     consequential and must be written); an app-owned key stays a string \
+                     (`id: text`/`id: uuid`)",
+                ),
+            _ => {}
+        }
+    }
+}
+
+/// A primitive's source spelling, for a diagnostic.
+fn prim_source_name(p: &Primitive) -> &'static str {
+    match p {
+        Primitive::Int => "int",
+        Primitive::Float => "float",
+        Primitive::Decimal { .. } => "decimal",
+        _ => "?",
     }
 }
 

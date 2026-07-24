@@ -227,6 +227,27 @@ pub trait DbRead: Send {
 
     /// Execute one write statement (INSERT/UPDATE/DELETE); returns rows affected.
     async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError>;
+
+    /// Execute a `serial` (DB-generated primary key) INSERT and return the assigned id.
+    /// The default reads a `RETURNING <id>` clause the codegen appended (Postgres/SQLite):
+    /// it runs the INSERT as a query and takes the first row's first column. MariaDB/MySQL
+    /// override this to execute then read `LAST_INSERT_ID()` (their INSERT carries no
+    /// RETURNING). Used only by the `serial` read-back planner.
+    async fn execute_returning_id(
+        &mut self,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<i64, DbError> {
+        let rows = fetch_all(self.fetch(sql, params)).await?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| DbError::new("serial INSERT returned no id"))?;
+        row.into_iter()
+            .next()
+            .and_then(|(_, v)| v.as_i64())
+            .ok_or_else(|| DbError::new("serial INSERT did not return an integer id"))
+    }
 }
 
 /// A checked-out connection. [`begin`](Db::begin) consumes it into a [`Tx`] — the
@@ -464,32 +485,55 @@ async fn apply_once(
 ) -> Result<Option<serde_json::Value>, DbError> {
     use serde_json::Value as J;
     let mut tx = db.begin().await?;
+    // A `serial` (DB-generated PK) create yields its id only when it runs; capture it so
+    // the deferred re-select can key on it.
+    let serial_insert = plan.serial.as_ref().map(|s| s.insert_idx);
+    let mut serial_id: Option<i64> = None;
     for (i, stmt) in plan.stmts.iter().enumerate() {
         // An error propagates and drops `tx` → rollback (never a pooled open tx).
+        if serial_insert == Some(i) {
+            serial_id = Some(tx.execute_returning_id(&stmt.sql, &stmt.params).await?);
+            continue;
+        }
         let affected = tx.execute(&stmt.sql, &stmt.params).await?;
         if plan.ack_check == Some(i) && affected == 0 {
             return Ok(None);
         }
     }
-    // Read the written row back in its declared shape, still inside the transaction.
-    let response = match &plan.ret_select {
-        Some(stmt) => {
-            let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
-            match rows.into_iter().next() {
-                Some(row) => nest_row(row),
-                None => return Ok(None),
+    // Read the written row back in its declared shape, still inside the transaction. A
+    // serial mutation binds its re-select late, from the captured DB-generated id.
+    let response = if let Some(readback) = &plan.serial {
+        let id = serial_id.expect("serial INSERT ran and returned an id");
+        match readback.bind(id).map_err(|e| DbError::new(e.to_string()))? {
+            Some(stmt) => {
+                let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
+                match rows.into_iter().next() {
+                    Some(row) => nest_row(row),
+                    None => return Ok(None),
+                }
             }
+            None => crate::plan::SerialReadback::id_response(id),
         }
-        // No declared-shape re-select (the row did not survive — a real DELETE): identify
-        // the created row by its engine `id`, or an empty object when nothing was created.
-        None => match &plan.result_id {
-            Some(id) => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("id".into(), J::String(id.clone()));
-                J::Object(obj)
+    } else {
+        match &plan.ret_select {
+            Some(stmt) => {
+                let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
+                match rows.into_iter().next() {
+                    Some(row) => nest_row(row),
+                    None => return Ok(None),
+                }
             }
-            None => J::Object(serde_json::Map::new()),
-        },
+            // No declared-shape re-select (the row did not survive — a real DELETE):
+            // identify the created row by its engine `id`, or `{}` when nothing was created.
+            None => match &plan.result_id {
+                Some(id) => {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("id".into(), J::String(id.clone()));
+                    J::Object(obj)
+                }
+                None => J::Object(serde_json::Map::new()),
+            },
+        }
     };
     tx.commit().await?;
     Ok(Some(response))

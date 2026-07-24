@@ -140,6 +140,11 @@ pub mod code {
     pub const KEYLESS_CREATE: &str = "E0264"; // a create on a `@no_id` model with a declared read-back but no `(unique)` column set to read it back by
     pub const REL_TO_KEYLESS: &str = "E0265"; // a forward relation targets a `@no_id` model (its `id` doesn't exist to reference)
 
+    // primary-key generation strategy (`id: uuid | ulid | serial`, D110)
+    pub const PK_BARE_INT: &str = "E0266"; // a bare `int` (or other numeric) as the `id` PK — a DB-generated integer key must be spelled `serial` (its generation is consequential and must be visible)
+    pub const PK_STRATEGY_MISPLACED: &str = "E0267"; // `serial`/`ulid` on a non-primary-key column — they are PK generation strategies, valid only as the `id` type
+    pub const PK_SERIAL_BACKREF: &str = "E0268"; // a `tx` step reads `$name.id` of a `serial` (DB-generated) create — the id is unknown until the row is written, so it can't bind a sibling step
+
     // opaque `raw(…)` column types + exotic indexes (E027x): the escape hatch for a DB
     // type or index form the engine does not model. The literal string is stored and
     // diffed verbatim; nothing here interprets it.
@@ -210,6 +215,48 @@ impl ForeignKeys {
             "all" => Self::All,
             _ => Self::None,
         }
+    }
+}
+
+/// A model's primary-key **generation strategy** — how the PK value comes to exist. Set
+/// by the `id` column's declared type (`id: uuid | ulid | serial`; `id: Id` resolves to
+/// the manifest `[schema] id` default). Drives minting (app-side vs DB-side), DDL, and
+/// the wire id repr. A `@no_id` (keyless) model has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PkStrategy {
+    /// `uuid` — an app-minted random v4 string (the project default). Known before the
+    /// INSERT, so it binds like any other value.
+    #[default]
+    Uuid,
+    /// `ulid` — an app-minted lexicographically-sortable string. App-side, like uuid.
+    Ulid,
+    /// `serial` — a DB-generated sequential integer. Unknown until the row is written, so
+    /// the INSERT omits it and the engine reads the assigned id back.
+    Serial,
+}
+
+impl PkStrategy {
+    /// The strategy a primary-key column's declared primitive implies. `Id` folds to the
+    /// project default (`uuid`) — a manifest pass rewrites a non-uuid default onto the
+    /// member first ([`resolve_pk_default`]), so by codegen time the primitive is concrete.
+    pub fn of(ty: Primitive) -> Self {
+        match ty {
+            Primitive::Serial => Self::Serial,
+            Primitive::Ulid => Self::Ulid,
+            _ => Self::Uuid,
+        }
+    }
+    /// Parse the manifest `[schema] id` default; anything but `ulid`/`serial` is `uuid`.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "ulid" => Self::Ulid,
+            "serial" => Self::Serial,
+            _ => Self::Uuid,
+        }
+    }
+    /// Is the id minted inside the database (unknown until the INSERT runs)?
+    pub fn is_db_generated(self) -> bool {
+        matches!(self, Self::Serial)
     }
 }
 
@@ -472,6 +519,25 @@ impl RModel {
     }
     pub fn is_unique(&self, field: &str) -> bool {
         self.unique_cols.iter().any(|c| c == field)
+    }
+
+    /// This model's primary-key generation strategy, read off the `id` column's declared
+    /// type. `None` for a `@no_id` (keyless) model. A `Primitive::Id` id folds to
+    /// [`PkStrategy::Uuid`] unless the manifest pass rewrote a non-uuid default onto it.
+    pub fn pk_strategy(&self) -> Option<PkStrategy> {
+        if self.no_id {
+            return None;
+        }
+        match self.member("id").map(|m| &m.kind) {
+            Some(MemberKind::Scalar { ty, .. }) => Some(PkStrategy::of(*ty)),
+            _ => None,
+        }
+    }
+
+    /// Does this model's PK come from the database (serial), so a `create` omits the id
+    /// column and the engine reads the assigned value back?
+    pub fn pk_is_db_generated(&self) -> bool {
+        self.pk_strategy().is_some_and(PkStrategy::is_db_generated)
     }
 
     /// The resolved FK constraint for a forward-relation member under the project

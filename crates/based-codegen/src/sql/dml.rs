@@ -897,7 +897,16 @@ fn path_primitive(schema: &CheckedSchema, root: &RModel, path: &Path) -> Primiti
             Some(MemberKind::Scalar { ty, .. }) => return *ty,
             Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
                 if last {
-                    return Primitive::Uuid;
+                    // The FK's primitive mirrors the target model's primary-key type
+                    // (a serial target → an `int` FK, a uuid target → uuid).
+                    return schema
+                        .model(target)
+                        .and_then(|m| m.member("id"))
+                        .and_then(|m| match &m.kind {
+                            MemberKind::Scalar { ty, .. } => Some(*ty),
+                            _ => None,
+                        })
+                        .unwrap_or(Primitive::Uuid);
                 }
                 match schema.model(target) {
                     Some(m) => cur = m,

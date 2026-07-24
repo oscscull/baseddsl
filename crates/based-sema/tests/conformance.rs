@@ -241,6 +241,8 @@ fn prim(p: Primitive) -> String {
         Primitive::Json => "json".into(),
         Primitive::Uuid => "uuid".into(),
         Primitive::Id => "Id".into(),
+        Primitive::Ulid => "ulid".into(),
+        Primitive::Serial => "serial".into(),
         Primitive::Float => "float".into(),
         Primitive::Decimal { precision, scale } => format!("decimal({precision}, {scale})"),
     }

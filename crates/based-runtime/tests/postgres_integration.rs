@@ -1009,3 +1009,54 @@ async fn nested_to_many_rows_ride_in_sort_cascade_order() {
         })
     );
 }
+
+/// The `serial` (DB-generated PK) read-back path against a live Postgres server: the
+/// INSERT omits the id, Postgres assigns it via `GENERATED ALWAYS AS IDENTITY`, and the
+/// engine reads it back with `RETURNING id` to key the declared-shape return.
+#[tokio::test]
+async fn serial_read_back_runs_against_live_postgres() {
+    const SCHEMA: &str = r#"
+        Org { id: serial  name: text }
+        shape OrgCard from Org { id, name }
+        mutation create_org(name) -> OrgCard { create Org { name = $name }; }
+        query org_by_id(id) -> OrgCard;
+    "#;
+    let Some((c, router, _guard)) = live_schema(SCHEMA).await else {
+        return;
+    };
+    let first = call(
+        &c,
+        &router,
+        "POST",
+        "/m/create_org",
+        json!({ "name": "Acme" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    let id1 = first.body["id"].as_i64().expect("db-generated integer id");
+    assert_eq!(first.body["name"], json!("Acme"));
+
+    let second = call(
+        &c,
+        &router,
+        "POST",
+        "/m/create_org",
+        json!({ "name": "Globex" }),
+        json!({}),
+    )
+    .await;
+    let id2 = second.body["id"].as_i64().expect("id");
+    assert!(id2 > id1, "serial ids increment: {id1} then {id2}");
+
+    let got = call(
+        &c,
+        &router,
+        "POST",
+        "/q/org_by_id",
+        json!({ "id": id1 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(got.body, json!({ "id": id1, "name": "Acme" }));
+}

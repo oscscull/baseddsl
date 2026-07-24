@@ -529,13 +529,13 @@ fn typed_ids_are_phantom_newtypes_per_entity() {
         shape OrderCard from Order { id, total, owner = org.id }
         query order_by_id(id) -> OrderCard;
         "#);
-    // The transparent phantom newtype + its explicit raw constructor.
+    // The phantom newtype + its explicit raw/int constructors. Its serde is hand-written
+    // (wire-honest: a serial id is a JSON number, a uuid/ulid id a string), so there is no
+    // derived `#[serde(transparent)]`.
     assert!(out.contains("pub struct Id<E> {"), "\n{out}");
-    assert!(
-        out.contains("#[serde(transparent, bound = \"\")]"),
-        "\n{out}"
-    );
+    assert!(out.contains("impl<E> Serialize for Id<E>"), "\n{out}");
     assert!(out.contains("pub fn from_raw("), "\n{out}");
+    assert!(out.contains("pub fn from_int("), "\n{out}");
     // A marker per model, so `Id<entity::Org>` and `Id<entity::User>` differ.
     assert!(out.contains("pub mod entity {"), "\n{out}");
     assert!(out.contains("pub enum Org {}"), "\n{out}");

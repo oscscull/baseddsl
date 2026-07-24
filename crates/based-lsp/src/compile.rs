@@ -2366,6 +2366,8 @@ fn primitive_str(p: Primitive) -> String {
         Primitive::Json => "json".into(),
         Primitive::Uuid => "uuid".into(),
         Primitive::Id => "Id".into(),
+        Primitive::Ulid => "ulid".into(),
+        Primitive::Serial => "serial".into(),
         Primitive::Float => "float".into(),
         Primitive::Decimal { precision, scale } => format!("decimal({precision}, {scale})"),
     }
@@ -2713,8 +2715,17 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
         Ok(project) => {
             let dialect = based_codegen::Dialect::parse(&project.manifest.dialect);
             let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
+            let pk_default = based_sema::PkStrategy::parse(&project.manifest.schema.id);
             let paths = project.files.into_iter().map(|f| f.path).collect();
-            compile_paths(paths, overlays, Vec::new(), Some(root), Some(dialect), fks)
+            compile_paths(
+                paths,
+                overlays,
+                Vec::new(),
+                Some(root),
+                Some(dialect),
+                fks,
+                pk_default,
+            )
         }
         // Manifest present but unreadable/malformed: surface it as a project-level
         // diagnostic and still compile this project's open buffers so the editor
@@ -2733,6 +2744,7 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
                 Some(root),
                 None,
                 based_sema::ForeignKeys::None,
+                based_sema::PkStrategy::Uuid,
             )
         }
     }
@@ -2748,6 +2760,7 @@ pub fn compile_loose(file: &Path, overlays: &HashMap<PathBuf, String>) -> Snapsh
         None,
         None,
         based_sema::ForeignKeys::None,
+        based_sema::PkStrategy::Uuid,
     )
 }
 
@@ -2760,6 +2773,7 @@ fn compile_paths(
     migrations_root: Option<&Path>,
     dialect: Option<based_codegen::Dialect>,
     fks: based_sema::ForeignKeys,
+    pk_default: based_sema::PkStrategy,
 ) -> Snapshot {
     // Read every file, preferring an open buffer over disk.
     let mut sources: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
@@ -2789,7 +2803,8 @@ fn compile_paths(
     let mut facts = Vec::new();
     let mut checked = None;
     if parse_ok {
-        let (schema, diags) = based_sema::check(&decls);
+        let (mut schema, diags) = based_sema::check(&decls);
+        based_sema::resolve_pk_default(&mut schema, pk_default);
         diagnostics.extend(diags);
         // Target-specific checks need the manifest's compile target; a loose file
         // (no project) has none, so they are skipped there.

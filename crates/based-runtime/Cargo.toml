@@ -28,7 +28,7 @@ postgres = [
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
 # The HTTP listener (`based serve`) — the axum socket edge over `serve::dispatch` —
 # plus the production uuid id-gen. Off by default so the core stays a plain library.
-serve = ["dep:axum", "dep:uuid", "tokio/net"]
+serve = ["dep:axum", "dep:uuid", "dep:ulid", "tokio/net"]
 # The Docker-backed real-DB integration harness + live suites. Brings up ephemeral
 # MariaDB/Postgres containers (via the `docker` CLI) — or connects to provided servers
 # via `TEST_MARIADB_URL`/`TEST_POSTGRES_URL` — to run the *verbatim* codegen-lowered
@@ -71,6 +71,8 @@ chrono = { version = "0.4", optional = true, default-features = false, features 
 axum = { version = "0.8", optional = true }
 # Production id generation: unpredictable, globally unique v4 uuids.
 uuid = { version = "1", optional = true, features = ["v4"] }
+# Production id generation for the `ulid` PK strategy: sortable 128-bit ids.
+ulid = { version = "1", optional = true }
 
 [dev-dependencies]
 based-parser.workspace = true
