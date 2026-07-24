@@ -18,7 +18,13 @@ relevant entries instead of scanning. A decision may appear under more than one 
   string-on-wire via `rust_decimal`/`serde-str`, `float` = f64, numeric family, `Literal::Decimal`
   exact-text defaults, SQLite TEXT storage, Postgres binary-numeric decode, E0159),
   D103 (implicit `id` → explicit-in-source, error `E0261` + autofix), D104 (opaque column types
-  via `raw("…")` — literal type-string in DDL+snapshot, opaque client value; `sql` banned as syntax)
+  via `raw("…")` — literal type-string in DDL+snapshot, opaque client value; `sql` banned as syntax),
+  D110 (PK generation-strategy axis: `[schema] id` default + per-model type override `uuid`/`ulid`/
+  `serial`, DB-generated sequential ids + read-back planner, natural single-column keys; spec-only,
+  impl in PLAN PR4), D111 (composite/multi-column PKs via `@key(f1,f2,…)` decorator, structured `Id<M>`
+  object surface, serial-part-where-legal; raw does NOT cover it per PR5 so PR6 ships codegen; spec-only,
+  impl PR6), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
+  family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
@@ -4965,3 +4971,166 @@ aliasing), client/OpenAPI, fmt round-trip, a sema conformance golden (`m2m_flatt
 two students, a duplicate link deduped to one far row, a soft-deleted junction link excluded,
 and a soft-deleted far course excluded. `make check` green end to end. Spec:
 `spec/syntax/relations.md` (Many-to-many) + `spec/syntax/shapes.md`.
+
+## D110 — Primary-key generation-strategy axis (`uuid` / `ulid` / `serial`, DB-generated ids)
+
+**Status: spec-only; owner-approved 2026-07-24. Implementation is PLAN PR4 (single-column) + PR6
+(composite).** A PK's *generation strategy* is a first-class, per-model design choice — not a fixed
+uuid. Sequential DB-assigned ids are a legitimate default for many schemas (index locality, storage,
+human-readable keys), and onboarding an existing production database requires representing whatever key
+it already has. uuid stays the project default (non-enumerable, distributed-friendly, free under this
+engine); choosing another strategy is a deliberate, unwarned opt-in.
+
+**The axis (parallel to `foreign_keys`/`@fk`, D108, and `@soft_delete`).**
+- `[schema] id = "uuid"` in `based.toml` sets the project default; `id: Id` resolves to it.
+- A model overrides per-model by writing the PK's **type**, strategy implied by type (implied-with-
+  override): `id: uuid` (app-minted v4 string), `id: ulid` (app-minted sortable string), `id: serial`
+  (DB-generated sequential integer). `Id` is the alias for the toml default.
+- **`serial`, not bare `int` (principles 1, 2, 8).** A PK is a consequential fact written in source
+  (principle 8 names it explicitly), and "the DB generates + increments + owns this identity" is
+  consequential behaviour that must be visible, not implied by a plain integer type. So a DB-generated
+  integer PK is spelled `serial`; a bare `int` is not a legal PK type.
+- `serial` lowers per dialect from one spelling: MariaDB/MySQL `BIGINT … AUTO_INCREMENT`, Postgres
+  `BIGINT GENERATED ALWAYS AS IDENTITY`, SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`. Width is 64-bit
+  (our `int` already lowers to `BIGINT`).
+
+**App-minted vs DB-generated is now a per-model fact (was engine-global `IdGen`).** `uuid`/`ulid` mint
+before the INSERT (id known at plan time, as today). `serial` mints inside the DB, so the id is unknown
+until the row is written. The runtime dispatches minting on the model's declared strategy.
+
+**The read-back planner change (`serial` only).** Today `plan_mutation` mints every id up front and a
+`tx`'s `$name.id` step-refs lower to that pre-minted bind, so the whole tx is one batch of parameterized
+statements. A DB-generated id inverts this: the INSERT omits the id column, the DB assigns it, and the
+engine reads it back — `RETURNING id` (Postgres, SQLite ≥ 3.35) or `LAST_INSERT_ID()` (MariaDB/MySQL) —
+then substitutes it into later steps' params. So `serial` steps in a `tx` execute strictly in order
+(execute → capture id → bind into subsequent steps), and the driver gains an insert-return-generated-id
+capability (`execute` today returns only rows-affected). App-minted strategies keep the existing batch
+path unchanged.
+
+**Wire honesty (no repr hiding).** An integer PK is an integer on the wire: `Id<entity::M>`'s underlying
+repr is per-entity (string for uuid/ulid, `i64` for serial), the JSON value is a number, and OpenAPI
+carries `{type: integer}` rather than `{type: string, format: uuid}`. A forward relation's FK column
+mirrors the target PK type (already true), so a relation to a `serial` model gets a `BIGINT` FK.
+Heterogeneous PK strategies across one schema are allowed.
+
+**Natural single-column keys (PR4 sub-item).** A table whose key is a meaningful existing column (a
+`sku`, an `iso_code`) has a key — it is not `@no_id` (which means genuinely keyless). A `@key(field)`
+decorator nominates a declared field as the PK, so "this column is the primary key" is expressible
+without a surrogate. (`@key` is the unified nominate-the-PK spelling — single or composite; superseded the
+earlier `@id(field)` sketch. Full composite design: D111.)
+
+**Composite / natural multi-column keys → PR6 / D111.** A multi-column PK (`(order_id, product_id)`,
+`(tenant_id, external_id)`) makes `Id<M>` a structured object, a relation FK multi-column, and get-by-id /
+read-back / keyset-tiebreak all multi-column. Common in real schemas and on the critical path for "swap
+into any production environment," so it is its own tracked item (PR6) with its own design entry (D111),
+sequenced after PR4 and informed by PR5's representability audit.
+
+**Migration of a strategy change is `@was`-shaped (D67-style).** Changing a live table's PK strategy is
+expressed with an explicit source marker and produces a reviewable, non-silent migration — like a
+column rename — but the step rewrites the PK column type *and* every inbound FK column that mirrors it,
+so it is a multi-table migration, not a single-column one. `schema.snap` records the strategy so the
+diff detects a change.
+
+**Blast radius (for PR4 planning, neutral inventory).** manifest (`[schema] id`); parser + AST +
+`grammar.ebnf` (`serial`/`ulid` PK types, `@key(field)` nomination); sema (resolve strategy, validate
+type↔strategy + relation mirroring, typed-id repr inference, new `E####`s); codegen `sql.rs` (per-dialect
+`serial` DDL), `sql/dml.rs` (omit-id + read-back + step-ref rework), `client.rs`/`openapi.rs` (per-entity
+id repr), `migrate/**` (snapshot strategy + diff); runtime `id.rs` (ULID gen, per-model minting),
+`run.rs` (interleaved execute/read-back), driver trait + all three drivers (insert-return-id); conformance
+goldens + a live example per dialect; `spec/syntax/models.md`. Spec: `spec/syntax/models.md`.
+
+## D111 — Composite (multi-column) primary keys via `@key(…)`; structured id surface
+
+**Status: spec-only; owner-approved 2026-07-24. Implementation is PLAN PR6, sequenced after PR4 (D110).**
+A model's primary key may be one-or-more *existing declared columns* rather than a surrogate. This is
+mandatory for the pluggable-replacement goal (principle 9): composite PKs are pervasive in real schemas
+(junctions, tenant-scoped natural keys, time-series), so a database that has one must be representable.
+
+**Three non-overlapping ways a model gets a PK.**
+1. Surrogate — the engine/DB supplies an opaque key: `id: uuid | ulid | serial` (D110).
+2. Nominated — declared column(s) *are* the key: `@key(f1, f2, …)`.
+3. Keyless — `@no_id("reason")`.
+
+**`@key(f1, f2, …)` — the nominate spelling (single or composite).** A stacked model decorator naming
+which declared fields form the PK, in list order (the composite index/column order). Fields are declared
+normally; a `@key` model has no synthesized `id` (it occupies the same "no surrogate id" slot as
+`@no_id`, but the table *has* a key). Chosen over inline per-field markers for principle 4 (the key is
+declared once, not smeared across N fields) and principle 3 (order is explicit in the delimited list, not
+inferred from field-declaration order); consistent with the other model decorators (`@scope`,
+`@soft_delete`, `@table`, `@no_id`). Arity 1 (`@key(sku)`) is the natural single-column key from D110.
+
+```
+@key(order, product)
+Enrollment {
+  order:   Order            # column order_id (FK)
+  product: Product          # column product_id (FK)
+  enrolled_at: timestamp
+}
+# → PRIMARY KEY (order_id, product_id); no surrogate id; the unique index is subsumed by the PK
+```
+
+A composite PK subsumes the explicit-junction `@index (a,b) unique` pattern (D102/D109): a junction gets
+a real PK instead of a table-with-a-unique-index-pretending-to-have-a-key.
+
+**Structured id surface (option A, not an opaque token).** With no single value to wrap, `Id<entity::M>`
+becomes a generated per-part struct — `EnrollmentId { order: Id<Order>, product: Id<Product> }` — carried
+everywhere a single id is today (get-by-id input, an inbound relation FK, create read-back, keyset
+tiebreak). On the wire it is a JSON object (`{ "order": …, "product": … }`); OpenAPI an object with typed
+properties. Chosen over an opaque encoded scalar (the `Cursor` pattern) because a PK's parts are
+*meaningful* real columns — transparency + per-part phantom typing (D70) beat single-token URL ergonomics
+for rows rarely fetched by hand-written URL. get-by-id takes the full struct; keyset tiebreak uses the
+full tuple (keyset is already lexicographic-multi-column, so it composes).
+
+**Serial part inside a composite key — allowed where the dialect allows (principle 9; per-dialect).**
+Postgres: legal (`PRIMARY KEY (a, id)`, `id` IDENTITY). MariaDB/MySQL InnoDB: legal, but an
+`AUTO_INCREMENT` column must lead *some* index, so codegen auto-emits a helper `INDEX(seq)` when the
+serial part is non-leading — covered, not forbidden, not misleading. SQLite: native `AUTOINCREMENT` only
+on a single-column `INTEGER PRIMARY KEY`, so a serial-in-composite is expressed via the raw DDL hatch plus
+an honest "not native on this dialect" diagnostic. A serial part reuses D110's read-back planner; a
+composite key of only known-at-insert parts (FKs + natural scalars) needs no read-back.
+
+**Relations *into* a composite-key model — first-class, no interim backstop.** An inbound FK to a
+composite PK is N columns; the first-class form auto-expands to `<field>_<part>` columns
+(`enrollment: Enrollment` → `enrollment_order_id`, `enrollment_product_id`) with an explicit column-map
+override for legacy names. Required for legacy onboarding (a real FK-to-composite exists in the wild), so
+it is in PR6 scope; sequenced after the leaf/junction case.
+
+**PR5 resolved the raw-coverage question — NEGATIVE (representability audit, 2026-07-24).** Raw can
+**not** express a structural composite PK or multi-column FK on a first-class model: D104 raw is a
+column-*type* string (no table-level key clause), a raw index yields only a composite UNIQUE (no FK,
+nullable — a different DB state), and a D67 raw migration step creates an out-of-band table invisible to
+sema/codegen/runtime. So a composite-key table is reachable by neither feature nor raw today — a
+principle-9 hole that **PR6 must close in codegen directly**; there is no interim backstop (this corrected
+an earlier draft of this entry that assumed raw would cover it).
+
+**Blast radius (neutral inventory).** parser + AST + `grammar.ebnf` (`@key(…)`); sema (resolve the key
+member set, no-synthesized-id, validate parts exist / are keyable, relation-into mirroring, new `E####`s);
+codegen `sql.rs` (composite `PRIMARY KEY (…)` + InnoDB helper index), `sql/dml.rs` (multi-column
+get/read-back/keyset), `client.rs`/`openapi.rs` (structured id struct + object schema), `migrate/**`
+(snapshot the key member set + diff); runtime get-by-id / cursor tiebreak over the tuple; conformance
+goldens + a live junction example. Spec: `spec/syntax/models.md` + `spec/syntax/relations.md`.
+
+## D112 — Split a real `mysql` dialect from `mariadb`; portable `CHAR(36)` id default for the family
+
+**Status: spec-only; owner-approved 2026-07-24. Implementation is PLAN PR8.** Fixes the PR5 miscompile: the
+`uuid`/`Id` column emitted `UUID` unconditionally on the MariaDb dialect (`sql.rs:491`), which is
+non-executable on `dialect="mysql"` (MySQL has no `UUID` type at any version) and on MariaDB < 10.7 (added
+in 10.7; 10.6 LTS lacks it) — silent, with the crate claiming MySQL-8 compatibility (`lib.rs:24-26`).
+
+**Decision.**
+- **`mysql` is a distinct dialect** (own `Dialect::MySql` variant), no longer aliased to `MariaDb`
+  (`lib.rs:54` maps both today). MySQL and MariaDB diverge and will diverge further; a real target is
+  required for honest output and per-dialect type/DDL choices. Identifier quoting stays backticks (shared).
+- **The MySQL/MariaDB family defaults `uuid`/`Id` to `CHAR(36)`.** It matches the engine's app-minted v4
+  *string* exactly, so the runtime value mapping is unchanged (it already binds/reads uuid strings), and it
+  executes on every MySQL and MariaDB version. Replaces the unconditional `UUID`.
+- **Native `UUID` is opt-in for MariaDB 10.7+** — via the raw type hatch today; PR8 also fixes `fk_type`
+  (`sql.rs:542-551`) to propagate a PK's `raw_type` so the hatch composes across FK columns (without it an
+  FK to a UUID-typed PK silently re-derives the default). Postgres keeps native `UUID` (idiomatic + correct).
+- **`BINARY(16)` deferred** — half the storage but needs a runtime uuid↔16-byte value-map; a later opt-in
+  optimization, not the default.
+
+**Blast radius.** manifest (map `"mysql"` → `MySql`); codegen `Dialect` enum + `sql_type` (a `MySql` branch;
+family `uuid`→`CHAR(36)`) + `fk_type` raw_type propagation; snapshot/migration dialect handling; the live
+test matrix (a `mysql` target alongside `mariadb` only where behaviour diverges — the dialect-divergent
+rule); doc-truth (`lib.rs:24-26` becomes accurate). Spec: `spec/syntax/models.md` type table.

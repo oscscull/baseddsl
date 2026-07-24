@@ -18,6 +18,8 @@ Tiebreakers, in priority order. Apply when a case isn't specified.
 
 8. **Show, don't write — only for cost-free, unambiguous derived facts.** A derived fact is shown in the editor (LSP), not written in source, only when deriving it is free of independent cost and has one meaning — e.g. an inverse name, fixed by the written forward edge. A derived fact a reviewer must weigh — an index (write + disk cost) or a primary key — is consequential (principle 2), so it is written in source; the engine errors when it's missing and offers a one-key autofix.
 
+9. **Consume any database; steer, don't forbid.** Every valid database state is expressible — via a first-class feature or a raw escape hatch; a valid state we can't represent at all is a bug. But representability is not endorsement: an undesirable-but-valid state stays reachable while carrying friction proportional to how much we discourage it — a mandatory `reason` (à la `unscoped`), or mild verbosity — and the engine warns when something is done wrong or inefficiently, as it does elsewhere. Never forbid a valid construct for being ugly; never silently bless it either.
+
 ## Hard priorities
 1. Brevity (context windows).
 2. File separation — one model per file, self-contained for its owner.

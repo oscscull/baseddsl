@@ -37,6 +37,15 @@ resumes it:
   front-end-only change (parser/sema/fmt/LSP/docs) may commit on `check-fast` alone. Never commit red.
   A driver/live slice is not "done" until `make check` is green — live against a real server, not
   compile-verified.
+- **Sequencing: critical features first, then examples — and examples only where dialects diverge.**
+  Build a critical feature to done (with thorough unit + live tests) *before* writing the practical
+  examples that demonstrate it — in that order, never interleaved. Do NOT rebuild an example across every
+  supported DB by reflex: a per-dialect example earns its keep only when the behaviour is *logically
+  divergent* by dialect (many are — but confirm it each time, don't assume). This is a velocity guard so
+  the build doesn't bog down in triplicated demos; it is **not** license to thin the unit tests, which stay
+  thorough regardless of dialect. The **axum-helpdesk** example is the designated home for
+  integration-level tests (that is its mission) — land new end-to-end coverage there rather than spinning
+  up fresh per-DB projects.
 - **Commit style.** On the current working branch (no push, no PR): first line
   `m6: <desc> (D<n>)`, short body, ending with the trailer
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Update this file
@@ -91,6 +100,129 @@ subquery, runtime unchanged, proven live on SQLite); implicit-junction sugar sta
 Track T tier-2, with the SQLite incremental-FK rebuild left as the one explicit deferral. Batch-by-batch
 history is in `PLAN-archive.md`.
 
+## URGENT — production-readiness / onboarding gaps (owner-raised 2026-07-24)
+
+Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
+system into an existing production environment as a pluggable replacement — plus two example/quality
+fixes that surfaced alongside. **Priority order: PR4 → PR6 → PR5 → PR2 → PR3 → PR1.** The primary-key
+story (**PR4 single-column + PR6 composite**) is priority 1 — owner: the single most important capability
+the system is missing for the pluggable-replacement goal; a schema whose keys can't be represented can't
+be onboarded at all. Its design fork is **resolved and owner-approved (D110)** — build to that. PR5's
+onboarding audit informs PR6's shape. PR1 is a cheap standalone win, sequenced last only because it isn't
+on the onboarding critical path.
+
+- **PR1. axum-helpdesk login route — the example is seed-locked.** `start_session` ("login issues the
+  session every later context derives from") exists in `schema/session/queries.bsl` but is **not exposed
+  over HTTP** — only `src/bin/seed.rs` calls it in-process, printing six hardcoded tokens (`tok-acme-*`).
+  A running server cannot mint a session for any caller the seed didn't bake, so the example reads as a
+  seed-driven integration fixture, not a usable service (owner concern). Fix: expose a login route
+  (`POST /sessions`) that mints a **server-generated** random token and returns it; keep `seed` for demo
+  *content* (tickets/comments) only. Optionally a minimal credential check so it is login, not bare
+  issuance. Pure example code, no engine change — lowest risk.
+- **PR2. Idempotency store: injection seam + `MemStore` TTL.** `IdempotencyStore` is a trait, but
+  `EngineInner.store` is a **concrete `MemStore`** hardwired in `embed.rs`/`http.rs` — unlike `id_gen`
+  and `guards`, which ARE injected as `Box<dyn …>`. So a user-written store cannot be plugged in without
+  editing runtime source; the "the store is a seam" doc-comment (`idempotency.rs`) is aspirational.
+  Separately, `MemStore` has no eviction ("keys accumulate", per its own doc) → unbounded memory growth
+  on a long-lived server. Fix: (a) `Engine::with_store` / serve-builder accepting `Box<dyn
+  IdempotencyStore>`; (b) TTL/eviction on `MemStore`. (This is the "durable multi-instance idempotency
+  store" that was on the Deferred list — now promoted.)
+- **PR3. Idempotency store: DB-backed durable impl.** Ship a database-backed `IdempotencyStore` (keys in
+  a table in the same DB). The strong form commits the key in the **same transaction** as the mutation →
+  genuine exactly-once even when a retry lands on another app instance, and it is on-brand for a DB-first
+  engine (more correct than Redis; Redis stays a viable TTL-friendly alternative). Depends on PR2's seam.
+- **PR4. PK generation-strategy axis — single-column (design resolved, D110; priority 1).** Today the id
+  *value* is unconditionally **app-minted** (`IdGen::next_id() -> String`, `UuidGen` v4), bound *before*
+  the INSERT; the synthesized PK carries `default: None // engine-generated on insert`, and there is no
+  path for a DB-generated PK. Make the generation strategy a per-model, type-driven choice, parallel to
+  `foreign_keys`/`@fk` and `@soft_delete`. **Resolved shape (D110):**
+  - `[schema] id = "uuid"` toml default (stays uuid — non-enumerable, free here); `id: Id` resolves to it.
+  - Per-model override by PK *type*, strategy implied-with-override: `id: uuid` (app v4 string), `id: ulid`
+    (app sortable string), **`id: serial`** (DB-generated sequential `BIGINT`). `serial`, not bare `int`
+    (principles 1/2/8 — a PK's generation is consequential, written+visible); bare `int` is not a legal PK.
+  - `serial` DDL per dialect from one spelling: MariaDB `BIGINT AUTO_INCREMENT`, Postgres `BIGINT GENERATED
+    ALWAYS AS IDENTITY`, SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`. FK columns mirror the target PK type.
+  - **Wire honesty:** `Id<M>` repr is per-entity (String vs `i64`); serial ids are JSON numbers; OpenAPI
+    `{type: integer}` not `{format: uuid}`. Heterogeneous PK strategies in one schema allowed, no warn.
+  - **Read-back planner (serial only):** the INSERT omits the id; the DB assigns it; the engine reads it
+    back (`RETURNING id` on Postgres/SQLite≥3.35, `LAST_INSERT_ID()` on MariaDB/MySQL) and substitutes it
+    into later `tx` steps' params — so serial steps execute strictly in order and the driver gains an
+    insert-return-generated-id path (`execute` returns only rows-affected today). App-minted keeps the
+    existing pre-minted batch path. Minting becomes per-model (was engine-global `IdGen`).
+  - **Natural single-column key (sub-item):** a `@key(field)` decorator nominates an existing declared
+    field as the PK (a `sku`/`iso_code` key is *not* `@no_id`, which means genuinely keyless). `@key` is
+    the unified nominate-the-PK spelling shared with composite keys (PR6/D111).
+  - **Blast radius** (D110 has the neutral inventory): manifest, parser/AST/grammar, sema (+`E####`s),
+    codegen `sql.rs`/`dml.rs`/`client.rs`/`openapi.rs`/`migrate`, runtime `id.rs`/`run.rs`/driver trait +
+    all three drivers, conformance goldens + a live example per dialect, `spec/syntax/models.md`.
+  - Strategy change on a live table is `@was`-shaped (explicit marker, reviewable migration) but rewrites
+    the PK type + every inbound FK — a multi-table step; `schema.snap` records the strategy so diff sees it.
+- **PR6. Composite / multi-column primary keys — `@key(…)` (design resolved, D111; priority 1 cluster
+  with PR4).** Multi-column PKs — junction `(order_id, product_id)`, tenant-scoped `(tenant_id,
+  external_id)`, time-series `(device_id, ts)` — are pervasive, so a pluggable replacement must represent
+  them (principle 9) or force adopters to add surrogate keys to tables that deliberately lack them.
+  Unsupported today: every model has exactly one PK member (or `@no_id`). **Resolved shape (D111):**
+  - `@key(f1, f2, …)` stacked model decorator names the PK columns in order; fields declared normally; a
+    `@key` model has no synthesized `id`. Arity 1 (`@key(sku)`) is PR4's natural single-column key — one
+    unified spelling. Subsumes the explicit-junction `@index (a,b) unique` (D102/D109).
+  - **Structured id (option A):** `Id<entity::M>` becomes a generated per-part struct (`EnrollmentId {
+    order, product }`), wire = JSON object, OpenAPI = typed-property object; parts keep phantom typing
+    (D70). get-by-id / keyset tiebreak use the full tuple (keyset already lexicographic-multi-column).
+  - **Serial part where the dialect allows (per-dialect, principle 9):** Postgres legal; MariaDB InnoDB
+    legal with an auto-emitted helper `INDEX(seq)`; SQLite via the raw DDL hatch + honest diagnostic. A
+    serial part reuses PR4's read-back; a key of only known-at-insert parts (FKs + scalars) needs none.
+  - **Inbound FK to a composite-key model:** first-class auto-expansion to `<field>_<part>` columns
+    (+ column-map override), sequenced after the junction/leaf case. **No raw interim backstop** — PR5
+    proved raw can't express a structural composite PK / multi-column FK (D111), so PR6 ships all of it
+    in codegen (extend `ForeignKeySnap`/`TableSnap` to `Vec` columns; multi-column get/read-back/keyset).
+  - Sequenced after PR4 (shares the read-back path for serial parts); own decisions entry D111.
+- **PR5. Representability audit + doc-truth pass (owner-raised 2026-07-24).** A dedicated systematic
+  sweep — **run as a parallel-subagent fan-out** — enforcing principle 9: for **every** ugly legacy
+  construct, prove there is *either* a first-class feature *or* a raw escape hatch; a valid DB state
+  reachable by neither is a **bug** to file. **Top question (blocks PR6's sequencing):** can the raw hatch
+  today express a *structural* composite PK / multi-column FK? Raw covers column *types* (D104), names
+  (`@table`/`(column)`), and index/migration DDL (D67) — structural key/FK coverage is unverified; if it's
+  a hole, PR6 can't lean on raw as its interim backstop and the hole must be filled. Onboarding surface to
+  map: DB-generated/sequential PKs (→PR4), composite/natural keys (→PR6), PK column name ≠ `id`, MySQL
+  charset/collation, enum representation vs an existing column, timezone in `now()`/`timestamp`,
+  schema/database qualifiers, reserved words, pre-existing indexes/constraints/views, and `UUID` not being
+  a valid column type on MySQL / MariaDB < 10.7. Doc-truth: verify `decisions.md` (5,100+ lines) + `PLAN`
+  against the code, flag untrue/stale entries for trim. **Confirmed drift to fix:** D1 claims the id column
+  is "MariaDB native `UUID` … else `BINARY(16)`" — there is **no `BINARY(16)` anywhere** in codegen (it
+  emits `UUID` unconditionally; also flags the < 10.7 gap above). File each finding as its own item.
+
+  **PR5 RESULTS (audit ran 2026-07-24, 22 agents, adversarially verified; task wcpdg9k5s).** Top question
+  answered NEGATIVE: composite PK / multi-col FK is representable by neither feature nor raw → folded into
+  D111/PR6 (no interim backstop). Two audit overclaims were overturned by verify (charset + timezone are
+  fine via raw — not bugs). Confirmed findings, filed as items:
+  - **PR7 (miscompile, small, high-value). PK column-name override emits unexecutable DDL.** `id: Id
+    (column "user_pk")` compiles clean but emits `PRIMARY KEY ("id")` for a nonexistent column (MariaDB
+    err 1072) — empirically reproduced. **Contradicts D3's documented `(column "…")` hook.** Fix: resolve
+    the PK column via `member("id").physical_col()` in `sql.rs:159` + `migrate/sql.rs:290,301` (drop the
+    phantom-id re-synthesis); add a renamed-PK conformance golden. Small, self-contained; do early.
+  - **PR8 (miscompile — design RESOLVED, D112). `id UUID` is rejected on `dialect="mysql"` and MariaDB
+    < 10.7.** Fix (D112, owner-approved 2026-07-24): **split a real `mysql` dialect** from `mariadb` (own
+    `Dialect::MySql`, no longer aliased at `lib.rs:54`); **default `uuid`/`Id` to `CHAR(36)`** for the
+    MySQL/MariaDB family (matches the app-minted v4 string → zero runtime change; executes on every
+    version); native `UUID` opt-in for MariaDB 10.7+ (via raw for now); **`BINARY(16)` deferred** (needs a
+    runtime uuid↔16-byte value-map). Also fix `fk_type` (`sql.rs:542-551`) to propagate the target PK's
+    `raw_type` so the raw hatch composes across FK columns. Lives in the same id-DDL code PR4 will touch.
+  - **PR9 (bug + miscompile). Non-default schema/database table unrepresentable.** No schema/namespace
+    concept; `@table("analytics.events")` silently emits a table *named* `"analytics.events"` in the
+    default schema (neither feature nor raw reaches it). Fix: a `@schema("…")` seam (schema field in the
+    Model IR, quoted separately in DDL/DML/FK/index); interim: reject a `.` in `@table` with a sema error.
+  - **Missing features (raw workaround exists → not blockers, first-class wanted):** table-level
+    charset/collation control (`[schema]` key or `@charset`/`@collate` + snapshot/diff); legacy-enum-column
+    adoption (pin CHECK name / width / native ENUM / suppress CHECK — today declaring a based enum forces a
+    column rewrite); VIEW-backed model (`@view`; today no path routes reads to a view — detour is modelling
+    the base tables). DB-generated PK is PR4. Coexistence with *unmanaged* indexes/constraints is already
+    fine (drift check only drops objects in its own snapshot).
+  - **Doc-truth drift to correct (own cleanup item):** D1 (phantom `BINARY(16)`; calls `id` "implicit" —
+    explicit since D103, only D2 got the banner); `sql.rs:22` + `lib.rs:24-26` (`UUID` "native"/"MySQL-8
+    compatible" false for MySQL/<10.7); D3 (no note that `(column …)` breaks on the PK); D11/D12/D13
+    "Deferred…" tails describing *shipped* features (nested shapes D55/D57, named-filter inlining D14, tx
+    back-refs D107) + the retired `sql` keyword spelling (→`raw`, D96); `sql.rs:156-157` stale PK comment.
+
 ## Definition of Done (the product is complete when…)
 
 Acceptance criteria. Everything in the Completion roadmap serves one of them. Status is the
@@ -129,9 +261,9 @@ current-truth summary; the evidence (which D# proved it) is in the archive.
    `raw(dialect)` up step (D67)** — all proven live. **✅ Fully met** — a `.bsl` change (including a
    data-preserving column/table rename) produces a reviewable, editable migration you safely apply.
 
-Deferred items (durable multi-instance idempotency store, shutdown grace deadline, incremental LSP
-sync, `^^` multi-level back-refs) stay deferred — worked only if they land on the critical path or a
-user would notice their absence. **Promoted off this list by the 2026-07-07 audit:** *nested shape
+Deferred items (shutdown grace deadline, incremental LSP sync, `^^` multi-level back-refs) stay
+deferred — worked only if they land on the critical path or a user would notice their absence. (The
+durable multi-instance idempotency store was promoted off this list to URGENT PR2/PR3, 2026-07-24.) **Promoted off this list by the 2026-07-07 audit:** *nested shape
 sub-objects + relation-array projection* → **Track L1** (core language surface, not optional — no query
 can return a related object/array without it); *self-ref join aliasing* → folded into L1 (the flagship
 `User.invited_users` case is self-referential and forces it); *rename* → done (D53).
