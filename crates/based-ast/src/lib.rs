@@ -407,6 +407,16 @@ pub enum ShapeField {
     /// `field -> ShapeName` — expand a relation into a sub-object projected by a
     /// named shape (whose `from` model must equal the relation's target)
     NestRef { field: Ident, shape: Ident },
+    /// `out = path { body }` — flatten a to-many path through a junction to the far
+    /// side, hiding the junction. The first path segment is a to-many inverse edge
+    /// (into the junction); the rest are forward edges to the far model, whose
+    /// projection is `body`. The result is the *distinct set* of far-side rows
+    /// (`Vec<far-shape>`), so a junction's link cardinality never leaks.
+    Flatten {
+        out: Ident,
+        path: Path,
+        body: Vec<ShapeField>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

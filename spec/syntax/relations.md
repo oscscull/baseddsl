@@ -109,12 +109,33 @@ the same NF11 tension the owner flagged for inferred indexes). Extra columns on 
 `create` / `delete` of a junction row; a shape reaches the far side through the junction
 (`enrollments { course { title } }`), reusing the to-many nesting machinery.
 
-*Deferred (the next T5 slice):* a **far-side flattening projection** that skips the junction
-in a shape (`courses = enrollments.course { title }` → a flat `Vec<Course>` rather than an
-array of enrollment objects), and any decision on implicit-junction sugar (`courses:
-Course[] <-> students`). The sugar is held because an engine-generated join table is real
-DDL a reviewer must see in the PR — it wants the same explicit-in-source resolution NF11 is
-weighing for inferred indexes, not a silent default.
+### Far-side flattening projection
+
+A shape can skip the junction and return the far side directly as a flat, **distinct**
+list — a derived field (`=`) naming a relation **path** through the to-many junction edge,
+then a forward edge to the far model, with a projection body:
+```
+shape StudentCourses from Student {
+  name
+  courses = enrollments.course { title }   # -> courses: [ { title }, … ], junction hidden
+}
+```
+`enrollments.course` hops into the to-many junction (`enrollments`, an inverse edge), then
+out along a forward edge (`course`) to the far model — so the field is `Vec<Course>`, not a
+`Vec` of enrollment wrappers. The list is the **set** of related far rows, each once
+(distinct on the far primary key): a junction with duplicate links, or a filter, never
+multiplies a far row into the result. It generalizes to more hops (an inverse edge first,
+then forward edges; the last segment's model is the element type), but the junction-skip is
+the primary form. **Order is unspecified** unless the far model declares `@sort` (portable
+JSON aggregation has no cross-dialect ordered form) — the same rule as a to-many nest. The
+far model's *and* the junction's `@scope` / `@soft_delete` ride the flattening subquery, so a
+tombstoned link, a tombstoned far row, and an out-of-scope far row are all excluded; nesting
+into a scoped far side counts as touching it. The body composes — it may nest or flatten
+further. A `@no_id` (keyless) far model is a compile error (no primary key to dedup on).
+
+*Implicit-junction sugar* (`courses: Course[] <-> students`) stays **rejected**: an
+engine-generated join table is real DDL a reviewer must see in the PR, so it wants the same
+explicit-in-source resolution NF11 settled for inferred indexes, not a silent default.
 
 ## Custom join condition
 Stays inside the guarantee — engine still understands the join, still injects soft-delete, still types it. For legacy keys:

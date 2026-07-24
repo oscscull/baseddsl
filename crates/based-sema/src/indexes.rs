@@ -688,6 +688,40 @@ fn shape_demand_in(
                     }
                 }
             }
+            // A flatten's first hop is a to-many inverse (into the junction) whose
+            // correlated subquery filters on the junction's back FK — the same index
+            // demand a to-many nest into the junction creates. Later forward hops join
+            // on the target's (indexed) primary key. The body reaches the far model.
+            ShapeField::Flatten { path, body, .. } => {
+                let first = &path.segments[0];
+                let mut cur = mi;
+                if let Some(MemberKind::Inverse { target, via }) =
+                    cx.model(mi).member(&first.node).map(|m| &m.kind)
+                {
+                    if let Some(ti) = cx.find(target) {
+                        usage[ti].join(via);
+                        push_join(joins, ti, via);
+                    }
+                }
+                let mut ok = true;
+                for seg in &path.segments {
+                    match cx
+                        .model(cur)
+                        .member(&seg.node)
+                        .and_then(|m| m.kind.target())
+                        .and_then(|t| cx.find(t))
+                    {
+                        Some(ti) => cur = ti,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    shape_demand_in(body, cur, cx, usage, joins, stack);
+                }
+            }
         }
     }
 }

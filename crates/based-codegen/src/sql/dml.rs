@@ -389,8 +389,10 @@ fn lower_agg_query<'a>(
                     (out.node.clone(), e.clone(), e)
                 }
             },
-            // Aggregate shapes are flat (sema `E0245`); a stray nest is ignored.
-            ShapeField::Nest { .. } | ShapeField::NestRef { .. } => continue,
+            // Aggregate shapes are flat (sema `E0245`); a stray nest/flatten is ignored.
+            ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. } => {
+                continue
+            }
         };
         cols.push(format!("  {} AS {}", proj, sel.q(&out)));
         expr_map.insert(out, cmp);
@@ -697,6 +699,15 @@ fn project_body<'a>(
                 };
                 project_nest(sel, field, body, model, alias, prefix, out_prefix, cols);
                 sel.exit_shape_ref();
+            }
+            // `out = edge.far { body }`: flatten a to-many path to the distinct far
+            // side, hiding the junction — a JSON-array column (`out[]`) the runtime
+            // parses like any to-many nest.
+            ShapeField::Flatten { out, path, body } => {
+                if let Some(arr) = sel.json_flatten_subquery(body, path, alias, model) {
+                    let name = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", out.node));
+                    cols.push(format!("{arr} AS {}", sel.q(&name)));
+                }
             }
         }
     }
@@ -1284,6 +1295,159 @@ impl<'a> Select<'a> {
         sql
     }
 
+    /// A fresh child `Select` rooted at `root_alias` with its own join scope, sharing
+    /// this select's schema/dialect/filters/scope injection and the current subquery
+    /// counter (so nested aliases stay globally distinct). For a to-many / flatten
+    /// correlated subquery's own reaches.
+    fn spawn_child(&self, root_alias: String) -> Select<'a> {
+        Select {
+            schema: self.schema,
+            dialect: self.dialect,
+            root_alias,
+            joins: Vec::new(),
+            seen: HashMap::new(),
+            filters: self.filters.clone(),
+            filter_stack: Vec::new(),
+            shapes: self.shapes.clone(),
+            shape_stack: self.shape_stack.clone(),
+            bindings: HashMap::new(),
+            inject_scope: self.inject_scope,
+            scope_inject: self.scope_inject,
+            sub_counter: self.sub_counter,
+            bare_cols: false,
+        }
+    }
+
+    /// Build the correlated-subquery expression for a **far-side flattening projection**
+    /// (`out = edge.far { body }`): the *distinct* set of far-side rows reached through a
+    /// to-many junction, the junction hidden. Two nested correlated levels:
+    ///
+    /// ```sql
+    /// (SELECT <json-agg>(<json-object of body>) FROM <far> AS <far_alias>
+    ///  WHERE <far_alias>.id IN (
+    ///     SELECT <jx>.<far_fk> FROM <junction> AS <jx> [<intermediate joins>]
+    ///     WHERE <jx>.<near_fk> = <outer>.id AND <junction soft-delete/@scope>)
+    ///  AND <far soft-delete/@scope>)
+    /// ```
+    ///
+    /// Iterating far rows (`FROM far`, `far.id IN (…)`) gives DISTINCT-on-PK for free —
+    /// duplicate junction links collapse to one far row, so the junction's link
+    /// cardinality never leaks — on every dialect (a portable `IN`, no `DISTINCT`
+    /// gymnastics). The junction's own scope/soft-delete ride the inner `IN`; the far
+    /// model's ride the outer `WHERE`. Element order follows the far model's `@sort`,
+    /// else unspecified (portable JSON aggregation has no cross-dialect ordered form).
+    /// Returns `None` on a malformed path (sema reports it).
+    fn json_flatten_subquery(
+        &mut self,
+        body: &'a [ShapeField],
+        path: &Path,
+        outer_alias: &str,
+        root: &'a RModel,
+    ) -> Option<String> {
+        let segs = &path.segments;
+        // First hop: a to-many inverse edge into the junction.
+        let (junction, near_fk, _) = self.to_many_edge(&segs[0].node, root)?;
+        self.sub_counter += 1;
+        let jx_alias = format!("s{}_{}", self.sub_counter, junction.table);
+
+        // Inner subquery scope: walk the forward hops, joining intermediate models and
+        // reading the far FK off the last hop's owner.
+        let mut inner = self.spawn_child(jx_alias.clone());
+        let mut cur_alias = jx_alias.clone();
+        let mut cur_model = junction;
+        let mut prefix = String::new();
+        let last = segs.len() - 1;
+        let mut far_fk = None;
+        let mut far_model: Option<&'a RModel> = None;
+        for (i, seg) in segs[1..].iter().enumerate() {
+            let idx = i + 1;
+            match cur_model.member(&seg.node).map(|m| &m.kind) {
+                Some(MemberKind::Forward {
+                    target,
+                    fk_col,
+                    optional,
+                    ..
+                }) => {
+                    if idx == last {
+                        far_fk = Some(fk_col.clone());
+                        far_model = self.schema.model(target);
+                    } else {
+                        let (a, m) = inner.join_forward(
+                            &cur_alias,
+                            &mut prefix,
+                            &seg.node,
+                            target,
+                            fk_col,
+                            *optional,
+                        );
+                        cur_alias = a;
+                        cur_model = m;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        let (far_fk, far_model) = (far_fk?, far_model?);
+        self.sub_counter = inner.sub_counter;
+
+        let mut inner_wheres = vec![format!(
+            "{} = {}",
+            self.qcol(&jx_alias, &near_fk),
+            self.qcol(outer_alias, "id")
+        )];
+        if let Some(sd) = &junction.soft_delete {
+            inner_wheres.push(soft_pred(self.dialect, &jx_alias, junction, sd));
+        }
+        if let Some(scope) = inner.scope_join_pred(&jx_alias, junction) {
+            inner_wheres.push(scope);
+        }
+        let mut inner_sql = format!(
+            "SELECT {} FROM {} AS {}",
+            self.qcol(&cur_alias, &far_fk),
+            self.q(&junction.table),
+            self.q(&jx_alias)
+        );
+        push_joins(&mut inner_sql, self.dialect, &inner.joins);
+        inner_sql.push_str(&format!(" WHERE {}", inner_wheres.join(" AND ")));
+
+        // Outer aggregation: the far rows in that set, projected + deduped by PK.
+        self.sub_counter += 1;
+        let far_alias = format!("s{}_{}", self.sub_counter, far_model.table);
+        let mut far_sel = self.spawn_child(far_alias.clone());
+        let elem = far_sel.json_object_expr(body, far_model, &far_alias, "");
+        let order_keys: Vec<String> = far_model
+            .sort
+            .iter()
+            .map(|t| {
+                let (a, col) = far_sel.resolve_from(&t.path, &far_alias, "", far_model);
+                format!("{} {}", far_sel.qcol(&a, &col), dir(t.dir))
+            })
+            .collect();
+        let order = (!order_keys.is_empty()).then(|| order_keys.join(", "));
+        self.sub_counter = far_sel.sub_counter;
+
+        let mut far_wheres = vec![format!(
+            "{} IN ({})",
+            self.qcol(&far_alias, "id"),
+            inner_sql
+        )];
+        if let Some(sd) = &far_model.soft_delete {
+            far_wheres.push(soft_pred(self.dialect, &far_alias, far_model, sd));
+        }
+        if let Some(scope) = far_sel.scope_join_pred(&far_alias, far_model) {
+            far_wheres.push(scope);
+        }
+        let mut sql = format!(
+            "(SELECT {} FROM {} AS {}",
+            self.dialect.json_array_agg(&elem, order.as_deref()),
+            self.q(&far_model.table),
+            self.q(&far_alias)
+        );
+        push_joins(&mut sql, self.dialect, &far_sel.joins);
+        sql.push_str(&format!(" WHERE {})", far_wheres.join(" AND ")));
+        Some(sql)
+    }
+
     /// Build a per-dialect JSON-object expression (`json_object('k', v, …)`) for a shape
     /// body over `model` at `alias`/`prefix` — one element of a to-many nested array. A
     /// bare field / reach becomes a `'key', <col>` pair; a to-one nest a nested JSON
@@ -1333,6 +1497,13 @@ impl<'a> Select<'a> {
                     if let Some(body) = self.enter_shape_ref(&shape.node) {
                         self.json_nest_pair(field, body, model, alias, prefix, &mut pairs);
                         self.exit_shape_ref();
+                    }
+                }
+                // A flatten nested inside a to-many element: its own correlated
+                // subquery, keyed off this element's alias.
+                ShapeField::Flatten { out, path, body } => {
+                    if let Some(arr) = self.json_flatten_subquery(body, path, alias, model) {
+                        pairs.push(format!("'{}', {}", out.node, arr));
                     }
                 }
             }

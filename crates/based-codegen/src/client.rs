@@ -658,6 +658,24 @@ mod rust {
                         fields.push((field.node.clone(), format!("Vec<{}>", shape.node)));
                     }
                 }
+                // `out = edge.far { body }`: the distinct far-side rows, hiding the
+                // junction — a `Vec<Sub>` of the far model's element struct, exactly
+                // like a to-many nest.
+                ShapeField::Flatten { out, path, body } => {
+                    if let Some(target) = flatten_far_model(schema, model, path) {
+                        let sub_name = format!("{name}{}", pascal(&out.node));
+                        let sub = build_struct(
+                            schema,
+                            decls,
+                            sub_name.clone(),
+                            body,
+                            Some(target),
+                            stack,
+                        );
+                        fields.push((out.node.clone(), format!("Vec<{sub_name}>")));
+                        nested.push(sub);
+                    }
+                }
             }
         }
         OutStruct {
@@ -665,6 +683,27 @@ mod rust {
             fields,
             nested,
         }
+    }
+
+    /// The far-side model of a flatten path (`edge.far`) — the last segment's relation
+    /// target, walking each hop through the schema. `None` on a malformed path (sema
+    /// reports it).
+    fn flatten_far_model<'a>(
+        schema: &'a CheckedSchema,
+        model: Option<&RModel>,
+        path: &Path,
+    ) -> Option<&'a RModel> {
+        let mut cur = model?.name.clone();
+        let mut out = None;
+        for seg in &path.segments {
+            let target = match schema.model(&cur)?.member(&seg.node).map(|m| &m.kind)? {
+                MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => target,
+                MemberKind::Scalar { .. } => return None,
+            };
+            out = schema.model(target);
+            cur = target.clone();
+        }
+        out
     }
 
     /// The target model + `optional` of a **to-one** relation field, or `None` for a

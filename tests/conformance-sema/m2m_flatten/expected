@@ -1,0 +1,17 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Student  table=student
+  id: Id
+  name: text
+  enrollments: <- Enrollment via student
+model Enrollment  table=enrollment
+  id: Id
+  student: -> Student  fk=student_id
+  course: -> Course  fk=course_id
+  index unique(student, course)
+model Course  table=course
+  id: Id
+  title: text
+shape StudentCourses from Student
+query student_courses  target=Student verb=list many  shape=StudentCourses

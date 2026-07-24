@@ -133,6 +133,20 @@ fn shape_nest_ref_formats_canonically() {
 }
 
 #[test]
+fn shape_flatten_formats_canonically() {
+    // A far-side flattening projection prints `out = path { body }`, inline or one per
+    // line by width, aligning the `=` with sibling reaches.
+    assert_eq!(
+        fmt("shape S from Stu { c  =  enr.crs  {  t  } }"),
+        "shape S from Stu { c = enr.crs { t } }\n"
+    );
+    assert_eq!(
+        fmt("shape StudentCourses from Student { name, courses = enrollments.course { title } }"),
+        "shape StudentCourses from Student {\n  name\n  courses = enrollments.course { title }\n}\n"
+    );
+}
+
+#[test]
 fn query_block_inline_and_expanded_by_clause_count() {
     // 0 clauses: inline block.
     assert_eq!(

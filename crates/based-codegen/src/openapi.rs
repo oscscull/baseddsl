@@ -613,9 +613,43 @@ fn shape_fields(
                     fields.push((field.node.clone(), arr, true));
                 }
             }
+            // `out = edge.far { body }`: the distinct far side, hiding the junction —
+            // an array of the far element object schema, always present (empty when
+            // there are no far rows).
+            ShapeField::Flatten {
+                out: alias,
+                path,
+                body,
+            } => {
+                if let Some(target) = flatten_far_model(schema, model, path) {
+                    let nested = shape_fields(schema, decls, body, Some(target), out, stack);
+                    let arr = json!({ "type": "array", "items": object_schema(&nested) });
+                    fields.push((alias.node.clone(), arr, true));
+                }
+            }
         }
     }
     fields
+}
+
+/// The far-side model of a flatten path (`edge.far`) — the last segment's relation
+/// target. `None` on a malformed path (sema reports it).
+fn flatten_far_model<'a>(
+    schema: &'a CheckedSchema,
+    model: Option<&RModel>,
+    path: &Path,
+) -> Option<&'a RModel> {
+    let mut cur = model?.name.clone();
+    let mut out = None;
+    for seg in &path.segments {
+        let target = match schema.model(&cur)?.member(&seg.node).map(|m| &m.kind)? {
+            MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => target,
+            MemberKind::Scalar { .. } => return None,
+        };
+        out = schema.model(target);
+        cur = target.clone();
+    }
+    out
 }
 
 /// The target model + `optional` of a **to-one** relation field, or `None` for a scalar,

@@ -47,6 +47,24 @@ and is never referenced this way.
 **Reference for a shared type; inline when you mean to trim.** If one shape is forced
 to serve two consumers with different needs, split it into two shapes.
 
+## Far-side flattening projection (many-to-many)
+A derived field (`=`) may name a relation **path** through a to-many junction edge and out
+a forward edge to the far side, with a projection body — returning the **distinct** far-side
+rows directly, the junction hidden:
+```
+shape StudentCourses from Student {
+  name
+  courses = enrollments.course { title }   # -> courses: [ { title }, … ]
+}
+```
+`enrollments` is a to-many inverse edge (into the junction), `course` a forward edge to the
+far model; `courses` is `Vec<Course>`, each far row once (distinct on its primary key — a
+duplicate junction link never multiplies it). Order is unspecified unless the far model
+declares `@sort`. The far model's and the junction's `@scope` / `@soft_delete` both ride the
+subquery, so tombstoned/out-of-scope rows are excluded. The body composes (further nests /
+flattens). A keyless (`@no_id`) far model is a compile error. See relations.md (Many-to-many)
+for the full contract; implicit-junction sugar stays rejected.
+
 ## Aggregate projections
 A `=` value may be an **aggregate** over the shape's rows instead of a reach:
 `count()`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`. A shape with any

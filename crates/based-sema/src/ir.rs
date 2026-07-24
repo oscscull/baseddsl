@@ -166,6 +166,12 @@ pub mod code {
     pub const UPSERT_TARGET_UNSET: &str = "E0252"; // a conflict-target column is neither set by the create nor scope-managed (no value to conflict / read back on)
     pub const UPSERT_SOFT_DELETE: &str = "E0253"; // `on conflict` on a @soft_delete model — a tombstoned row would be silently updated instead of inserted
     pub const UPSERT_SCOPE: &str = "E0254"; // a scoped model's conflict target omits a scope column — a conflict could match/modify another scope's row
+
+    // far-side flattening projection (E030x): `out = path { body }` skips a junction to
+    // the distinct far side of a many-to-many.
+    pub const FLATTEN_NOT_TOMANY: &str = "E0300"; // the flatten path's first segment is not a to-many inverse edge (nothing to flatten through)
+    pub const FLATTEN_SEGMENT: &str = "E0301"; // a segment after the first does not resolve as a forward edge to the next model
+    pub const FLATTEN_KEYLESS: &str = "E0302"; // the far-side model is `@no_id` (keyless) — a distinct set of far rows has no key to dedup on
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

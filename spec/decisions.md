@@ -61,8 +61,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Relations** — D17 (custom `on:` join resolution), D102 (many-to-many via explicit
   junction model — two forward edges + two to-many inverses, no new syntax; far-side
   flattening + implicit-junction sugar deferred), D103 (m2m fork resolved: **no** implicit-junction
-  sugar — a junction's FK columns are explicit `@index`; only the far-side flattening projection
-  remains, as sugar over existing machinery), D108 (opt-in FK referential actions: `@fk(…)` /
+  sugar — a junction's FK columns are explicit `@index`), D109 (far-side flattening projection
+  `courses = enrollments.course { … }` → a flat distinct `Vec<Course>`, junction hidden;
+  two-level IN-subquery lowering, scope/soft-delete on junction+far, E0300–E0302 — closes T5;
+  implicit-junction sugar stays rejected), D108 (opt-in FK referential actions: `@fk(…)` /
   `@no_fk` + toml `[schema] foreign_keys` convention + the divergence-reason rule; E0290–E0295, W0110)
 - **Aggregations** — D101 (aggregations + group by + having: an *aggregate shape*
   `count()`/`sum`/`avg`/`min`/`max` projected over groups, paired with a query's
@@ -74,7 +76,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D79 (named nested projection: `field -> Shape` references a shape decl — same SQL as inline,
   one nominal client/OpenAPI type; E0132/E0133/E0134), D87 (ordered to-many nests: relation
   `@sort` > child model `@sort` as ORDER BY inside the JSON aggregate, all three dialects —
-  supersedes D57's order-unspecified caveat)
+  supersedes D57's order-unspecified caveat), D109 (far-side flattening projection
+  `out = edge.far { … }` — a two-level correlated IN-subquery skipping a m2m junction to the
+  distinct far side; reuses D57's json-agg + `field[]` marker, runtime unchanged; E0300–E0302)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres), D85 (streaming is
   the non-paginating full pass; `page` on a stream query is E0201), D97 (`Page<T>.total: Option<i64>`
@@ -4882,3 +4886,82 @@ render, incl. the SQLite honest-marker), fmt round-trip, a sema conformance gold
 (`fk_referential`), and a **live SQLite cascade proof** (bad-parent insert rejected → pragma
 on; parent delete cascades the child away). `make check` green end to end (fast gate + all
 three live suites + all examples + the axum-helpdesk smoke).
+
+## D109 — many-to-many far-side flattening projection (`courses = enrollments.course { … }`) (T5)
+
+**The gap.** A shape could reach the far side of an explicit-junction m2m (D102) only
+*through* the junction — `enrollments { course { title } }` returns a `Vec` of junction
+wrappers, each holding one course. Consumers want the far side directly as a flat list. The
+**far-side flattening projection** hides the junction and returns the far side as a
+`Vec<far-shape>`. This is the last open T5 slice; **implicit-junction sugar
+(`Course[] <-> students`) stays rejected** (D102/D103 — an engine-generated join table is
+PR-invisible DDL, wants explicit-in-source resolution).
+
+**Syntax (owner-approved).** A shape field spelled with `=` (a derived field, like an
+aggregate — *not* a stored `:` field) naming a relation **path** through a to-many inverse
+edge then forward edge(s) to the far side, with a projection body:
+```
+StudentCourses from Student {
+  name
+  courses = enrollments.course { title }   # -> courses: [ { title }, … ], junction hidden
+}
+```
+`enrollments.course` = hop into the to-many junction (`enrollments`, an inverse edge on the
+`from` model), then out a forward edge (`course`) to the far model; the body is the far
+model's projection; the field is `Vec<Course>`. Generalizes to N hops (inverse edge first,
+then forward edges; the **last** segment's model is the element type), but the 2-hop
+junction-skip is the primary/tested case. Parses to `ShapeField::Flatten { out, path, body }`
+— a brace body after `= path` distinguishes it from a plain `= path` reach.
+
+**Semantics.**
+- **Distinct far-side rows** — the list is the *set* of related far rows, each once (distinct
+  on the far PK), so a junction's link cardinality never leaks (a duplicate link, or a filter,
+  can't multiply a far row).
+- **Order unspecified** unless the far model declares `@sort` (portable JSON aggregation has no
+  cross-dialect ordered form) — the same rule as a to-many nest (D57/D87).
+- **Scope + soft-delete ride the subquery** — the far model's `@scope`/`@soft_delete` **and**
+  the junction's own, injected into the right level (junction's into the inner `IN`, far's into
+  the outer `WHERE`). Nesting into a scoped far side counts as *touching* it (E0185 territory,
+  D81) — the scope walks (`walk_shape_join_in`/index demand) recurse the flatten path + body.
+- **Composes** — the far body may itself nest / flatten further (recurses).
+- **Keyless far model** (`@no_id`) → `E0302` (no PK to dedup the distinct set on).
+
+**Lowering (a two-level correlated subquery — the portable DISTINCT route).**
+```sql
+(SELECT <json-agg>(<json-object of body>) FROM <far> AS s2_far
+ WHERE s2_far.id IN (
+   SELECT s1_junction.<far_fk> FROM <junction> AS s1_junction [<intermediate joins>]
+   WHERE s1_junction.<near_fk> = <outer>.id AND <junction soft-delete/@scope>)
+ AND <far soft-delete/@scope>)
+```
+Iterating **far rows** (`FROM far`, `far.id IN (…)`) gives DISTINCT-on-PK for free on every
+dialect — a plain `IN`, no `json_agg(DISTINCT …)` / `SELECT DISTINCT` gymnastics (Postgres
+`json` has no equality operator, so a `DISTINCT` on the built object wouldn't compile; and
+DISTINCT-on-the-object is the wrong key anyway — two distinct far rows with equal projected
+columns must both appear). Reuses D57's per-dialect `json_array_agg` (SQLite
+`json_group_array`, MariaDB `JSON_ARRAYAGG`, Postgres `json_agg`, all coalesced to `[]`), the
+`s<n>_<table>` child aliasing (so a self-referential m2m never collides), and the `field[]`
+[`ARRAY_MARK`] output alias — so the **runtime is unchanged** beyond what D57 provides (it
+already parses a `field[]` column into sub-objects). Element order = the far model's `@sort`
+inside the aggregate.
+
+**Sema (three stable codes, E030x).** `E0300` the path's first segment is not a to-many
+inverse edge (nothing to flatten through). `E0301` a later segment doesn't resolve as a
+forward edge to the next model, or the path is single-segment (no far side). `E0302` the far
+model is `@no_id` (keyless). The body is validated like a nest body (`check_shape_body`
+against the far model). A flatten on an aggregate shape is `E0245`; a flatten in a raw-bodied
+query's shape is `E0213`.
+
+**Landed across:** AST (`ShapeField::Flatten`); parser (`= path { body }`); sema
+(`check_flatten_path` + E0300–E0302, the scope-touch walk in `scope.rs`, index demand in
+`indexes.rs`); SQL codegen (`Select::json_flatten_subquery` + `spawn_child`, reached from
+`project_body` and `json_object_expr`); client (`Vec<Sub>` far element struct, the junction
+hidden) + OpenAPI (array of the far object schema); fmt (`out = path { body }`, inline +
+block, aligned); LSP (path segments navigable, body reaches the far model). **Verified:**
+parser +/−, sema +/− per code + the E0185 touch case, codegen SQL all three dialects (the
+two-level IN subquery, junction+far soft-delete/scope split across levels, self-ref
+aliasing), client/OpenAPI, fmt round-trip, a sema conformance golden (`m2m_flatten`), and
+**live SQLite** — a distinct `Vec<Course>` with the junction hidden, a course shared across
+two students, a duplicate link deduped to one far row, a soft-deleted junction link excluded,
+and a soft-deleted far course excluded. `make check` green end to end. Spec:
+`spec/syntax/relations.md` (Many-to-many) + `spec/syntax/shapes.md`.

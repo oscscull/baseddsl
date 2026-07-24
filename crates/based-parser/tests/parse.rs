@@ -379,6 +379,42 @@ fn shape_nest_reference_requires_uppercamel_name() {
 }
 
 #[test]
+fn shape_far_side_flattening_projection() {
+    // `courses = enrollments.course { title }` — a derived field (`=`) naming a relation
+    // path with a projection body parses to `Flatten`, distinct from a plain reach.
+    let sf = parse_ok(
+        r#"
+        shape StudentCourses from Student {
+          name
+          courses = enrollments.course { title }
+        }
+        "#,
+    );
+    let shape = match &sf.decls[0] {
+        Decl::Shape(s) => s,
+        other => panic!("expected shape, got {other:?}"),
+    };
+    match &shape.body[1] {
+        ShapeField::Flatten { out, path, body } => {
+            assert_eq!(out.node, "courses");
+            assert_eq!(path.segments.len(), 2);
+            assert_eq!(path.segments[0].node, "enrollments");
+            assert_eq!(path.segments[1].node, "course");
+            assert_eq!(body.len(), 1);
+            assert!(matches!(&body[0], ShapeField::Bare(b) if b.node == "title"));
+        }
+        other => panic!("expected flatten, got {other:?}"),
+    }
+    // A `= path` with no body stays a plain reach (not a flatten).
+    let sf = parse_ok("shape C from Student { city = school.city }");
+    let shape = match &sf.decls[0] {
+        Decl::Shape(s) => s,
+        other => panic!("expected shape, got {other:?}"),
+    };
+    assert!(matches!(&shape.body[0], ShapeField::Rename { .. }));
+}
+
+#[test]
 fn mutation_with_create_and_param_refs() {
     let sf = parse_ok(
         r#"

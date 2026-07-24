@@ -1019,6 +1019,25 @@ impl Snapshot {
                 ShapeField::NestRef { field, .. } => {
                     out.push((from, std::slice::from_ref(field)));
                 }
+                // `out = edge.far { body }`: the path segments are navigable relation
+                // references (rooted at `from`); the body reaches the far model.
+                ShapeField::Flatten { path, body, .. } => {
+                    out.push((from, &path.segments));
+                    let mut cur = from;
+                    let mut ok = true;
+                    for seg in &path.segments {
+                        match self.relation_target(cur, &seg.node) {
+                            Some(t) => cur = t,
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        self.shape_paths(cur, body, out);
+                    }
+                }
             }
         }
     }
@@ -1890,7 +1909,9 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
 fn collect_shape_body_refs<'a>(body: &'a [ShapeField], out: &mut Vec<&'a Ident>) {
     for f in body {
         match f {
-            ShapeField::Nest { body, .. } => collect_shape_body_refs(body, out),
+            ShapeField::Nest { body, .. } | ShapeField::Flatten { body, .. } => {
+                collect_shape_body_refs(body, out)
+            }
             ShapeField::NestRef { shape, .. } => out.push(shape),
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }

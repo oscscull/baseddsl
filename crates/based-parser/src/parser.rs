@@ -1059,16 +1059,38 @@ impl<'a> Parser<'a> {
     fn shape_field(&mut self) -> PResult<ShapeField> {
         let name = self.lower_ident("shape field")?;
         if self.eat(Tok::Eq) {
-            let value = if self.is_raw_start() {
-                ShapeValue::Raw(self.raw_sql()?)
-            } else if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::LParen) {
+            if self.is_raw_start() {
+                return Ok(ShapeField::Rename {
+                    out: name,
+                    value: ShapeValue::Raw(self.raw_sql()?),
+                });
+            }
+            if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::LParen) {
                 // `out = count()` / `out = sum(total)` — an aggregate. A path can't hold
                 // `(`, so `ident (` in a shape value is unambiguously an aggregate call.
-                ShapeValue::Agg(self.aggregate()?)
-            } else {
-                ShapeValue::Path(self.path()?)
-            };
-            return Ok(ShapeField::Rename { out: name, value });
+                return Ok(ShapeField::Rename {
+                    out: name,
+                    value: ShapeValue::Agg(self.aggregate()?),
+                });
+            }
+            let path = self.path()?;
+            // `out = path { body }` — a far-side flattening projection (skip a junction
+            // to the far side of a many-to-many). A brace body after the path is what
+            // distinguishes it from a plain `out = path` reach.
+            if self.at(Tok::LBrace) {
+                self.bump();
+                let body = self.shape_body_fields()?;
+                self.expect(Tok::RBrace, "`}`")?;
+                return Ok(ShapeField::Flatten {
+                    out: name,
+                    path,
+                    body,
+                });
+            }
+            return Ok(ShapeField::Rename {
+                out: name,
+                value: ShapeValue::Path(path),
+            });
         }
         if self.at(Tok::LBrace) {
             self.bump();

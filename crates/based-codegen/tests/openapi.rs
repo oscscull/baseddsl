@@ -415,6 +415,33 @@ fn nested_to_many_shape_emits_array_of_object_schema() {
 }
 
 #[test]
+fn flatten_field_emits_array_of_far_object_schema() {
+    // `courses = enrollments.course { title }` — the far-side flattening projection
+    // emits an `array` of the far element object schema, hiding the junction; required.
+    let doc = gen(r#"
+        @sort(id asc)
+        Student { id: Id, name: text, enrollments: Enrollment[] (Enrollment.student) }
+        @sort(id asc)
+        Enrollment { id: Id, student: Student, course: Course, @index (student, course) }
+        @sort(id asc)
+        Course { id: Id, title: text }
+        shape StudentCourses from Student { name, courses = enrollments.course { title } }
+        query student_by_id(id) -> StudentCourses;
+        "#);
+    let props = &doc["components"]["schemas"]["StudentCourses"]["properties"];
+    assert_eq!(props["courses"]["type"], "array");
+    assert_eq!(props["courses"]["items"]["type"], "object");
+    assert_eq!(
+        props["courses"]["items"]["properties"]["title"]["type"],
+        "string"
+    );
+    let required = doc["components"]["schemas"]["StudentCourses"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(required.iter().any(|v| v == "courses"));
+}
+
+#[test]
 fn enum_field_is_a_string_schema_with_enum_list() {
     let doc = gen(r#"
         enum Status { pending, paid, shipped }

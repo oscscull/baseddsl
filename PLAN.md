@@ -83,10 +83,13 @@ principle 8), NF9 opaque `raw(…)` column + exotic-index seam (D104), **NF13 na
 bindings `create … as name;` / `$name.field` replacing `^` (D107) — `^`/`E0170` retired**, NF7
 `@was` self-consuming gen + teach-at-checkpoint (D105), and **NF8 honest snapshot-authoritative
 `up.mig` contract + drift-refusal + editable surface (D106) are now shipped.** All D103–D107
-follow-ups are done. **Track T is now complete (T6 FK referential actions, D108)** — `@fk`/`@no_fk`
+follow-ups are done. **Track T is complete (T6 FK referential actions, D108)** — `@fk`/`@no_fk`
 + toml `foreign_keys` convention + the divergence-reason rule, DDL/snapshot/migration all three dialects,
-SQLite cascade proven live; next is Track T tier-2, with the T5 m2m flattening-projection slice and the
-SQLite incremental-FK rebuild left as explicit deferrals. Batch-by-batch history is in `PLAN-archive.md`.
+SQLite cascade proven live. The **T5 m2m far-side flattening projection is now done (D109)** —
+`courses = enrollments.course { … }` → a flat distinct `Vec<Course>`, junction hidden (two-level IN
+subquery, runtime unchanged, proven live on SQLite); implicit-junction sugar stays rejected. Next is
+Track T tier-2, with the SQLite incremental-FK rebuild left as the one explicit deferral. Batch-by-batch
+history is in `PLAN-archive.md`.
 
 ## Definition of Done (the product is complete when…)
 
@@ -563,7 +566,7 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   naming / `RModel.inferred_indexes` / the `InferredIndex` fact+inlay all retire; the written `@index`
   is still rendered soft-delete-leading (a rendering, not a second index); inverse pairing stays a
   shown fact. **Resolves D102's m2m fork: no implicit-junction sugar** (silent DDL), junction FK
-  indexes are explicit; only the far-side flattening projection remains. Fallout on landing: goldens +
+  indexes are explicit; the far-side flattening projection is now done (D109). Fallout on landing: goldens +
   `spec/examples/commerce` + the four `examples/*` schemas gain explicit `@index`/`id` lines. Original
   writeup below. Owner position: silent engine-created DDL disobeys principles — an
   index has real write/disk cost and is invisible in a PR (hard priority 3: reviewer
@@ -656,9 +659,9 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
 
 A confirmed 6-item queue closing the gap to a general DB-first DSL (commerce is only a *named*
 example, not the domain). **T1–T6 all done (enum D82, decimal/float D83, atomic update exprs D100,
-aggregations+group-by+having D101, upsert + m2m-via-explicit-junction D102, FK referential actions
-D108).** Two slices remain deferred: the T5 far-side m2m flattening projection (unblocked by D103) and
-the T6 SQLite incremental-FK table rebuild (from-scratch FKs already work on SQLite). Next is **tier-2**
+aggregations+group-by+having D101, upsert + m2m-via-explicit-junction D102 + **far-side flattening
+projection D109**, FK referential actions D108).** One slice remains deferred: the T6 SQLite
+incremental-FK table rebuild (from-scratch FKs already work on SQLite). Next is **tier-2**
 (for-update locking, computed shape fields, `distinct`, time/bytes types). Worked in order; each
 iteration marks its item + D#.
 
@@ -720,10 +723,13 @@ iteration marks its item + D#.
   bound). Proven unit (parser/sema +/−/codegen all 3 dialects/fmt) + sema conformance golden +
   **live SQLite** (insert→conflict→conflict composing 1→2→3→4). **m2m:** modeled by an explicit
   junction model (two forward edges + two to-many inverses — no new syntax; already works via
-  L1/D57). **Open next-T5 slice:** far-side flattening projection (`courses = enrollments.course
-  { … }` → flat `Vec<Course>`) + implicit-junction sugar (`Course[] <-> students`) — deferred on
-  principle (an engine-generated join table is invisible DDL; wants NF11-style explicit-in-source,
-  not a silent default). Detail: D102, relations.md.
+  L1/D57). **Far-side flattening projection ✅ done (D109):** `courses = enrollments.course { … }`
+  → a flat *distinct* `Vec<Course>`, the junction hidden (a two-level correlated `IN` subquery —
+  `FROM far WHERE far.id IN (SELECT junction.far_fk …)` — distinct-on-PK for free on all three
+  dialects; reuses D57's json-agg + `field[]` marker, so the runtime is unchanged; junction *and*
+  far `@scope`/`@soft_delete` ride the right level; E0300–E0302; proven live on SQLite). This
+  closes the last open T5 slice. **Implicit-junction sugar (`Course[] <-> students`) stays
+  rejected** (D103 — an engine-generated join table is PR-invisible DDL). Detail: D109, relations.md.
 - **T6. ✅ done (D108). FK referential actions** — opt-in DB `FOREIGN KEY` constraints with
   `on_delete`/`on_update` cascade/restrict/set_null/no_action, all visible in source. `@fk(…)` opts a
   forward relation in (+ actions); `@no_fk` opts out (one edge or a whole model); toml

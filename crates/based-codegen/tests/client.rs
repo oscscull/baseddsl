@@ -405,6 +405,34 @@ fn nested_to_many_shape_emits_vec_of_nested_struct() {
 }
 
 #[test]
+fn flatten_field_takes_vec_of_far_element_struct() {
+    // `courses = enrollments.course { title }` types the field as `Vec<Sub>` where `Sub`
+    // is the far model's element struct — the junction is hidden entirely.
+    let out = gen(r#"
+        @sort(id asc)
+        Student { id: Id, name: text, enrollments: Enrollment[] (Enrollment.student) }
+        @sort(id asc)
+        Enrollment { id: Id, student: Student, course: Course, @index (student, course) }
+        @sort(id asc)
+        Course { id: Id, title: text }
+        shape StudentCourses from Student { name, courses = enrollments.course { title } }
+        query student_by_id(id) -> StudentCourses;
+        "#);
+    assert!(out.contains("pub struct StudentCourses {"), "\n{out}");
+    assert!(
+        out.contains("pub courses: Vec<StudentCoursesCourses>,"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("pub struct StudentCoursesCourses {"),
+        "\n{out}"
+    );
+    assert!(out.contains("pub title: String,"), "\n{out}");
+    // The junction never appears as a struct field name.
+    assert!(!out.contains("enrollment"), "junction leaked\n{out}");
+}
+
+#[test]
 fn nest_ref_field_takes_the_named_shape_type() {
     // A named-shape nest (`placed_by -> UserRef`) references the shape's own struct —
     // one nominal type shared by every site — instead of minting `<Parent><Field>`.

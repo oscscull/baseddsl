@@ -376,6 +376,117 @@ fn shape_nest_ref_self_cycle_rejected() {
     assert_eq!(errors(&d), ["E0134"]);
 }
 
+#[test]
+fn shape_flatten_far_side_ok() {
+    // `courses = enrollments.course { title }` — a to-many hop into the junction, then a
+    // forward hop to the far side; the body projects the far model. Checks clean.
+    assert_clean(
+        r#"
+        Student { id: Id, name: text, enrollments: Enrollment[] (Enrollment.student) }
+        Enrollment { id: Id, student: Student, course: Course, @index (student, course) }
+        Course { id: Id, title: text }
+        shape StudentCourses from Student { name, courses = enrollments.course { title } }
+        query student_by_id(id) -> StudentCourses;
+        "#,
+    );
+}
+
+#[test]
+fn shape_flatten_first_segment_must_be_to_many() {
+    // A forward (to-one) first segment has no junction to flatten through → E0300.
+    let (_, d) = analyze(
+        r#"
+        Student { id: Id, name: text, school: School, @index school }
+        School { id: Id, name: text }
+        shape S from Student { name, x = school.name { name } }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0300"), "{:?}", codes(&d));
+}
+
+#[test]
+fn shape_flatten_later_segment_must_be_forward() {
+    // After the junction hop, a non-forward segment (a scalar) is E0301.
+    let (_, d) = analyze(
+        r#"
+        Student { id: Id, name: text, enrollments: Enrollment[] (Enrollment.student) }
+        Enrollment { id: Id, student: Student, note: text, @index student }
+        shape S from Student { name, x = enrollments.note { title } }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0301"), "{:?}", codes(&d));
+}
+
+#[test]
+fn shape_flatten_single_segment_has_no_far_side() {
+    // A one-segment path never reaches a far side (nothing to flatten to) → E0301.
+    let (_, d) = analyze(
+        r#"
+        Student { id: Id, name: text, enrollments: Enrollment[] (Enrollment.student) }
+        Enrollment { id: Id, student: Student, note: text, @index student }
+        shape S from Student { name, x = enrollments { note } }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0301"), "{:?}", codes(&d));
+}
+
+#[test]
+fn shape_flatten_keyless_far_side_rejected() {
+    // A `@no_id` far model has no primary key to dedup the distinct set on → E0302.
+    let (_, d) = analyze(
+        r#"
+        Student { id: Id, name: text, enrollments: Enrollment[] (Enrollment.student) }
+        Enrollment { id: Id, student: Student, course: Course, @index (student, course) }
+        @no_id("legacy view without a key")
+        Course { title: text }
+        shape S from Student { name, courses = enrollments.course { title } }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0302"), "{:?}", codes(&d));
+}
+
+#[test]
+fn shape_flatten_scoped_far_side_is_touched_e0185() {
+    // Flattening into a scoped far side (or junction) counts as touching it: a callable
+    // that doesn't satisfy that scope alternative fails at compile time.
+    let (_, d) = analyze(
+        r#"
+        Org { id: Id, name: text }
+        Region { id: Id, name: text }
+        scope Tenant (org: Org = $ctx.org)
+        scope Region (region: Region = $ctx.region)
+        @scope Tenant
+        Student { id: Id, org: Org, name: text, enrollments: Enrollment[] (Enrollment.student), @index org }
+        @scope Tenant
+        Enrollment { id: Id, org: Org, student: Student, course: Course, @index (student, course), @index org }
+        @scope Region
+        Course { id: Id, region: Region, title: text, @index region }
+        shape S from Student { name, courses = enrollments.course { title } }
+        query student_by_id(id) -> S scoped Tenant;
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0185"), "{:?}", codes(&d));
+
+    // Naming both axes satisfies every touched model → clean.
+    let (_, d) = analyze(
+        r#"
+        Org { id: Id, name: text }
+        Region { id: Id, name: text }
+        scope Tenant (org: Org = $ctx.org)
+        scope Region (region: Region = $ctx.region)
+        @scope Tenant
+        Student { id: Id, org: Org, name: text, enrollments: Enrollment[] (Enrollment.student), @index org }
+        @scope Tenant
+        Enrollment { id: Id, org: Org, student: Student, course: Course, @index (student, course), @index org }
+        @scope Region
+        Course { id: Id, region: Region, title: text, @index region }
+        shape S from Student { name, courses = enrollments.course { title } }
+        query student_by_id(id) -> S scoped Tenant, Region;
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
 // ---------- queries / mutations -------------------------------------------
 
 #[test]

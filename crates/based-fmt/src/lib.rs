@@ -209,7 +209,9 @@ impl Printer {
             .body
             .iter()
             .filter_map(|f| match f {
-                ShapeField::Rename { out, .. } => Some(out.node.len()),
+                ShapeField::Rename { out, .. } | ShapeField::Flatten { out, .. } => {
+                    Some(out.node.len())
+                }
                 _ => None,
             })
             .max()
@@ -568,6 +570,15 @@ fn shape_field_inline(f: &ShapeField) -> String {
                 .join(", ")
         ),
         ShapeField::NestRef { field, shape } => format!("{} -> {}", field.node, shape.node),
+        ShapeField::Flatten { out, path: p, body } => format!(
+            "{} = {} {{ {} }}",
+            out.node,
+            path(p),
+            body.iter()
+                .map(shape_field_inline)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -586,6 +597,15 @@ fn shape_field_block(f: &ShapeField, rename_w: usize) -> String {
                 .join(", ")
         ),
         ShapeField::NestRef { field, shape } => format!("{} -> {}", field.node, shape.node),
+        ShapeField::Flatten { out, path: p, body } => format!(
+            "{:<rename_w$} = {} {{ {} }}",
+            out.node,
+            path(p),
+            body.iter()
+                .map(shape_field_inline)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

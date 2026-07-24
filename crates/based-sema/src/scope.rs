@@ -629,6 +629,31 @@ fn walk_shape_join_in(
                     }
                 }
             }
+            // A far-side flattening projection (`out = edge.far { … }`): every hop's
+            // model is entered by the correlated subquery (the junction in the inner
+            // `IN`, the far model in the aggregation), so each scoped model on the path
+            // is touched, and the far body is walked in the far model context.
+            ShapeField::Flatten { path, body, .. } => {
+                let mut cur = model;
+                let mut ok = true;
+                for seg in &path.segments {
+                    match nest_target(cur, &seg.node, cx) {
+                        Some(ti) => {
+                            if is_scoped(cx, ti) {
+                                push(out, ti);
+                            }
+                            cur = ti;
+                        }
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    walk_shape_join_in(body, cur, cx, stack, out);
+                }
+            }
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }
     }

@@ -26,7 +26,10 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
     // reference — a group has no sub-objects).
     if is_agg_shape(&s.body) {
         for f in &s.body {
-            if let ShapeField::Nest { field, .. } | ShapeField::NestRef { field, .. } = f {
+            if let ShapeField::Nest { field, .. }
+            | ShapeField::NestRef { field, .. }
+            | ShapeField::Flatten { out: field, .. } = f
+            {
                 sink.error_note(
                     code::AGG_COMPOSE,
                     field.span,
@@ -138,8 +141,93 @@ fn check_shape_body(
                     None => unknown_field(cx, mi, field, sink),
                 }
             }
+            // `out = path { body }`: flatten a to-many path through a junction to the
+            // far side (the junction is hidden). The path resolves as a to-many inverse
+            // hop then forward hops; the body projects the far model.
+            ShapeField::Flatten { path, body, .. } => {
+                if let Some(far) = check_flatten_path(path, mi, cx, sink) {
+                    if cx.model(far).no_id {
+                        let span = path.segments.last().map(|s| s.span).unwrap_or(path.segments[0].span);
+                        sink.error_note(
+                            code::FLATTEN_KEYLESS,
+                            span,
+                            format!("`{}` is a keyless (`@no_id`) model", cx.model(far).name),
+                            "a flattening projection returns a distinct *set* of far rows — it needs a primary key to dedup on",
+                        );
+                    }
+                    check_shape_body(body, far, cx, stack, sink);
+                }
+            }
         }
     }
+}
+
+/// Validate a flatten path (`enrollments.course`): the first segment must be a
+/// to-**many** inverse edge (into the junction), and each later segment a forward
+/// edge to the next model. Returns the far model (the last segment's target) on a
+/// clean path, else reports the offending segment and returns `None`.
+fn check_flatten_path(path: &Path, mi: usize, cx: &Cx, sink: &mut Sink) -> Option<usize> {
+    let segs = &path.segments;
+    let first = &segs[0];
+    if segs.len() < 2 {
+        sink.error_note(
+            code::FLATTEN_SEGMENT,
+            first.span,
+            format!("`{}` has no forward hop to a far side", first.node),
+            "a flattening projection skips a junction: `edge.far { … }` (a to-many edge, then a forward edge)",
+        );
+        return None;
+    }
+    let mut cur = match cx.model(mi).member(&first.node).map(|m| &m.kind) {
+        Some(MemberKind::Inverse { target, via }) => {
+            let ti = cx.find(target)?;
+            if cx.model(ti).is_unique(via) {
+                sink.error(
+                    code::FLATTEN_NOT_TOMANY,
+                    first.span,
+                    format!(
+                        "`{}` is a to-one edge; a flattening projection skips a to-*many* junction",
+                        first.node
+                    ),
+                );
+                return None;
+            }
+            ti
+        }
+        Some(_) => {
+            sink.error(
+                code::FLATTEN_NOT_TOMANY,
+                first.span,
+                format!(
+                    "`{}` must be a to-many edge (into the junction) to flatten through it",
+                    first.node
+                ),
+            );
+            return None;
+        }
+        None => {
+            unknown_field(cx, mi, first, sink);
+            return None;
+        }
+    };
+    for seg in &segs[1..] {
+        match cx.model(cur).member(&seg.node).map(|m| &m.kind) {
+            Some(MemberKind::Forward { target, .. }) => cur = cx.find(target)?,
+            Some(_) => {
+                sink.error(
+                    code::FLATTEN_SEGMENT,
+                    seg.span,
+                    format!("`{}` must be a forward relation to the far model", seg.node),
+                );
+                return None;
+            }
+            None => {
+                unknown_field(cx, cur, seg, sink);
+                return None;
+            }
+        }
+    }
+    Some(cur)
 }
 
 /// Follow a `-> Shape` reference for cycle detection only: a shape that transitively
@@ -169,7 +257,9 @@ fn check_ref_cycle(shape: &str, at: Span, cx: &Cx, stack: &mut Vec<String>, sink
 fn walk_body_refs(fields: &[ShapeField], cx: &Cx, stack: &mut Vec<String>, sink: &mut Sink) {
     for f in fields {
         match f {
-            ShapeField::Nest { body, .. } => walk_body_refs(body, cx, stack, sink),
+            ShapeField::Nest { body, .. } | ShapeField::Flatten { body, .. } => {
+                walk_body_refs(body, cx, stack, sink)
+            }
             ShapeField::NestRef { shape, .. } => {
                 check_ref_cycle(&shape.node, shape.span, cx, stack, sink)
             }
@@ -271,6 +361,7 @@ fn summarize_agg_shape(body: &[ShapeField]) -> (Vec<String>, Vec<GroupCol>) {
             ShapeField::Nest { field, .. } | ShapeField::NestRef { field, .. } => {
                 out_names.push(field.node.clone());
             }
+            ShapeField::Flatten { out, .. } => out_names.push(out.node.clone()),
         }
     }
     (out_names, group_cols)
@@ -718,10 +809,12 @@ fn check_raw_query(
     // depends on engine-built projections (join aliases / JSON aggregation) that a
     // raw statement does not get.
     if let Some(body) = cx.shape_bodies.get(&q.ret.ty.node) {
-        if body
-            .iter()
-            .any(|f| matches!(f, ShapeField::Nest { .. } | ShapeField::NestRef { .. }))
-        {
+        if body.iter().any(|f| {
+            matches!(
+                f,
+                ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. }
+            )
+        }) {
             sink.error_note(
                 code::RAW_QUERY_NEST,
                 q.ret.ty.span,
