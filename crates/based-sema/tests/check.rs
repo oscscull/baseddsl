@@ -2426,7 +2426,7 @@ fn or_model_create_naming_both_alternatives_is_clean() {
         .find(|m| m.name == "write_post")
         .unwrap();
     let mut fields: Vec<&str> = m.ctx_requires.iter().map(|c| c.field.as_str()).collect();
-    fields.sort();
+    fields.sort_unstable();
     assert_eq!(fields, ["page", "user"]);
 }
 
@@ -3146,12 +3146,11 @@ fn raw_query_soft_delete_gap_is_linted() {
         }
         "#,
     );
-    let warns: Vec<&str> = d
+    let warns = d
         .iter()
         .filter(|x| x.severity == Severity::Warning && x.code == "W0102")
-        .map(|x| x.code)
-        .collect();
-    assert_eq!(warns.len(), 2, "{:?}", codes(&d));
+        .count();
+    assert_eq!(warns, 2, "{:?}", codes(&d));
     assert!(errors(&d).is_empty(), "{:?}", codes(&d));
 }
 
@@ -3663,7 +3662,7 @@ fn a_required_opaque_column_makes_create_impossible() {
 fn empty_raw_body_and_unknown_method_error() {
     let (_, d) = analyze(r#"Place { id: Id, a: raw("")?, @index raw("") @index a using nope }"#);
     let mut got = errors(&d);
-    got.sort();
+    got.sort_unstable();
     assert_eq!(got, vec!["E0272", "E0274", "E0274"]);
 }
 

@@ -89,8 +89,7 @@ fn resolve_term(
         t.ctx
             .path
             .first()
-            .map(|s| s.node.clone())
-            .unwrap_or_else(|| t.ctx.name.node.clone())
+            .map_or_else(|| t.ctx.name.node.clone(), |s| s.node.clone())
     };
     RScopeTerm {
         column: t.col.node.clone(),
@@ -365,19 +364,18 @@ pub fn inject_ctx_reqs(
     touched: &[usize],
     cx: &Cx,
 ) -> Vec<CtxReq> {
-    let mut out = Vec::new();
-    for si in resolve_inject(scoped, unscoped_present, touched, cx) {
-        for (_, ctx_field) in &si.terms {
-            if let Some((term, span)) = find_term(ctx_field, cx) {
-                out.push(CtxReq {
-                    field: term.ctx_field.clone(),
-                    ty: term.ty.clone(),
-                    span,
-                });
-            }
-        }
-    }
-    out
+    resolve_inject(scoped, unscoped_present, touched, cx)
+        .into_iter()
+        .flat_map(|si| si.terms)
+        .filter_map(|(_, ctx_field)| {
+            let (term, span) = find_term(&ctx_field, cx)?;
+            Some(CtxReq {
+                field: term.ctx_field.clone(),
+                ty: term.ty.clone(),
+                span,
+            })
+        })
+        .collect()
 }
 
 /// The scope-decl term a `$ctx.<field>` binding came from (any decl binding that
@@ -529,15 +527,8 @@ fn walk_write_join(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<usize>) {
                 }
             }
         }
-        WriteStmt::Update { model, where_, .. } => {
-            if let Some(mi) = cx.find(&model.node) {
-                if is_scoped(cx, mi) {
-                    push(out, mi);
-                }
-                walk_pred_join(where_, mi, cx, out);
-            }
-        }
-        WriteStmt::Delete { model, where_ }
+        WriteStmt::Update { model, where_, .. }
+        | WriteStmt::Delete { model, where_ }
         | WriteStmt::HardDelete { model, where_ }
         | WriteStmt::Restore { model, where_ } => {
             if let Some(mi) = cx.find(&model.node) {
@@ -634,24 +625,15 @@ fn walk_shape_join_in(
             // `IN`, the far model in the aggregation), so each scoped model on the path
             // is touched, and the far body is walked in the far model context.
             ShapeField::Flatten { path, body, .. } => {
-                let mut cur = model;
-                let mut ok = true;
-                for seg in &path.segments {
-                    match nest_target(cur, &seg.node, cx) {
-                        Some(ti) => {
-                            if is_scoped(cx, ti) {
-                                push(out, ti);
-                            }
-                            cur = ti;
-                        }
-                        None => {
-                            ok = false;
-                            break;
-                        }
+                let far = path.segments.iter().try_fold(model, |cur, seg| {
+                    let ti = nest_target(cur, &seg.node, cx)?;
+                    if is_scoped(cx, ti) {
+                        push(out, ti);
                     }
-                }
-                if ok {
-                    walk_shape_join_in(body, cur, cx, stack, out);
+                    Some(ti)
+                });
+                if let Some(far) = far {
+                    walk_shape_join_in(body, far, cx, stack, out);
                 }
             }
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}

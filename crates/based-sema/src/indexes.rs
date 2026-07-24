@@ -83,8 +83,7 @@ pub fn run(
     for mu in mutations_ast {
         let inject = rmut_by_name
             .get(mu.name.node.as_str())
-            .map(|rm| rm.scope_inject.as_slice())
-            .unwrap_or(&[]);
+            .map_or(&[][..], |rm| rm.scope_inject.as_slice());
         for stmt in &mu.body {
             collect_write(stmt, &mu.name.node, inject, cx, &mut usage, &mut patterns);
         }
@@ -154,8 +153,8 @@ struct Pattern {
 }
 
 impl Pattern {
-    fn new(name: String, span: Span, paginated: bool) -> Pattern {
-        Pattern {
+    fn new(name: String, span: Span, paginated: bool) -> Self {
+        Self {
             name,
             span,
             eq: Vec::new(),
@@ -477,7 +476,9 @@ fn lead<'a>(m: &RModel, idx: &'a RIndex) -> Option<&'a str> {
     let mut cols = idx.columns.iter();
     let first = cols.next()?;
     match &m.soft_delete {
-        Some(sd) if &sd.field == first => cols.next().or(Some(first)).map(|s| s.as_str()),
+        Some(sd) if &sd.field == first => {
+            cols.next().or(Some(first)).map(std::string::String::as_str)
+        }
         _ => Some(first.as_str()),
     }
 }
@@ -536,7 +537,7 @@ fn check_pattern(pat: &Pattern, mi: usize, cx: &Cx, sink: &mut Sink) {
             .iter()
             .chain(&pat.range)
             .chain(&pat.sort)
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .collect();
         let col = wants.first().copied().unwrap_or("");
         sink.error_fix(
@@ -694,7 +695,6 @@ fn shape_demand_in(
             // on the target's (indexed) primary key. The body reaches the far model.
             ShapeField::Flatten { path, body, .. } => {
                 let first = &path.segments[0];
-                let mut cur = mi;
                 if let Some(MemberKind::Inverse { target, via }) =
                     cx.model(mi).member(&first.node).map(|m| &m.kind)
                 {
@@ -703,23 +703,14 @@ fn shape_demand_in(
                         push_join(joins, ti, via);
                     }
                 }
-                let mut ok = true;
-                for seg in &path.segments {
-                    match cx
-                        .model(cur)
+                let far = path.segments.iter().try_fold(mi, |cur, seg| {
+                    cx.model(cur)
                         .member(&seg.node)
                         .and_then(|m| m.kind.target())
                         .and_then(|t| cx.find(t))
-                    {
-                        Some(ti) => cur = ti,
-                        None => {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                if ok {
-                    shape_demand_in(body, cur, cx, usage, joins, stack);
+                });
+                if let Some(far) = far {
+                    shape_demand_in(body, far, cx, usage, joins, stack);
                 }
             }
         }

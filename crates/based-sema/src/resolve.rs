@@ -195,12 +195,12 @@ fn lit_family(l: &Literal) -> Option<Family> {
 /// relational operators)? Json matches anything; a relation key accepts either a
 /// uuid string or an integer key.
 fn compatible(a: Family, b: Family) -> bool {
-    use Family::*;
+    use Family::{Json, Key, Numeric, Textual};
     if a == Json || b == Json {
         return true;
     }
     match (a, b) {
-        (Key, Textual) | (Textual, Key) | (Key, Numeric) | (Numeric, Key) => true,
+        (Key, Textual | Numeric) | (Textual | Numeric, Key) => true,
         _ => a == b,
     }
 }
@@ -688,6 +688,109 @@ pub fn check_predicate(
     check_predicate_in(pred, model, cx, params, &mut Vec::new(), sink);
 }
 
+/// `col <op> value`. When the left column is enum-typed, the right operand is a variant
+/// (or a param), not a column — membership-checked instead of resolved as a path, which
+/// would misread the variant as an unknown field.
+fn check_cmp(
+    path: &Path,
+    op: Op,
+    value: &Value,
+    model: Option<usize>,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    let mut handled = false;
+    if let Some(mi) = model {
+        resolve_path(path, mi, cx, sink);
+        if let Some(en) = cx.terminal_enum(path, mi) {
+            // Ordered comparison is numeric-only: allowed on an int enum, rejected on a
+            // string enum (its values have no order).
+            if matches!(op, Op::Gt | Op::Lt | Op::Ge | Op::Le) && !en.is_int() {
+                sink.error(
+                    code::ENUM_ORDERED_OP,
+                    path.segments.last().map_or(en.span, |s| s.span),
+                    format!(
+                        "`{}` is a string enum; ordered comparison is only valid on a \
+                         numeric enum",
+                        en.name
+                    ),
+                );
+            }
+            handled = check_enum_operand(value, en, params, sink);
+        }
+    }
+    if !handled {
+        check_value(value, model, cx, params, sink);
+        // Operand typing runs after both sides' name errors are reported, and is silent
+        // when either side failed to resolve.
+        if let Some(mi) = model {
+            check_cmp_types(path, op, value, mi, cx, sink);
+        }
+    }
+}
+
+/// `col in (…)`. Against an enum column each bare element is a variant — membership-
+/// checked (E0154) instead of resolved as a column path.
+fn check_in_list(
+    path: &Path,
+    values: &[Value],
+    model: Option<usize>,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) {
+    let en = model.and_then(|mi| {
+        resolve_path(path, mi, cx, sink);
+        cx.terminal_enum(path, mi)
+    });
+    for value in values {
+        if en.is_some_and(|en| check_enum_operand(value, en, params, sink)) {
+            continue;
+        }
+        check_value(value, model, cx, params, sink);
+        if let Some(mi) = model {
+            check_in_element_type(path, value, mi, cx, sink);
+        }
+    }
+}
+
+/// `filter(args…)`. On matching arity the filter's body is resolved against the call-site
+/// model, so its column paths (`address.city = …`) are checked against the model the query
+/// actually runs on — a filter has no model of its own. The arguments themselves are
+/// values in the *caller's* param scope.
+fn check_filter_call(
+    name: &Ident,
+    args: &[Value],
+    model: Option<usize>,
+    cx: &Cx,
+    params: &[String],
+    in_filters: &mut Vec<String>,
+    sink: &mut Sink,
+) {
+    match cx.filters.get(&name.node) {
+        None => sink.error(
+            code::UNKNOWN_FILTER,
+            name.span,
+            format!("unknown filter `{}`", name.node),
+        ),
+        Some(def) if def.params.len() != args.len() => sink.error(
+            code::FILTER_ARITY,
+            name.span,
+            format!(
+                "filter `{}` takes {} argument(s), got {}",
+                name.node,
+                def.params.len(),
+                args.len()
+            ),
+        ),
+        Some(def) => resolve_filter_body(def, model, cx, in_filters, sink),
+    }
+    for v in args {
+        check_value(v, model, cx, params, sink);
+    }
+}
+
 /// Inner walker carrying `in_filters`, the stack of named filters currently being
 /// expanded, so a filter that (directly or transitively) calls itself terminates
 /// instead of recursing forever.
@@ -706,56 +809,10 @@ fn check_predicate_in(
         }
         Predicate::Not(p) => check_predicate_in(p, model, cx, params, in_filters, sink),
         Predicate::Cmp { path, op, value } => {
-            let mut handled = false;
-            if let Some(mi) = model {
-                resolve_path(path, mi, cx, sink);
-                // When the left column is enum-typed, the right operand is a variant
-                // (or a param), not a column — check membership instead of resolving it
-                // as a path (which would misread the variant as an unknown field).
-                if let Some(en) = cx.terminal_enum(path, mi) {
-                    // Ordered comparison is numeric-only: allowed on an int enum,
-                    // rejected on a string enum (its values have no order).
-                    if matches!(op, Op::Gt | Op::Lt | Op::Ge | Op::Le) && !en.is_int() {
-                        sink.error(
-                            code::ENUM_ORDERED_OP,
-                            path.segments.last().map(|s| s.span).unwrap_or(en.span),
-                            format!(
-                                "`{}` is a string enum; ordered comparison is only valid on a \
-                                 numeric enum",
-                                en.name
-                            ),
-                        );
-                    }
-                    handled = check_enum_operand(value, en, params, sink);
-                }
-            }
-            if !handled {
-                check_value(value, model, cx, params, sink);
-                // Operand typing runs after both sides' name errors are reported, and
-                // is silent when either side failed to resolve.
-                if let Some(mi) = model {
-                    check_cmp_types(path, *op, value, mi, cx, sink);
-                }
-            }
+            check_cmp(path, *op, value, model, cx, params, sink);
         }
         Predicate::InList { path, values } => {
-            let en = if let Some(mi) = model {
-                resolve_path(path, mi, cx, sink);
-                cx.terminal_enum(path, mi)
-            } else {
-                None
-            };
-            for value in values {
-                // Against an enum column, a bare element is a variant — membership-
-                // checked (E0154) instead of resolved as a column path.
-                if en.is_some_and(|en| check_enum_operand(value, en, params, sink)) {
-                    continue;
-                }
-                check_value(value, model, cx, params, sink);
-                if let Some(mi) = model {
-                    check_in_element_type(path, value, mi, cx, sink);
-                }
-            }
+            check_in_list(path, values, model, cx, params, sink);
         }
         Predicate::Bare(path) => {
             // A bare atom is a bool column or a zero-arg named-filter reference.
@@ -770,32 +827,7 @@ fn check_predicate_in(
             }
         }
         Predicate::FilterCall { name, args } => {
-            match cx.filters.get(&name.node) {
-                None => sink.error(
-                    code::UNKNOWN_FILTER,
-                    name.span,
-                    format!("unknown filter `{}`", name.node),
-                ),
-                Some(def) if def.params.len() != args.len() => sink.error(
-                    code::FILTER_ARITY,
-                    name.span,
-                    format!(
-                        "filter `{}` takes {} argument(s), got {}",
-                        name.node,
-                        def.params.len(),
-                        args.len()
-                    ),
-                ),
-                // Arity is right: resolve the filter's body against the call-site
-                // model, so its column paths (`address.city = …`) are checked
-                // against the model the query actually runs on (a filter has no
-                // model of its own).
-                Some(def) => resolve_filter_body(def, model, cx, in_filters, sink),
-            }
-            // The arguments themselves are values in the *caller's* param scope.
-            for v in args {
-                check_value(v, model, cx, params, sink);
-            }
+            check_filter_call(name, args, model, cx, params, in_filters, sink);
         }
         Predicate::Raw(raw) => {
             check_raw_params(raw, params, sink);

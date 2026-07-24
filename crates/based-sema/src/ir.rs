@@ -205,10 +205,10 @@ pub enum ForeignKeys {
 
 impl ForeignKeys {
     /// Parse the manifest value; anything but `"all"` is the safe `None` default.
-    pub fn parse(s: &str) -> ForeignKeys {
+    pub fn parse(s: &str) -> Self {
         match s {
-            "all" => ForeignKeys::All,
-            _ => ForeignKeys::None,
+            "all" => Self::All,
+            _ => Self::None,
         }
     }
 }
@@ -224,31 +224,31 @@ pub enum FkAction {
 
 impl FkAction {
     /// Map the source keyword to an action, or `None` for an unknown spelling (`E0294`).
-    pub fn parse(s: &str) -> Option<FkAction> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "cascade" => Some(FkAction::Cascade),
-            "restrict" => Some(FkAction::Restrict),
-            "set_null" => Some(FkAction::SetNull),
-            "no_action" => Some(FkAction::NoAction),
+            "cascade" => Some(Self::Cascade),
+            "restrict" => Some(Self::Restrict),
+            "set_null" => Some(Self::SetNull),
+            "no_action" => Some(Self::NoAction),
             _ => None,
         }
     }
     /// The SQL clause spelling (`ON DELETE <this>`).
     pub fn sql(self) -> &'static str {
         match self {
-            FkAction::Cascade => "CASCADE",
-            FkAction::Restrict => "RESTRICT",
-            FkAction::SetNull => "SET NULL",
-            FkAction::NoAction => "NO ACTION",
+            Self::Cascade => "CASCADE",
+            Self::Restrict => "RESTRICT",
+            Self::SetNull => "SET NULL",
+            Self::NoAction => "NO ACTION",
         }
     }
     /// The neutral snapshot spelling (matches the source keyword).
     pub fn snap(self) -> &'static str {
         match self {
-            FkAction::Cascade => "cascade",
-            FkAction::Restrict => "restrict",
-            FkAction::SetNull => "set_null",
-            FkAction::NoAction => "no_action",
+            Self::Cascade => "cascade",
+            Self::Restrict => "restrict",
+            Self::SetNull => "set_null",
+            Self::NoAction => "no_action",
         }
     }
 }
@@ -616,17 +616,17 @@ impl MemberKind {
     /// The column's opaque `raw(…)` type, when it has one.
     pub fn opaque(&self) -> Option<&RawSpec> {
         match self {
-            MemberKind::Scalar { raw_type, .. } => raw_type.as_ref(),
+            Self::Scalar { raw_type, .. } => raw_type.as_ref(),
             _ => None,
         }
     }
     pub fn is_relation(&self) -> bool {
-        !matches!(self, MemberKind::Scalar { .. })
+        !matches!(self, Self::Scalar { .. })
     }
     pub fn target(&self) -> Option<&str> {
         match self {
-            MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => Some(target),
-            MemberKind::Scalar { .. } => None,
+            Self::Forward { target, .. } | Self::Inverse { target, .. } => Some(target),
+            Self::Scalar { .. } => None,
         }
     }
 }

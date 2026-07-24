@@ -26,7 +26,7 @@ fn conformance_golden() {
     let dir = conformance_dir();
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("read conformance-sema dir")
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();
@@ -199,9 +199,9 @@ fn member(name: &str, kind: &MemberKind) -> String {
                 "{name}: {}{}{}",
                 raw_type
                     .as_ref()
-                    .map(|r| r.render())
+                    .map(based_ast::RawSpec::render)
                     .or_else(|| enum_name.clone())
-                    .unwrap_or_else(|| prim(*ty).to_string()),
+                    .unwrap_or_else(|| prim(*ty)),
                 if *optional { "?" } else { "" },
                 if *many { "[]" } else { "" },
             );
@@ -282,7 +282,7 @@ fn ctx(reqs: &[based_sema::CtxReq]) -> String {
         .iter()
         .map(|r| {
             let ty = match &r.ty {
-                CtxField::Scalar(p) => prim(*p).to_string(),
+                CtxField::Scalar(p) => prim(*p),
                 CtxField::Relation(m) => format!("-> {m}"),
             };
             format!("{}: {ty}", r.field)

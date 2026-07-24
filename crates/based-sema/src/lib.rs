@@ -103,7 +103,7 @@ pub fn check_foreign_keys(schema: &CheckedSchema, fks: ForeignKeys) -> Vec<Diagn
                         m.name
                     ),
                 ),
-                _ => {}
+                ForeignKeys::All => {}
             }
         }
         for mem in &m.members {
@@ -143,7 +143,7 @@ pub fn check_foreign_keys(schema: &CheckedSchema, fks: ForeignKeys) -> Vec<Diagn
                             m.name, mem.name
                         ),
                     ),
-                    _ => {}
+                    ForeignKeys::None | ForeignKeys::All => {}
                 }
             }
             if fk.no_fk {
@@ -166,7 +166,7 @@ pub fn check_foreign_keys(schema: &CheckedSchema, fks: ForeignKeys) -> Vec<Diagn
                             m.name, mem.name
                         ),
                     ),
-                    _ => {}
+                    ForeignKeys::All => {}
                 }
             }
         }
@@ -185,173 +185,235 @@ fn raw_spec_covers(spec: &based_ast::RawSpec, dialect: &str, sink: &mut Sink) {
     }
 }
 
+/// The declaration set bucketed by kind — pass 1's output, borrowed from the input slice.
+#[derive(Default)]
+struct Decls<'a> {
+    models: Vec<&'a based_ast::Model>,
+    shapes: Vec<&'a based_ast::Shape>,
+    scopes: Vec<&'a based_ast::ScopeDecl>,
+    enums: Vec<&'a based_ast::EnumDecl>,
+    queries: Vec<&'a based_ast::Query>,
+    mutations: Vec<&'a based_ast::Mutation>,
+    filters: Vec<&'a based_ast::NamedFilter>,
+}
+
+impl<'a> Decls<'a> {
+    fn collect(decls: &'a [Decl]) -> Self {
+        let mut out = Self::default();
+        for d in decls {
+            match d {
+                Decl::Model(m) => out.models.push(m),
+                Decl::Shape(s) => out.shapes.push(s),
+                Decl::Scope(s) => out.scopes.push(s),
+                Decl::Enum(e) => out.enums.push(e),
+                Decl::Query(q) => out.queries.push(q),
+                Decl::Mutation(m) => out.mutations.push(m),
+                Decl::Filter(f) => out.filters.push(f),
+            }
+        }
+        out
+    }
+}
+
+/// The name tables every later pass reads, with duplicates already reported.
+struct Names<'a> {
+    /// Model name -> its position in `Decls::models` (and so in the `RModel` vec).
+    index: HashMap<String, usize>,
+    /// Shape name -> the model it projects.
+    shape_from: HashMap<String, String>,
+    /// Shape name -> its body, so `$ctx` collection can walk a return shape's relation
+    /// reaches to find joined scoped models. Last write wins on a duplicate name
+    /// (already reported); the collector only reads it.
+    shape_bodies: HashMap<String, &'a [based_ast::ShapeField]>,
+    /// Full filter defs, not just arity: the body is re-resolved against each call-site
+    /// model in the predicate checker.
+    filters: HashMap<String, &'a based_ast::NamedFilter>,
+}
+
+impl<'a> Names<'a> {
+    fn build(decls: &Decls<'a>, sink: &mut Sink) -> Self {
+        let mut index: HashMap<String, usize> = HashMap::new();
+        for (i, m) in decls.models.iter().enumerate() {
+            // First declaration wins the index; later ones are reported, not recorded.
+            if index.contains_key(&m.name.node) {
+                sink.error(
+                    code::DUP_MODEL,
+                    m.name.span,
+                    format!("duplicate model `{}`", m.name.node),
+                );
+            } else {
+                index.insert(m.name.node.clone(), i);
+            }
+        }
+        let mut shape_from: HashMap<String, String> = HashMap::new();
+        let mut shape_bodies: HashMap<String, &[based_ast::ShapeField]> = HashMap::new();
+        for s in &decls.shapes {
+            // `full` is a per-model convention, so duplicate `full` is allowed.
+            if s.name.node != "full" && shape_from.contains_key(&s.name.node) {
+                sink.error(
+                    code::DUP_SHAPE,
+                    s.name.span,
+                    format!("duplicate shape `{}`", s.name.node),
+                );
+            } else {
+                shape_from.insert(s.name.node.clone(), s.from.node.clone());
+            }
+            shape_bodies.insert(s.name.node.clone(), s.body.as_slice());
+        }
+        let mut filters: HashMap<String, &based_ast::NamedFilter> = HashMap::new();
+        for f in &decls.filters {
+            if filters.contains_key(&f.name.node) {
+                sink.error(
+                    code::DUP_FILTER,
+                    f.name.span,
+                    format!("duplicate filter `{}`", f.name.node),
+                );
+            } else {
+                filters.insert(f.name.node.clone(), *f);
+            }
+        }
+        // Queries and mutations share the wire namespace (one route each).
+        let mut callable: HashSet<&str> = HashSet::new();
+        for (name, span) in decls
+            .queries
+            .iter()
+            .map(|q| (&q.name.node, q.name.span))
+            .chain(decls.mutations.iter().map(|m| (&m.name.node, m.name.span)))
+        {
+            if !callable.insert(name.as_str()) {
+                sink.error(
+                    code::DUP_CALLABLE,
+                    span,
+                    format!("duplicate query/mutation `{name}`"),
+                );
+            }
+        }
+        Self {
+            index,
+            shape_from,
+            shape_bodies,
+            filters,
+        }
+    }
+
+    /// Every type name already spoken for, which enum resolution must not collide with.
+    fn type_names(&self, decls: &Decls) -> HashSet<String> {
+        let mut taken: HashSet<String> = self.index.keys().cloned().collect();
+        taken.extend(self.shape_from.keys().cloned());
+        taken.extend(decls.scopes.iter().map(|s| s.name.node.clone()));
+        taken
+    }
+}
+
+/// Passes 2–3b: one `RModel` per model, validated, with named scopes attached.
+fn build_models(
+    decls: &Decls,
+    names: &Names,
+    enums: &[REnum],
+    sink: &mut Sink,
+) -> (Vec<RModel>, Vec<RScope>, HashMap<String, usize>) {
+    // Enum name -> its inferred kind, so a field's classification picks the storage type
+    // (an int enum is an integer column; a string enum is text).
+    let enum_kinds: HashMap<String, EnumKind> =
+        enums.iter().map(|e| (e.name.clone(), e.kind)).collect();
+
+    let mut rmodels: Vec<RModel> = decls
+        .models
+        .iter()
+        .map(|m| model::skeleton(m, &enum_kinds, sink))
+        .collect();
+    for (mi, ast) in decls.models.iter().enumerate() {
+        model::validate(ast, mi, &mut rmodels, &names.index, sink);
+    }
+
+    // Named scopes: resolve the `scope` decls, then attach each model's `@scope Name`
+    // refs (E0183/E0184) + synthesize the injected predicate.
+    let (rscopes, scope_index) = scope::resolve_decls(&decls.scopes, &names.index, sink);
+    scope::attach_models(&decls.models, &mut rmodels, &rscopes, &scope_index, sink);
+    (rmodels, rscopes, scope_index)
+}
+
+/// Passes 4–6: everything that reads the finished models through one context.
+fn check_access_layer(
+    decls: &Decls,
+    cx: &Cx,
+    sink: &mut Sink,
+) -> (Vec<RShape>, Vec<RQuery>, Vec<RMutation>, Vec<RFilter>) {
+    for ast in &decls.models {
+        model::resolve_exprs(ast, cx, sink);
+    }
+    // Enum-typed field defaults (a `default <variant>` must name a member).
+    enums::check_field_defaults(cx, sink);
+    let rshapes: Vec<RShape> = decls
+        .shapes
+        .iter()
+        .filter_map(|s| check::check_shape(s, cx, sink))
+        .collect();
+    let rqueries: Vec<RQuery> = decls
+        .queries
+        .iter()
+        .filter_map(|q| check::check_query(q, cx, sink))
+        .collect();
+    let rmutations: Vec<RMutation> = decls
+        .mutations
+        .iter()
+        .filter_map(|m| check::check_mutation(m, cx, sink))
+        .collect();
+    let rfilters: Vec<RFilter> = decls
+        .filters
+        .iter()
+        .map(|f| check::check_filter(f, cx, sink))
+        .collect();
+
+    // Index requirement checks + lints. Last on purpose: it reasons over the *whole*
+    // resolved access layer (closed world).
+    indexes::run(
+        &decls.models,
+        &decls.queries,
+        &decls.shapes,
+        &decls.mutations,
+        &rqueries,
+        &rmutations,
+        cx,
+        sink,
+    );
+    (rshapes, rqueries, rmutations, rfilters)
+}
+
 /// Resolve and check the whole declaration set (gathered from every `.bsl` file).
 pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
     let mut sink = Sink::default();
 
-    // 1. Collect declarations by kind.
-    let mut models = Vec::new();
-    let mut shapes = Vec::new();
-    let mut scope_decls = Vec::new();
-    let mut enum_decls = Vec::new();
-    let mut queries = Vec::new();
-    let mut mutations = Vec::new();
-    let mut filters = Vec::new();
-    for d in decls {
-        match d {
-            Decl::Model(m) => models.push(m),
-            Decl::Shape(s) => shapes.push(s),
-            Decl::Scope(s) => scope_decls.push(s),
-            Decl::Enum(e) => enum_decls.push(e),
-            Decl::Query(q) => queries.push(q),
-            Decl::Mutation(m) => mutations.push(m),
-            Decl::Filter(f) => filters.push(f),
-        }
-    }
-
-    // Name tables + duplicate detection.
-    let mut index: HashMap<String, usize> = HashMap::new();
-    for (i, m) in models.iter().enumerate() {
-        if index.contains_key(&m.name.node) {
-            sink.error(
-                code::DUP_MODEL,
-                m.name.span,
-                format!("duplicate model `{}`", m.name.node),
-            );
-        } else {
-            index.insert(m.name.node.clone(), i);
-        }
-    }
-    let mut shape_from: HashMap<String, String> = HashMap::new();
-    for s in &shapes {
-        // `full` is a per-model convention , so duplicate `full` is allowed.
-        if s.name.node != "full" && shape_from.contains_key(&s.name.node) {
-            sink.error(
-                code::DUP_SHAPE,
-                s.name.span,
-                format!("duplicate shape `{}`", s.name.node),
-            );
-        } else {
-            shape_from.insert(s.name.node.clone(), s.from.node.clone());
-        }
-    }
-    // Shape bodies keyed by name, so `$ctx` collection can walk a return shape's
-    // relation reaches to find joined scoped models . Last write wins on a
-    // duplicate name (already reported above); the collector only reads it.
-    let mut shape_bodies: HashMap<String, &[based_ast::ShapeField]> = HashMap::new();
-    for s in &shapes {
-        shape_bodies.insert(s.name.node.clone(), s.body.as_slice());
-    }
-    // Full filter defs (not just arity): the body is re-resolved against each
-    // call-site model in the predicate checker.
-    let mut filter_defs: HashMap<String, &based_ast::NamedFilter> = HashMap::new();
-    for f in &filters {
-        if filter_defs.contains_key(&f.name.node) {
-            sink.error(
-                code::DUP_FILTER,
-                f.name.span,
-                format!("duplicate filter `{}`", f.name.node),
-            );
-        } else {
-            filter_defs.insert(f.name.node.clone(), *f);
-        }
-    }
-    // Queries and mutations share the wire namespace (one route each).
-    let mut callable: HashSet<&str> = HashSet::new();
-    for (name, span) in queries
-        .iter()
-        .map(|q| (&q.name.node, q.name.span))
-        .chain(mutations.iter().map(|m| (&m.name.node, m.name.span)))
-    {
-        if !callable.insert(name.as_str()) {
-            sink.error(
-                code::DUP_CALLABLE,
-                span,
-                format!("duplicate query/mutation `{name}`"),
-            );
-        }
-    }
+    let decls = Decls::collect(decls);
+    let names = Names::build(&decls, &mut sink);
 
     // Enum decls share the type-name namespace with models/shapes/scopes; resolve them
     // now (before skeletons) so a field typed by an enum name classifies as a scalar
     // column, not a relation.
-    let mut taken: HashSet<String> = index.keys().cloned().collect();
-    taken.extend(shape_from.keys().cloned());
-    taken.extend(scope_decls.iter().map(|s| s.name.node.clone()));
-    let (renums, enum_index) = enums::resolve_decls(&enum_decls, &taken, &mut sink);
-    // Enum name -> its inferred kind, so a field's classification picks the storage type
-    // (an int enum is an integer column; a string enum is text).
-    let enum_kinds: HashMap<String, EnumKind> =
-        renums.iter().map(|e| (e.name.clone(), e.kind)).collect();
+    let taken = names.type_names(&decls);
+    let (renums, enum_index) = enums::resolve_decls(&decls.enums, &taken, &mut sink);
 
-    // 2. Skeletons, then 3. validate (needs &mut models + the name index).
-    let mut rmodels: Vec<RModel> = models
-        .iter()
-        .map(|m| model::skeleton(m, &enum_kinds, &mut sink))
-        .collect();
-    for (mi, ast) in models.iter().enumerate() {
-        model::validate(ast, mi, &mut rmodels, &index, &mut sink);
-    }
+    let (rmodels, rscopes, scope_index) = build_models(&decls, &names, &renums, &mut sink);
 
-    // 3b. Named scopes: resolve the `scope` decls, then attach each
-    // model's `@scope Name` refs (E0183/E0184) + synthesize the injected predicate.
-    let (rscopes, scope_index) = scope::resolve_decls(&scope_decls, &index, &mut sink);
-    scope::attach_models(&models, &mut rmodels, &rscopes, &scope_index, &mut sink);
-
-    // 4/5. Everything from here reads the finished models through one context.
-    let (rshapes, rqueries, rmutations, rfilters) = {
-        let cx = Cx {
+    let (rshapes, rqueries, rmutations, rfilters) = check_access_layer(
+        &decls,
+        &Cx {
             models: &rmodels,
-            index: &index,
-            filters: &filter_defs,
-            shapes: &shape_from,
-            shape_bodies: &shape_bodies,
+            index: &names.index,
+            filters: &names.filters,
+            shapes: &names.shape_from,
+            shape_bodies: &names.shape_bodies,
             scopes: &rscopes,
             scope_index: &scope_index,
             enums: &renums,
             enum_index: &enum_index,
-        };
+        },
+        &mut sink,
+    );
 
-        for ast in &models {
-            model::resolve_exprs(ast, &cx, &mut sink);
-        }
-        // Enum-typed field defaults (a `default <variant>` must name a member).
-        enums::check_field_defaults(&cx, &mut sink);
-        let rshapes: Vec<RShape> = shapes
-            .iter()
-            .filter_map(|s| check::check_shape(s, &cx, &mut sink))
-            .collect();
-        let rqueries: Vec<RQuery> = queries
-            .iter()
-            .filter_map(|q| check::check_query(q, &cx, &mut sink))
-            .collect();
-        let rmutations: Vec<RMutation> = mutations
-            .iter()
-            .filter_map(|m| check::check_mutation(m, &cx, &mut sink))
-            .collect();
-        let rfilters: Vec<RFilter> = filters
-            .iter()
-            .map(|f| check::check_filter(f, &cx, &mut sink))
-            .collect();
-
-        // 6. Index requirement checks + lints. Last on purpose: it
-        // reasons over the *whole* resolved access layer (closed world).
-        indexes::run(
-            &models,
-            &queries,
-            &shapes,
-            &mutations,
-            &rqueries,
-            &rmutations,
-            &cx,
-            &mut sink,
-        );
-        (rshapes, rqueries, rmutations, rfilters)
-    };
-
-    // 7. `$ctx` coherence : each callable's inferred context requirement is
-    // its own, but a field name must mean one type everywhere the caller's shared
-    // context bag is read — closed world makes that a fact, not a guess.
+    // `$ctx` coherence: each callable's inferred context requirement is its own, but a
+    // field name must mean one type everywhere the caller's shared context bag is read —
+    // closed world makes that a fact, not a guess.
     ctx::check_coherence(&rqueries, &rmutations, &mut sink);
 
     let schema = CheckedSchema {
@@ -362,7 +424,7 @@ pub fn check(decls: &[Decl]) -> (CheckedSchema, Vec<Diagnostic>) {
         queries: rqueries,
         mutations: rmutations,
         filters: rfilters,
-        model_index: index,
+        model_index: names.index,
         scope_index,
         enum_index,
     };

@@ -11,3 +11,6 @@ based-diagnostics = { workspace = true }
 
 [dev-dependencies]
 based-parser = { workspace = true }
+
+[lints]
+workspace = true

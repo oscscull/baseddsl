@@ -51,3 +51,42 @@ ctrlc = { version = "3", features = ["termination"] }
 
 [profile.release]
 lto = "thin"
+
+# Lint policy. A crate opts in with `[lints] workspace = true`; crates are migrated one at a
+# time, so absence of that stanza means "not yet cleaned", not "exempt".
+# The selection is the subset of pedantic/nursery that catches real smells. Lints whose fix
+# reads worse than the original are deliberately absent (principle: readable wins) — notably
+# `format_push_string` (forces `write!` + an unwrap), `option_if_let_else`,
+# `needless_raw_string_hashes` (golden SQL fixtures read better with uniform `r#"…"#`),
+# `wildcard_imports` (every one is an AST/IR node prelude — the explicit list is 30 names
+# of pure noise), and `match_same_arms` (exhaustive matches here document why each variant
+# is a no-op; merging the arms deletes the documentation).
+[workspace.lints.clippy]
+# Real defects and waste.
+redundant_clone = "deny"
+needless_collect = "deny"
+or_fun_call = "deny"
+unused_peekable = "deny"
+useless_let_if_seq = "deny"
+needless_pass_by_ref_mut = "deny"
+implicit_clone = "deny"
+manual_is_variant_and = "deny"
+stable_sort_primitive = "deny"
+# Size limits: the forcing function that keeps functions decomposed.
+too_many_lines = "deny"
+# Idiom consistency.
+use_self = "deny"
+map_unwrap_or = "deny"
+manual_let_else = "deny"
+redundant_closure_for_method_calls = "deny"
+semicolon_if_nothing_returned = "deny"
+match_wildcard_for_single_variants = "deny"
+unnested_or_patterns = "deny"
+single_match_else = "deny"
+uninlined_format_args = "deny"
+enum_glob_use = "deny"
+needless_for_each = "deny"
+explicit_iter_loop = "deny"
+cast_lossless = "deny"
+checked_conversions = "deny"
+unreadable_literal = "deny"

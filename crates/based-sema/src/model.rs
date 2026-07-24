@@ -371,7 +371,7 @@ fn validate_decimals(ast: &Model, sink: &mut Sink) {
 ///   * both `@fk` and `@no_fk` on one edge → `E0292`,
 ///   * `@fk(on_delete: set_null)` on a required (non-nullable) relation → `E0293`,
 ///   * an unknown referential action → `E0294`.
-fn validate_fk(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Sink) {
+fn validate_fk(ast: &Model, mi: usize, models: &[RModel], sink: &mut Sink) {
     for mem in &ast.members {
         let Member::Field(f) = mem else { continue };
         if f.fk.is_none() && f.no_fk.is_none() {
@@ -395,31 +395,30 @@ fn validate_fk(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Sink) {
             continue;
         }
         // The decorators mean something only on a forward to-one relation column.
-        match models[mi].member(&f.name.node).map(|m| &m.kind) {
-            Some(MemberKind::Forward { custom_join, .. }) => {
-                if *custom_join {
-                    sink.error(
-                        code::FK_CUSTOM_JOIN,
-                        span,
-                        format!(
-                            "`@fk`/`@no_fk` on `{}` — a custom-join (`on:`) relation owns no conventional FK column",
-                            f.name.node
-                        ),
-                    );
-                    continue;
-                }
-            }
-            _ => {
+        if let Some(MemberKind::Forward { custom_join, .. }) =
+            models[mi].member(&f.name.node).map(|m| &m.kind)
+        {
+            if *custom_join {
                 sink.error(
-                    code::FK_TARGET,
+                    code::FK_CUSTOM_JOIN,
                     span,
                     format!(
-                        "`@fk`/`@no_fk` on `{}` — only a forward to-one relation (which owns the `{}_id` FK column) can carry one",
-                        f.name.node, f.name.node
+                        "`@fk`/`@no_fk` on `{}` — a custom-join (`on:`) relation owns no conventional FK column",
+                        f.name.node
                     ),
                 );
                 continue;
             }
+        } else {
+            sink.error(
+                code::FK_TARGET,
+                span,
+                format!(
+                    "`@fk`/`@no_fk` on `{}` — only a forward to-one relation (which owns the `{}_id` FK column) can carry one",
+                    f.name.node, f.name.node
+                ),
+            );
+            continue;
         }
         // Referential actions: known spelling, and `set_null` needs a nullable relation.
         if let Some(fk) = &f.fk {
@@ -464,7 +463,7 @@ fn type_base_name(f: &Field) -> String {
 /// (`E0190`) and an old name that is still a *live* column/table (`E0191` — then it can't
 /// be the rename's source). Field-level `@was` sits in the field modifier position; the
 /// model-level form is a generic decorator.
-fn validate_was(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut Sink) {
+fn validate_was(ast: &Model, mi: usize, models: &[RModel], sink: &mut Sink) {
     // Field-level: `<field>: <ty> @was("old_col")`.
     for mem in &ast.members {
         let Member::Field(f) = mem else { continue };

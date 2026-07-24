@@ -105,7 +105,7 @@ fn resolve_variant_value(
         // Int enum: every variant must carry an int.
         (EnumKind::Int, Some(VariantValue::Int(n))) => EnumValue::Int(*n),
         (EnumKind::Int, other) => {
-            let span = v.value.as_ref().map(|s| s.span).unwrap_or(v.name.span);
+            let span = v.value.as_ref().map_or(v.name.span, |s| s.span);
             sink.error(
                 code::ENUM_MIXED,
                 span,

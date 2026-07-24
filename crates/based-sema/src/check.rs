@@ -5,6 +5,7 @@ use based_ast::*;
 
 use crate::ir::*;
 use crate::resolve::{self, Cx};
+use std::collections::HashSet;
 
 // ---------- shapes ---------------------------------------------------------
 
@@ -81,18 +82,8 @@ fn check_shape_body(
                 ShapeValue::Agg(agg) => check_agg_call(agg, mi, cx, sink),
             },
             ShapeField::Nest { field, body } => {
-                match cx.model(mi).member(&field.node).map(|m| &m.kind) {
-                    Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
-                        if let Some(ti) = cx.find(target) {
-                            check_shape_body(body, ti, cx, stack, sink);
-                        }
-                    }
-                    Some(MemberKind::Scalar { .. }) => sink.error(
-                        code::SHAPE_NEST_SCALAR,
-                        field.span,
-                        format!("`{}` is a column, not a relation, so it can't be nested", field.node),
-                    ),
-                    None => unknown_field(cx, mi, field, sink),
+                if let Some(ti) = nest_target(field, mi, cx, sink).and_then(|t| cx.find(t)) {
+                    check_shape_body(body, ti, cx, stack, sink);
                 }
             }
             // `field -> Shape`: nest a relation, projected by a named shape. The
@@ -100,45 +91,8 @@ fn check_shape_body(
             // check covers its fields; here we resolve the relation, require the
             // shape's model to equal the relation target, and guard against cycles.
             ShapeField::NestRef { field, shape } => {
-                match cx.model(mi).member(&field.node).map(|m| &m.kind) {
-                    Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
-                        match cx.shapes.get(&shape.node) {
-                            Some(from) if from != target => sink.error(
-                                code::SHAPE_REF_MODEL,
-                                shape.span,
-                                format!(
-                                    "shape `{}` projects `{from}`, but `{}` relates to `{target}`",
-                                    shape.node, field.node
-                                ),
-                            ),
-                            Some(_) => {
-                                if cx
-                                    .shape_bodies
-                                    .get(&shape.node)
-                                    .is_some_and(|b| is_agg_shape(b))
-                                {
-                                    sink.error_note(
-                                        code::AGG_COMPOSE,
-                                        shape.span,
-                                        format!("`{}` is an aggregate shape", shape.node),
-                                        "an aggregate shape is a group, not a row — it can't be nested",
-                                    );
-                                }
-                                check_ref_cycle(&shape.node, shape.span, cx, stack, sink)
-                            }
-                            None => sink.error(
-                                code::SHAPE_REF_UNKNOWN,
-                                shape.span,
-                                format!("`-> {}` names no declared shape", shape.node),
-                            ),
-                        }
-                    }
-                    Some(MemberKind::Scalar { .. }) => sink.error(
-                        code::SHAPE_NEST_SCALAR,
-                        field.span,
-                        format!("`{}` is a column, not a relation, so it can't be nested", field.node),
-                    ),
-                    None => unknown_field(cx, mi, field, sink),
+                if let Some(target) = nest_target(field, mi, cx, sink) {
+                    check_nest_ref(shape, field, target, cx, stack, sink);
                 }
             }
             // `out = path { body }`: flatten a to-many path through a junction to the
@@ -147,7 +101,7 @@ fn check_shape_body(
             ShapeField::Flatten { path, body, .. } => {
                 if let Some(far) = check_flatten_path(path, mi, cx, sink) {
                     if cx.model(far).no_id {
-                        let span = path.segments.last().map(|s| s.span).unwrap_or(path.segments[0].span);
+                        let span = path.segments.last().map_or(path.segments[0].span, |s| s.span);
                         sink.error_note(
                             code::FLATTEN_KEYLESS,
                             span,
@@ -159,6 +113,73 @@ fn check_shape_body(
                 }
             }
         }
+    }
+}
+
+/// The model a nested field points at: its member must exist and be a relation.
+/// Reports the missing-field / not-a-relation case and returns `None`.
+fn nest_target<'a>(field: &Ident, mi: usize, cx: &'a Cx, sink: &mut Sink) -> Option<&'a str> {
+    match cx.model(mi).member(&field.node).map(|m| &m.kind) {
+        Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
+            Some(target)
+        }
+        Some(MemberKind::Scalar { .. }) => {
+            sink.error(
+                code::SHAPE_NEST_SCALAR,
+                field.span,
+                format!(
+                    "`{}` is a column, not a relation, so it can't be nested",
+                    field.node
+                ),
+            );
+            None
+        }
+        None => {
+            unknown_field(cx, mi, field, sink);
+            None
+        }
+    }
+}
+
+/// The `field -> Shape` half of a nest-by-reference: the named shape must exist, project
+/// the relation's target model, and not be an aggregate; the reference must not cycle.
+fn check_nest_ref(
+    shape: &Ident,
+    field: &Ident,
+    target: &str,
+    cx: &Cx,
+    stack: &mut Vec<String>,
+    sink: &mut Sink,
+) {
+    match cx.shapes.get(&shape.node) {
+        Some(from) if from != target => sink.error(
+            code::SHAPE_REF_MODEL,
+            shape.span,
+            format!(
+                "shape `{}` projects `{from}`, but `{}` relates to `{target}`",
+                shape.node, field.node
+            ),
+        ),
+        Some(_) => {
+            if cx
+                .shape_bodies
+                .get(&shape.node)
+                .is_some_and(|b| is_agg_shape(b))
+            {
+                sink.error_note(
+                    code::AGG_COMPOSE,
+                    shape.span,
+                    format!("`{}` is an aggregate shape", shape.node),
+                    "an aggregate shape is a group, not a row — it can't be nested",
+                );
+            }
+            check_ref_cycle(&shape.node, shape.span, cx, stack, sink);
+        }
+        None => sink.error(
+            code::SHAPE_REF_UNKNOWN,
+            shape.span,
+            format!("`-> {}` names no declared shape", shape.node),
+        ),
     }
 }
 
@@ -258,10 +279,10 @@ fn walk_body_refs(fields: &[ShapeField], cx: &Cx, stack: &mut Vec<String>, sink:
     for f in fields {
         match f {
             ShapeField::Nest { body, .. } | ShapeField::Flatten { body, .. } => {
-                walk_body_refs(body, cx, stack, sink)
+                walk_body_refs(body, cx, stack, sink);
             }
             ShapeField::NestRef { shape, .. } => {
-                check_ref_cycle(&shape.node, shape.span, cx, stack, sink)
+                check_ref_cycle(&shape.node, shape.span, cx, stack, sink);
             }
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }
@@ -321,7 +342,7 @@ fn check_agg_call(agg: &AggCall, mi: usize, cx: &Cx, sink: &mut Sink) {
                 }
                 let is_enum = cx.terminal_enum(arg, mi).is_some();
                 if let Some(reason) = resolve::agg_operand_reason(func, &term, is_enum) {
-                    let span = arg.segments.last().map(|s| s.span).unwrap_or(agg.span);
+                    let span = arg.segments.last().map_or(agg.span, |s| s.span);
                     sink.error(code::AGG_OPERAND, span, reason);
                 }
             }
@@ -425,43 +446,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
     let ret = resolve_return(&q.ret, body_model, cx, sink)?;
     let ti = cx.find(&ret.model)?;
 
-    // verb: explicit in a block, else inferred from cardinality.
-    let verb = match &q.body {
-        QueryBody::Block(s) => {
-            if s.model.node != ret.model {
-                sink.error(
-                    code::RETURN_MODEL_MISMATCH,
-                    s.model.span,
-                    format!(
-                        "statement reads `{}` but the return type is from `{}`",
-                        s.model.node, ret.model
-                    ),
-                );
-            }
-            s.verb
-        }
-        _ => {
-            if q.ret.many || q.ret.stream {
-                Verb::List
-            } else {
-                Verb::Get
-            }
-        }
-    };
-
-    // A stream is a list delivered incrementally: a `get` body is a cardinality
-    // mismatch (E0200).
-    if q.ret.stream && verb == Verb::Get {
-        sink.error_note(
-            code::STREAM_GET,
-            q.ret.ty.span,
-            format!(
-                "stream query `{}` uses `get` — a stream is many rows",
-                q.name.node
-            ),
-            "use `list`, or drop `stream` for a scalar return",
-        );
-    }
+    let verb = query_verb(q, &ret.model, sink);
 
     // Bare/inline queries map each param onto a same-named column (the filter);
     // block and raw queries reference params via `$`, so no same-name mapping is
@@ -479,86 +464,15 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         .as_deref()
         .and_then(|n| cx.shape_bodies.get(n).copied())
         .filter(|b| is_agg_shape(b));
-    let is_agg = agg_body.is_some();
 
-    let is_raw = matches!(q.body, QueryBody::Raw(_));
-    let mut has_order = false;
-    match &q.body {
-        QueryBody::Bare => {}
-        QueryBody::Inline(clauses) => match agg_body {
-            Some(body) => check_agg_query(q, clauses, ti, body, cx, &params, sink),
-            None => {
-                reject_agg_clauses(q, clauses, sink);
-                has_order = check_clauses(clauses, ti, cx, &params, sink);
-            }
-        },
-        QueryBody::Block(s) => {
-            let smi = cx.find(&s.model.node).unwrap_or(ti);
-            match agg_body {
-                Some(body) => check_agg_query(q, &s.clauses, smi, body, cx, &params, sink),
-                None => {
-                    reject_agg_clauses(q, &s.clauses, sink);
-                    has_order = check_clauses(&s.clauses, smi, cx, &params, sink);
-                }
-            }
-        }
-        QueryBody::Raw(raw) => check_raw_query(q, raw, ti, cx, &params, sink),
-    }
-
-    if verb == Verb::Get && !q.ret.stream && !is_raw && !is_agg && !get_is_keyed(q, ti, cx) {
-        sink.error_note(
-            code::GET_NOT_UNIQUE,
-            q.span,
-            format!(
-                "`get` query `{}` is not keyed on a unique field",
-                q.name.node
-            ),
-            "a scalar `get` needs an equality on `id`, a `(unique)` column, or a unique index",
-        );
-    }
-
-    // Nondeterministic-order lint: a `list` with no sort at any tier.
-    let paginated = matches!(&q.body, QueryBody::Inline(cs) | QueryBody::Block(Statement{clauses: cs, ..}) if cs.iter().any(|c| matches!(c, Clause::Page(_))));
-
-    // A page is a bounded chunk + a re-entry cursor; a stream is one unbounded
-    // forward pass — the envelopes contradict (E0201).
-    if q.ret.stream && paginated {
-        sink.error_note(
-            code::STREAM_PAGE,
-            q.span,
-            format!("stream query `{}` declares `page`", q.name.node),
-            "paginate for random access, stream for the full pass — drop one",
-        );
-    }
-    if verb == Verb::List && !is_raw && !is_agg && !has_order && cx.model(ti).sort.is_empty() {
-        sink.warn(
-            code::NONDET_SORT,
-            q.span,
-            format!(
-                "`list` query `{}` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`",
-                q.name.node
-            ),
-        );
-    }
-
-    // A keyless model has no `id` tiebreaker, so a keyset page (non-offset `page`) needs
-    // a sort that is itself a total order — its effective sort must include a local
-    // `(unique)` column, else the minted cursor could drop or repeat rows (E0263).
-    let keyset = page_clause(&q.body).is_some_and(|p| !p.offset);
-    if cx.model(ti).no_id && !is_raw && !is_agg && keyset {
-        let m = cx.model(ti);
-        let deterministic = effective_sort(&q.body, m)
-            .iter()
-            .any(|t| t.path.segments.len() == 1 && m.is_unique(&t.path.segments[0].node));
-        if !deterministic {
-            sink.error_note(
-                code::KEYLESS_KEYSET,
-                q.span,
-                format!("keyset `page` on keyless `{}` has no unique sort key", m.name),
-                "a `@no_id` model has no `id` tiebreaker — `order (…)` on a `(unique)` column, or `page (…) offset`",
-            );
-        }
-    }
+    let shape = QueryShape {
+        verb,
+        raw: matches!(q.body, QueryBody::Raw(_)),
+        agg: agg_body.is_some(),
+        has_order: check_query_body(q, ti, agg_body, cx, &params, sink),
+        paginated: matches!(&q.body, QueryBody::Inline(cs) | QueryBody::Block(Statement{clauses: cs, ..}) if cs.iter().any(|c| matches!(c, Clause::Page(_)))),
+    };
+    check_query_envelope(q, ti, &shape, cx, sink);
 
     // Scope acknowledgement: a callable touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
@@ -616,11 +530,147 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         many: q.ret.many || q.ret.stream,
         stream: q.ret.stream,
         ret_shape: ret.shape,
-        paginated,
+        paginated: shape.paginated,
         ctx_requires,
         shard_key,
         scope_inject,
     })
+}
+
+/// What the body turned out to be — the facts the envelope lints (keying, sort
+/// determinism, stream/page exclusivity) are judged against.
+struct QueryShape {
+    verb: Verb,
+    raw: bool,
+    agg: bool,
+    /// The body carries its own `order` clause.
+    has_order: bool,
+    paginated: bool,
+}
+
+/// The query's verb: explicit in a block body, else inferred from return cardinality.
+/// Reports a block statement that reads a model the return type doesn't project.
+fn query_verb(q: &Query, ret_model: &str, sink: &mut Sink) -> Verb {
+    match &q.body {
+        QueryBody::Block(s) => {
+            if s.model.node != ret_model {
+                sink.error(
+                    code::RETURN_MODEL_MISMATCH,
+                    s.model.span,
+                    format!(
+                        "statement reads `{}` but the return type is from `{ret_model}`",
+                        s.model.node
+                    ),
+                );
+            }
+            s.verb
+        }
+        _ if q.ret.many || q.ret.stream => Verb::List,
+        _ => Verb::Get,
+    }
+}
+
+/// Check the body's clauses against the target model. Returns whether the body carries
+/// its own `order` clause.
+fn check_query_body(
+    q: &Query,
+    ti: usize,
+    agg_body: Option<&[ShapeField]>,
+    cx: &Cx,
+    params: &[String],
+    sink: &mut Sink,
+) -> bool {
+    let (clauses, mi) = match &q.body {
+        QueryBody::Bare => return false,
+        QueryBody::Raw(raw) => {
+            check_raw_query(q, raw, ti, cx, params, sink);
+            return false;
+        }
+        QueryBody::Inline(clauses) => (clauses.as_slice(), ti),
+        QueryBody::Block(s) => (s.clauses.as_slice(), cx.find(&s.model.node).unwrap_or(ti)),
+    };
+    if let Some(body) = agg_body {
+        check_agg_query(q, clauses, mi, body, cx, params, sink);
+        false
+    } else {
+        reject_agg_clauses(q, clauses, sink);
+        check_clauses(clauses, mi, cx, params, sink)
+    }
+}
+
+/// The result-envelope rules, judged once the body is known: a scalar `get` must be
+/// keyed, a `list` must sort deterministically, `stream` and `page` are exclusive, and a
+/// keyset page over a keyless model needs a unique sort key.
+fn check_query_envelope(q: &Query, ti: usize, shape: &QueryShape, cx: &Cx, sink: &mut Sink) {
+    let engine_built = !shape.raw && !shape.agg;
+
+    // A stream is a list delivered incrementally: a `get` body is a cardinality
+    // mismatch (E0200).
+    if q.ret.stream && shape.verb == Verb::Get {
+        sink.error_note(
+            code::STREAM_GET,
+            q.ret.ty.span,
+            format!(
+                "stream query `{}` uses `get` — a stream is many rows",
+                q.name.node
+            ),
+            "use `list`, or drop `stream` for a scalar return",
+        );
+    }
+    if shape.verb == Verb::Get && !q.ret.stream && engine_built && !get_is_keyed(q, ti, cx) {
+        sink.error_note(
+            code::GET_NOT_UNIQUE,
+            q.span,
+            format!(
+                "`get` query `{}` is not keyed on a unique field",
+                q.name.node
+            ),
+            "a scalar `get` needs an equality on `id`, a `(unique)` column, or a unique index",
+        );
+    }
+
+    // A page is a bounded chunk + a re-entry cursor; a stream is one unbounded
+    // forward pass — the envelopes contradict (E0201).
+    if q.ret.stream && shape.paginated {
+        sink.error_note(
+            code::STREAM_PAGE,
+            q.span,
+            format!("stream query `{}` declares `page`", q.name.node),
+            "paginate for random access, stream for the full pass — drop one",
+        );
+    }
+
+    // Nondeterministic-order lint: a `list` with no sort at any tier.
+    if shape.verb == Verb::List && engine_built && !shape.has_order && cx.model(ti).sort.is_empty()
+    {
+        sink.warn(
+            code::NONDET_SORT,
+            q.span,
+            format!(
+                "`list` query `{}` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`",
+                q.name.node
+            ),
+        );
+    }
+
+    // A keyless model has no `id` tiebreaker, so a keyset page (non-offset `page`) needs
+    // a sort that is itself a total order — its effective sort must include a local
+    // `(unique)` column, else the minted cursor could drop or repeat rows (E0263).
+    let keyset = page_clause(&q.body).is_some_and(|p| !p.offset);
+    let m = cx.model(ti);
+    if m.no_id && engine_built && keyset {
+        let deterministic = effective_sort(&q.body, m)
+            .iter()
+            .any(|t| t.path.segments.len() == 1 && m.is_unique(&t.path.segments[0].node));
+        if !deterministic {
+            sink.error_note(
+                code::KEYLESS_KEYSET,
+                q.span,
+                format!("keyset `page` on keyless `{}` has no unique sort key", m.name),
+                "a `@no_id` model has no `id` tiebreaker — `order (…)` on a `(unique)` column, or `page (…) offset`",
+            );
+        }
+    }
 }
 
 /// Resolve a return type to its underlying model. A shape resolves via its `from`;
@@ -748,44 +798,7 @@ fn check_raw_query(
     params: &[String],
     sink: &mut Sink,
 ) {
-    for p in &q.params {
-        if p.ty.is_none() {
-            sink.error_note(
-                code::RAW_QUERY_PARAM,
-                p.name.span,
-                format!(
-                    "param `{}` of raw-bodied query `{}` needs a type annotation",
-                    p.name.node, q.name.node
-                ),
-                "a raw body gives no column to infer the type from",
-            );
-        }
-        if p.binding.is_some() {
-            sink.error_note(
-                code::RAW_QUERY_PARAM,
-                p.name.span,
-                format!(
-                    "param `{}` of raw-bodied query `{}` can't carry a binding",
-                    p.name.node, q.name.node
-                ),
-                "the raw SQL is the whole filter — reference the param as `${…}` inside it",
-            );
-        }
-    }
-    for part in &raw.parts {
-        if let RawPart::Param(pr) = part {
-            if pr.name.node == "ctx" {
-                sink.error_note(
-                    code::RAW_QUERY_CTX,
-                    pr.name.span,
-                    "`${ctx.…}` in a raw query body has no type source",
-                    "declare a typed param and pass the context value through it",
-                );
-            } else {
-                resolve::check_param_ref(pr, params, sink);
-            }
-        }
-    }
+    check_raw_query_params(q, raw, params, sink);
     if q.ret.stream {
         sink.error_note(
             code::RAW_QUERY_STREAM,
@@ -826,9 +839,56 @@ fn check_raw_query(
             );
         }
     }
-    // Soft-delete: the engine can't inject the tombstone filter into SQL it didn't
-    // build. Lint the target model, plus any other soft-delete model whose table the
-    // raw text mentions (the joined-table case).
+    check_raw_soft_delete_gap(raw, ti, cx, sink);
+}
+
+/// A raw body's params must be typed bind values: there is no column to infer a type from,
+/// and no engine-built WHERE for a binding to ride. `${ctx.…}` has no type source at all.
+fn check_raw_query_params(q: &Query, raw: &RawSql, params: &[String], sink: &mut Sink) {
+    for p in &q.params {
+        if p.ty.is_none() {
+            sink.error_note(
+                code::RAW_QUERY_PARAM,
+                p.name.span,
+                format!(
+                    "param `{}` of raw-bodied query `{}` needs a type annotation",
+                    p.name.node, q.name.node
+                ),
+                "a raw body gives no column to infer the type from",
+            );
+        }
+        if p.binding.is_some() {
+            sink.error_note(
+                code::RAW_QUERY_PARAM,
+                p.name.span,
+                format!(
+                    "param `{}` of raw-bodied query `{}` can't carry a binding",
+                    p.name.node, q.name.node
+                ),
+                "the raw SQL is the whole filter — reference the param as `${…}` inside it",
+            );
+        }
+    }
+    for part in &raw.parts {
+        if let RawPart::Param(pr) = part {
+            if pr.name.node == "ctx" {
+                sink.error_note(
+                    code::RAW_QUERY_CTX,
+                    pr.name.span,
+                    "`${ctx.…}` in a raw query body has no type source",
+                    "declare a typed param and pass the context value through it",
+                );
+            } else {
+                resolve::check_param_ref(pr, params, sink);
+            }
+        }
+    }
+}
+
+/// The engine can't inject a tombstone filter into SQL it didn't build. Lint the target
+/// model, plus any other soft-delete model whose table the raw text mentions (the
+/// joined-table case).
+fn check_raw_soft_delete_gap(raw: &RawSql, ti: usize, cx: &Cx, sink: &mut Sink) {
     let text: String = raw
         .parts
         .iter()
@@ -931,8 +991,7 @@ fn reject_agg_clauses(q: &Query, clauses: &[Clause], sink: &mut Sink) {
                 let span = cols
                     .first()
                     .and_then(|p| p.segments.first())
-                    .map(|s| s.span)
-                    .unwrap_or(q.span);
+                    .map_or(q.span, |s| s.span);
                 sink.error_note(
                     code::AGG_CONTEXT,
                     span,
@@ -981,7 +1040,7 @@ fn check_agg_query(
     // Group-by consistency: every projected non-aggregate column must be grouped.
     for gc in &group_cols {
         if !group_paths.iter().any(|gp| same_path(gp, &gc.path)) {
-            let span = gc.path.segments.last().map(|s| s.span).unwrap_or(q.span);
+            let span = gc.path.segments.last().map_or(q.span, |s| s.span);
             sink.error_note(
                 code::AGG_GROUP_BY,
                 span,
@@ -1000,7 +1059,7 @@ fn check_agg_query(
             Clause::Order(terms) => {
                 for t in terms {
                     if t.path.segments.len() != 1 || !out_names.contains(&t.path.segments[0].node) {
-                        let span = t.path.segments.last().map(|s| s.span).unwrap_or(q.span);
+                        let span = t.path.segments.last().map_or(q.span, |s| s.span);
                         sink.error_note(
                             code::AGG_GROUP_BY,
                             span,
@@ -1067,7 +1126,7 @@ fn check_having(
 fn check_having_path(path: &Path, out_names: &[String], qspan: Span, sink: &mut Sink) {
     let ok = path.segments.len() == 1 && out_names.contains(&path.segments[0].node);
     if !ok {
-        let span = path.segments.last().map(|s| s.span).unwrap_or(qspan);
+        let span = path.segments.last().map_or(qspan, |s| s.span);
         sink.error_note(
             code::AGG_GROUP_BY,
             span,
@@ -1186,28 +1245,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         );
     }
 
-    // A create on a keyless return model has no generated `id` to read the row back by,
-    // so a declared-shape return must key on a `(unique)` column the create sets. If it
-    // sets none, reject rather than emit a re-select the runtime can't key (E0264). An
-    // `-> ok` mutation reads nothing back, so it is exempt.
-    if !m.ret.ack {
-        if let Some(rmodel) = cx.find(&ret.model).map(|i| cx.model(i)) {
-            if rmodel.no_id
-                && creates_model(&m.body, &ret.model)
-                && !create_sets_unique(&m.body, &ret.model, rmodel)
-            {
-                sink.error_note(
-                    code::KEYLESS_CREATE,
-                    m.span,
-                    format!(
-                        "mutation `{}` creates keyless `{}` but sets no unique column to read it back by",
-                        m.name.node, ret.model
-                    ),
-                    "a `@no_id` model has no generated `id` — assign a `(unique)` column in the `create`, or return `-> ok`",
-                );
-            }
-        }
-    }
+    check_keyless_readback(m, &ret, cx, sink);
 
     // Scope acknowledgement: a mutation touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
@@ -1254,6 +1292,33 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         shard_key,
         scope_inject,
     })
+}
+
+/// A create on a keyless return model has no generated `id` to read the row back by, so a
+/// declared-shape return must key on a `(unique)` column the create sets. If it sets none,
+/// reject rather than emit a re-select the runtime can't key (E0264). An `-> ok` mutation
+/// reads nothing back, so it is exempt.
+fn check_keyless_readback(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut Sink) {
+    if m.ret.ack {
+        return;
+    }
+    let Some(rmodel) = cx.find(&ret.model).map(|i| cx.model(i)) else {
+        return;
+    };
+    if rmodel.no_id
+        && creates_model(&m.body, &ret.model)
+        && !create_sets_unique(&m.body, &ret.model, rmodel)
+    {
+        sink.error_note(
+            code::KEYLESS_CREATE,
+            m.span,
+            format!(
+                "mutation `{}` creates keyless `{}` but sets no unique column to read it back by",
+                m.name.node, ret.model
+            ),
+            "a `@no_id` model has no generated `id` — assign a `(unique)` column in the `create`, or return `-> ok`",
+        );
+    }
 }
 
 /// A write's effect on its target row, for the `-> ok` / declared-shape rules.
@@ -1476,56 +1541,66 @@ fn check_write(
                 resolve::check_predicate(where_, Some(mi), cx, params, sink);
             }
         }
-        WriteStmt::Tx(inner) => {
-            // Named step bindings (`create … as name`): a binding reaches any *prior*
-            // step. Pre-scan every binding name in this tx so a forward reference is
-            // distinguishable from a plain unbound name (both E0281); then descend,
-            // growing the reachable set after each bound create and flagging a binding
-            // that shadows a param or duplicates another (E0280).
-            let mut binds = bindings.clone();
-            for s in inner {
-                if let WriteStmt::Create {
-                    binding: Some(b), ..
-                } = s
-                {
-                    binds.all.insert(b.node.clone());
-                }
-            }
-            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            for s in inner {
-                check_write(s, cx, params, &binds, scoped, unscoped, sink);
-                if let WriteStmt::Create {
-                    model,
-                    binding: Some(b),
-                    ..
-                } = s
-                {
-                    if params.iter().any(|p| p == &b.node) {
-                        sink.error_note(
-                            code::BINDING_SHADOW,
-                            b.span,
-                            format!("step binding `{}` shadows a parameter", b.node),
-                            "rename the binding — `$…` must name one thing",
-                        );
-                    } else if !seen.insert(b.node.as_str()) {
-                        sink.error(
-                            code::BINDING_SHADOW,
-                            b.span,
-                            format!("duplicate step binding `{}` in this `tx`", b.node),
-                        );
-                    }
-                    if let Some(mi) = write_model(model, cx, &mut Sink::default()) {
-                        binds.resolved.insert(b.node.clone(), mi);
-                    }
-                }
-            }
-        }
+        WriteStmt::Tx(inner) => check_tx(inner, cx, params, bindings, scoped, unscoped, sink),
         WriteStmt::Raw(raw) => {
             for part in &raw.parts {
                 if let RawPart::Param(pr) = part {
                     resolve::check_param_ref(pr, params, sink);
                 }
             }
+        }
+    }
+}
+
+/// Named step bindings (`create … as name`): a binding reaches any *prior* step. Pre-scan
+/// every binding name in this tx so a forward reference is distinguishable from a plain
+/// unbound name (both E0281); then descend, growing the reachable set after each bound
+/// create and flagging a binding that shadows a param or duplicates another (E0280).
+fn check_tx(
+    inner: &[WriteStmt],
+    cx: &Cx,
+    params: &[String],
+    bindings: &Bindings,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    sink: &mut Sink,
+) {
+    let mut binds = bindings.clone();
+    for s in inner {
+        if let WriteStmt::Create {
+            binding: Some(b), ..
+        } = s
+        {
+            binds.all.insert(b.node.clone());
+        }
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    for s in inner {
+        check_write(s, cx, params, &binds, scoped, unscoped, sink);
+        let WriteStmt::Create {
+            model,
+            binding: Some(b),
+            ..
+        } = s
+        else {
+            continue;
+        };
+        if params.iter().any(|p| p == &b.node) {
+            sink.error_note(
+                code::BINDING_SHADOW,
+                b.span,
+                format!("step binding `{}` shadows a parameter", b.node),
+                "rename the binding — `$…` must name one thing",
+            );
+        } else if !seen.insert(b.node.as_str()) {
+            sink.error(
+                code::BINDING_SHADOW,
+                b.span,
+                format!("duplicate step binding `{}` in this `tx`", b.node),
+            );
+        }
+        if let Some(mi) = write_model(model, cx, &mut Sink::default()) {
+            binds.resolved.insert(b.node.clone(), mi);
         }
     }
 }
@@ -1720,74 +1795,8 @@ fn check_upsert(
     params: &[String],
     sink: &mut Sink,
 ) {
-    let m = cx.model(mi);
     let target: Vec<&str> = oc.target.iter().map(|t| t.node.as_str()).collect();
-
-    // A tombstoned row still occupies its unique key, so a conflict would silently
-    // update the tombstone instead of inserting — surprising and unsafe.
-    if m.soft_delete.is_some() {
-        sink.error_note(
-            code::UPSERT_SOFT_DELETE,
-            oc.span,
-            format!(
-                "`on conflict` is not allowed on the @soft_delete model `{}`",
-                m.name
-            ),
-            "a tombstoned row still holds its unique key — an upsert would update it, not insert",
-        );
-    }
-
-    // The conflict target must be a declared unique key (else no collision to define).
-    if !is_unique_key(m, &target) {
-        sink.error_note(
-            code::UPSERT_TARGET,
-            oc.span,
-            format!(
-                "conflict target ({}) is not a unique key of `{}`",
-                target.join(", "),
-                m.name
-            ),
-            "name a `(unique)` column, a `@index (…) unique`, or the pk — a conflict needs a key the database enforces",
-        );
-    }
-
-    // The scope columns this mutation auto-manages on the create (the chosen alternative).
-    let scope_cols: Vec<String> = crate::scope::resolve_inject(scoped, unscoped, &[mi], cx)
-        .into_iter()
-        .flat_map(|si| si.terms)
-        .map(|(field, _)| field)
-        .collect();
-
-    // Every conflict column must have a value on the create — assigned, or engine-managed
-    // as a scope column — so the conflict, and the read-back key, resolve.
-    let assigned: Vec<&str> = create_assigns.iter().map(|a| a.col.node.as_str()).collect();
-    for t in &oc.target {
-        let set = assigned.contains(&t.node.as_str()) || scope_cols.iter().any(|c| c == &t.node);
-        if !set {
-            sink.error_note(
-                code::UPSERT_TARGET_UNSET,
-                t.span,
-                format!("conflict column `{}` is not set by the create", t.node),
-                "assign it in the create block (or let a `@scope` column supply it) so the conflict has a value",
-            );
-        }
-    }
-
-    // A scoped model's conflict target must include its scope column(s): else a conflict
-    // could match — and the update modify — a different scope's row.
-    for sc in &scope_cols {
-        if !target.iter().any(|t| t == sc) {
-            sink.error_note(
-                code::UPSERT_SCOPE,
-                oc.span,
-                format!(
-                    "conflict target on scoped `{}` omits the scope column `{sc}`",
-                    m.name
-                ),
-                "add it to the conflict target so a conflict can only match a row in the caller's own scope",
-            );
-        }
-    }
+    check_conflict_target(oc, &target, mi, create_assigns, scoped, unscoped, cx, sink);
 
     // The update branch is an ordinary update — check its assigns — but it may not assign
     // a conflict column (moving the key would break the conflict + the read-back).
@@ -1811,6 +1820,84 @@ fn check_upsert(
                     a.col.node
                 ),
                 "the update runs on a conflict *of* this key — don't move it",
+            );
+        }
+    }
+}
+
+/// The conflict target must name a key the database actually enforces, every column of it
+/// must get a value on the create, and — on a scoped model — it must include the scope
+/// columns, else a conflict could match (and the update modify) another scope's row.
+#[allow(clippy::too_many_arguments)]
+fn check_conflict_target(
+    oc: &OnConflict,
+    target: &[&str],
+    mi: usize,
+    create_assigns: &[Assign],
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let m = cx.model(mi);
+
+    // A tombstoned row still occupies its unique key, so a conflict would silently
+    // update the tombstone instead of inserting — surprising and unsafe.
+    if m.soft_delete.is_some() {
+        sink.error_note(
+            code::UPSERT_SOFT_DELETE,
+            oc.span,
+            format!(
+                "`on conflict` is not allowed on the @soft_delete model `{}`",
+                m.name
+            ),
+            "a tombstoned row still holds its unique key — an upsert would update it, not insert",
+        );
+    }
+
+    if !is_unique_key(m, target) {
+        sink.error_note(
+            code::UPSERT_TARGET,
+            oc.span,
+            format!(
+                "conflict target ({}) is not a unique key of `{}`",
+                target.join(", "),
+                m.name
+            ),
+            "name a `(unique)` column, a `@index (…) unique`, or the pk — a conflict needs a key the database enforces",
+        );
+    }
+
+    // The scope columns this mutation auto-manages on the create (the chosen alternative).
+    let scope_cols: Vec<String> = crate::scope::resolve_inject(scoped, unscoped, &[mi], cx)
+        .into_iter()
+        .flat_map(|si| si.terms)
+        .map(|(field, _)| field)
+        .collect();
+
+    let assigned: Vec<&str> = create_assigns.iter().map(|a| a.col.node.as_str()).collect();
+    for t in &oc.target {
+        let set = assigned.contains(&t.node.as_str()) || scope_cols.iter().any(|c| c == &t.node);
+        if !set {
+            sink.error_note(
+                code::UPSERT_TARGET_UNSET,
+                t.span,
+                format!("conflict column `{}` is not set by the create", t.node),
+                "assign it in the create block (or let a `@scope` column supply it) so the conflict has a value",
+            );
+        }
+    }
+
+    for sc in &scope_cols {
+        if !target.iter().any(|t| t == sc) {
+            sink.error_note(
+                code::UPSERT_SCOPE,
+                oc.span,
+                format!(
+                    "conflict target on scoped `{}` omits the scope column `{sc}`",
+                    m.name
+                ),
+                "add it to the conflict target so a conflict can only match a row in the caller's own scope",
             );
         }
     }
@@ -1896,16 +1983,15 @@ fn check_binding_ref(
 }
 
 fn write_model(name: &Ident, cx: &Cx, sink: &mut Sink) -> Option<usize> {
-    match cx.find(&name.node) {
-        Some(i) => Some(i),
-        None => {
-            sink.error(
-                code::UNKNOWN_MODEL,
-                name.span,
-                format!("unknown model `{}`", name.node),
-            );
-            None
-        }
+    if let Some(i) = cx.find(&name.node) {
+        Some(i)
+    } else {
+        sink.error(
+            code::UNKNOWN_MODEL,
+            name.span,
+            format!("unknown model `{}`", name.node),
+        );
+        None
     }
 }
 
