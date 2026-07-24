@@ -37,16 +37,16 @@ pub struct WireResponse {
 impl WireResponse {
     /// A `200` success envelope. `pub(crate)` so the listener edge (`http`) can build the
     /// same-shaped body for the operational probes it answers before `dispatch`.
-    pub(crate) fn ok(body: serde_json::Value) -> WireResponse {
-        WireResponse { status: 200, body }
+    pub(crate) fn ok(body: serde_json::Value) -> Self {
+        Self { status: 200, body }
     }
 
     /// An error envelope: `{ "error": { "code": "...", "message": "..." } }`. Public so
     /// the listener edge (`http`) can build the same-shaped response for a failure it
     /// handles before `dispatch` (a bad body, a missing/invalid `$ctx` header, a pool
     /// checkout failure).
-    pub fn error(status: u16, code: &str, message: String) -> WireResponse {
-        WireResponse {
+    pub fn error(status: u16, code: &str, message: String) -> Self {
+        Self {
             status,
             body: serde_json::json!({ "error": { "code": code, "message": message } }),
         }
@@ -307,7 +307,10 @@ pub fn resolve_shard_key(
 /// 404; a bad/missing arg or `$ctx` → 400 (the caller can fix it); an unbound placeholder
 /// is an internal invariant break (codegen/planner disagreement) → 500.
 fn plan_error_response(e: PlanError) -> WireResponse {
-    use PlanError::*;
+    use PlanError::{
+        BadArg, BadCtx, BadCursor, MissingArg, MissingCtx, UnboundPlaceholder, UnknownMutation,
+        UnknownQuery,
+    };
     let status = match &e {
         UnknownQuery(_) | UnknownMutation(_) => 404,
         MissingArg(_) | BadArg { .. } | MissingCtx(_) | BadCtx { .. } | BadCursor(_) => 400,

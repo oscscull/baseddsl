@@ -122,8 +122,8 @@ pub struct MemStore {
 }
 
 impl MemStore {
-    pub fn new() -> MemStore {
-        MemStore::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -152,7 +152,7 @@ impl IdempotencyStore for MemStore {
         // fingerprint that never matches a future `begin`, so a stray record can't be
         // replayed under a mismatched payload.
         let fp = match map.get(&k) {
-            Some(Entry::InFlight(fp)) | Some(Entry::Done(fp, _)) => *fp,
+            Some(Entry::InFlight(fp) | Entry::Done(fp, _)) => *fp,
             None => Fingerprint::MAX,
         };
         map.insert(k, Entry::Done(fp, response));

@@ -45,7 +45,7 @@ impl Compiled {
     /// Discover `**/*.bsl` under `root`, parse + check them, and lower every query.
     /// Bails with [`LoadError::Check`] on any error diagnostic (a dirty schema must
     /// never reach codegen). Warnings are tolerated — they do not affect execution.
-    pub fn load(root: &Path) -> Result<Compiled, LoadError> {
+    pub fn load(root: &Path) -> Result<Self, LoadError> {
         let project = based_manifest::discover(root).map_err(LoadError::Check)?;
         let dialect = Dialect::parse(&project.manifest.dialect);
 
@@ -68,14 +68,14 @@ impl Compiled {
             return Err(LoadError::Check(sema_diags));
         }
 
-        Ok(Compiled::from_checked(schema, decls, dialect))
+        Ok(Self::from_checked(schema, decls, dialect))
     }
 
     /// Build the served artifact from an already-checked schema + AST for a target
     /// `dialect` (the loader's tail; also the seam tests use to skip disk I/O). The
     /// SQL is lowered *and* later bound (`?` vs `$n`) for this dialect, so it must be
     /// the one the serving `Backend` speaks.
-    pub fn from_checked(schema: CheckedSchema, decls: Vec<Decl>, dialect: Dialect) -> Compiled {
+    pub fn from_checked(schema: CheckedSchema, decls: Vec<Decl>, dialect: Dialect) -> Self {
         let queries = lower_queries(&schema, &decls, dialect)
             .into_iter()
             .map(|q| (q.name.clone(), q))
@@ -84,7 +84,7 @@ impl Compiled {
             .into_iter()
             .map(|m| (m.name.clone(), m))
             .collect();
-        Compiled {
+        Self {
             schema,
             decls,
             dialect,

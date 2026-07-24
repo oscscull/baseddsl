@@ -80,7 +80,7 @@ async fn start(backend: impl Backend + 'static) -> String {
         serve_with_handle(
             compile(),
             backend,
-            TrustedHeaderContext::default(),
+            TrustedHeaderContext,
             ServeConfig { listen },
             move |h| {
                 let _ = tx.send(h);
@@ -103,8 +103,8 @@ struct Http {
 }
 
 impl Http {
-    fn new(addr: &str) -> Http {
-        Http {
+    fn new(addr: &str) -> Self {
+        Self {
             base: format!("http://{addr}"),
             client: reqwest::Client::new(),
         }
@@ -387,12 +387,10 @@ mod decoder {
     use super::*;
 
     fn chunks(parts: &[&str]) -> impl futures_core::Stream<Item = Result<Vec<u8>, std::io::Error>> {
-        futures_util::stream::iter(
-            parts
-                .iter()
-                .map(|p| Ok(p.as_bytes().to_vec()))
-                .collect::<Vec<_>>(),
-        )
+        // The collect is load-bearing: the returned stream must not borrow `parts`, so the
+        // owned bytes are materialized before `stream::iter` takes them.
+        let owned: Vec<_> = parts.iter().map(|p| Ok(p.as_bytes().to_vec())).collect();
+        futures_util::stream::iter(owned)
     }
 
     #[tokio::test]
@@ -407,7 +405,7 @@ mod decoder {
         .collect()
         .await;
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.is_ok()));
+        assert!(rows.iter().all(Result::is_ok));
         assert_eq!(rows[1].as_ref().unwrap().status, "open");
     }
 

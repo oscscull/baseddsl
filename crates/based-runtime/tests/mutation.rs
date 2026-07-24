@@ -396,8 +396,8 @@ struct DeadlockThenOk {
 }
 
 impl DeadlockThenOk {
-    fn new(deadlocks: u32, reselect: Vec<based_runtime::Row>) -> DeadlockThenOk {
-        DeadlockThenOk {
+    fn new(deadlocks: u32, reselect: Vec<based_runtime::Row>) -> Self {
+        Self {
             counters: Arc::new(Mutex::new((deadlocks, 0))),
             reselect: MockDb::new(vec![reselect]),
         }

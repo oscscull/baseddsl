@@ -38,7 +38,7 @@ const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 fn map_sqlite_err(e: sqlx::Error) -> DbError {
     let kind = match e
         .as_database_error()
-        .and_then(|d| d.code())
+        .and_then(sqlx::error::DatabaseError::code)
         .and_then(|c| c.parse::<i64>().ok())
     {
         // Extended result codes carry the primary code in the low byte.
@@ -60,7 +60,7 @@ fn bind_all<'q>(
             SqlValue::Null => q.bind(Option::<String>::None),
             SqlValue::Int(i) => q.bind(*i),
             SqlValue::Float(f) => q.bind(*f),
-            SqlValue::Bool(b) => q.bind(*b as i64),
+            SqlValue::Bool(b) => q.bind(i64::from(*b)),
             SqlValue::Text(s)
             | SqlValue::Uuid(s)
             | SqlValue::Timestamp(s)
@@ -113,8 +113,8 @@ fn decode_sqlite(
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap());
+        s.push(char::from_digit(u32::from(b & 0xf), 16).unwrap());
     }
     s
 }
@@ -196,7 +196,7 @@ impl SqliteBackend {
     /// A backend over a fresh in-memory database (`:memory:`). One shared connection,
     /// recycled forever, so writes from one request are visible to the next — no infra,
     /// no file.
-    pub fn in_memory() -> Result<SqliteBackend, DbError> {
+    pub fn in_memory() -> Result<Self, DbError> {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             // SQLite ignores FK constraints unless this pragma is ON per connection — make
@@ -211,12 +211,12 @@ impl SqliteBackend {
             .idle_timeout(None)
             .max_lifetime(None)
             .connect_lazy_with(opts);
-        Ok(SqliteBackend { pool })
+        Ok(Self { pool })
     }
 
     /// A backend over a file database at `path` (created if absent). A file database
     /// persists on its own, so an ordinary bounded pool serves it.
-    pub fn open(path: &str) -> Result<SqliteBackend, DbError> {
+    pub fn open(path: &str) -> Result<Self, DbError> {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -227,7 +227,7 @@ impl SqliteBackend {
             .idle_timeout(None)
             .max_lifetime(None)
             .connect_lazy_with(opts);
-        Ok(SqliteBackend { pool })
+        Ok(Self { pool })
     }
 
     /// Build the [`Backend`] over a caller's **existing** sqlx pool — the embed for an
@@ -242,8 +242,8 @@ impl SqliteBackend {
     /// database.
     ///
     /// [`in_memory`]: SqliteBackend::in_memory
-    pub fn from_pool(pool: SqlitePool) -> SqliteBackend {
-        SqliteBackend { pool }
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
     /// Run setup SQL (e.g. `CREATE TABLE …; INSERT …;`) against the database — a

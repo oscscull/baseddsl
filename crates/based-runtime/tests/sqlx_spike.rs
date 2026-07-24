@@ -97,6 +97,7 @@ fn assert_rust_decimal_lossy(decoded: Result<Decimal, sqlx::Error>) {
 
 // ---------- MariaDB via sqlx's MySql driver --------------------------------
 
+#[allow(clippy::too_many_lines)] // one linear value-per-type fidelity table; splitting it hides the pairing
 #[tokio::test]
 async fn mariadb_values_round_trip_through_sqlx() {
     let Some(server) = docker_mariadb::MariaDbContainer::start().await else {
@@ -180,7 +181,7 @@ async fn mariadb_values_round_trip_through_sqlx() {
     assert_eq!(row.get::<i64, _>("n"), i64::MAX);
     assert_eq!(row.get::<f64, _>("f"), 2.5);
     // BOOLEAN is TINYINT(1); the wire contract is 0/1.
-    assert_eq!(row.get::<bool, _>("ok") as i64, 1);
+    assert_eq!(i64::from(row.get::<bool, _>("ok")), 1);
     assert_eq!(
         mysql_ts(row.get::<NaiveDateTime, _>("at")),
         "2024-01-02 12:30:45"
@@ -251,6 +252,7 @@ async fn mariadb_values_round_trip_through_sqlx() {
 
 // ---------- Postgres --------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // one linear value-per-type fidelity table; splitting it hides the pairing
 #[tokio::test]
 async fn postgres_values_round_trip_through_sqlx() {
     let Some(server) = docker_postgres::PostgresContainer::start().await else {

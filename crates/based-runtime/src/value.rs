@@ -54,33 +54,33 @@ pub enum Family {
 
 impl Family {
     /// The family a primitive coerces to.
-    pub fn of(prim: Primitive) -> Family {
+    pub fn of(prim: Primitive) -> Self {
         match prim {
-            Primitive::Int => Family::Int,
-            Primitive::Float => Family::Float,
-            Primitive::Bool => Family::Bool,
-            Primitive::Json => Family::Json,
-            Primitive::Decimal { .. } => Family::Decimal,
-            Primitive::Text => Family::Text,
-            Primitive::Timestamp => Family::Timestamp,
-            Primitive::Date => Family::Date,
-            Primitive::Uuid | Primitive::Id => Family::Uuid,
+            Primitive::Int => Self::Int,
+            Primitive::Float => Self::Float,
+            Primitive::Bool => Self::Bool,
+            Primitive::Json => Self::Json,
+            Primitive::Decimal { .. } => Self::Decimal,
+            Primitive::Text => Self::Text,
+            Primitive::Timestamp => Self::Timestamp,
+            Primitive::Date => Self::Date,
+            Primitive::Uuid | Primitive::Id => Self::Uuid,
         }
     }
 
     /// A human name for the family, for a boundary error message.
     pub fn label(self) -> &'static str {
         match self {
-            Family::Int => "int",
-            Family::Float => "float",
-            Family::Bool => "bool",
-            Family::Text => "text",
-            Family::Uuid => "uuid",
-            Family::Timestamp => "timestamp",
-            Family::Date => "date",
-            Family::Decimal => "decimal",
-            Family::Json => "json",
-            Family::Any => "value",
+            Self::Int => "int",
+            Self::Float => "float",
+            Self::Bool => "bool",
+            Self::Text => "text",
+            Self::Uuid => "uuid",
+            Self::Timestamp => "timestamp",
+            Self::Date => "date",
+            Self::Decimal => "decimal",
+            Self::Json => "json",
+            Self::Any => "value",
         }
     }
 }
@@ -123,7 +123,7 @@ pub fn coerce(
             J::Number(n) if n.is_i64() => Ok(SqlValue::Int(n.as_i64().unwrap())),
             J::Number(n) if n.is_u64() => n
                 .as_u64()
-                .filter(|u| *u <= i64::MAX as u64)
+                .filter(|u| i64::try_from(*u).is_ok())
                 .map(|u| SqlValue::Int(u as i64))
                 .ok_or_else(|| CoerceError {
                     expected: family,
@@ -172,7 +172,7 @@ fn by_shape(v: &serde_json::Value) -> SqlValue {
         J::Null => SqlValue::Null,
         J::Bool(b) => SqlValue::Bool(*b),
         J::Number(n) if n.is_i64() => SqlValue::Int(n.as_i64().unwrap()),
-        J::Number(n) if n.is_u64() && n.as_u64().unwrap() <= i64::MAX as u64 => {
+        J::Number(n) if n.is_u64() && i64::try_from(n.as_u64().unwrap()).is_ok() => {
             SqlValue::Int(n.as_u64().unwrap() as i64)
         }
         J::Number(n) => SqlValue::Float(n.as_f64().unwrap_or(0.0)),

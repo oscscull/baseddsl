@@ -91,7 +91,7 @@ pub struct ApplyOpts {
 
 impl Default for ApplyOpts {
     fn default() -> Self {
-        ApplyOpts {
+        Self {
             allow_destructive: false,
             direction: Direction::Up,
         }
@@ -137,36 +137,36 @@ pub enum MigrateError {
 }
 
 impl From<DbError> for MigrateError {
-    fn from(e: DbError) -> MigrateError {
-        MigrateError::Db(e)
+    fn from(e: DbError) -> Self {
+        Self::Db(e)
     }
 }
 
 impl std::fmt::Display for MigrateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MigrateError::Db(e) => write!(f, "database error: {}", e.message),
-            MigrateError::Io(m) => write!(f, "{m}"),
-            MigrateError::Artifact(m) => write!(f, "{m}"),
-            MigrateError::Tamper { id, applied, current } => write!(
+            Self::Db(e) => write!(f, "database error: {}", e.message),
+            Self::Io(m) => write!(f, "{m}"),
+            Self::Artifact(m) => write!(f, "{m}"),
+            Self::Tamper { id, applied, current } => write!(
                 f,
                 "migration `{id}` was edited after it was applied (ledger hash {applied}, current {current}); \
                  applied history is immutable — fix forward with a new migration"
             ),
-            MigrateError::UpMigDrift { id } => write!(
+            Self::UpMigDrift { id } => write!(
                 f,
                 "migration `{id}` has a structural up.mig line edited away from schema.snap; \
                  structural steps derive from schema.snap — edit the schema and re-run \
                  `based migrate gen`, or use a raw(<dialect>) line for SQL the steps can't express"
             ),
-            MigrateError::Destructive { id } => write!(
+            Self::Destructive { id } => write!(
                 f,
                 "migration `{id}` has destructive step(s); re-run with --allow-destructive to apply"
             ),
-            MigrateError::NoDown { id } => {
+            Self::NoDown { id } => {
                 write!(f, "migration `{id}` has no down.mig — it is roll-forward only")
             }
-            MigrateError::Order(m) => write!(f, "{m}"),
+            Self::Order(m) => write!(f, "{m}"),
         }
     }
 }
@@ -200,10 +200,10 @@ pub fn load_migrations(
         }
         let snap_text = read_file(&path.join("schema.snap"))?;
         let snap = Snapshot::parse(&snap_text)
-            .map_err(|e| MigrateError::Artifact(format!("{}/schema.snap: {e}", name)))?;
+            .map_err(|e| MigrateError::Artifact(format!("{name}/schema.snap: {e}")))?;
         let steps = migrate::diff_snapshots(&prev, &snap);
         let mut up_sql = migrate::sql_statements(&steps, dialect)
-            .map_err(|e| MigrateError::Artifact(format!("{}/up.mig: {e}", name)))?;
+            .map_err(|e| MigrateError::Artifact(format!("{name}/up.mig: {e}")))?;
 
         let up_text = read_file(&path.join("up.mig"))?;
         // Structural steps are authoritative from `schema.snap`; a hand-edit to a structural
@@ -217,15 +217,15 @@ pub fn load_migrations(
         let raw_steps = migrate::parse_raw_steps(&up_text);
         up_sql.extend(
             migrate::sql_statements(&raw_steps, dialect)
-                .map_err(|e| MigrateError::Artifact(format!("{}/up.mig: {e}", name)))?,
+                .map_err(|e| MigrateError::Artifact(format!("{name}/up.mig: {e}")))?,
         );
         let up_hash = migrate::content_hash(&up_text);
-        let destructive = steps.iter().any(|s| s.destructive());
+        let destructive = steps.iter().any(based_codegen::migrate::Step::destructive);
         // The rename teach hint keys off this migration's own diff (prev → this snapshot),
         // so the destructive gate can point a drop+add at `@was` (D105).
         let rename_hints = migrate::rename_hints(&prev, &snap)
             .iter()
-            .map(|h| h.message())
+            .map(based_codegen::migrate::RenameHint::message)
             .collect();
 
         // A `down.mig` counts only if it carries an executable statement. `gen` prefills one
@@ -465,7 +465,7 @@ pub async fn apply(
 
     // The highest migration number that should remain applied after this run.
     let keep_max: u32 = match opts.direction {
-        Direction::Up => migrations.last().map(|m| m.number).unwrap_or(0),
+        Direction::Up => migrations.last().map_or(0, |m| m.number),
         Direction::To(n) => n,
         Direction::Down => match latest_applied {
             Some(top) => migrations

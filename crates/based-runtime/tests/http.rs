@@ -42,8 +42,8 @@ struct MockBackend {
 }
 
 impl MockBackend {
-    fn new(rows: Vec<Vec<Row>>) -> MockBackend {
-        MockBackend {
+    fn new(rows: Vec<Vec<Row>>) -> Self {
+        Self {
             rows,
             ready: true,
             mid_stream_fail: None,
@@ -51,8 +51,8 @@ impl MockBackend {
     }
 
     /// A backend whose readiness probe fails (the DB-down case).
-    fn not_ready() -> MockBackend {
-        MockBackend {
+    fn not_ready() -> Self {
+        Self {
             rows: vec![],
             ready: false,
             mid_stream_fail: None,
@@ -60,8 +60,8 @@ impl MockBackend {
     }
 
     /// A backend whose reads deliver `rows`, then fail with `message` mid-stream.
-    fn failing_mid_stream(rows: Vec<Row>, message: &str) -> MockBackend {
-        MockBackend {
+    fn failing_mid_stream(rows: Vec<Row>, message: &str) -> Self {
+        Self {
             rows: vec![rows],
             ready: true,
             mid_stream_fail: Some(message.to_string()),
@@ -133,7 +133,7 @@ fn start_with_handle(backend: MockBackend) -> (String, Handle, thread::JoinHandl
             .block_on(serve_with_handle(
                 compile(),
                 backend,
-                TrustedHeaderContext::default(),
+                TrustedHeaderContext,
                 config,
                 |handle| tx.send(handle).unwrap(),
             ))
@@ -562,14 +562,13 @@ async fn listener_refuses_a_guarded_schema_at_startup() {
     let err = based_runtime::http::serve(
         compiled,
         MockBackend::new(vec![]),
-        TrustedHeaderContext::default(),
+        TrustedHeaderContext,
         ServeConfig {
             listen: "127.0.0.1:0".to_string(),
         },
     )
     .await
-    .err()
-    .expect("a guarded schema must not come up on the listener");
+    .expect_err("a guarded schema must not come up on the listener");
     assert!(err.to_string().contains("caller_can_close"), "{err}");
     assert!(err.to_string().contains("Engine::with_guards"), "{err}");
 }

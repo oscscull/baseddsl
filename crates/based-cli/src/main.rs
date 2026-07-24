@@ -406,7 +406,7 @@ fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
     }
 
     // Next number is a count of existing dirs (never a timestamp — determinism).
-    let next = existing.last().map(|(n, _)| n + 1).unwrap_or(1);
+    let next = existing.last().map_or(1, |(n, _)| n + 1);
     let slug = migration_slug(name, next);
     let dir_name = format!("{next:04}_{slug}");
     let dir = migrations_dir.join(&dir_name);

@@ -207,12 +207,7 @@ async fn mutation_writes_then_reselects_declared_shape() {
     )
     .await;
     let rows = listed.body.as_array().expect("list");
-    assert_eq!(
-        rows.len(),
-        2,
-        "the created order is now readable: {:?}",
-        rows
-    );
+    assert_eq!(rows.len(), 2, "the created order is now readable: {rows:?}");
 }
 
 #[tokio::test]
@@ -1671,10 +1666,9 @@ async fn guard_reads_the_live_database_before_the_write() {
         let backend = Arc::clone(&guard_backend);
         async move {
             let id = req.args["id"].as_str().unwrap_or_default().to_string();
-            let mut conn = match backend.checkout("").await {
-                Ok(conn) => conn,
-                // Fail closed: a guard that cannot decide denies.
-                Err(_) => return GuardVerdict::deny("cannot verify order state"),
+            // Fail closed: a guard that cannot decide denies.
+            let Ok(mut conn) = backend.checkout("").await else {
+                return GuardVerdict::deny("cannot verify order state");
             };
             let rows = fetch_all(conn.fetch(
                 "SELECT `status` FROM `order` WHERE `id` = ?",

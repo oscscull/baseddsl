@@ -88,8 +88,8 @@ pub enum DbErrorKind {
 
 impl DbError {
     /// An unclassified ([`Other`](DbErrorKind::Other)) operational failure.
-    pub fn new(message: impl Into<String>) -> DbError {
-        DbError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
             message: message.into(),
             kind: DbErrorKind::Other,
         }
@@ -97,8 +97,8 @@ impl DbError {
 
     /// A failure of a specific operational [`DbErrorKind`] (the driver classifies its own
     /// error codes into these).
-    pub fn of(kind: DbErrorKind, message: impl Into<String>) -> DbError {
-        DbError {
+    pub fn of(kind: DbErrorKind, message: impl Into<String>) -> Self {
+        Self {
             message: message.into(),
             kind,
         }
@@ -156,13 +156,13 @@ pub enum RunError {
 }
 
 impl From<PlanError> for RunError {
-    fn from(e: PlanError) -> RunError {
-        RunError::Plan(e)
+    fn from(e: PlanError) -> Self {
+        Self::Plan(e)
     }
 }
 impl From<DbError> for RunError {
-    fn from(e: DbError) -> RunError {
-        RunError::Db(e)
+    fn from(e: DbError) -> Self {
+        Self::Db(e)
     }
 }
 
@@ -172,11 +172,11 @@ impl RunError {
     /// where the failure carries its own; the idempotency variants own theirs.
     pub fn code(&self) -> &'static str {
         match self {
-            RunError::Plan(e) => e.code(),
-            RunError::Db(e) => e.code(),
-            RunError::NotFound(_) => "not_found",
-            RunError::Conflict(_) => "idempotency_conflict",
-            RunError::KeyReuse(_) => "idempotency_key_reuse",
+            Self::Plan(e) => e.code(),
+            Self::Db(e) => e.code(),
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "idempotency_conflict",
+            Self::KeyReuse(_) => "idempotency_key_reuse",
         }
     }
 }
@@ -184,19 +184,19 @@ impl RunError {
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunError::Plan(e) => write!(f, "{e}"),
-            RunError::Db(e) => write!(f, "{e}"),
-            RunError::NotFound(name) => write!(
+            Self::Plan(e) => write!(f, "{e}"),
+            Self::Db(e) => write!(f, "{e}"),
+            Self::NotFound(name) => write!(
                 f,
                 "`{name}` matched no row (no such row, or it is out of scope)"
             ),
-            RunError::Conflict(key) => {
+            Self::Conflict(key) => {
                 write!(
                     f,
                     "a request with idempotency key `{key}` is already in progress"
                 )
             }
-            RunError::KeyReuse(key) => write!(
+            Self::KeyReuse(key) => write!(
                 f,
                 "idempotency key `{key}` was already used for a different request"
             ),
@@ -207,9 +207,9 @@ impl std::fmt::Display for RunError {
 impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            RunError::Plan(e) => Some(e),
-            RunError::Db(e) => Some(e),
-            RunError::NotFound(_) | RunError::Conflict(_) | RunError::KeyReuse(_) => None,
+            Self::Plan(e) => Some(e),
+            Self::Db(e) => Some(e),
+            Self::NotFound(_) | Self::Conflict(_) | Self::KeyReuse(_) => None,
         }
     }
 }
@@ -341,13 +341,10 @@ pub async fn run_mutation(
 
     // No key → the plain path (run every time). This is also what `NoStore` yields, but
     // short-circuiting here means a keyless request never touches the store at all.
-    let key = match &req.idempotency_key {
-        None => {
-            return apply(backend, shard_key, &plan)
-                .await?
-                .ok_or_else(|| RunError::NotFound(req.callable.clone()))
-        }
-        Some(k) => k,
+    let Some(key) = &req.idempotency_key else {
+        return apply(backend, shard_key, &plan)
+            .await?
+            .ok_or_else(|| RunError::NotFound(req.callable.clone()));
     };
 
     // Fingerprint the request payload (args + `$ctx`) so the store can tell a genuine
@@ -415,8 +412,7 @@ fn deadlock_backoff(attempt: u32) -> std::time::Duration {
     let step_ms = 2u64.saturating_pow(attempt).saturating_mul(2).min(100);
     let jitter = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.subsec_nanos() as u64) % step_ms.max(1))
-        .unwrap_or(0);
+        .map_or(0, |d| u64::from(d.subsec_nanos()) % step_ms.max(1));
     std::time::Duration::from_millis(step_ms + jitter)
 }
 
@@ -612,7 +608,7 @@ async fn shape<D: DbRead + ?Sized>(
     let mut rows = fetch_all(db.fetch(&plan.main.sql, &plan.main.params)).await?;
     Ok(match plan.envelope {
         // `get`: the first row, or JSON null (Option<T>).
-        Envelope::One => rows.into_iter().next().map(nest_row).unwrap_or(J::Null),
+        Envelope::One => rows.into_iter().next().map_or(J::Null, nest_row),
         // `list`: every row as an array.
         Envelope::Many => J::Array(rows.into_iter().map(nest_row).collect()),
         // paginated `list`: the { rows, cursor } envelope. For a keyset page, mint the
@@ -630,7 +626,7 @@ async fn shape<D: DbRead + ?Sized>(
                 "rows".into(),
                 J::Array(rows.into_iter().map(nest_row).collect()),
             );
-            obj.insert("cursor".into(), cursor.map(J::String).unwrap_or(J::Null));
+            obj.insert("cursor".into(), cursor.map_or(J::Null, J::String));
             if with_count {
                 if let Some(count) = &plan.count {
                     let total = fetch_all(db.fetch(&count.sql, &count.params))
@@ -681,7 +677,7 @@ pub struct MockDb {
 impl MockDb {
     /// A mock that replies to each `fetch` with the given batches, in order.
     pub fn new(responses: Vec<Vec<Row>>) -> Self {
-        MockDb {
+        Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
                 responses: responses.into(),
                 ..MockState::default()
@@ -691,7 +687,7 @@ impl MockDb {
 
     /// A mock whose every `fetch`/`execute` fails with `message` (the DB-fault path).
     pub fn failing(message: impl Into<String>) -> Self {
-        MockDb {
+        Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
                 fail: Some(message.into()),
                 ..MockState::default()
@@ -702,7 +698,7 @@ impl MockDb {
     /// A mock whose `fetch` yields `rows`, then fails with `message` — the database
     /// breaking *mid-stream*, after the read has started delivering.
     pub fn failing_mid_stream(rows: Vec<Row>, message: impl Into<String>) -> Self {
-        MockDb {
+        Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
                 responses: vec![rows].into(),
                 fail_mid_stream: Some(message.into()),

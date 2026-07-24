@@ -11,8 +11,8 @@
 //!
 //! Unlike SQLite this needs infra: an ephemeral MariaDB container. The harness
 //! ([`support::docker_mariadb`]) starts one on a random port and tears it down after; when
-//! the Docker daemon is unreachable it returns `None` and **each test skips cleanly** (logs
-//! + early-returns), so `cargo test --workspace --all-features` stays green with no daemon.
+//! the Docker daemon is unreachable it returns `None` and **each test skips cleanly**
+//! (logs, early-returns), so `cargo test --workspace --all-features` stays green with no daemon.
 //! The suite is the driver's real gate: it exercises the SQL a live MariaDB actually runs.
 
 #![cfg(feature = "docker-tests")]
@@ -719,7 +719,7 @@ async fn concurrent_transactions_surface_a_deadlock() {
         "one side must be aborted with a deadlock-class error: {results:?}"
     );
     assert!(
-        results.iter().any(|r| r.is_ok()),
+        results.iter().any(std::result::Result::is_ok),
         "the other side must commit: {results:?}"
     );
 }
@@ -768,7 +768,7 @@ async fn serve_live(compiled: Compiled, backend: ShardRouter) -> String {
         serve_with_handle(
             compiled,
             backend,
-            TrustedHeaderContext::default(),
+            TrustedHeaderContext,
             ServeConfig { listen },
             move |h| {
                 let _ = tx.send(h);

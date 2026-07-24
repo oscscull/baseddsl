@@ -93,8 +93,8 @@ impl Engine {
         compiled: Compiled,
         backend: impl Backend + 'static,
         id_gen: impl IdGen + 'static,
-    ) -> Engine {
-        match Engine::with_guards(compiled, backend, id_gen, Guards::new()) {
+    ) -> Self {
+        match Self::with_guards(compiled, backend, id_gen, Guards::new()) {
             Ok(engine) => engine,
             Err(e) => panic!("{e} (use Engine::with_guards)"),
         }
@@ -108,12 +108,12 @@ impl Engine {
         backend: impl Backend + 'static,
         id_gen: impl IdGen + 'static,
         guards: Guards,
-    ) -> Result<Engine, GuardSetupError> {
+    ) -> Result<Self, GuardSetupError> {
         let missing = guards.missing_for(&compiled);
         if !missing.is_empty() {
             return Err(GuardSetupError { missing });
         }
-        Ok(Engine {
+        Ok(Self {
             inner: Arc::new(EngineInner {
                 compiled,
                 backend: Arc::new(backend),

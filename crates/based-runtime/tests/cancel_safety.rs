@@ -112,8 +112,8 @@ struct Gate {
 }
 
 impl Gate {
-    fn cancel_at(op: usize, mode: Mode) -> Arc<Gate> {
-        Arc::new(Gate {
+    fn cancel_at(op: usize, mode: Mode) -> Arc<Self> {
+        Arc::new(Self {
             next_op: AtomicUsize::new(0),
             cancel_at: op,
             mode,
@@ -122,8 +122,8 @@ impl Gate {
     }
 
     /// A gate that never cancels — counts the ops on the path.
-    fn unlimited() -> Arc<Gate> {
-        Gate::cancel_at(usize::MAX, Mode::Before)
+    fn unlimited() -> Arc<Self> {
+        Self::cancel_at(usize::MAX, Mode::Before)
     }
 
     fn ops_seen(&self) -> usize {
@@ -193,7 +193,7 @@ impl DbRead for GateDb {
 #[async_trait]
 impl Db for GateDb {
     async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError> {
-        let GateDb { gate, inner } = *self;
+        let Self { gate, inner } = *self;
         let tx = gate.point(inner.begin()).await?;
         Ok(Box::new(GateTx { gate, inner: tx }))
     }
@@ -222,7 +222,7 @@ impl DbRead for GateTx {
 #[async_trait]
 impl Tx for GateTx {
     async fn commit(self: Box<Self>) -> Result<(), DbError> {
-        let GateTx { gate, inner } = *self;
+        let Self { gate, inner } = *self;
         gate.point(inner.commit()).await
     }
 }

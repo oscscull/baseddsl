@@ -785,7 +785,7 @@ async fn concurrent_transactions_surface_a_deadlock() {
         "one side must be aborted with a deadlock-class error: {results:?}"
     );
     assert!(
-        results.iter().any(|r| r.is_ok()),
+        results.iter().any(std::result::Result::is_ok),
         "the other side must commit: {results:?}"
     );
 }
@@ -834,7 +834,7 @@ async fn serve_live(compiled: Compiled, backend: PgRouter) -> String {
         serve_with_handle(
             compiled,
             backend,
-            TrustedHeaderContext::default(),
+            TrustedHeaderContext,
             ServeConfig { listen },
             move |h| {
                 let _ = tx.send(h);

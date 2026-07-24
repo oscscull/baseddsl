@@ -25,7 +25,7 @@ use docker_mariadb::MariaDbContainer;
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new() -> Scratch {
+    fn new() -> Self {
         let mut dir = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -33,7 +33,7 @@ impl Scratch {
             .as_nanos();
         dir.push(format!("based-apply-maria-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
+        Self(dir)
     }
     fn migration(&self, name: &str, up: &str, snap: &str) {
         let dir = self.0.join("migrations").join(name);

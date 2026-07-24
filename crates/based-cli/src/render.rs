@@ -61,8 +61,7 @@ fn locate(src: &str, offset: usize) -> Loc<'_> {
     }
     let line_end = src[line_start..]
         .find('\n')
-        .map(|n| line_start + n)
-        .unwrap_or(src.len());
+        .map_or(src.len(), |n| line_start + n);
     Loc {
         line,
         col: offset - line_start + 1,

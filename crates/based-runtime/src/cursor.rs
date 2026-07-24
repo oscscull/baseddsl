@@ -54,7 +54,7 @@ pub fn decode(s: &str, n: usize) -> Result<Vec<serde_json::Value>, CursorError> 
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h

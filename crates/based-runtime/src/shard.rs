@@ -41,8 +41,8 @@ impl Default for PoolConfig {
     /// box's connection limit (scale for load by adding shards + instances), a few-second
     /// checkout wait, and a generous per-statement ceiling (a hardening backstop for a
     /// runaway query, not a tight SLA; a deployment tightens it).
-    fn default() -> PoolConfig {
-        PoolConfig {
+    fn default() -> Self {
+        Self {
             min: 4,
             max: 32,
             checkout_timeout: Duration::from_secs(5),
@@ -59,7 +59,7 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h = OFFSET;
     for &b in bytes {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(PRIME);
     }
     h
@@ -82,7 +82,7 @@ mod tests {
         let expect = {
             let mut h = 0xcbf2_9ce4_8422_2325u64;
             for &b in b"org-1" {
-                h ^= b as u64;
+                h ^= u64::from(b);
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
             h % LOGICAL_SHARDS as u64

@@ -42,7 +42,10 @@ use crate::value::SqlValue;
 /// retry it. A `statement_timeout` cancel (`57014`) is not retried — re-running would just
 /// time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
 fn map_pg_err(e: sqlx::Error) -> DbError {
-    let kind = match e.as_database_error().and_then(|d| d.code()) {
+    let kind = match e
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+    {
         Some(c) if c == "40P01" || c == "40001" => DbErrorKind::Deadlock,
         _ => DbErrorKind::Other,
     };
@@ -182,11 +185,11 @@ fn decode_pg_binary(ty: &str, b: &[u8]) -> serde_json::Value {
     use serde_json::Value as J;
     match ty {
         "BOOL" => J::Bool(b.first().is_some_and(|v| *v != 0)),
-        "INT2" => read_i16(b).map_or(J::Null, |n| J::Number((n as i64).into())),
-        "INT4" => read_i32(b).map_or(J::Null, |n| J::Number((n as i64).into())),
+        "INT2" => read_i16(b).map_or(J::Null, |n| J::Number(i64::from(n).into())),
+        "INT4" => read_i32(b).map_or(J::Null, |n| J::Number(i64::from(n).into())),
         "INT8" => read_i64(b).map_or(J::Null, |n| J::Number(n.into())),
         "FLOAT4" => read_i32(b)
-            .and_then(|n| serde_json::Number::from_f64(f32::from_bits(n as u32) as f64))
+            .and_then(|n| serde_json::Number::from_f64(f64::from(f32::from_bits(n as u32))))
             .map_or(J::Null, J::Number),
         "FLOAT8" => read_i64(b)
             .and_then(|n| serde_json::Number::from_f64(f64::from_bits(n as u64)))
@@ -213,10 +216,7 @@ fn decode_pg_text(ty: &str, s: &str) -> serde_json::Value {
     use serde_json::Value as J;
     match ty {
         "BOOL" => J::Bool(s == "t"),
-        "INT2" | "INT4" | "INT8" => s
-            .parse::<i64>()
-            .map(|n| J::Number(n.into()))
-            .unwrap_or(J::Null),
+        "INT2" | "INT4" | "INT8" => s.parse::<i64>().map_or(J::Null, |n| J::Number(n.into())),
         "FLOAT4" | "FLOAT8" => s
             .parse::<f64>()
             .ok()
@@ -274,7 +274,7 @@ fn pg_date(b: &[u8]) -> serde_json::Value {
     let Some(days) = read_i32(b) else {
         return serde_json::Value::String(hex(b));
     };
-    let (y, m, d) = civil_from_days(days as i64 + PG_EPOCH_DAYS_FROM_UNIX);
+    let (y, m, d) = civil_from_days(i64::from(days) + PG_EPOCH_DAYS_FROM_UNIX);
     serde_json::Value::String(format!("{y:04}-{m:02}-{d:02}"))
 }
 
@@ -305,7 +305,7 @@ fn pg_numeric(b: &[u8]) -> serde_json::Value {
     }
     let rd = |o: usize| i16::from_be_bytes([b[o], b[o + 1]]);
     let ndigits = rd(0);
-    let weight = rd(2) as i32;
+    let weight = i32::from(rd(2));
     let sign = rd(4) as u16;
     let dscale = rd(6).max(0) as usize;
     if sign == 0xC000 {
@@ -384,7 +384,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64; // day of era, [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era, [0, 399]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // year of era, [0, 399]
     let y = yoe as i64 + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year (Mar-based), [0, 365]
     let mp = (5 * doy + 2) / 153; // Mar-based month, [0, 11]
@@ -397,8 +397,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap());
+        s.push(char::from_digit(u32::from(b & 0xf), 16).unwrap());
     }
     s
 }
@@ -413,8 +413,8 @@ pub struct PostgresDb {
 
 impl PostgresDb {
     /// Wrap an already-checked-out connection (the router hands these out).
-    pub fn new(conn: PoolConnection<Postgres>) -> PostgresDb {
-        PostgresDb { conn }
+    pub fn new(conn: PoolConnection<Postgres>) -> Self {
+        Self { conn }
     }
 }
 
@@ -506,7 +506,7 @@ impl PgRouter {
     /// Build a router over `urls` (one Postgres per physical shard), each with a bounded
     /// pool. Adding a shard later re-runs this with the new URL list; only the logical
     /// shards that move need migrating — existing keys keep hashing the same.
-    pub fn new(urls: &[String], pool: PoolConfig) -> Result<PgRouter, DbError> {
+    pub fn new(urls: &[String], pool: PoolConfig) -> Result<Self, DbError> {
         if urls.is_empty() {
             return Err(DbError::new("shard router needs at least one database url"));
         }
@@ -516,13 +516,13 @@ impl PgRouter {
             .collect::<Result<Vec<_>, _>>()?;
         let n = shards.len();
         let assign = (0..LOGICAL_SHARDS).map(|i| i % n).collect();
-        Ok(PgRouter { shards, assign })
+        Ok(Self { shards, assign })
     }
 
     /// The common case: one physical shard (all logical shards map to it). The router is
     /// still the seam — splitting later is a config change, not a code change.
-    pub fn single(url: &str, pool: PoolConfig) -> Result<PgRouter, DbError> {
-        PgRouter::new(std::slice::from_ref(&url.to_string()), pool)
+    pub fn single(url: &str, pool: PoolConfig) -> Result<Self, DbError> {
+        Self::new(std::slice::from_ref(&url.to_string()), pool)
     }
 
     /// Build the [`Backend`] over a caller's **existing** sqlx pool — the embed for an
@@ -540,8 +540,8 @@ impl PgRouter {
     /// [`PoolExhausted`](crate::run::DbErrorKind::PoolExhausted) when its own
     /// `acquire_timeout` elapses (sqlx's default is 30s), and deadlock-retry works
     /// unchanged (each attempt is a fresh checkout).
-    pub fn from_pool(pool: PgPool) -> PgRouter {
-        PgRouter {
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self {
             shards: vec![pool],
             assign: vec![0; LOGICAL_SHARDS],
         }
@@ -583,7 +583,7 @@ impl PgRouter {
 #[async_trait]
 impl Backend for PgRouter {
     async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
-        Ok(Box::new(PgRouter::checkout(self, shard_key).await?))
+        Ok(Box::new(Self::checkout(self, shard_key).await?))
     }
 
     /// Readiness = every physical shard's pool can hand out a connection that answers

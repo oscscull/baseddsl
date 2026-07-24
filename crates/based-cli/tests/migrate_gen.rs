@@ -8,7 +8,7 @@ use std::process::Command;
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(tag: &str) -> Scratch {
+    fn new(tag: &str) -> Self {
         let mut dir = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -19,7 +19,7 @@ impl Scratch {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
+        Self(dir)
     }
     fn write(&self, rel: &str, contents: &str) {
         let path = self.0.join(rel);

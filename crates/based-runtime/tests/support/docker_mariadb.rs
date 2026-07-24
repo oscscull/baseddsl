@@ -69,7 +69,7 @@ impl MariaDbContainer {
     /// container); otherwise spins an ephemeral container via Docker. Returns `None` (after
     /// logging why) when neither is reachable/ready — the caller skips the test rather than
     /// failing it.
-    pub async fn start() -> Option<MariaDbContainer> {
+    pub async fn start() -> Option<Self> {
         // CI-provided server takes precedence: connect to it after the readiness-wait.
         if let Ok(url) = std::env::var(URL_ENV) {
             let url = url.trim().to_string();
@@ -82,7 +82,7 @@ impl MariaDbContainer {
                     );
                     return None;
                 }
-                return Some(MariaDbContainer {
+                return Some(Self {
                     kind: Kind::External { url },
                 });
             }
@@ -126,15 +126,12 @@ impl MariaDbContainer {
         }
         let id = String::from_utf8_lossy(&run.stdout).trim().to_string();
 
-        let port = match mapped_port(&id) {
-            Some(p) => p,
-            None => {
-                eprintln!("[docker-mariadb] SKIP: could not read the mapped host port");
-                remove(&id);
-                return None;
-            }
+        let Some(port) = mapped_port(&id) else {
+            eprintln!("[docker-mariadb] SKIP: could not read the mapped host port");
+            remove(&id);
+            return None;
         };
-        let container = MariaDbContainer {
+        let container = Self {
             kind: Kind::Spun { id, port },
         };
 
@@ -218,8 +215,7 @@ fn docker_available() -> bool {
     Command::new("docker")
         .arg("info")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Read the host port Docker mapped to the container's 3306 (`docker port <id> 3306/tcp`

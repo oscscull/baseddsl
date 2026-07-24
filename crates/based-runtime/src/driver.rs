@@ -82,7 +82,7 @@ fn bind_all<'q>(
             SqlValue::Null => q.bind(Option::<String>::None),
             SqlValue::Int(i) => q.bind(*i),
             SqlValue::Float(f) => q.bind(*f),
-            SqlValue::Bool(b) => q.bind(*b as i64),
+            SqlValue::Bool(b) => q.bind(i64::from(*b)),
             SqlValue::Text(s)
             | SqlValue::Uuid(s)
             | SqlValue::Timestamp(s)
@@ -125,7 +125,7 @@ fn decode_mysql(row: &MySqlRow, i: usize, ty: &str) -> Result<serde_json::Value,
         }
         "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
         | "BIGINT UNSIGNED" => J::Number(row.try_get_unchecked::<u64, _>(i)?.into()),
-        "FLOAT" => serde_json::Number::from_f64(row.try_get_unchecked::<f32, _>(i)? as f64)
+        "FLOAT" => serde_json::Number::from_f64(f64::from(row.try_get_unchecked::<f32, _>(i)?))
             .map_or(J::Null, J::Number),
         "DOUBLE" => serde_json::Number::from_f64(row.try_get_unchecked::<f64, _>(i)?)
             .map_or(J::Null, J::Number),
@@ -182,8 +182,8 @@ fn mysql_time(t: chrono::NaiveTime) -> String {
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap());
+        s.push(char::from_digit(u32::from(b & 0xf), 16).unwrap());
     }
     s
 }
@@ -198,8 +198,8 @@ pub struct MariaDb {
 
 impl MariaDb {
     /// Wrap an already-checked-out connection (the router hands these out).
-    pub fn new(conn: PoolConnection<MySql>) -> MariaDb {
-        MariaDb { conn }
+    pub fn new(conn: PoolConnection<MySql>) -> Self {
+        Self { conn }
     }
 }
 
@@ -282,7 +282,7 @@ impl ShardRouter {
     /// pool, distributing the logical-shard space as evenly as possible across them.
     /// Adding a shard later re-runs this with the new URL list; only the logical shards
     /// that move need their data migrated — existing keys keep hashing the same.
-    pub fn new(urls: &[String], pool: PoolConfig) -> Result<ShardRouter, DbError> {
+    pub fn new(urls: &[String], pool: PoolConfig) -> Result<Self, DbError> {
         if urls.is_empty() {
             return Err(DbError::new("shard router needs at least one database url"));
         }
@@ -294,13 +294,13 @@ impl ShardRouter {
         // the default balance; a deployment can later hand-assign to move hot shards.
         let n = shards.len();
         let assign = (0..LOGICAL_SHARDS).map(|i| i % n).collect();
-        Ok(ShardRouter { shards, assign })
+        Ok(Self { shards, assign })
     }
 
     /// The common case: one physical shard (all logical shards map to it). The router
     /// is still the seam — splitting later is a config change, not a code change.
-    pub fn single(url: &str, pool: PoolConfig) -> Result<ShardRouter, DbError> {
-        ShardRouter::new(std::slice::from_ref(&url.to_string()), pool)
+    pub fn single(url: &str, pool: PoolConfig) -> Result<Self, DbError> {
+        Self::new(std::slice::from_ref(&url.to_string()), pool)
     }
 
     /// Build the [`Backend`] over a caller's **existing** sqlx pool — the embed for an
@@ -318,8 +318,8 @@ impl ShardRouter {
     /// [`PoolExhausted`](crate::run::DbErrorKind::PoolExhausted) when its own
     /// `acquire_timeout` elapses (sqlx's default is 30s), and deadlock-retry works
     /// unchanged (each attempt is a fresh checkout).
-    pub fn from_pool(pool: MySqlPool) -> ShardRouter {
-        ShardRouter {
+    pub fn from_pool(pool: MySqlPool) -> Self {
+        Self {
             shards: vec![pool],
             assign: vec![0; LOGICAL_SHARDS],
         }
@@ -360,7 +360,7 @@ impl ShardRouter {
 #[async_trait]
 impl Backend for ShardRouter {
     async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
-        Ok(Box::new(ShardRouter::checkout(self, shard_key).await?))
+        Ok(Box::new(Self::checkout(self, shard_key).await?))
     }
 
     /// Readiness = *every* physical shard's pool can hand out a connection. A single
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(fnv1a_64(b"org-1") % LOGICAL_SHARDS as u64, {
             let mut h = 0xcbf2_9ce4_8422_2325u64;
             for &b in b"org-1" {
-                h ^= b as u64;
+                h ^= u64::from(b);
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
             h % LOGICAL_SHARDS as u64

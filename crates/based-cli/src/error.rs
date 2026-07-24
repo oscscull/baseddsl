@@ -33,8 +33,8 @@ enum Kind {
 
 impl CliError {
     /// A usage/config mistake the caller must fix. Exit code 2.
-    pub fn usage(message: impl Into<String>) -> CliError {
-        CliError {
+    pub fn usage(message: impl Into<String>) -> Self {
+        Self {
             kind: Kind::Usage,
             message: message.into(),
             source: None,
@@ -43,8 +43,8 @@ impl CliError {
     }
 
     /// An operational failure while running the command. Exit code 1.
-    pub fn failure(message: impl Into<String>) -> CliError {
-        CliError {
+    pub fn failure(message: impl Into<String>) -> Self {
+        Self {
             kind: Kind::Failure,
             message: message.into(),
             source: None,
@@ -54,8 +54,8 @@ impl CliError {
 
     /// A summary line for a command whose per-item detail is already on stderr (the
     /// rustc-style diagnostics, or a `verify`/`status` problem list). Printed as-is.
-    pub fn summary(kind_usage: bool, message: impl Into<String>) -> CliError {
-        CliError {
+    pub fn summary(kind_usage: bool, message: impl Into<String>) -> Self {
+        Self {
             kind: if kind_usage {
                 Kind::Usage
             } else {
@@ -71,8 +71,8 @@ impl CliError {
     pub fn io(
         context: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
-    ) -> CliError {
-        CliError {
+    ) -> Self {
+        Self {
             kind: Kind::Failure,
             message: context.into(),
             source: Some(Box::new(source)),
@@ -84,8 +84,8 @@ impl CliError {
     pub fn caused_by(
         message: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
-    ) -> CliError {
-        CliError {
+    ) -> Self {
+        Self {
             kind: Kind::Failure,
             message: message.into(),
             source: Some(Box::new(source)),
@@ -96,12 +96,12 @@ impl CliError {
     /// A migration failure. A destructive step needing `--allow-destructive` is the
     /// caller's to fix (usage); everything else is operational. The typed error is kept
     /// in the chain, so its `Display` (and any wrapped `DbError`) reads through.
-    pub fn migrate(context: impl Into<String>, source: MigrateError) -> CliError {
+    pub fn migrate(context: impl Into<String>, source: MigrateError) -> Self {
         let kind = match source {
             MigrateError::Destructive { .. } => Kind::Usage,
             _ => Kind::Failure,
         };
-        CliError {
+        Self {
             kind,
             message: context.into(),
             source: Some(Box::new(source)),
@@ -110,8 +110,8 @@ impl CliError {
     }
 
     /// A database failure, carrying the driver's message + machine code in the chain.
-    pub fn db(context: impl Into<String>, source: DbError) -> CliError {
-        CliError {
+    pub fn db(context: impl Into<String>, source: DbError) -> Self {
+        Self {
             kind: Kind::Failure,
             message: context.into(),
             source: Some(Box::new(source)),

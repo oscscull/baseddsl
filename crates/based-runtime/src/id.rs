@@ -26,7 +26,7 @@ pub struct SeqIdGen {
 impl SeqIdGen {
     /// A generator yielding `<prefix>-0`, `<prefix>-1`, …
     pub fn new(prefix: impl Into<String>) -> Self {
-        SeqIdGen {
+        Self {
             prefix: prefix.into(),
             n: std::sync::atomic::AtomicU64::new(0),
         }
@@ -36,7 +36,7 @@ impl SeqIdGen {
 impl Default for SeqIdGen {
     /// Ids of the form `id-0`, `id-1`, …
     fn default() -> Self {
-        SeqIdGen::new("id")
+        Self::new("id")
     }
 }
 

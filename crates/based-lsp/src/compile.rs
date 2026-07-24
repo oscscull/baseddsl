@@ -337,7 +337,7 @@ impl Snapshot {
             let (lo, hi) = (span.start as usize, (span.end as usize).min(src.len()));
             // Fold from the block's opening brace when there is one, else the decl's
             // own start; the close is the span's last byte (the `}` / `)` / `;`).
-            let open = src[lo..hi].find('{').map(|i| lo + i).unwrap_or(lo);
+            let open = src[lo..hi].find('{').map_or(lo, |i| lo + i);
             let start_line = idx.position(open).line;
             let end_line = idx.position(hi.saturating_sub(1)).line;
             if end_line > start_line {
@@ -845,7 +845,7 @@ impl Snapshot {
                 // The binding region runs from the end of the param head (its type
                 // annotation, or the bare name) through the bound ident, so the
                 // `->` / operator token between them is hoverable too.
-                let head_end = p.ty.as_ref().map(|t| t.span.end).unwrap_or(p.name.span.end);
+                let head_end = p.ty.as_ref().map_or(p.name.span.end, |t| t.span.end);
                 match &p.binding {
                     Some(ParamBinding::Edge(edge)) => {
                         if edge.span.file.0 as usize == fid
@@ -957,9 +957,8 @@ impl Snapshot {
                     let Some(root) = root else { continue };
                     for p in &q.params {
                         match &p.binding {
-                            Some(ParamBinding::Edge(id))
-                            | Some(ParamBinding::ColOp { col: id, .. }) => {
-                                out.push((root, std::slice::from_ref(id)))
+                            Some(ParamBinding::Edge(id) | ParamBinding::ColOp { col: id, .. }) => {
+                                out.push((root, std::slice::from_ref(id)));
                             }
                             None => {}
                         }
@@ -1023,19 +1022,12 @@ impl Snapshot {
                 // references (rooted at `from`); the body reaches the far model.
                 ShapeField::Flatten { path, body, .. } => {
                     out.push((from, &path.segments));
-                    let mut cur = from;
-                    let mut ok = true;
-                    for seg in &path.segments {
-                        match self.relation_target(cur, &seg.node) {
-                            Some(t) => cur = t,
-                            None => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok {
-                        self.shape_paths(cur, body, out);
+                    let far = path
+                        .segments
+                        .iter()
+                        .try_fold(from, |cur, seg| self.relation_target(cur, &seg.node));
+                    if let Some(far) = far {
+                        self.shape_paths(far, body, out);
                     }
                 }
             }
@@ -1221,7 +1213,7 @@ impl Snapshot {
                 WriteStmt::Delete { model, where_ }
                 | WriteStmt::Restore { model, where_ }
                 | WriteStmt::HardDelete { model, where_ } => {
-                    self.pred_variant_sites(where_, model.node.as_str(), out)
+                    self.pred_variant_sites(where_, model.node.as_str(), out);
                 }
                 WriteStmt::Tx(inner) => self.write_variant_sites(inner, out),
                 WriteStmt::Raw(_) => {}
@@ -1416,16 +1408,16 @@ impl Snapshot {
                     ));
                 }
                 Decl::Shape(s) if here(s.span) => {
-                    out.push(symbol(&s.name, SymbolKind::INTERFACE, s.span, idx, None))
+                    out.push(symbol(&s.name, SymbolKind::INTERFACE, s.span, idx, None));
                 }
                 Decl::Query(q) if here(q.span) => {
-                    out.push(symbol(&q.name, SymbolKind::FUNCTION, q.span, idx, None))
+                    out.push(symbol(&q.name, SymbolKind::FUNCTION, q.span, idx, None));
                 }
                 Decl::Mutation(m) if here(m.span) => {
-                    out.push(symbol(&m.name, SymbolKind::METHOD, m.span, idx, None))
+                    out.push(symbol(&m.name, SymbolKind::METHOD, m.span, idx, None));
                 }
                 Decl::Filter(f) if here(f.span) => {
-                    out.push(symbol(&f.name, SymbolKind::FUNCTION, f.span, idx, None))
+                    out.push(symbol(&f.name, SymbolKind::FUNCTION, f.span, idx, None));
                 }
                 _ => {}
             }
@@ -1910,7 +1902,7 @@ fn collect_shape_body_refs<'a>(body: &'a [ShapeField], out: &mut Vec<&'a Ident>)
     for f in body {
         match f {
             ShapeField::Nest { body, .. } | ShapeField::Flatten { body, .. } => {
-                collect_shape_body_refs(body, out)
+                collect_shape_body_refs(body, out);
             }
             ShapeField::NestRef { shape, .. } => out.push(shape),
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
@@ -2143,7 +2135,7 @@ fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>)
             WriteStmt::Delete { model, where_ }
             | WriteStmt::Restore { model, where_ }
             | WriteStmt::HardDelete { model, where_ } => {
-                pred_paths(where_, model.node.as_str(), out)
+                pred_paths(where_, model.node.as_str(), out);
             }
             WriteStmt::Tx(inner) => write_paths(inner, out),
             WriteStmt::Raw(_) => {}
@@ -2259,22 +2251,22 @@ fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
             WriteStmt::Create {
                 assigns, conflict, ..
             } => {
-                assigns
-                    .iter()
-                    .for_each(|a| assign_rhs_param_refs(&a.value, out));
+                for a in assigns {
+                    assign_rhs_param_refs(&a.value, out);
+                }
                 if let Some(oc) = conflict {
-                    oc.update
-                        .iter()
-                        .for_each(|a| assign_rhs_param_refs(&a.value, out));
+                    for a in &oc.update {
+                        assign_rhs_param_refs(&a.value, out);
+                    }
                 }
             }
             WriteStmt::Update {
                 where_, assigns, ..
             } => {
                 pred_param_refs(where_, out);
-                assigns
-                    .iter()
-                    .for_each(|a| assign_rhs_param_refs(&a.value, out));
+                for a in assigns {
+                    assign_rhs_param_refs(&a.value, out);
+                }
             }
             WriteStmt::Delete { where_, .. }
             | WriteStmt::Restore { where_, .. }
@@ -2332,7 +2324,7 @@ fn raw_param_refs<'a>(r: &'a RawSql, out: &mut Vec<&'a ParamRef>) {
 /// preceding newline, or 0). Where a leading `@was` decorator line is inserted.
 fn line_start(src: &str, off: u32) -> usize {
     let o = (off as usize).min(src.len());
-    src[..o].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    src[..o].rfind('\n').map_or(0, |i| i + 1)
 }
 
 /// The start byte offset of a spanned model member (field / index). A raw
@@ -2696,13 +2688,13 @@ fn latest_snapshot(root: &Path) -> Option<based_codegen::migrate::Snapshot> {
     let dir = root.join("migrations");
     let mut best: Option<(u32, PathBuf)> = None;
     for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some((num, _)) = name.split_once('_') {
             if let Ok(n) = num.parse::<u32>() {
-                if best.as_ref().map(|(b, _)| n > *b).unwrap_or(true) {
+                if best.as_ref().is_none_or(|(b, _)| n > *b) {
                     best = Some((n, entry.path()));
                 }
             }
@@ -2852,7 +2844,7 @@ impl LineIndex {
                 line_starts.push(i + 1);
             }
         }
-        LineIndex {
+        Self {
             src: src.to_string(),
             line_starts,
         }
@@ -2906,8 +2898,7 @@ impl LineIndex {
         let start = self.line_starts[line];
         let end = self.src[start..]
             .find('\n')
-            .map(|n| start + n)
-            .unwrap_or(self.src.len());
+            .map_or(self.src.len(), |n| start + n);
         self.position(end)
     }
 }
@@ -3329,7 +3320,7 @@ mod tests {
             .iter()
             .find_map(|h| match &h.label {
                 InlayHintLabel::LabelParts(p) => Some(p),
-                _ => None,
+                InlayHintLabel::String(_) => None,
             })
             .expect("an inverse hint rendered as label parts");
         assert_eq!(parts.len(), 1);
@@ -4488,7 +4479,7 @@ mutation mark(id: Id) -> OrderRow { update Order where (id = $id) { status = shi
             let root =
                 std::env::temp_dir().join(format!("based-lsp-{tag}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&root).unwrap();
-            TempWorkspace { root }
+            Self { root }
         }
 
         fn path(&self, rel: &str) -> PathBuf {

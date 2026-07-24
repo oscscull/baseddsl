@@ -238,10 +238,10 @@ impl EdgeError {
     /// follow. Stable across releases.
     fn code(&self) -> &'static str {
         match self {
-            EdgeError::BadContext => "bad_context",
-            EdgeError::BadBody(_) => "bad_body",
-            EdgeError::Draining => "draining",
-            EdgeError::NotReady(_) => "not_ready",
+            Self::BadContext => "bad_context",
+            Self::BadBody(_) => "bad_body",
+            Self::Draining => "draining",
+            Self::NotReady(_) => "not_ready",
         }
     }
 
@@ -249,8 +249,8 @@ impl EdgeError {
     /// is `400`; a drain/readiness refusal is a retryable `503`.
     fn status(&self) -> u16 {
         match self {
-            EdgeError::BadContext | EdgeError::BadBody(_) => 400,
-            EdgeError::Draining | EdgeError::NotReady(_) => 503,
+            Self::BadContext | Self::BadBody(_) => 400,
+            Self::Draining | Self::NotReady(_) => 503,
         }
     }
 }
@@ -258,10 +258,10 @@ impl EdgeError {
 impl std::fmt::Display for EdgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EdgeError::BadContext => f.write_str("X-Based-Context is not a JSON object"),
-            EdgeError::BadBody(reason) => f.write_str(reason),
-            EdgeError::Draining => f.write_str("server is shutting down"),
-            EdgeError::NotReady(message) => f.write_str(message),
+            Self::BadContext => f.write_str("X-Based-Context is not a JSON object"),
+            Self::BadBody(reason) => f.write_str(reason),
+            Self::Draining => f.write_str("server is shutting down"),
+            Self::NotReady(message) => f.write_str(message),
         }
     }
 }
@@ -269,8 +269,8 @@ impl std::fmt::Display for EdgeError {
 impl std::error::Error for EdgeError {}
 
 impl From<EdgeError> for WireResponse {
-    fn from(e: EdgeError) -> WireResponse {
-        WireResponse::error(e.status(), e.code(), e.to_string())
+    fn from(e: EdgeError) -> Self {
+        Self::error(e.status(), e.code(), e.to_string())
     }
 }
 

@@ -68,7 +68,7 @@ impl PostgresContainer {
     /// Prefers an externally-provided server (`TEST_POSTGRES_URL`, e.g. a CI service
     /// container); otherwise spins an ephemeral container via Docker. Returns `None` (after
     /// logging why) when neither is reachable/ready — the caller skips rather than failing.
-    pub async fn start() -> Option<PostgresContainer> {
+    pub async fn start() -> Option<Self> {
         // CI-provided server takes precedence: connect to it after the readiness-wait.
         if let Ok(url) = std::env::var(URL_ENV) {
             let url = url.trim().to_string();
@@ -81,7 +81,7 @@ impl PostgresContainer {
                     );
                     return None;
                 }
-                return Some(PostgresContainer {
+                return Some(Self {
                     kind: Kind::External { url },
                 });
             }
@@ -122,15 +122,12 @@ impl PostgresContainer {
         }
         let id = String::from_utf8_lossy(&run.stdout).trim().to_string();
 
-        let port = match mapped_port(&id) {
-            Some(p) => p,
-            None => {
-                eprintln!("[docker-postgres] SKIP: could not read the mapped host port");
-                remove(&id);
-                return None;
-            }
+        let Some(port) = mapped_port(&id) else {
+            eprintln!("[docker-postgres] SKIP: could not read the mapped host port");
+            remove(&id);
+            return None;
         };
-        let container = PostgresContainer {
+        let container = Self {
             kind: Kind::Spun { id, port },
         };
 
@@ -213,8 +210,7 @@ fn docker_available() -> bool {
     Command::new("docker")
         .arg("info")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Read the host port Docker mapped to the container's 5432 (`docker port <id> 5432/tcp`

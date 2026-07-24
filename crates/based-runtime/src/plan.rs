@@ -45,7 +45,7 @@ impl Request {
         args: serde_json::Value,
         ctx: serde_json::Value,
     ) -> Self {
-        Request {
+        Self {
             callable: callable.into(),
             args: args.as_object().cloned().unwrap_or_default(),
             ctx: ctx.as_object().cloned().unwrap_or_default(),
@@ -82,7 +82,7 @@ impl Request {
         for part in [&self.args, &self.ctx] {
             let s = serde_json::Value::Object(part.clone()).to_string();
             for b in s.as_bytes() {
-                h ^= *b as u64;
+                h ^= u64::from(*b);
                 h = h.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime.
             }
             // A separator byte between the two maps.
@@ -195,7 +195,10 @@ impl PlanError {
     /// the wire `error.code` (`serve`) and any library consumer that branches on the class
     /// of failure rather than the message text. Stable across releases.
     pub fn code(&self) -> &'static str {
-        use PlanError::*;
+        use PlanError::{
+            BadArg, BadCtx, BadCursor, MissingArg, MissingCtx, UnboundPlaceholder, UnknownMutation,
+            UnknownQuery,
+        };
         match self {
             UnknownQuery(_) => "unknown_query",
             UnknownMutation(_) => "unknown_mutation",
@@ -211,7 +214,10 @@ impl PlanError {
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use PlanError::*;
+        use PlanError::{
+            BadArg, BadCtx, BadCursor, MissingArg, MissingCtx, UnboundPlaceholder, UnknownMutation,
+            UnknownQuery,
+        };
         match self {
             UnknownQuery(n) => write!(f, "no query `{n}`"),
             UnknownMutation(n) => write!(f, "no mutation `{n}`"),
@@ -421,7 +427,7 @@ struct Env {
 
 impl Env {
     fn new(dialect: based_codegen::Dialect) -> Self {
-        Env {
+        Self {
             dialect,
             values: std::collections::HashMap::new(),
         }
@@ -452,17 +458,16 @@ fn bind_param(
     optional: bool,
     req: &Request,
 ) -> Result<SqlValue, PlanError> {
-    match req.args.get(&p.name.node) {
-        Some(v) => coerce(v, family, optional).map_err(|e| bad_arg(&p.name.node, e)),
-        None => {
-            if let Some(dv) = &p.default {
-                return Ok(default_value(schema, p, dv, family));
-            }
-            if optional {
-                return Ok(SqlValue::Null);
-            }
-            Err(PlanError::MissingArg(p.name.node.clone()))
+    if let Some(v) = req.args.get(&p.name.node) {
+        coerce(v, family, optional).map_err(|e| bad_arg(&p.name.node, e))
+    } else {
+        if let Some(dv) = &p.default {
+            return Ok(default_value(schema, p, dv, family));
         }
+        if optional {
+            return Ok(SqlValue::Null);
+        }
+        Err(PlanError::MissingArg(p.name.node.clone()))
     }
 }
 

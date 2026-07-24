@@ -511,7 +511,7 @@ impl LanguageServer for Backend {
                 let offset = idx.offset(*pos) as u32;
                 snapshot
                     .selection_range(fid, offset)
-                    .unwrap_or(SelectionRange {
+                    .unwrap_or_else(|| SelectionRange {
                         range: Range::new(*pos, *pos),
                         parent: None,
                     })

@@ -77,8 +77,8 @@ pub enum GuardVerdict {
 
 impl GuardVerdict {
     /// Deny with a reason (the wire message the caller sees).
-    pub fn deny(message: impl Into<String>) -> GuardVerdict {
-        GuardVerdict::Deny {
+    pub fn deny(message: impl Into<String>) -> Self {
+        Self::Deny {
             message: message.into(),
         }
     }
@@ -98,13 +98,13 @@ pub struct Guards {
 
 impl Guards {
     /// An empty registry. Register implementations with [`Guards::register`].
-    pub fn new() -> Guards {
-        Guards::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Register the implementation for one declared guard name (builder-style).
     /// Registering a name twice keeps the last implementation.
-    pub fn register<F, Fut>(mut self, name: impl Into<String>, guard: F) -> Guards
+    pub fn register<F, Fut>(mut self, name: impl Into<String>, guard: F) -> Self
     where
         F: Fn(GuardRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = GuardVerdict> + Send + 'static,

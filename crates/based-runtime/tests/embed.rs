@@ -419,8 +419,7 @@ async fn unregistered_guard_fails_at_engine_build() {
         SeqIdGen::default(),
         Guards::new(),
     )
-    .err()
-    .expect("a guarded schema with no registered guard must not build");
+    .expect_err("a guarded schema with no registered guard must not build");
     assert_eq!(
         err.missing,
         vec![("close_order".to_string(), "caller_can_close".to_string())]
@@ -586,7 +585,7 @@ async fn dropping_the_typed_stream_releases_the_connection() {
         .collect()
         .await;
     assert_eq!(full.len(), 3);
-    assert!(full.iter().all(|r| r.is_ok()));
+    assert!(full.iter().all(std::result::Result::is_ok));
 }
 
 /// Keyed replay against a real database: a retried `place_order_with_key` returns the

@@ -164,7 +164,7 @@ async fn engine_call_stream_yields_rows_in_process() {
         .expect("stream starts");
     let items: Vec<_> = stream.collect().await;
     assert_eq!(items.len(), 2);
-    assert!(items.iter().all(|i| i.is_ok()));
+    assert!(items.iter().all(std::result::Result::is_ok));
 }
 
 // ---- against a real engine (in-memory SQLite) ------------------------------
@@ -265,6 +265,6 @@ mod sqlite {
         .collect()
         .await;
         assert_eq!(full.len(), 3);
-        assert!(full.iter().all(|r| r.is_ok()));
+        assert!(full.iter().all(std::result::Result::is_ok));
     }
 }
