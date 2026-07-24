@@ -651,7 +651,7 @@ fn member_family(schema: &CheckedSchema, model: &RModel, path: &[&str]) -> Optio
 fn target_key_family(schema: &CheckedSchema, target: &str) -> Family {
     match schema
         .model(target)
-        .and_then(|m| m.member("id"))
+        .and_then(RModel::pk_member)
         .map(|m| &m.kind)
     {
         Some(MemberKind::Scalar { ty, .. }) => Family::of(*ty),

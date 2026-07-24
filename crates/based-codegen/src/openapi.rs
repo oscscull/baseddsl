@@ -731,7 +731,7 @@ fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, Value, b
 fn fk_target_schema(schema: &CheckedSchema, target: &str) -> Value {
     match schema
         .model(target)
-        .and_then(|m| m.member("id"))
+        .and_then(based_sema::RModel::pk_member)
         .map(|m| &m.kind)
     {
         Some(MemberKind::Scalar { ty, .. }) => primitive_schema(*ty),

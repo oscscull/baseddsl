@@ -861,6 +861,55 @@ fn fk_to_a_serial_model_is_a_plain_integer_column() {
 }
 
 #[test]
+fn key_field_is_the_primary_key_with_no_surrogate_id() {
+    // `@key(sku)` nominates a declared column as the PK: the `PRIMARY KEY` names that
+    // column, its type is the column's own (`text`), and no `id` column is synthesized.
+    let src = r#"
+        @key(sku)
+        Product { sku: text  name: text }
+    "#;
+    for (ddl, q) in [(gen(src), '`'), (gen_sqlite(src), '`'), (gen_pg(src), '"')] {
+        assert!(ddl.contains(&format!("PRIMARY KEY ({q}sku{q})")), "\n{ddl}");
+        assert!(!ddl.contains(&format!("{q}id{q}")), "\n{ddl}");
+    }
+    // The MySQL/MariaDB family: the key column is a plain NOT NULL VARCHAR, not an id type.
+    let m = gen(src);
+    assert!(m.contains("`sku` VARCHAR(255) NOT NULL"), "\n{m}");
+}
+
+#[test]
+fn fk_to_a_key_model_mirrors_the_natural_key_type() {
+    // A relation into a `@key(sku: text)` model carries the key's own type + references
+    // the nominated column, not a phantom `id`.
+    let src = r#"
+        @key(sku)
+        Product { sku: text  name: text }
+        Order { id: Id  product: Product @fk }
+    "#;
+    let m = gen(src);
+    assert!(m.contains("`product_id` VARCHAR(255) NOT NULL"), "\n{m}");
+    let p = gen_pg(src);
+    assert!(
+        p.contains(r#"FOREIGN KEY ("product_id") REFERENCES "product" ("sku")"#),
+        "\n{p}"
+    );
+}
+
+#[test]
+fn key_with_int_column_is_an_integer_primary_key() {
+    // A `@key` over an `int` column is a plain integer PK (app-supplied, *not* `serial` —
+    // no AUTO_INCREMENT/identity clause).
+    let src = r#"
+        @key(code)
+        Currency { code: int  name: text }
+    "#;
+    let m = gen(src);
+    assert!(m.contains("`code` BIGINT NOT NULL"), "\n{m}");
+    assert!(m.contains("PRIMARY KEY (`code`)"), "\n{m}");
+    assert!(!m.contains("AUTO_INCREMENT"), "\n{m}");
+}
+
+#[test]
 fn ulid_pk_is_a_fixed_char_string() {
     let src = "Doc { id: ulid  slug: text }";
     // The MySQL/MariaDB family stores the 26-char ULID as CHAR(26) (not a uuid CHAR(36)).

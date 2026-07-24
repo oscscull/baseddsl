@@ -357,9 +357,11 @@ mod rust {
     fn member_entity(model: &RModel, field: &str) -> Option<String> {
         match model.member(field).map(|m| &m.kind)? {
             MemberKind::Forward { target, .. } => Some(target.clone()),
-            // The PK column carries the phantom-typed `Id<entity::M>`. The PK is the `id`
-            // field (present unless `@no_id`), regardless of its declared strategy type.
-            MemberKind::Scalar { .. } if !model.no_id && field == "id" => Some(model.name.clone()),
+            // The PK column carries the phantom-typed `Id<entity::M>` — the `id` field, or
+            // the column a `@key(field)` nominates, regardless of its strategy/natural type.
+            MemberKind::Scalar { .. } if model.pk_field() == Some(field) => {
+                Some(model.name.clone())
+            }
             _ => None,
         }
     }
@@ -767,9 +769,11 @@ mod rust {
         let mut fields = Vec::new();
         for mem in &model.members {
             match &mem.kind {
-                // The primary-key column carries this model's typed id, whatever its
-                // generation strategy (`Id`/`uuid`/`ulid`/`serial`).
-                MemberKind::Scalar { optional, many, .. } if !model.no_id && mem.name == "id" => {
+                // The primary-key column carries this model's typed id — the `id` field or a
+                // `@key(field)` natural key, whatever its strategy/declared type.
+                MemberKind::Scalar { optional, many, .. }
+                    if model.pk_field() == Some(mem.name.as_str()) =>
+                {
                     fields.push((
                         mem.name.clone(),
                         wrap(&id_type(&model.name), *optional, *many),
@@ -906,7 +910,7 @@ mod rust {
         let n = path.len();
         for (i, seg) in path.iter().enumerate() {
             let last = i + 1 == n;
-            let is_pk = !cur.no_id && *seg == "id";
+            let is_pk = cur.pk_field() == Some(*seg);
             match cur.member(seg).map(|m| &m.kind) {
                 // The model's own primary key is that model's typed id, whatever its
                 // generation strategy.

@@ -20,10 +20,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D103 (implicit `id` → explicit-in-source, error `E0261` + autofix), D104 (opaque column types
   via `raw("…")` — literal type-string in DDL+snapshot, opaque client value; `sql` banned as syntax),
   D110 (PK generation-strategy axis: `[schema] id` default + per-model type override `uuid`/`ulid`/
-  `serial`, DB-generated sequential ids + read-back planner, natural single-column keys; spec-only,
-  impl in PLAN PR4), D111 (composite/multi-column PKs via `@key(f1,f2,…)` decorator, structured `Id<M>`
-  object surface, serial-part-where-legal; raw does NOT cover it per PR5 so PR6 ships codegen; spec-only,
-  impl PR6), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
+  `serial`, DB-generated sequential ids + read-back planner, natural single-column keys; impl in PLAN
+  PR4), D111 (natural single-column key `@key(field)` DONE; composite/multi-column PKs via `@key(f1,f2,…)`
+  decorator + structured `Id<M>` object surface + serial-part-where-legal is PR6 — raw does NOT cover it
+  per PR5 so PR6 ships codegen), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
   family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
@@ -5005,9 +5005,8 @@ with `last_insert_id()`); `plan_mutation`/`apply_once` capture the id at run tim
 re-select on it (`SerialReadback`). Minting is per-model (`IdGen::next_ulid`, prod `UlidGen` via the
 `ulid` crate; `serial` mints in the DB). **Proven live** on real SQLite
 (`tests/serial_integration.rs`: create → DB-assigned incrementing integer id → read-back, and an FK to a
-serial parent → get-by-id). **Deferred to a follow-up:** `@key(field)` natural single-column key (the
-nominate-the-PK decorator, shared with composite PR6/D111) — noted so the strategy axis landed as one
-clean, green, fully-tested commit; `@key` is unblocked and small.
+serial parent → get-by-id). **`@key(field)` natural single-column key: shipped as a follow-up — see the
+D111 impl note** (the nominate-the-PK decorator, single-column; composite stays PR6).
 
 A PK's *generation strategy* is a first-class, per-model design choice — not a fixed
 uuid. Sequential DB-assigned ids are a legitimate default for many schemas (index locality, storage,
@@ -5075,7 +5074,30 @@ goldens + a live example per dialect; `spec/syntax/models.md`. Spec: `spec/synta
 
 ## D111 — Composite (multi-column) primary keys via `@key(…)`; structured id surface
 
-**Status: spec-only; owner-approved 2026-07-24. Implementation is PLAN PR6, sequenced after PR4 (D110).**
+**Status: single-column `@key(field)` implemented; composite `@key(f1,…)` is PLAN PR6. Owner-approved
+2026-07-24.**
+
+**Impl note (single-column, follow-up to PR4).** The natural single-column key shipped: `@key(field)`
+is a generic model decorator (no grammar change — args are field-name `ident`/`path`, like `@sort`)
+resolved by `based_sema::model::resolve_key` into `RModel.key: Vec<String>`. A `@key` model synthesizes
+no `id`, and `RModel` gained `pk_field_names()`/`pk_field()`/`pk_member()`/`pk_column()` — the one place
+the PK column is resolved (id, a renamed id, or a `@key` field), replacing every hard-coded `member("id")`
+across codegen/runtime (DDL PK clause, `fk_type`, the JOIN/correlation `ON` in `dml.rs` — `join_forward`
+target, `join_inverse`/to-many/flatten parent, to-one present-probe — the keyset id-tiebreaker,
+client `member_entity`/`model_fields`/`reach_type`, openapi `fk_target_schema`, migration `target_pk_column`
++ snapshot `pk=` marker, runtime `target_key_family`). `pk_strategy()` returns `None` for a `@key` model:
+the natural key is app-supplied, so the `create` sets it like any column and reads the row back keyed on
+it (extending the keyless `read_key` path — `no_id || !key.is_empty()`); there is no minting and no
+serial read-back. A `@key` field is the entity's phantom-typed `Id<entity::M>` in the client, and an
+inbound FK mirrors the key's *own* type (`fk_type`/`fk_target_schema` via `pk_member`), so a
+`@key(sku: text)` model gives a `VARCHAR`/`TEXT` FK, not a uuid. Sema errors: `E0275` (nominated field
+undeclared), `E0276` (unsuitable type — a PK must be a required, single-valued, engine-modelled scalar),
+`E0277` (`@key` + `@no_id` contradictory), `E0278` (composite `@key(f1, f2, …)` not yet supported —
+lifted by PR6). **Proven live on SQLite** (`crates/based-runtime/tests/key_integration.rs`: natural-key
+create → read-back, get-by-natural-key, FK-to-natural-key create/read, and a to-many nest correlated on
+the parent's natural key). Conformance golden `tests/conformance-sema/natural_key`. The **composite**
+form below (structured id, multi-column FK, serial parts) remains PR6.
+
 A model's primary key may be one-or-more *existing declared columns* rather than a surrogate. This is
 mandatory for the pluggable-replacement goal (principle 9): composite PKs are pervasive in real schemas
 (junctions, tenant-scoped natural keys, time-series), so a database that has one must be representable.

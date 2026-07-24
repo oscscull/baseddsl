@@ -34,7 +34,7 @@
 //! MariaDB/SQLite and double-quoted on Postgres ([`Dialect::quote`]).
 
 use based_ast::{DefaultVal, Literal, Primitive, RawSpec};
-use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel};
 
 use crate::Dialect;
 
@@ -155,14 +155,13 @@ fn create_table(
 ) -> String {
     let mut lines: Vec<String> = column_lines(schema, model, dialect);
 
-    // Primary key — the `id` member's physical column (its `(column "…")` override, else
-    // `id`). A `@no_id` (keyless legacy) table has none. SQLite spells a `serial` PK
-    // inline on the column (`INTEGER PRIMARY KEY AUTOINCREMENT`), so it needs no separate
-    // clause; every other case (and every other dialect's serial) gets the clause.
+    // Primary key — the PK member's physical column: the `id` field's, or the column a
+    // `@key(field)` nominates. A `@no_id` (keyless legacy) table has none. SQLite spells a
+    // `serial` PK inline on the column (`INTEGER PRIMARY KEY AUTOINCREMENT`), so it needs no
+    // separate clause; every other case (and every other dialect's serial) gets the clause.
     let sqlite_serial = dialect == Dialect::Sqlite && model.pk_is_db_generated();
-    if !model.no_id && !sqlite_serial {
-        let pk = model.member("id").map_or("id", RMember::physical_col);
-        lines.push(format!("PRIMARY KEY ({})", dialect.quote(pk)));
+    if let Some(pk) = model.pk_column().filter(|_| !sqlite_serial) {
+        lines.push(format!("PRIMARY KEY ({})", dialect.quote(&pk)));
     }
     lines.extend(constraint_lines(schema, model, dialect, fks));
 
@@ -585,7 +584,7 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
 fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> String {
     let id_kind = schema
         .model(target)
-        .and_then(|m| m.member("id"))
+        .and_then(RModel::pk_member)
         .map(|m| &m.kind);
     if let Some(spec) = id_kind.and_then(|k| k.opaque()) {
         return spec

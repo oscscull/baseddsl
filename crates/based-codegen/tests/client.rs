@@ -885,3 +885,27 @@ fn opaque_column_projects_as_a_plain_string() {
     assert!(out.contains("pub location: Option<String>"), "\n{out}");
     assert!(out.contains("pub area: "), "\n{out}");
 }
+
+#[test]
+fn key_model_types_the_natural_key_and_inbound_fk_as_the_entity_id() {
+    // A `@key(sku)` model's nominated column is the entity's phantom-typed id, and an FK
+    // into it carries the same `Id<entity::Product>` — so a natural key gets the same
+    // cross-entity type safety a surrogate `id` does.
+    let out = gen(r#"
+        @key(sku)
+        Product { sku: text, name: text }
+        Order { id: Id, product: Product }
+        shape ProductCard from Product { sku, name }
+        shape OrderCard from Order { id, product = product.sku }
+        query product(sku) -> ProductCard;
+        query order(id) -> OrderCard;
+        "#);
+    assert!(out.contains("pub mod entity"), "\n{out}");
+    assert!(out.contains("pub enum Product {}"), "\n{out}");
+    // The nominated key column is the entity id, not a plain String.
+    assert!(out.contains("pub sku: Id<entity::Product>,"), "\n{out}");
+    // The inbound FK mirrors it.
+    assert!(out.contains("pub product: Id<entity::Product>,"), "\n{out}");
+    // Get-by-key takes the typed id.
+    assert!(out.contains("sku: Id<entity::Product>"), "\n{out}");
+}

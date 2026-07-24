@@ -61,6 +61,14 @@ use based_sema::{
 
 use crate::Dialect;
 
+/// A model's physical primary-key column for a JOIN / correlation `ON` — the `id`
+/// column, or a `@key(field)` natural key. Falls back to `id` for a model with no
+/// resolved key (a keyless model can't be a relation endpoint — sema flags that — so the
+/// fallback only ever fires on an already-erroring schema, keeping the SQL well-formed).
+fn pk_col(m: &RModel) -> String {
+    m.pk_column().unwrap_or_else(|| "id".to_string())
+}
+
 /// The separator joining a nested to-one relation's field name to its projected
 /// columns in a SELECT output alias (`buyer` + `name` → `buyer.name`). A `.` cannot
 /// occur in a BSL identifier, so any output alias containing it is unambiguously a
@@ -734,7 +742,7 @@ fn project_nest<'a>(
         if to_one_absent_possible(model, &field.node) {
             cols.push(format!(
                 "{} AS {}",
-                sel.qcol(&child_alias, "id"),
+                sel.qcol(&child_alias, &pk_col(child_model)),
                 sel.q(&format!("{nested_out}{NEST_PRESENT}"))
             ));
         }
@@ -748,7 +756,8 @@ fn project_nest<'a>(
             cols,
         );
     } else if let Some((child_model, via_fk, edge_sort)) = sel.to_many_edge(&field.node, model) {
-        let arr = sel.json_array_subquery(body, child_model, &via_fk, alias, edge_sort);
+        let arr =
+            sel.json_array_subquery(body, child_model, &via_fk, alias, &pk_col(model), edge_sort);
         let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
         cols.push(format!("{arr} AS {}", sel.q(&out)));
     }
@@ -848,12 +857,13 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
     };
     let terms: &[SortTerm] = query_order.unwrap_or(&root.sort);
 
+    let pk_col = root.pk_column();
     let mut out: Vec<OrderKey> = Vec::new();
-    let mut last_is_id = false;
+    let mut last_is_pk = false;
     for t in terms {
         let prim = path_primitive(sel.schema, root, &t.path);
         let (alias, col) = sel.resolve(&t.path, root);
-        last_is_id = alias == sel.root_alias && col == "id";
+        last_is_pk = alias == sel.root_alias && pk_col.as_deref() == Some(col.as_str());
         out.push(OrderKey {
             col_ref: sel.qcol(&alias, &col),
             dir: t.dir,
@@ -861,25 +871,27 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         });
     }
     if let Some(page) = query_page(q) {
-        // A keyset page must be deterministic: append the unique `id`
+        // A keyset page must be deterministic: append the unique primary-key
         // tiebreaker unless the sort already ends on it. This holds even with no
-        // explicit `order`/`@sort` — an empty order still yields `ORDER BY id`, so the
+        // explicit `order`/`@sort` — an empty order still yields `ORDER BY <pk>`, so the
         // cursor comparison has a unique basis and never drops or repeats a row. Offset
         // pages don't need the tiebreaker (their window is positional). A keyless
-        // (`@no_id`) model has no `id` to append — sema (E0263) guarantees its declared
-        // sort already carries a unique tiebreaker.
-        if !page.offset && !last_is_id && !root.no_id {
-            // The tiebreaker's primitive is the model's own `id` type: a declared
-            // `id: text` cursor value must re-bind as text, not uuid.
-            let prim = match root.member("id").map(|m| &m.kind) {
-                Some(MemberKind::Scalar { ty, .. }) => *ty,
-                _ => Primitive::Id,
-            };
-            out.push(OrderKey {
-                col_ref: sel.qcol(&sel.root_alias, "id"),
-                dir: SortDir::Asc,
-                prim,
-            });
+        // (`@no_id`) model has no PK to append — sema (E0263) guarantees its declared
+        // sort already carries a unique tiebreaker. The PK is `id`, or a `@key(field)` key.
+        if !page.offset && !last_is_pk {
+            if let Some(pk_col) = &pk_col {
+                // The tiebreaker's primitive is the PK column's own type: a declared
+                // `id: text` (or natural-key) cursor value must re-bind as that type.
+                let prim = match root.pk_member().map(|m| &m.kind) {
+                    Some(MemberKind::Scalar { ty, .. }) => *ty,
+                    _ => Primitive::Id,
+                };
+                out.push(OrderKey {
+                    col_ref: sel.qcol(&sel.root_alias, pk_col),
+                    dir: SortDir::Asc,
+                    prim,
+                });
+            }
         }
     }
     out
@@ -901,7 +913,7 @@ fn path_primitive(schema: &CheckedSchema, root: &RModel, path: &Path) -> Primiti
                     // (a serial target → an `int` FK, a uuid target → uuid).
                     return schema
                         .model(target)
-                        .and_then(|m| m.member("id"))
+                        .and_then(RModel::pk_member)
                         .and_then(|m| match &m.kind {
                             MemberKind::Scalar { ty, .. } => Some(*ty),
                             _ => None,
@@ -1185,7 +1197,8 @@ impl<'a> Select<'a> {
                 if !tmodel.is_unique(via) {
                     return None; // to-many collection — handled by the to-many subquery path.
                 }
-                let (a, m) = self.join_inverse(alias, &mut prefix, field, target, via);
+                let (a, m) =
+                    self.join_inverse(alias, &pk_col(model), &mut prefix, field, target, via);
                 Some((a, prefix, m))
             }
             MemberKind::Scalar { .. } => None,
@@ -1236,6 +1249,7 @@ impl<'a> Select<'a> {
         child: &'a RModel,
         via_fk: &str,
         outer_alias: &str,
+        outer_pk: &str,
         edge_sort: &[SortTerm],
     ) -> String {
         self.sub_counter += 1;
@@ -1283,7 +1297,7 @@ impl<'a> Select<'a> {
         let mut wheres = vec![format!(
             "{} = {}",
             self.qcol(&child_alias, via_fk),
-            self.qcol(outer_alias, "id")
+            self.qcol(outer_alias, outer_pk)
         )];
         if let Some(sd) = &child.soft_delete {
             wheres.push(soft_pred(self.dialect, &child_alias, child, sd));
@@ -1401,7 +1415,7 @@ impl<'a> Select<'a> {
         let mut inner_wheres = vec![format!(
             "{} = {}",
             self.qcol(&jx_alias, &near_fk),
-            self.qcol(outer_alias, "id")
+            self.qcol(outer_alias, &pk_col(root))
         )];
         if let Some(sd) = &junction.soft_delete {
             inner_wheres.push(soft_pred(self.dialect, &jx_alias, junction, sd));
@@ -1436,7 +1450,7 @@ impl<'a> Select<'a> {
 
         let mut far_wheres = vec![format!(
             "{} IN ({})",
-            self.qcol(&far_alias, "id"),
+            self.qcol(&far_alias, &pk_col(far_model)),
             inner_sql
         )];
         if let Some(sd) = &far_model.soft_delete {
@@ -1558,7 +1572,7 @@ impl<'a> Select<'a> {
             let nested = if to_one_absent_possible(model, &field.node) {
                 format!(
                     "CASE WHEN {} IS NULL THEN NULL ELSE {nested} END",
-                    self.qcol(&child_alias, "id")
+                    self.qcol(&child_alias, &pk_col(child_model))
                 )
             } else {
                 nested
@@ -1566,7 +1580,14 @@ impl<'a> Select<'a> {
             pairs.push(format!("'{}', {}", field.node, nested));
         } else if let Some((child_model, via_fk, edge_sort)) = self.to_many_edge(&field.node, model)
         {
-            let arr = self.json_array_subquery(body, child_model, &via_fk, alias, edge_sort);
+            let arr = self.json_array_subquery(
+                body,
+                child_model,
+                &via_fk,
+                alias,
+                &pk_col(model),
+                edge_sort,
+            );
             pairs.push(format!("'{}', {}", field.node, arr));
         }
     }
@@ -1615,7 +1636,7 @@ impl<'a> Select<'a> {
                         return (alias, "id".to_string());
                     }
                     let (next_alias, next) =
-                        self.join_inverse(&alias, &mut prefix, name, target, via);
+                        self.join_inverse(&alias, &pk_col(cur), &mut prefix, name, target, via);
                     alias = next_alias;
                     cur = next;
                 }
@@ -1643,7 +1664,7 @@ impl<'a> Select<'a> {
         let kind = if optional { "LEFT JOIN" } else { "JOIN" };
         let mut on = format!(
             "{} = {}",
-            self.qcol(&alias, "id"),
+            self.qcol(&alias, &pk_col(tmodel)),
             self.qcol(cur_alias, fk_col)
         );
         if let Some(sd) = &tmodel.soft_delete {
@@ -1664,10 +1685,12 @@ impl<'a> Select<'a> {
         (alias, tmodel)
     }
 
-    /// FK on the target table -> LEFT JOIN target ON target.<via_fk> = cur.id.
+    /// FK on the target table -> LEFT JOIN target ON target.<via_fk> = cur.<pk>. `cur_pk`
+    /// is the current (parent) model's primary-key column — `id`, or a `@key(field)` key.
     fn join_inverse(
         &mut self,
         cur_alias: &str,
+        cur_pk: &str,
         prefix: &mut String,
         field: &str,
         target: &str,
@@ -1687,7 +1710,7 @@ impl<'a> Select<'a> {
         let mut on = format!(
             "{} = {}",
             self.qcol(&alias, &via_fk),
-            self.qcol(cur_alias, "id")
+            self.qcol(cur_alias, cur_pk)
         );
         if let Some(sd) = &tmodel.soft_delete {
             on.push_str(&format!(

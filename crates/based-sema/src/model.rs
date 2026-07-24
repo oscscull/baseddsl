@@ -54,6 +54,9 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
     // (the reason is mandatory, so the PR shows why — `E0262`).
     let no_id = model_no_id(m, sink);
 
+    // `@key(field, …)` nominates a declared field as the primary key (no surrogate `id`).
+    let key = resolve_key(m, &members, no_id, sink);
+
     // `@no_fk` opts the whole table out of FK constraints (reason checked, if required,
     // in the manifest-dependent divergence pass).
     let no_fk = model_no_fk(m);
@@ -61,8 +64,9 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
     // A model's primary key is load-bearing and written in source. A model that
     // declares no `id` field is an error (`E0261`) with a one-key autofix; the `id`
     // member is still synthesized so the rest of resolution + codegen has a PK to
-    // key on, but the source must name it. A `@no_id` model legitimately has none.
-    if !seen.contains_key("id") && !no_id {
+    // key on, but the source must name it. A `@no_id` model legitimately has none, and
+    // a `@key` model nominates an existing column instead.
+    if !seen.contains_key("id") && !no_id && key.is_empty() {
         sink.error_fix(
             code::NO_ID,
             m.name.span,
@@ -111,6 +115,101 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         no_fk_span: no_fk.map(|(_, s)| s),
         unique_cols: Vec::new(),
         was: model_was(m),
+        key,
+    }
+}
+
+/// Resolve `@key(field, …)` — the nominated natural primary key. Returns the field names
+/// in list order (empty when no `@key`). A single-column `@key(sku)` names one declared
+/// field to carry the `PRIMARY KEY` in place of a synthesized `id`; each nominated field
+/// must exist (`E0275`) and be a required scalar column (`E0276`). `@key` on a keyless
+/// (`@no_id`) model is contradictory (`E0277`); composite keys are not yet supported
+/// (`E0278`, single-column only). A rejected key resolves to empty so the model still
+/// needs an `id` (the ordinary path), never a half-formed key.
+fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    let mut key_span: Option<Span> = None;
+    for d in &m.decorators {
+        if d.name.node != "key" {
+            continue;
+        }
+        key_span = Some(d.span);
+        for a in &d.args {
+            match a {
+                DecoArg::Ident(id) => fields.push(id.node.clone()),
+                DecoArg::Path(p) if p.segments.len() == 1 => {
+                    fields.push(p.segments[0].node.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    let Some(span) = key_span else {
+        return Vec::new();
+    };
+    // A model is keyed either by a nominated column or declared keyless, never both.
+    if no_id {
+        sink.error_note(
+            code::KEY_WITH_NO_ID,
+            span,
+            format!("`{}` carries both `@key` and `@no_id`", m.name.node),
+            "`@key` nominates a primary key; `@no_id` declares the table keyless — a model is one or the other",
+        );
+        return Vec::new();
+    }
+    if fields.len() > 1 {
+        sink.error_note(
+            code::KEY_COMPOSITE,
+            span,
+            format!(
+                "composite `@key({})` is not yet supported",
+                fields.join(", ")
+            ),
+            "only a single-column natural key (`@key(field)`) is supported for now",
+        );
+        return Vec::new();
+    }
+    // Each nominated field must exist and be usable as a primary key.
+    let mut ok = true;
+    for f in &fields {
+        match members
+            .iter()
+            .find(|mem| &mem.name == f)
+            .map(|mem| &mem.kind)
+        {
+            None => {
+                sink.error(
+                    code::KEY_UNKNOWN_FIELD,
+                    span,
+                    format!(
+                        "`@key({f})` names field `{f}`, which `{}` does not declare",
+                        m.name.node
+                    ),
+                );
+                ok = false;
+            }
+            // A required, single-valued, engine-modelled scalar is keyable.
+            Some(MemberKind::Scalar {
+                optional: false,
+                many: false,
+                raw_type: None,
+                ..
+            }) => {}
+            Some(_) => {
+                sink.error_note(
+                    code::KEY_UNSUITABLE,
+                    span,
+                    format!("`@key({f})` — `{f}` cannot be a primary key"),
+                    "a nominated primary key must be a required (non-optional, single-valued) scalar column",
+                );
+                ok = false;
+            }
+        }
+    }
+    if ok {
+        fields
+    } else {
+        Vec::new()
     }
 }
 
@@ -775,6 +874,7 @@ fn validate_decorators(ast: &Model, mi: usize, models: &mut [RModel], sink: &mut
             "was" => {}   // model rename directive — validated in `validate_was`
             "no_id" => {} // keyless opt-out — consumed + validated in `skeleton`
             "no_fk" => {} // whole-table FK opt-out — consumed in `skeleton`, divergence in the manifest pass
+            "key" => {}   // natural-key nomination — consumed + validated in `skeleton`
             other => sink.warn(
                 code::UNKNOWN_DECORATOR,
                 d.name.span,
@@ -889,12 +989,9 @@ fn resolve_managed_ts(
 /// single-column unique indexes. (Composite unique indexes make no *single*
 /// column unique, so they do not count here.)
 fn compute_unique(ast: &Model, m: &mut RModel) {
-    // A keyless model has no `id`, so it seeds no unique column from one.
-    let mut unique: Vec<String> = if m.no_id {
-        Vec::new()
-    } else {
-        vec!["id".to_string()]
-    };
+    // The primary key column(s) are unique: a keyless model has none, a `@key` model its
+    // nominated field(s), an ordinary model its `id`.
+    let mut unique: Vec<String> = m.pk_field_names().iter().map(ToString::to_string).collect();
     for mem in &ast.members {
         match mem {
             Member::Field(f) if f.modifiers.iter().any(|x| matches!(x, Modifier::Unique)) => {

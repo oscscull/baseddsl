@@ -145,6 +145,14 @@ pub mod code {
     pub const PK_STRATEGY_MISPLACED: &str = "E0267"; // `serial`/`ulid` on a non-primary-key column — they are PK generation strategies, valid only as the `id` type
     pub const PK_SERIAL_BACKREF: &str = "E0268"; // a `tx` step reads `$name.id` of a `serial` (DB-generated) create — the id is unknown until the row is written, so it can't bind a sibling step
 
+    // natural (nominated) primary key `@key(field)` (D111): a declared column *is* the
+    // primary key — no surrogate `id` is synthesized. The single-column case; composite
+    // `@key(f1, f2, …)` is PR6.
+    pub const KEY_UNKNOWN_FIELD: &str = "E0275"; // `@key(x)` names a field the model does not declare
+    pub const KEY_UNSUITABLE: &str = "E0276"; // the nominated field can't be a primary key (optional, `[]`, or a relation/opaque — a PK must be a required scalar column)
+    pub const KEY_WITH_NO_ID: &str = "E0277"; // `@key` and `@no_id` on one model — a model either nominates a key or declares itself keyless, never both
+    pub const KEY_COMPOSITE: &str = "E0278"; // `@key(f1, f2, …)` composite key — not yet supported (single-column only)
+
     // opaque `raw(…)` column types + exotic indexes (E027x): the escape hatch for a DB
     // type or index form the engine does not model. The literal string is stored and
     // diffed verbatim; nothing here interprets it.
@@ -196,6 +204,7 @@ pub const KNOWN_DECORATORS: &[&str] = &[
     "was",
     "no_id",
     "no_fk",
+    "key",
 ];
 
 /// The project-wide FK-constraint convention, from the manifest `[schema] foreign_keys`
@@ -488,6 +497,10 @@ pub struct RModel {
     /// the keyset id tiebreaker, create read-back by generated id). `false` for the
     /// ordinary case (a model always has an `id`).
     pub no_id: bool,
+    /// `@key(field, …)` — the declared field(s) that *are* the primary key, so no surrogate
+    /// `id` is synthesized. Empty for the ordinary case (the model uses `id`) or a keyless
+    /// (`@no_id`) model. The single-column case holds one field; composite keys are PR6.
+    pub key: Vec<String>,
     /// `@no_fk` on the model — opt *every* forward relation out of an FK constraint (the
     /// whole-table legacy escape). Reason + span ride along for the divergence check.
     pub no_fk: bool,
@@ -522,16 +535,47 @@ impl RModel {
     }
 
     /// This model's primary-key generation strategy, read off the `id` column's declared
-    /// type. `None` for a `@no_id` (keyless) model. A `Primitive::Id` id folds to
-    /// [`PkStrategy::Uuid`] unless the manifest pass rewrote a non-uuid default onto it.
+    /// type. `None` for a `@no_id` (keyless) model, and for a `@key`-nominated natural key
+    /// (its value is app-supplied like any column, not engine-generated). A `Primitive::Id`
+    /// id folds to [`PkStrategy::Uuid`] unless the manifest pass rewrote a non-uuid default.
     pub fn pk_strategy(&self) -> Option<PkStrategy> {
-        if self.no_id {
+        if self.no_id || !self.key.is_empty() {
             return None;
         }
         match self.member("id").map(|m| &m.kind) {
             Some(MemberKind::Scalar { ty, .. }) => Some(PkStrategy::of(*ty)),
             _ => None,
         }
+    }
+
+    /// The field name(s) forming this model's primary key: the `@key(…)` nominated fields,
+    /// else the surrogate `id`. Empty for a keyless (`@no_id`) model.
+    pub fn pk_field_names(&self) -> Vec<&str> {
+        if self.no_id {
+            Vec::new()
+        } else if self.key.is_empty() {
+            vec!["id"]
+        } else {
+            self.key.iter().map(String::as_str).collect()
+        }
+    }
+
+    /// The single primary-key field name — `id`, or a `@key(field)` natural key. `None` for
+    /// a keyless model. (A composite `@key` returns its first part; multi-column is PR6.)
+    pub fn pk_field(&self) -> Option<&str> {
+        self.pk_field_names().into_iter().next()
+    }
+
+    /// The resolved primary-key member (the `id` field, or the `@key`-nominated field), for
+    /// reading its type when mirroring an inbound FK. `None` for a keyless model.
+    pub fn pk_member(&self) -> Option<&RMember> {
+        self.pk_field().and_then(|f| self.member(f))
+    }
+
+    /// The physical primary-key column (its `(column "…")` override, else the field name).
+    /// `None` for a keyless model.
+    pub fn pk_column(&self) -> Option<String> {
+        self.pk_member().map(|m| m.physical_col().to_string())
     }
 
     /// Does this model's PK come from the database (serial), so a `create` omits the id

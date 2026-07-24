@@ -112,6 +112,23 @@ compiler enforces the loss:
 - A forward relation **to** a keyless model is `E0265` — there is no `id` for its foreign
   key to reference.
 
+### `@key(field)` — a natural (nominated) primary key
+A table whose key is a **meaningful existing column** — a `sku`, an `iso_code` — has a key;
+it is not `@no_id` (which means genuinely keyless). `@key(field)` nominates a declared field
+as the primary key, so no surrogate `id` is synthesized: that column carries the `PRIMARY
+KEY`, and it is the entity's typed id everywhere (`Id<entity::M>` in the client, the value an
+inbound relation FK mirrors — with the key's own type, e.g. `TEXT`/`BIGINT`, not a uuid).
+```
+@key(iso_code)
+Country { iso_code: text  name: text }
+# → PRIMARY KEY (iso_code); no `id`; a relation to Country references iso_code
+```
+The natural key is **app-supplied**, not engine-generated (unlike `serial`): the `create`
+sets it like any column and the row reads back keyed on it. The nominated field must be a
+required, single-valued scalar (`E0276`) and must exist (`E0275`); `@key` on a `@no_id` model
+is contradictory (`E0277`). `@key` is the unified nominate-the-PK spelling — the composite
+form `@key(f1, f2, …)` (multi-column keys) is a planned extension (currently `E0278`).
+
 ## Decorators (model-level)
 Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8), `@no_id("reason")` (a keyless legacy table — see Defaults), `@no_fk[("reason")]` (opt the whole table out of FK constraints — see relations.md). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
 

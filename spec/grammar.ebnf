@@ -52,8 +52,11 @@ scope_deco  = '@scope' scope_name { ',' scope_name } ;  (* one alternative (AND)
 (* Decorators stack above the model, one per line; never positional on header.  *)
 (* `@no_id("reason")` opts a genuinely keyless legacy table out of the `id`      *)
 (* primary key; the reason string is MANDATORY (like `unscoped(...)`).           *)
+(* `@key(field)` nominates a declared column as the primary key (no `id`         *)
+(* synthesized) — the single-column natural key; `@key(f1, f2, …)` composite is  *)
+(* planned. Args are field names (`ident`/`path`), like `@sort`/`@created`.      *)
 decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
-deco_name   = ident ;              (* soft_delete sort scope table was no_id …   *)
+deco_name   = ident ;              (* soft_delete sort scope table was no_id key… *)
 deco_args   = deco_arg { ',' deco_arg } ;
 deco_arg    = sort_term | predicate | ident | path | literal ;
 

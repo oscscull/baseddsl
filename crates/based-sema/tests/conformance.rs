@@ -160,6 +160,9 @@ fn summarize_model(m: &RModel) -> String {
     if m.no_id {
         head.push_str("  no_id");
     }
+    if !m.key.is_empty() {
+        head.push_str(&format!("  key=({})", m.key.join(", ")));
+    }
     let mut out = format!("{head}\n");
 
     for mem in &m.members {

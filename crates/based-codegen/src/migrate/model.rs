@@ -7,7 +7,7 @@
 //! dialect — SQL lives in [`super::sql`].
 
 use based_ast::{DefaultVal, Literal, Primitive, SortDir, SortTerm};
-use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel, SoftDelete, SoftMode};
 use std::fmt::Write as _;
 
 // ---------- neutral snapshot model ----------------------------------------
@@ -256,17 +256,10 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
     let mut foreign_keys = foreign_key_snaps(schema, model, fks);
     foreign_keys.sort();
 
-    // Record a renamed PK column so the from-scratch `CREATE TABLE` names it; the default
-    // `id` stays `None` (elided + re-synthesized).
-    let pk = if model.no_id {
-        None
-    } else {
-        model
-            .member("id")
-            .map(RMember::physical_col)
-            .filter(|c| *c != "id")
-            .map(str::to_string)
-    };
+    // Record a non-default PK column so the from-scratch `CREATE TABLE` names it: a renamed
+    // `id`, or a `@key(field)` natural key. The default `id` stays `None` (elided +
+    // re-synthesized); a keyless (`@no_id`) table has no PK column.
+    let pk = model.pk_column().filter(|c| c != "id");
 
     TableSnap {
         name: model.table.clone(),
@@ -316,17 +309,11 @@ pub fn foreign_key_snaps(
     out
 }
 
-/// The physical primary-key column of a relation target (`id`, or its `(column "…")`
-/// override). `None` when the target is missing or keyless (`@no_id`).
+/// The physical primary-key column of a relation target (`id`, its `(column "…")`
+/// override, or a `@key(field)` natural key). `None` when the target is missing or
+/// keyless (`@no_id`).
 pub fn target_pk_column(schema: &CheckedSchema, target: &str) -> Option<String> {
-    let t = schema.model(target)?;
-    if t.no_id {
-        return None;
-    }
-    Some(
-        t.member("id")
-            .map_or_else(|| "id".to_string(), |m| m.physical_col().to_string()),
-    )
+    schema.model(target)?.pk_column()
 }
 
 /// The declared renames (`@was`) across the schema: model-level `@was` → a table rename,
@@ -547,7 +534,7 @@ fn enum_neutral_type(schema: &CheckedSchema, enum_name: Option<&str>) -> Option<
 fn fk_type(schema: &CheckedSchema, target: &str) -> String {
     match schema
         .model(target)
-        .and_then(|m| m.member("id"))
+        .and_then(RModel::pk_member)
         .map(|m| &m.kind)
     {
         Some(MemberKind::Scalar {

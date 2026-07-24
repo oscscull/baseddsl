@@ -104,9 +104,9 @@ history is in `PLAN-archive.md`.
 
 Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
 system into an existing production environment as a pluggable replacement — plus two example/quality
-fixes that surfaced alongside. **Priority order: ~~PR4~~ → PR4-key (`@key`) → PR6 → PR5 → PR2 → PR3 →
-PR1.** PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); its `@key(field)` natural-key
-sub-item is a clean follow-up (next). The primary-key
+fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → PR6 → PR5 → PR2 →
+PR3 → PR1.** PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); its `@key(field)` natural
+single-column key is **done** (D111 impl — single-column; composite `@key(f1,f2,…)` is PR6). The primary-key
 story (**PR4 single-column + PR6 composite**) is priority 1 — owner: the single most important capability
 the system is missing for the pluggable-replacement goal; a schema whose keys can't be represented can't
 be onboarded at all. Its design fork is **resolved and owner-approved (D110)** — build to that. PR5's
@@ -142,9 +142,17 @@ on the onboarding critical path.
   (`serial`/`ulid` off `id`), `E0268` (`$name.id` of a serial create can't bind a `tx` sibling).
   **Proven live on all three dialects** (SQLite in-memory `serial_integration.rs`; live Postgres +
   MariaDB serial read-back added to the docker integration suites — RETURNING and LAST_INSERT_ID paths
-  both green). **Deferred to a clean follow-up:** the `@key(field)` natural single-column key (the
-  nominate-the-PK decorator, unified with composite PR6/D111) — split out so the strategy axis landed as
-  one green, fully-tested commit; `@key` is unblocked and small. Original design detail (D110):
+  both green). **`@key(field)` natural single-column key: ✅ DONE (D111 impl).** A `@key(field)` model
+  decorator nominates a declared column as the primary key — no surrogate `id` synthesized, that column
+  carries the `PRIMARY KEY`, and it is the entity's typed id everywhere (`Id<entity::M>` in the client,
+  the value an inbound relation FK mirrors with the key's *own* type, not uuid). App-supplied (not
+  DB-generated like `serial`): the `create` sets it, the row reads back keyed on it (reuses the keyless
+  read-back path). New sema errors `E0275` (unknown field), `E0276` (unsuitable type — a PK must be a
+  required scalar), `E0277` (`@key` + `@no_id`), `E0278` (composite deferred to PR6). Full pipeline:
+  parser (generic decorator) → sema (`RModel.key` + `pk_field`/`pk_member`/`pk_column`) → codegen
+  DDL/FK/JOIN-correlation/keyset-tiebreaker/client/openapi/migration-snapshot → runtime. Proven live on
+  SQLite (`key_integration.rs`: natural-key create → read-back, get-by-key, FK-to-natural-key, to-many
+  nest correlated on the key). Composite `@key(f1,f2,…)` stays PR6. Original design detail (D110):
   - `[schema] id = "uuid"` toml default (stays uuid — non-enumerable, free here); `id: Id` resolves to it.
   - Per-model override by PK *type*, strategy implied-with-override: `id: uuid` (app v4 string), `id: ulid`
     (app sortable string), **`id: serial`** (DB-generated sequential `BIGINT`). `serial`, not bare `int`

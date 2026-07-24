@@ -639,3 +639,35 @@ fn serial_pk_migration_matches_generated_ddl() {
     );
     assert!(ddl.contains(r#""org_id" BIGINT NOT NULL"#), "\n{ddl}");
 }
+
+#[test]
+fn key_model_from_scratch_names_the_natural_key_and_round_trips() {
+    let schema = checked(
+        r#"
+        @key(sku)
+        Product { sku: text  name: text }
+        Order { id: Id  product: Product @fk }
+        "#,
+    );
+
+    // From-scratch migration makes the nominated column the PK (no phantom `id`), and an
+    // inbound FK references it with the natural-key type.
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(pg.contains(r#"PRIMARY KEY ("sku")"#), "\n{pg}");
+    assert!(pg.contains(r#""product_id" TEXT NOT NULL"#), "\n{pg}");
+    assert!(
+        pg.contains(r#"FOREIGN KEY ("product_id") REFERENCES "product" ("sku")"#),
+        "\n{pg}"
+    );
+
+    // The `pk=` marker survives the snapshot round-trip, and a re-diff is empty.
+    let snap = Snapshot::from_schema(&schema);
+    let parsed = Snapshot::parse(&snap.render()).expect("round-trip parse");
+    assert_eq!(snap, parsed);
+    assert!(migrate::diff(&parsed, &schema).is_empty());
+
+    // The migration renderer matches `based gen sql` for the same schema.
+    let ddl = sql::ddl(&schema, Dialect::Postgres);
+    assert!(ddl.contains(r#"PRIMARY KEY ("sku")"#), "\n{ddl}");
+}

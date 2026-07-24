@@ -557,9 +557,10 @@ fn lower_create<'a>(
     // The primary key. A `serial` PK is DB-generated: the INSERT *omits* the id column
     // entirely and the runtime reads the assigned value back (`serial_return`). An
     // app-minted `id` (uuid/ulid, no SQL default) is bound as `:id[_step]` unless the
-    // caller set it explicitly. A keyless (`@no_id`) model has no `id` column at all.
+    // caller set it explicitly. A keyless (`@no_id`) model has no `id` column, and a
+    // `@key(field)` model's key is a caller-supplied column set like any other assign.
     let serial_return = model.pk_is_db_generated();
-    let gen_id = if model.no_id || serial_return {
+    let gen_id = if model.no_id || serial_return || !model.key.is_empty() {
         None
     } else if !assigned.iter().any(|c| c == "id") {
         cols.insert(0, dialect.quote("id"));
@@ -569,11 +570,12 @@ fn lower_create<'a>(
         None
     };
 
-    // A keyless create reads its row back by a `(unique)` column it set (no generated
-    // id). Sema (E0264) guarantees a declared-shape return sets one; picking the first
-    // keeps codegen deterministic. `None` when the model is keyed or no unique column
-    // was set (a declared-shape return of the latter is already `E0264`).
-    let read_key = if model.no_id {
+    // A create with no generated id reads its row back by a unique column it set: a keyless
+    // (`@no_id`) model's `(unique)` column, or a `@key(field)` model's nominated key. Sema
+    // (E0264) guarantees a keyless declared-shape return sets one; a `@key` model's key is a
+    // required column, always set. Picking the first unique column keeps codegen
+    // deterministic. `None` when the model has a generated/serial id.
+    let read_key = if model.no_id || !model.key.is_empty() {
         model.unique_cols.iter().find_map(|u| {
             value_by_field
                 .get(u)

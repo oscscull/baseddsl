@@ -1300,6 +1300,103 @@ fn no_id_requires_a_non_empty_reason() {
     assert_eq!(errors(&d), ["E0262"]);
 }
 
+// ---------- @key(field) natural single-column primary key -----------------
+
+#[test]
+fn key_nominates_a_field_as_the_primary_key() {
+    // `@key(sku)` makes an existing column the PK — no synthesized `id`, no E0261, and the
+    // nominated field is unique (a `get` may key on it).
+    let (schema, d) = analyze(
+        r#"
+        @key(sku)
+        Product { sku: text  name: text }
+        shape P from Product { sku, name }
+        query product(sku) -> P;
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", errors(&d));
+    let m = schema.model("Product").unwrap();
+    assert_eq!(m.pk_field(), Some("sku"));
+    assert_eq!(m.pk_column().as_deref(), Some("sku"));
+    assert!(m.is_unique("sku"));
+    // A natural key has no engine generation strategy (its value is app-supplied).
+    assert_eq!(m.pk_strategy(), None);
+    assert!(!m.pk_is_db_generated());
+}
+
+#[test]
+fn key_names_an_unknown_field() {
+    // `@key(x)` where `x` is not declared — E0275.
+    let (_, d) = analyze(
+        r#"
+        @key(x)
+        Product { sku: text  name: text }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0275"), "{:?}", errors(&d));
+}
+
+#[test]
+fn key_field_must_be_a_required_scalar() {
+    // An optional column can't be a primary key — E0276.
+    let (_, d) = analyze(
+        r#"
+        @key(sku)
+        Product { sku: text?  name: text }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0276"), "{:?}", errors(&d));
+    // A relation can't be a single-column natural key either (composite FK-keys are PR6).
+    let (_, d) = analyze(
+        r#"
+        Org { id: Id  name: text }
+        @key(org)
+        Membership { org: Org  role: text }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0276"), "{:?}", errors(&d));
+}
+
+#[test]
+fn key_and_no_id_conflict() {
+    // A model either nominates a key or declares itself keyless, never both — E0277.
+    let (_, d) = analyze(
+        r#"
+        @key(sku)
+        @no_id("legacy")
+        Product { sku: text  name: text }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0277"), "{:?}", errors(&d));
+}
+
+#[test]
+fn composite_key_is_not_yet_supported() {
+    // `@key(a, b)` composite keys are deferred to PR6 — E0278 for now.
+    let (_, d) = analyze(
+        r#"
+        Order { id: Id  n: int }
+        Product { id: Id  n: int }
+        @key(order, product)
+        Enrollment { order: Order  product: Product  at: timestamp }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0278"), "{:?}", errors(&d));
+}
+
+#[test]
+fn relation_to_a_key_model_is_clean() {
+    // A forward relation into a `@key` model resolves against its nominated key (the model
+    // is *not* keyless, so no E0265).
+    assert_clean(
+        r#"
+        @key(sku)
+        Product { sku: text  name: text }
+        Order { id: Id  product: Product }
+        "#,
+    );
+}
+
 #[test]
 fn manifest_id_default_resolves_bare_id() {
     use based_sema::{resolve_pk_default, PkStrategy};

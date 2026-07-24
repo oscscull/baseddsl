@@ -1,0 +1,15 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Country  table=country  key=(iso_code)
+  iso_code: text
+  name: text
+model Customer  table=customer
+  id: Id
+  country: -> Country  fk=country_id
+  email: text
+shape CountryRow from Country
+shape CustomerRow from Customer
+query country  target=Country verb=get  shape=CountryRow
+query customer  target=Customer verb=get  shape=CustomerRow
+mutation add_country  ret=Country
