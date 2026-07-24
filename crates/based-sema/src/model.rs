@@ -96,11 +96,13 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         );
     }
 
-    let table = table_name(m);
+    let table = table_name(m, sink);
+    let schema = model_schema(m, sink);
     RModel {
         name: m.name.node.clone(),
         span: m.span,
         table,
+        schema,
         members,
         soft_delete: None,
         sort: Vec::new(),
@@ -344,16 +346,59 @@ fn model_was(m: &Model) -> Option<String> {
     None
 }
 
-/// Physical table name: `@table("…")` override else `snake_case(Name)`.
-fn table_name(m: &Model) -> String {
+/// Physical table name: `@table("…")` override else `snake_case(Name)`. A `.` in the
+/// override is a namespace prefix in the wrong place — the schema/database qualifier is
+/// `@schema`, so the table name is emitted as a single quoted identifier (`E0297`).
+fn table_name(m: &Model, sink: &mut Sink) -> String {
     for d in &m.decorators {
         if d.name.node == "table" {
             if let Some(DecoArg::Lit(Literal::Str(s))) = d.args.first() {
+                if s.contains('.') {
+                    sink.error_note(
+                        code::TABLE_QUALIFIED,
+                        d.span,
+                        format!("`@table(\"{s}\")` contains a `.`"),
+                        "a schema/database qualifier belongs in `@schema(\"…\")`; `@table` names one table",
+                    );
+                }
                 return s.clone();
             }
         }
     }
     snake_case(&m.name.node)
+}
+
+/// The SQL schema (Postgres) / database (MySQL/MariaDB) namespace from `@schema("name")`,
+/// or `None` for the default namespace. The name must be a single bare identifier — a
+/// dotted, empty, or whitespace value is `E0296` (a multi-level `db.schema` qualifier is
+/// not modelled; one namespace level).
+fn model_schema(m: &Model, sink: &mut Sink) -> Option<String> {
+    for d in &m.decorators {
+        if d.name.node != "schema" {
+            continue;
+        }
+        let Some(DecoArg::Lit(Literal::Str(s))) = d.args.first() else {
+            sink.error_note(
+                code::SCHEMA_INVALID,
+                d.span,
+                "`@schema` needs a name".to_string(),
+                "write the schema/database as a string: `@schema(\"analytics\")`",
+            );
+            return None;
+        };
+        let valid = !s.is_empty() && !s.contains('.') && !s.chars().any(char::is_whitespace);
+        if !valid {
+            sink.error_note(
+                code::SCHEMA_INVALID,
+                d.span,
+                format!("`@schema(\"{s}\")` is not a valid namespace name"),
+                "use a single bare identifier — a schema (Postgres) or database (MySQL/MariaDB) name",
+            );
+            return None;
+        }
+        return Some(s.clone());
+    }
+    None
 }
 
 /// Classify a field as a scalar column, a forward relation (FK here), or an

@@ -317,7 +317,7 @@ fn lower_ret_select(
         wheres.push(scope);
     }
 
-    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&model.table));
+    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.qt(model));
     push_joins(&mut sql, dialect, &sel.joins);
     push_where(&mut sql, &wheres);
     sql.push_str(";\n");
@@ -676,7 +676,7 @@ fn insert_sql(
     tail: &str,
     serial_return: bool,
 ) -> String {
-    let table = dialect.quote(&model.table);
+    let table = dialect.quote_table(model.schema.as_deref(), &model.table);
     let returning = if serial_return && matches!(dialect, Dialect::Postgres | Dialect::Sqlite) {
         format!(" RETURNING {}", dialect.quote(&physical_col(model, "id")))
     } else {
@@ -901,7 +901,7 @@ fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
 /// (`UPDATE t SET … FROM j WHERE <join-on> AND …`). Without joins both are the plain
 /// single-table `UPDATE t SET … WHERE …`.
 fn update_stmt(sel: &Select, model: &RModel, sets: &[String], wheres: &[String]) -> String {
-    let mut s = format!("UPDATE {}", sel.q(&model.table));
+    let mut s = format!("UPDATE {}", sel.qt(model));
     if sel.dialect == Dialect::Postgres {
         s.push_str(&format!("\nSET {}", sets.join(", ")));
         let mut wheres = wheres.to_vec();
@@ -923,20 +923,20 @@ fn delete_stmt(sel: &Select, model: &RModel, wheres: &[String]) -> String {
     let mut s = String::new();
     match sel.dialect {
         Dialect::Postgres => {
-            s.push_str(&format!("DELETE FROM {}", sel.q(&model.table)));
+            s.push_str(&format!("DELETE FROM {}", sel.qt(model)));
             let mut wheres = wheres.to_vec();
             push_from_using(&mut s, sel, &mut wheres, "USING");
             push_where(&mut s, &wheres);
         }
         _ if sel.joins.is_empty() => {
-            s.push_str(&format!("DELETE FROM {}", sel.q(&model.table)));
+            s.push_str(&format!("DELETE FROM {}", sel.qt(model)));
             push_where(&mut s, wheres);
         }
         _ => {
             s.push_str(&format!(
                 "DELETE {} FROM {}",
                 sel.q(&sel.root_alias),
-                sel.q(&model.table)
+                sel.qt(model)
             ));
             push_joins(&mut s, sel.dialect, &sel.joins);
             push_where(&mut s, wheres);
@@ -959,7 +959,13 @@ fn push_from_using(s: &mut String, sel: &Select, wheres: &mut Vec<String>, keywo
     let tables: Vec<String> = sel
         .joins
         .iter()
-        .map(|j| format!("{} AS {}", sel.q(&j.table), sel.q(&j.alias)))
+        .map(|j| {
+            format!(
+                "{} AS {}",
+                sel.dialect.quote_table(j.schema.as_deref(), &j.table),
+                sel.q(&j.alias)
+            )
+        })
         .collect();
     s.push_str(&format!("\n{keyword} {}", tables.join(", ")));
     // Fold each join `ON` into the WHERE, ahead of the existing conditions.

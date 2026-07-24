@@ -206,16 +206,17 @@ fn create_table(
         .map(|l| format!("  {l}"))
         .collect::<Vec<_>>()
         .join(",\n");
+    let schema = model.schema.as_deref();
     let mut out = format!(
         "CREATE TABLE {} (\n{body}\n);\n",
-        dialect.quote(&model.table)
+        dialect.quote_table(schema, &model.table)
     );
 
     for spec in specs
         .iter()
         .filter(|s| !dialect.is_mysql_family() || !inline_on_mariadb(s))
     {
-        out.push_str(&create_index_stmt(dialect, &model.table, spec));
+        out.push_str(&create_index_stmt(dialect, schema, &model.table, spec));
     }
     out
 }
@@ -391,21 +392,31 @@ fn inline_index_clause(dialect: Dialect, spec: &IndexSpec) -> String {
 /// A declared/inferred index as a standalone `CREATE INDEX` statement (SQLite and
 /// Postgres have no inline table-index clause). A unique index becomes `CREATE UNIQUE
 /// INDEX`.
-fn create_index_stmt(dialect: Dialect, table: &str, spec: &IndexSpec) -> String {
-    format!("{};\n", create_index_sql(dialect, table, spec))
+fn create_index_stmt(
+    dialect: Dialect,
+    schema: Option<&str>,
+    table: &str,
+    spec: &IndexSpec,
+) -> String {
+    format!("{};\n", create_index_sql(dialect, schema, table, spec))
 }
 
 /// A standalone `CREATE [UNIQUE] INDEX`, bare (no trailing `;`). An opaque index's body
 /// rides verbatim in place of the column list; `using <method>` renders as Postgres's
 /// leading `USING <m>` (MariaDB spells methods inline — see `inline_index_clause`).
-fn create_index_sql(dialect: Dialect, table: &str, spec: &IndexSpec) -> String {
+fn create_index_sql(
+    dialect: Dialect,
+    schema: Option<&str>,
+    table: &str,
+    spec: &IndexSpec,
+) -> String {
     let kind = if spec.unique {
         "CREATE UNIQUE INDEX"
     } else {
         "CREATE INDEX"
     };
     let name = dialect.quote(&spec.name);
-    let table_q = dialect.quote(table);
+    let table_q = dialect.quote_table(schema, table);
     if let Some(raw) = &spec.raw {
         return format!("{kind} {name} ON {table_q} {raw}");
     }
@@ -481,7 +492,7 @@ pub(crate) fn fk_constraint_clause(
         "CONSTRAINT {name} FOREIGN KEY ({col}) REFERENCES {ref_table} ({ref_col})",
         name = dialect.quote(&name),
         col = quote_list(&fk.columns),
-        ref_table = dialect.quote(&fk.ref_table),
+        ref_table = dialect.quote_table(fk.ref_schema.as_deref(), &fk.ref_table),
         ref_col = quote_list(&fk.ref_columns),
     );
     if let Some(a) = &fk.on_delete {

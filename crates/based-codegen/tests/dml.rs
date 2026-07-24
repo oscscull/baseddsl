@@ -48,6 +48,28 @@ fn bare_get_injects_soft_delete_and_maps_param() {
 }
 
 #[test]
+fn schema_qualified_model_namespaces_from_and_join_not_column_refs() {
+    // A `@schema`-qualified model reads `FROM schema.table`, but column references keep the
+    // bare table name as the correlation (SQL's implicit alias) — so only the base object
+    // carries the namespace. A join into another qualified model likewise qualifies its
+    // JOIN target while aliasing normally.
+    let ddl = gen(r#"
+        @schema("core")
+        Org { id: Id, name: text }
+        @schema("analytics")
+        Event { id: Id, org: Org, note: text }
+        shape EventCard from Event { note, org { name } }
+        query event_by_id(id) -> EventCard;
+        "#);
+    assert!(ddl.contains("FROM `analytics`.`event`"), "\n{ddl}");
+    assert!(ddl.contains("JOIN `core`.`org` AS"), "\n{ddl}");
+    // column refs use the bare table name, never the schema-qualified form.
+    assert!(ddl.contains("`event`.`note`"), "\n{ddl}");
+    assert!(!ddl.contains("`analytics.event`"), "\n{ddl}");
+    assert!(ddl.contains("WHERE `event`.`id` = :id"), "\n{ddl}");
+}
+
+#[test]
 fn relation_param_maps_to_fk_column() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)

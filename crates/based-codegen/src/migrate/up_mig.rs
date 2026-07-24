@@ -84,10 +84,14 @@ fn render_step(out: &mut String, step: &Step) {
             let _ = writeln!(out, "drop unique {name}");
         }
         Step::AddForeignKey { table, fk } => {
+            let ref_table = match &fk.ref_schema {
+                Some(sc) => format!("{sc}::{}", fk.ref_table),
+                None => fk.ref_table.clone(),
+            };
             let mut line = format!(
                 "add foreign_key {table}.{} -> {}.{}",
                 super::model::col_list_text(&fk.columns),
-                fk.ref_table,
+                ref_table,
                 super::model::col_list_text(&fk.ref_columns)
             );
             if let Some(a) = &fk.on_delete {
@@ -110,6 +114,14 @@ fn render_step(out: &mut String, step: &Step) {
         }
         Step::RenameColumn { table, from, to } => {
             let _ = writeln!(out, "rename column {table}.{from} -> {to}");
+        }
+        Step::AlterSchema { table, from, to } => {
+            let _ = writeln!(
+                out,
+                "alter schema {table} {} -> {}",
+                from.as_deref().unwrap_or("(default)"),
+                to.as_deref().unwrap_or("(default)")
+            );
         }
         Step::Raw { dialect, sql } => {
             let _ = writeln!(out, "raw({}) `{sql}`", dialect.name());
@@ -141,7 +153,14 @@ pub(crate) fn scope_change_line(sc: &ScopeChange) -> String {
 }
 
 fn render_create_table(out: &mut String, t: &TableSnap) {
-    let _ = writeln!(out, "create table {} {{", t.name);
+    match &t.schema {
+        Some(s) => {
+            let _ = writeln!(out, "create table {s}.{} {{", t.name);
+        }
+        None => {
+            let _ = writeln!(out, "create table {} {{", t.name);
+        }
+    }
     for c in &t.columns {
         let _ = writeln!(out, "  column {}", column_spec(c));
     }

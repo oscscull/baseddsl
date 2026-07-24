@@ -942,3 +942,75 @@ async fn serial_read_back_runs_against_live_mariadb() {
     .await;
     assert_eq!(got.body, json!({ "id": id1, "name": "Acme" }));
 }
+
+/// A `@schema("…")`-qualified model lives in a named MariaDB *database*; a create + read-back
+/// and a cross-database FK all run against the live server. Proves the qualifier reaches
+/// INSERT, the read-back SELECT + JOIN, and the FK `REFERENCES core.org` constraint.
+#[tokio::test]
+async fn schema_qualified_models_create_read_and_fk_across_databases() {
+    let Some(container) = MariaDbContainer::start().await else {
+        return;
+    };
+    let src = r#"
+        @schema("core")
+        Org { id: Id, name: text }
+        @schema("analytics")
+        Event { id: Id, org: Org @fk, note: text }
+        shape EventCard from Event { note, org { name } }
+        query events() -> EventCard[];
+        mutation add_event(org -> org, note) -> EventCard {
+          create Event { org = $org, note = $note };
+        }
+        "#;
+    let compiled = compile(src, Dialect::MariaDb);
+    let router = ShardRouter::single(&container.url(), PoolConfig::default())
+        .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
+
+    // Fresh, re-runnable namespaces (a MariaDB "schema" is a database).
+    container
+        .exec_batch(
+            "DROP DATABASE IF EXISTS analytics; DROP DATABASE IF EXISTS core;\n\
+             CREATE DATABASE core; CREATE DATABASE analytics;",
+        )
+        .await;
+    container
+        .exec_batch(&sql::ddl(&compiled.schema, Dialect::MariaDb))
+        .await;
+    container
+        .exec_batch(&format!(
+            "INSERT INTO `core`.`org` (`id`, `name`) VALUES ('{ORG_1}', 'Acme');"
+        ))
+        .await;
+
+    // Create through the engine: INSERT INTO `analytics`.`event` with a FK into `core`.`org`,
+    // then re-select in the declared shape (FROM `analytics`.`event` JOIN `core`.`org`).
+    let created = call(
+        &compiled,
+        &router,
+        "POST",
+        "/m/add_event",
+        json!({ "org": ORG_1, "note": "hello" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{:?}", created.body);
+    assert_eq!(
+        created.body,
+        json!({ "note": "hello", "org": { "name": "Acme" } })
+    );
+
+    let listed = call(
+        &compiled,
+        &router,
+        "POST",
+        "/q/events",
+        json!({}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(
+        listed.body,
+        json!([{ "note": "hello", "org": { "name": "Acme" } }])
+    );
+}

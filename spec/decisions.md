@@ -24,7 +24,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   PR4), D111 (nominated primary key `@key(f1, f2, …)` DONE — natural single-column + composite/multi-column
   PKs, structured `Id<M>` object surface, multi-column FK auto-expansion; serial-part-inside-composite
   deferred), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
-  family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8)
+  family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8),
+  D113 (schema/database namespace qualifier `@schema("name")` DONE — Postgres schema / MySQL
+  database, `quote_table` per-part quoting across DDL/DML/FK/index/migration, `Step::AlterSchema`
+  move, E0296/E0297; incremental-ALTER-on-namespaced-table deferred)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
@@ -219,8 +222,10 @@ A query may only sort by `created_at` if that model declares it (see the product
 - Relation field FK column = `<field>_id`. `placed_by: User` -> column `placed_by_id`.
 - Legacy override hooks (the base state we're targeting may use any names, including reserved
   words — D8): `@table("legacy_name")` on the model; `(column "legacy_name")` on a field;
-  `(on: ...)` on a relation (relations.md). The convention is the default only, never a
-  requirement on the existing database.
+  `(on: ...)` on a relation (relations.md); `@schema("name")` on the model places the table in a
+  non-default SQL schema / database namespace (D113). The convention is the default only, never a
+  requirement on the existing database. A `.` in `@table("a.b")` is `E0297` — a namespace prefix
+  belongs in `@schema`, not the table name.
 - **Impl note (PR7):** `(column "…")` on the `id` field renames the PK's physical column. Both DDL
   paths resolve the PK constraint through the `id` member's physical column (the `based gen sql`
   `create_table` and the migration from-scratch `create_table_statements`), never a hardcoded `id` —
@@ -5233,3 +5238,70 @@ propagates its per-dialect literal, so `id: Id raw("UUID")` makes both the PK an
 one live target — the divergent-only rule); no separate MySQL live suite added. `BINARY(16)` remains
 deferred. Doc-truth corrected: `lib.rs` dialect docs, `sql.rs` type table, D1 (phantom `BINARY(16)`),
 this entry's line 337, and the mariadb-quickstart comments.
+
+## D113 — Schema / database namespace qualifier `@schema("name")`
+
+**Status: implemented (PR9).** Closes the PR5 representability finding: there was no
+schema/namespace concept, so a table outside the connection's default schema was reachable by
+neither a first-class feature nor `raw` — `@table("analytics.events")` silently emitted a table
+*named* `"analytics.events"` in the default schema (a `.` quoted inside one identifier), a bug
+under principle 9 ("consume any database; every valid state is expressible").
+
+**Decision.**
+- **Surface: `@schema("name")` model decorator.** Single bare-identifier argument. Places the
+  model's table in a named **SQL schema** (Postgres) / **database** (MySQL/MariaDB). `None` (no
+  decorator) = the connection's default namespace, unchanged. The name is validated as a single
+  bare identifier — empty / dotted / whitespace-carrying is `E0296`; a multi-level `db.schema`
+  qualifier is deliberately not modelled (one namespace level). A `.` inside `@table("a.b")` is
+  now `E0297` (a namespace prefix belongs in `@schema`, not the table name) — the interim reject
+  the audit asked for, made a permanent steer.
+- **One rendering, dialect-agnostic in syntax.** `Dialect::quote_table(schema, table)` emits
+  `"schema"."table"` (each part quoted for the dialect, the dot never quoted), or a bare quoted
+  `"table"` when unqualified. The SQL `qualifier.table` form is identical across Postgres / MySQL
+  / MariaDB / SQLite; only the *concept* the qualifier denotes differs (SQL schema vs database vs
+  attached-database). No `CREATE SCHEMA`/`CREATE DATABASE` is emitted — the namespace is assumed
+  to pre-exist (this is the consume-an-existing-DB case), mirroring how we never `CREATE DATABASE`.
+- **The qualifier rides every table reference.** DDL (`CREATE TABLE`, inline + standalone
+  `CREATE INDEX ... ON`), all DML (SELECT/INSERT/UPDATE/DELETE, incl. the to-many correlated
+  subqueries and the multi-table UPDATE/DELETE FROM/USING lists), JOIN targets, and an FK
+  `REFERENCES` — including one *into* a schema-qualified model from another schema (the FK snapshot
+  carries the target's `ref_schema`). Column references keep the **bare table name** as their
+  correlation (SQL's implicit alias for `FROM schema.table` is the table name, so only the base
+  object is namespaced) — no churn to the per-column qualification.
+- **Not part of the entity's typed identity.** A namespace is a DB-side placement detail, so it
+  never leaks to the wire / generated client / OpenAPI — confirmed unaffected.
+- **Migration.** The snapshot records each table's `schema` and each FK's `ref_schema` (serialized
+  as `schema=<name>` on the table header and a `schema::table` reference on the FK line, `::`
+  keeping the schema separable from the `.` before the column list), so a schema-qualified model
+  and a cross-schema FK round-trip (a re-diff is empty). A from-scratch migration namespaces the
+  `CREATE TABLE` + FK. A model **moving** namespace is detected (never silently missed) and diffs
+  into an `alter schema` step: Postgres `ALTER TABLE … SET SCHEMA`, MySQL/MariaDB cross-database
+  `RENAME TABLE from.t TO to.t`; SQLite has no in-place cross-attached-database move, so it renders
+  a loud raw-rebuild pointer (same honesty as the SQLite FK-add / alter-column cases).
+
+**New diagnostics.** `E0296` (invalid `@schema` name), `E0297` (a `.` in `@table` → use `@schema`).
+
+**Blast radius.** sema (`RModel.schema`, `KNOWN_DECORATORS`, `model_schema`/`table_name`
+validation, `E0296`/`E0297`); codegen `Dialect::quote_table`, `sql.rs` (create_table / index /
+FK clause via `ForeignKeySnap.ref_schema`), `sql/dml.rs` (`Select::qt`, `Join.schema`,
+`push_joins`, the subquery FROMs), `sql/mutations.rs` (INSERT/UPDATE/DELETE + FROM/USING),
+`migrate` (`TableSnap.schema`, `ForeignKeySnap.ref_schema`, snapshot render/parse, from-scratch
+create statements, the new `Step::AlterSchema` + per-dialect render, diff detection, up.mig
+render). Spec: `spec/syntax/models.md`, `spec/grammar.ebnf`.
+
+**Proven live.** Postgres (a `@schema("analytics")` model + a cross-schema FK into
+`@schema("core")`: create through the engine → FK-checked INSERT → read-back SELECT + cross-schema
+JOIN, and a list query) and MariaDB (the same, where a "schema" is a database), both green on the
+Docker suites; conformance DDL goldens (qualified `CREATE TABLE` + FK, per dialect), a DML golden
+(qualified FROM/JOIN, bare-table column refs), and a migration round-trip + schema-move golden.
+
+**Deferred (clean follow-up).** An **incremental ALTER on an already-namespaced table** — add/drop
+column/index/FK, rename, drop — currently emits an *unqualified* `ALTER TABLE <table>` (correct only
+in the default namespace); threading `schema` through the ~10 table-carrying `Step` variants is a
+mechanical follow-up. The dominant onboarding path — representing and *creating* tables in a named
+namespace, all DML across them, cross-schema FKs, and the from-scratch migration — is fully covered,
+and a schema *move* IS handled. Snapshot table identity remains the bare table name (two same-named
+tables in different schemas is not distinguished by the diff — documented, not a target).
+
+**Impl note under D3.** See D3's naming hooks: `@schema` is the namespace-qualifier sibling of the
+`@table`/`(column "…")` legacy-name hooks; a `.` in `@table` is now steered to `@schema` (`E0297`).

@@ -72,6 +72,10 @@ pub struct ScopeTermSnap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSnap {
     pub name: String,
+    /// `@schema("…")` — the SQL schema (Postgres) / database (MySQL/MariaDB) the table lives
+    /// in, or `None` for the default namespace. Recorded so a from-scratch `CREATE TABLE` is
+    /// namespaced and a model *moving* schema diffs into an `alter schema` step.
+    pub schema: Option<String>,
     /// `@soft_delete` column + its neutral mode (`timestamp`/`bool`), if any.
     pub soft_delete: Option<(String, String)>,
     /// `@created` engine-managed column (set on insert), if any.
@@ -112,6 +116,9 @@ pub struct TableSnap {
 pub struct ForeignKeySnap {
     pub columns: Vec<String>,
     pub ref_table: String,
+    /// The referenced table's `@schema("…")` namespace, if it lives outside the default
+    /// one — so a cross-schema `REFERENCES` names `schema.table`. `None` = default namespace.
+    pub ref_schema: Option<String>,
     pub ref_columns: Vec<String>,
     /// `cascade`/`restrict`/`set_null`/`no_action`, or `None` for the DB-default action.
     pub on_delete: Option<String>,
@@ -283,6 +290,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
 
     TableSnap {
         name: model.table.clone(),
+        schema: model.schema.clone(),
         soft_delete: model.soft_delete.as_ref().map(soft_delete_snap),
         created: model.created.clone(),
         updated: model.updated.clone(),
@@ -321,9 +329,11 @@ pub fn foreign_key_snaps(
         let ref_table = schema
             .model(target)
             .map_or_else(|| target.clone(), |t| t.table.clone());
+        let ref_schema = schema.model(target).and_then(|t| t.schema.clone());
         out.push(ForeignKeySnap {
             columns: pairs.iter().map(|(c, _)| c.clone()).collect(),
             ref_table,
+            ref_schema,
             ref_columns: pairs
                 .iter()
                 .map(|(_, p)| p.physical_col().to_string())
@@ -664,6 +674,9 @@ fn render_rename(r: &Rename) -> String {
 
 fn render_table(out: &mut String, t: &TableSnap) {
     let mut header = format!("table {}", t.name);
+    if let Some(s) = &t.schema {
+        let _ = write!(header, " schema={s}");
+    }
     if let Some((col, mode)) = &t.soft_delete {
         let _ = write!(header, " soft_delete={col}:{mode}");
     }
@@ -727,10 +740,16 @@ fn render_table(out: &mut String, t: &TableSnap) {
 /// the `schema.snap` FK line and the `up.mig` foreign-key step. A composite FK renders its
 /// column lists as `(c1, c2)` tuples; a single-column FK stays the bare-name form.
 pub fn fk_spec_text(f: &ForeignKeySnap) -> String {
+    // A cross-schema target renders `schema::table` — `::` keeps the schema separable from
+    // the `.` between the table and its column list on parse.
+    let ref_table = match &f.ref_schema {
+        Some(sc) => format!("{sc}::{}", f.ref_table),
+        None => f.ref_table.clone(),
+    };
     let mut s = format!(
         "fk {} -> {}.{}",
         col_list_text(&f.columns),
-        f.ref_table,
+        ref_table,
         col_list_text(&f.ref_columns)
     );
     if let Some(a) = &f.on_delete {
@@ -929,11 +948,16 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     let mut sort = Vec::new();
     let mut no_id = false;
     let mut pk: Vec<String> = Vec::new();
+    let mut schema = None;
 
     while !head.is_empty() {
         if head == "no_id" || head.starts_with("no_id ") {
             no_id = true;
             head = head["no_id".len()..].trim_start();
+        } else if let Some(after) = head.strip_prefix("schema=") {
+            let mut sp = after.splitn(2, char::is_whitespace);
+            schema = Some(sp.next().unwrap_or("").to_string());
+            head = sp.next().unwrap_or("").trim_start();
         } else if let Some(after) = head.strip_prefix("pk=") {
             // `pk=col` (single) or `pk=(c1, c2)` (composite — the tuple carries spaces).
             let (marker, rest) = if after.starts_with('(') {
@@ -990,6 +1014,7 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
 
     Ok(TableSnap {
         name,
+        schema,
         soft_delete,
         created,
         updated,
@@ -1039,6 +1064,11 @@ fn parse_fk(rest: &str, line: usize) -> Result<ForeignKeySnap, ParseError> {
         None => (tail, ""),
     };
     let (ref_table, ref_cols) = reference.trim().split_once('.').ok_or_else(malformed)?;
+    // A `schema::table` reference carries a cross-schema target; a bare name is default.
+    let (ref_schema, ref_table) = match ref_table.trim().split_once("::") {
+        Some((sc, tbl)) => (Some(sc.trim().to_string()), tbl.trim().to_string()),
+        None => (None, ref_table.trim().to_string()),
+    };
     let mut on_delete = None;
     let mut on_update = None;
     for tok in attrs.split_whitespace() {
@@ -1052,7 +1082,8 @@ fn parse_fk(rest: &str, line: usize) -> Result<ForeignKeySnap, ParseError> {
     }
     Ok(ForeignKeySnap {
         columns: parse_col_list(col),
-        ref_table: ref_table.trim().to_string(),
+        ref_table,
+        ref_schema,
         ref_columns: parse_col_list(ref_cols),
         on_delete,
         on_update,

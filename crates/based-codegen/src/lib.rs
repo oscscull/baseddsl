@@ -98,6 +98,18 @@ impl Dialect {
         format!("{}.{}", self.quote(table), self.quote(column))
     }
 
+    /// A table reference, optionally prefixed by its `@schema("…")` namespace: bare
+    /// `` `table` `` in the default namespace, or `` `schema`.`table` `` when the model is
+    /// placed in a named SQL schema (Postgres) / database (MySQL/MariaDB). Each part is
+    /// quoted separately — the dot is a separator, never quoted. The syntax is identical
+    /// across dialects; only the concept the namespace denotes differs.
+    pub fn quote_table(self, schema: Option<&str>, table: &str) -> String {
+        match schema {
+            Some(s) => format!("{}.{}", self.quote(s), self.quote(table)),
+            None => self.quote(table),
+        }
+    }
+
     /// The boolean literal spelling. MariaDB/Postgres have the `TRUE`/`FALSE`
     /// keywords; SQLite stores bools as integers, so it is `1`/`0`.
     pub fn bool_lit(self, b: bool) -> &'static str {

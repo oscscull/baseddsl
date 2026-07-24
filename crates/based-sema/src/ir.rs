@@ -181,6 +181,12 @@ pub mod code {
     pub const UPSERT_SOFT_DELETE: &str = "E0253"; // `on conflict` on a @soft_delete model — a tombstoned row would be silently updated instead of inserted
     pub const UPSERT_SCOPE: &str = "E0254"; // a scoped model's conflict target omits a scope column — a conflict could match/modify another scope's row
 
+    // schema / database namespace qualifier `@schema("name")` (D113): places a model's
+    // table in a named SQL schema (Postgres) / database (MySQL/MariaDB) instead of the
+    // connection default, so a table outside the default namespace is representable.
+    pub const SCHEMA_INVALID: &str = "E0296"; // `@schema("")` / a name that is not a single bare identifier (empty, dotted, or whitespace)
+    pub const TABLE_QUALIFIED: &str = "E0297"; // a `.` in `@table("a.b")` — a namespace prefix belongs in `@schema`, not the table name
+
     // far-side flattening projection (E030x): `out = path { body }` skips a junction to
     // the distinct far side of a many-to-many.
     pub const FLATTEN_NOT_TOMANY: &str = "E0300"; // the flatten path's first segment is not a to-many inverse edge (nothing to flatten through)
@@ -202,6 +208,7 @@ pub const KNOWN_DECORATORS: &[&str] = &[
     "created",
     "updated",
     "table",
+    "schema",
     "was",
     "no_id",
     "no_fk",
@@ -497,6 +504,11 @@ pub struct RModel {
     pub span: Span,
     /// Generated table name (`snake_case`) or the `@table("…")` override.
     pub table: String,
+    /// `@schema("name")` — the SQL schema (Postgres) / database (MySQL/MariaDB) the table
+    /// lives in, so it can be consumed/emitted outside the connection's default namespace.
+    /// `None` = the default namespace. Rendered as a per-part-quoted `schema.table` prefix
+    /// at every table reference.
+    pub schema: Option<String>,
     pub members: Vec<RMember>,
     pub soft_delete: Option<SoftDelete>,
     /// Model default sort (`@sort`); empty when none is declared.

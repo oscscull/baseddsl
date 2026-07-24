@@ -299,7 +299,7 @@ fn lower_query(
     }
 
     // Assemble. Joins were accumulated by every resolve above, so emit them now.
-    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&root.table));
+    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.qt(root));
     push_joins(&mut sql, sel.dialect, &sel.joins);
     if !main_wheres.is_empty() {
         sql.push_str(&format!("\nWHERE {}", main_wheres.join(" AND ")));
@@ -321,7 +321,7 @@ fn lower_query(
         let mut cnt = format!(
             "SELECT COUNT(*) AS {}\nFROM {}",
             sel.q("count"),
-            sel.q(&root.table)
+            sel.qt(root)
         );
         push_joins(&mut cnt, sel.dialect, &sel.joins);
         if !wheres.is_empty() {
@@ -441,7 +441,7 @@ fn lower_agg_query<'a>(
         .collect();
 
     // Assemble — joins were accumulated by the resolves above.
-    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.q(&root.table));
+    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.qt(root));
     push_joins(&mut sql, sel.dialect, &sel.joins);
     if !wheres.is_empty() {
         sql.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
@@ -999,6 +999,9 @@ fn path_primitive(schema: &CheckedSchema, root: &RModel, path: &Path) -> Primiti
 pub(crate) struct Join {
     pub(crate) kind: &'static str, // "JOIN" | "LEFT JOIN"
     pub(crate) table: String,
+    /// The joined model's `@schema("…")` namespace, so a join into a schema-qualified table
+    /// names `schema.table`. `None` = default namespace.
+    pub(crate) schema: Option<String>,
     pub(crate) alias: String,
     pub(crate) on: String,
 }
@@ -1011,7 +1014,7 @@ pub(crate) fn push_joins(s: &mut String, dialect: Dialect, joins: &[Join]) {
         s.push_str(&format!(
             "\n{} {} AS {} ON {}",
             j.kind,
-            dialect.quote(&j.table),
+            dialect.quote_table(j.schema.as_deref(), &j.table),
             dialect.quote(&j.alias),
             j.on
         ));
@@ -1147,6 +1150,13 @@ impl<'a> Select<'a> {
     /// Quote one identifier for the target dialect (`` `x` `` / `"x"`).
     pub(crate) fn q(&self, ident: &str) -> String {
         self.dialect.quote(ident)
+    }
+
+    /// A table reference, `@schema`-qualified when the model lives outside the default
+    /// namespace (`` `schema`.`table` ``), else bare. Used at every FROM/JOIN/DML base.
+    pub(crate) fn qt(&self, model: &RModel) -> String {
+        self.dialect
+            .quote_table(model.schema.as_deref(), &model.table)
     }
 
     /// A `table`.`column` qualified reference, quoted for the dialect.
@@ -1380,7 +1390,7 @@ impl<'a> Select<'a> {
         let mut sql = format!(
             "(SELECT {} FROM {} AS {}",
             self.dialect.json_array_agg(&elem, order.as_deref()),
-            self.q(&child.table),
+            self.qt(child),
             self.q(&child_alias)
         );
         push_joins(&mut sql, self.dialect, &sub.joins);
@@ -1502,7 +1512,7 @@ impl<'a> Select<'a> {
         let mut inner_sql = format!(
             "SELECT {} FROM {} AS {}",
             self.qcol(&cur_alias, &far_fk),
-            self.q(&junction.table),
+            self.qt(junction),
             self.q(&jx_alias)
         );
         push_joins(&mut inner_sql, self.dialect, &inner.joins);
@@ -1538,7 +1548,7 @@ impl<'a> Select<'a> {
         let mut sql = format!(
             "(SELECT {} FROM {} AS {}",
             self.dialect.json_array_agg(&elem, order.as_deref()),
-            self.q(&far_model.table),
+            self.qt(far_model),
             self.q(&far_alias)
         );
         push_joins(&mut sql, self.dialect, &far_sel.joins);
@@ -1763,7 +1773,14 @@ impl<'a> Select<'a> {
         if let Some(scope) = self.scope_join_pred(&alias, tmodel) {
             on.push_str(&format!(" AND {scope}"));
         }
-        self.record(kind, tmodel.table.clone(), alias.clone(), on, prefix);
+        self.record(
+            kind,
+            tmodel.table.clone(),
+            tmodel.schema.clone(),
+            alias.clone(),
+            on,
+            prefix,
+        );
         (alias, tmodel)
     }
 
@@ -1812,7 +1829,14 @@ impl<'a> Select<'a> {
         if let Some(scope) = self.scope_join_pred(&alias, tmodel) {
             on.push_str(&format!(" AND {scope}"));
         }
-        self.record("LEFT JOIN", tmodel.table.clone(), alias.clone(), on, prefix);
+        self.record(
+            "LEFT JOIN",
+            tmodel.table.clone(),
+            tmodel.schema.clone(),
+            alias.clone(),
+            on,
+            prefix,
+        );
         (alias, tmodel)
     }
 
@@ -1820,6 +1844,7 @@ impl<'a> Select<'a> {
         &mut self,
         kind: &'static str,
         table: String,
+        schema: Option<String>,
         alias: String,
         on: String,
         prefix: &str,
@@ -1828,6 +1853,7 @@ impl<'a> Select<'a> {
         self.joins.push(Join {
             kind,
             table,
+            schema,
             alias,
             on,
         });

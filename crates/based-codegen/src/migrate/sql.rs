@@ -120,7 +120,7 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
             after,
         } => alter_column_statements(table, column, changes, after, dialect)?,
         Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
-            vec![create_index_sql(dialect, table, index)]
+            vec![create_index_sql(dialect, None, table, index)]
         }
         Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
             vec![drop_index_sql(dialect, table, name)]
@@ -143,6 +143,7 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
             dialect.quote(from),
             dialect.quote(to),
         )],
+        Step::AlterSchema { table, from, to } => alter_schema_statements(table, from, to, dialect)?,
         // A raw escape runs verbatim only when its dialect matches the target; for any
         // other dialect it is a no-op here (its per-dialect twin carries that target).
         Step::Raw { dialect: d, sql } => {
@@ -262,6 +263,11 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
             dialect.quote(to),
             dialect.quote(from),
         )],
+        // A schema move reverses to the mirror move (to → from), mechanically reversible on
+        // Postgres/MySQL; SQLite's forward form already errored, so no reverse is reached.
+        Step::AlterSchema { table, from, to } => {
+            alter_schema_statements(table, to, from, dialect).ok()?
+        }
         // A scope change emits no DDL forward, so its reverse is likewise a no-op — present
         // but empty, never flagged irreversible.
         Step::ScopeChange(_) => vec![],
@@ -372,16 +378,17 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         .map(|l| format!("  {l}"))
         .collect::<Vec<_>>()
         .join(",\n");
+    let schema = t.schema.as_deref();
     let mut stmts = vec![format!(
         "CREATE TABLE {} (\n{body}\n)",
-        dialect.quote(&t.name)
+        dialect.quote_table(schema, &t.name)
     )];
     for i in t
         .indexes
         .iter()
         .filter(|i| !dialect.is_mysql_family() || i.raw.is_some())
     {
-        stmts.push(create_index_sql(dialect, &t.name, i));
+        stmts.push(create_index_sql(dialect, schema, &t.name, i));
     }
     stmts
 }
@@ -413,7 +420,7 @@ fn add_foreign_key_statements(
         dialect.quote(table),
         dialect.quote(&name),
         quote_list(&fk.columns),
-        dialect.quote(&fk.ref_table),
+        dialect.quote_table(fk.ref_schema.as_deref(), &fk.ref_table),
         quote_list(&fk.ref_columns),
     );
     if let Some(a) = &fk.on_delete {
@@ -423,6 +430,35 @@ fn add_foreign_key_statements(
         let _ = write!(s, " ON UPDATE {}", crate::sql::fk_action_sql(a));
     }
     Ok(vec![s])
+}
+
+/// Move a table between SQL schemas (Postgres) / databases (MySQL/MariaDB). Postgres has an
+/// in-place `ALTER TABLE … SET SCHEMA`; the MySQL family expresses it as a cross-database
+/// `RENAME TABLE from_db.t TO to_db.t`. SQLite cannot move a table across attached databases
+/// in place, so it surfaces a loud raw-rebuild pointer rather than a silently-skipped move.
+fn alter_schema_statements(
+    table: &str,
+    from: &Option<String>,
+    to: &Option<String>,
+    dialect: Dialect,
+) -> Result<Vec<String>, String> {
+    let from_q = dialect.quote_table(from.as_deref(), table);
+    match dialect {
+        Dialect::Postgres => {
+            let target = to.as_deref().unwrap_or("public");
+            Ok(vec![format!(
+                "ALTER TABLE {from_q} SET SCHEMA {}",
+                dialect.quote(target)
+            )])
+        }
+        Dialect::MariaDb | Dialect::MySql => {
+            let to_q = dialect.quote_table(to.as_deref(), table);
+            Ok(vec![format!("RENAME TABLE {from_q} TO {to_q}")])
+        }
+        Dialect::Sqlite => Err(format!(
+            "SQLite cannot move {table} across attached databases in place; author a raw(sqlite) table-rebuild migration."
+        )),
+    }
 }
 
 /// `ALTER TABLE … DROP CONSTRAINT` (Postgres) / `DROP FOREIGN KEY` (MariaDB). SQLite has no
@@ -534,14 +570,19 @@ fn alter_column_statements(
 
 /// A standalone `CREATE [UNIQUE] INDEX` (all dialects share this form for an add). Bare
 /// (no trailing `;`); `render_sql` terminates it, `apply` executes it as-is.
-fn create_index_sql(dialect: Dialect, table: &str, index: &IndexSnap) -> String {
+fn create_index_sql(
+    dialect: Dialect,
+    schema: Option<&str>,
+    table: &str,
+    index: &IndexSnap,
+) -> String {
     let kind = if index.unique {
         "CREATE UNIQUE INDEX"
     } else {
         "CREATE INDEX"
     };
     let name = dialect.quote(&index.name);
-    let table_q = dialect.quote(table);
+    let table_q = dialect.quote_table(schema, table);
     // An opaque index's body replaces the column list verbatim.
     if let Some(raw) = &index.raw {
         return format!("{kind} {name} ON {table_q} {}", raw_body(raw, dialect));

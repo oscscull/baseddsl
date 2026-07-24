@@ -55,8 +55,10 @@ scope_deco  = '@scope' scope_name { ',' scope_name } ;  (* one alternative (AND)
 (* `@key(f1, f2, …)` nominates the declared column(s) forming the primary key    *)
 (* (no `id` synthesized) — one field is a natural single-column key, two or more  *)
 (* a composite key. Args are field names (`ident`/`path`), like `@sort`.          *)
+(* `@schema("name")` places the table in a named SQL schema (Postgres) / database *)
+(* (MySQL/MariaDB) instead of the connection default; the name is one identifier. *)
 decorator   = '@' deco_name [ '(' [ deco_args ] ')' ] ;
-deco_name   = ident ;              (* soft_delete sort scope table was no_id key… *)
+deco_name   = ident ;         (* soft_delete sort scope table schema was no_id key *)
 deco_args   = deco_arg { ',' deco_arg } ;
 deco_arg    = sort_term | predicate | ident | path | literal ;
 

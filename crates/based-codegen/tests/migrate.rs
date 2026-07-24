@@ -210,6 +210,64 @@ fn renamed_pk_from_scratch_names_the_real_column_and_round_trips() {
 }
 
 #[test]
+fn schema_qualifier_from_scratch_and_round_trips() {
+    let schema = checked(
+        r#"
+        @schema("core")
+        Org { id: Id, name: text }
+        @schema("analytics")
+        Event { id: Id, org: Org @fk }
+        "#,
+    );
+
+    // From-scratch migration namespaces both the CREATE TABLE and the cross-schema FK.
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    let sql = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        sql.contains(r#"CREATE TABLE "analytics"."event" ("#),
+        "\n{sql}"
+    );
+    assert!(sql.contains(r#"CREATE TABLE "core"."org" ("#), "\n{sql}");
+    assert!(sql.contains(r#"REFERENCES "core"."org" ("id")"#), "\n{sql}");
+
+    // Schema + ref_schema survive the snapshot round-trip, and a re-diff is empty.
+    let snap = Snapshot::from_schema(&schema);
+    let parsed = Snapshot::parse(&snap.render()).expect("round-trip parse");
+    assert_eq!(snap, parsed, "\n{}", snap.render());
+    assert!(migrate::diff(&parsed, &schema).is_empty());
+}
+
+#[test]
+fn moving_a_model_between_schemas_is_an_alter_schema_step() {
+    // Changing `@schema` on an existing table is detected (never silently missed) and
+    // renders per-dialect: Postgres `SET SCHEMA`, MySQL/MariaDB cross-database `RENAME`.
+    let base = r#"@schema("old") Widget { id: Id  name: text }"#;
+    let evolved = r#"@schema("new") Widget { id: Id  name: text }"#;
+    let prev = Snapshot::from_schema(&checked(base));
+    let steps = migrate::diff(&prev, &checked(evolved));
+
+    assert!(
+        steps.iter().any(
+            |s| matches!(s, migrate::Step::AlterSchema { table, from, to }
+                if table == "widget"
+                    && from.as_deref() == Some("old")
+                    && to.as_deref() == Some("new"))
+        ),
+        "expected an AlterSchema step, got {steps:#?}"
+    );
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#"ALTER TABLE "old"."widget" SET SCHEMA "new""#),
+        "\n{pg}"
+    );
+    let maria = migrate::render_sql(&steps, Dialect::MariaDb);
+    assert!(
+        maria.contains("RENAME TABLE `old`.`widget` TO `new`.`widget`"),
+        "\n{maria}"
+    );
+}
+
+#[test]
 fn dropping_a_model_is_a_marked_drop_table() {
     let base = "
         Org { id: Id  name: text }

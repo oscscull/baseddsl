@@ -16,6 +16,7 @@ fn col(name: &str, ty: &str, nullable: bool) -> ColumnSnap {
 fn table(name: &str, columns: Vec<ColumnSnap>) -> TableSnap {
     TableSnap {
         name: name.to_string(),
+        schema: None,
         soft_delete: None,
         created: None,
         updated: None,
@@ -49,6 +50,7 @@ fn render_then_parse_round_trips_every_attribute() {
         scopes: vec![scope_decl("Tenant", &[("org", "Org", "org")])],
         tables: vec![TableSnap {
             name: "order".to_string(),
+            schema: Some("analytics".to_string()),
             soft_delete: Some(("deleted_at".to_string(), "timestamp".to_string())),
             created: Some("created_at".to_string()),
             updated: Some("updated_at".to_string()),
@@ -84,6 +86,7 @@ fn render_then_parse_round_trips_every_attribute() {
             foreign_keys: vec![ForeignKeySnap {
                 columns: vec!["org_id".to_string()],
                 ref_table: "org".to_string(),
+                ref_schema: Some("core".to_string()),
                 ref_columns: vec!["id".to_string()],
                 on_delete: Some("cascade".to_string()),
                 on_update: None,

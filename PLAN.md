@@ -242,10 +242,26 @@ cheap standalone win, sequenced last only because it isn't on the onboarding cri
     spellings). Verified on the live `mariadb:11.4` suite (family's one live target). PR4 note: the
     id-DDL type now lives in `sql_type`'s `MariaDb | MySql` arm + `fk_type`; a DB-generated/serial PK
     will branch there.
-  - **PR9 (bug + miscompile). Non-default schema/database table unrepresentable.** No schema/namespace
-    concept; `@table("analytics.events")` silently emits a table *named* `"analytics.events"` in the
-    default schema (neither feature nor raw reaches it). Fix: a `@schema("…")` seam (schema field in the
-    Model IR, quoted separately in DDL/DML/FK/index); interim: reject a `.` in `@table` with a sema error.
+  - **PR9 ✅ DONE (D113). Schema/database namespace qualifier `@schema("name")`.** Was: no
+    schema/namespace concept — `@table("analytics.events")` silently emitted a table *named*
+    `"analytics.events"` in the default schema (neither feature nor raw reached it). Fixed: a
+    `@schema("name")` model decorator (`RModel.schema`) places the table in a named SQL schema
+    (Postgres) / database (MySQL/MariaDB). `Dialect::quote_table(schema, table)` emits per-part-quoted
+    `"schema"."table"` (dot never quoted; syntax identical across dialects) at **every** table
+    reference: CREATE TABLE, indexes, all DML (SELECT/INSERT/UPDATE/DELETE + to-many subqueries +
+    multi-table FROM/USING), JOIN targets, and FK `REFERENCES` (incl. cross-schema, via
+    `ForeignKeySnap.ref_schema`). Column refs keep the bare table name as the correlation. Snapshot
+    records `schema`/`ref_schema` and round-trips; a schema **move** diffs into `Step::AlterSchema`
+    (Postgres `SET SCHEMA`, MySQL/MariaDB cross-database `RENAME TABLE`, SQLite → loud raw-rebuild).
+    Not part of the entity's typed identity → absent from wire/client/OpenAPI. New sema: `E0296`
+    (invalid `@schema` name), `E0297` (a `.` in `@table` → use `@schema`, the interim reject made
+    permanent). Proven live on Postgres (schema) + MariaDB (database): create through the engine →
+    FK-checked cross-schema INSERT → read-back SELECT + cross-schema JOIN + list. Goldens: DDL
+    (qualified CREATE TABLE + FK per dialect), DML (qualified FROM/JOIN), migration round-trip +
+    schema-move. **Deferred (clean):** an incremental ALTER on an *already-namespaced* table
+    (add/drop column/index/FK, rename, drop) emits an unqualified `ALTER TABLE <table>` — threading
+    `schema` through the ~10 table-carrying `Step` variants is a mechanical follow-up; the from-scratch
+    + schema-move + DML paths are complete.
   - **Missing features (raw workaround exists → not blockers, first-class wanted):** table-level
     charset/collation control (`[schema]` key or `@charset`/`@collate` + snapshot/diff); legacy-enum-column
     adoption (pin CHECK name / width / native ENUM / suppress CHECK — today declaring a based enum forces a

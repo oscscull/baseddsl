@@ -145,8 +145,30 @@ referencing every key column; projected bare, that FK reads back as the structur
 The composite PK is a unique, covering index — a `get` keyed on the whole tuple is served by
 it, and keyset pagination orders by and compares the full key.
 
+### `@schema("name")` — a non-default schema / database namespace
+By default a model's table lives in the connection's default namespace. `@schema("name")`
+places it in a **named SQL schema** (Postgres) / **database** (MySQL/MariaDB) instead, so a
+table that lives outside the default namespace can be consumed and emitted (representability,
+principle 9):
+```
+@schema("analytics")
+Event { id: Id  org: Org @fk  note: text }
+# → CREATE TABLE "analytics"."event"; every reference is schema.table
+```
+The name is a **single bare identifier** — a schema (Postgres) or database (MySQL/MariaDB)
+name (empty, dotted, or whitespace-carrying → `E0296`; a multi-level `db.schema` qualifier is
+not modelled). The qualifier rides **every** table reference: `CREATE TABLE`, all DML
+(SELECT/INSERT/UPDATE/DELETE), JOIN targets, index DDL, and an FK `REFERENCES` — including one
+*into* a schema-qualified model from another schema. Each part is quoted separately
+(`"schema"."table"`), never the dot; column references keep the bare table name as their
+correlation. A qualifier is a DB-side placement detail, not part of the entity's typed
+identity, so it never appears on the wire / client / OpenAPI. Put a namespace prefix in
+`@schema`, never in `@table` — a `.` inside `@table("a.b")` is `E0297`. A model that *moves*
+namespace diffs into a reviewable `alter schema` migration step (Postgres `SET SCHEMA`,
+MySQL/MariaDB cross-database `RENAME TABLE`; SQLite needs a raw table-rebuild).
+
 ## Decorators (model-level)
-Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8), `@no_id("reason")` (a keyless legacy table — see Defaults), `@no_fk[("reason")]` (opt the whole table out of FK constraints — see relations.md). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
+Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8), `@schema("name")` (a non-default schema/database namespace — see above, D113), `@no_id("reason")` (a keyless legacy table — see Defaults), `@no_fk[("reason")]` (opt the whole table out of FK constraints — see relations.md). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
 
 Field-level, on a forward to-one relation: `@fk[(…)]` opts a relation into a DB `FOREIGN KEY` constraint (with optional `on_delete`/`on_update` actions); `@no_fk` opts one edge out. Presence is resolved against the `[schema] foreign_keys` convention, and a decorator that flips presence against it needs a reason string — full spec in relations.md.
 ```

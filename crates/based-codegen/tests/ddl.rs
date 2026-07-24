@@ -98,6 +98,72 @@ fn fk_targeting_a_renamed_pk_references_the_real_column() {
 }
 
 #[test]
+fn schema_qualifier_namespaces_the_create_table_and_index() {
+    // `@schema("analytics")` places the table in a named SQL schema (Postgres) / database
+    // (MySQL/MariaDB): every table reference is `schema.table`, each part quoted separately,
+    // never the dot. The syntax is identical across dialects.
+    let src = r#"
+        @schema("analytics")
+        Event { id: Id, name: text, @index (name) }
+    "#;
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#"CREATE TABLE "analytics"."event" ("#),
+        "\n{pg}"
+    );
+    assert!(pg.contains(r#"ON "analytics"."event" ("#), "\n{pg}");
+    let maria = gen(src);
+    assert!(
+        maria.contains("CREATE TABLE `analytics`.`event` ("),
+        "\n{maria}"
+    );
+    // MySQL/MariaDB inline the index, so its table clause needs no qualifier — but the
+    // table header does.
+    assert!(!maria.contains("`analytics.event`"), "\n{maria}");
+    let mysql = gen_for(src, Dialect::MySql);
+    assert!(
+        mysql.contains("CREATE TABLE `analytics`.`event` ("),
+        "\n{mysql}"
+    );
+}
+
+#[test]
+fn fk_across_a_schema_boundary_references_the_qualified_table() {
+    // A relation into a schema-qualified model must `REFERENCES schema.table` — the
+    // qualifier rides through the FK, not just the local table's own CREATE.
+    let src = r#"
+        @schema("core")
+        Org { id: Id, name: text }
+
+        @schema("analytics")
+        Event { id: Id, org: Org @fk }
+    "#;
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#"CREATE TABLE "analytics"."event" ("#),
+        "\n{pg}"
+    );
+    assert!(
+        pg.contains(r#"FOREIGN KEY ("org_id") REFERENCES "core"."org" ("id")"#),
+        "\n{pg}"
+    );
+    let maria = gen(src);
+    assert!(
+        maria.contains("FOREIGN KEY (`org_id`) REFERENCES `core`.`org` (`id`)"),
+        "\n{maria}"
+    );
+}
+
+#[test]
+fn no_schema_qualifier_stays_a_bare_table_name() {
+    // The default (no `@schema`) is unchanged — a single bare, quoted identifier.
+    let pg = gen_pg("Org { id: Id, name: text }");
+    assert!(pg.contains(r#"CREATE TABLE "org" ("#), "\n{pg}");
+    // No schema-qualified reference: the table is a single bare identifier.
+    assert!(!pg.contains(r#"."org""#), "\n{pg}");
+}
+
+#[test]
 fn type_mapping_and_nullability() {
     let ddl = gen(r#"
         Widget {

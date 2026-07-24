@@ -1060,3 +1060,78 @@ async fn serial_read_back_runs_against_live_postgres() {
     .await;
     assert_eq!(got.body, json!({ "id": id1, "name": "Acme" }));
 }
+
+/// A `@schema("…")`-qualified model lives in a named Postgres schema; a create + read-back
+/// and a cross-schema FK all run against the live server. Proves the qualifier reaches
+/// INSERT, the read-back SELECT + JOIN, and the FK `REFERENCES core.org` constraint.
+#[tokio::test]
+async fn schema_qualified_models_create_read_and_fk_across_namespaces() {
+    let Some(container) = PostgresContainer::start().await else {
+        return;
+    };
+    let src = r#"
+        @schema("core")
+        Org { id: Id, name: text }
+        @schema("analytics")
+        Event { id: Id, org: Org @fk, note: text }
+        shape EventCard from Event { note, org { name } }
+        query events() -> EventCard[];
+        mutation add_event(org -> org, note) -> EventCard {
+          create Event { org = $org, note = $note };
+        }
+        "#;
+    let compiled = compile(src);
+    let router = PgRouter::single(&container.url(), PoolConfig::default())
+        .unwrap_or_else(|e| panic!("connect to live Postgres: {e:?}"));
+
+    container.exec_batch(RESET_SQL).await;
+    container
+        .exec_batch(
+            "DROP SCHEMA IF EXISTS analytics CASCADE; DROP SCHEMA IF EXISTS core CASCADE;\n\
+             CREATE SCHEMA core; CREATE SCHEMA analytics;",
+        )
+        .await;
+    container
+        .exec_batch(&sql::ddl(&compiled.schema, Dialect::Postgres))
+        .await;
+    container
+        .exec_batch(&format!(
+            "INSERT INTO \"core\".\"org\" (\"id\", \"name\") VALUES ('{ORG_1}', 'Acme');"
+        ))
+        .await;
+
+    // Create the event through the engine: INSERT INTO "analytics"."event" with a FK into
+    // "core"."org", then re-select in the declared shape (SELECT … FROM "analytics"."event"
+    // JOIN "core"."org"). The nested `org { name }` proves the cross-schema JOIN resolved.
+    let created = call(
+        &compiled,
+        &router,
+        "POST",
+        "/m/add_event",
+        json!({ "org": ORG_1, "note": "hello" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{:?}", created.body);
+    assert_eq!(
+        created.body,
+        json!({ "note": "hello", "org": { "name": "Acme" } })
+    );
+
+    // A second read path: the list query SELECTs FROM the qualified table + joins the
+    // cross-schema parent.
+    let listed = call(
+        &compiled,
+        &router,
+        "POST",
+        "/q/events",
+        json!({}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(
+        listed.body,
+        json!([{ "note": "hello", "org": { "name": "Acme" } }])
+    );
+}
