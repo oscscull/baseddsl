@@ -142,14 +142,14 @@ impl Snapshot {
     /// convention (`none`). Convenience over [`Snapshot::from_schema_with`] for callers
     /// (tests, from-scratch DDL that carries only explicit `@fk`s) that don't thread the
     /// manifest convention.
-    pub fn from_schema(schema: &CheckedSchema) -> Snapshot {
-        Snapshot::from_schema_with(schema, ForeignKeys::None)
+    pub fn from_schema(schema: &CheckedSchema) -> Self {
+        Self::from_schema_with(schema, ForeignKeys::None)
     }
 
     /// Build the neutral snapshot from a resolved schema under a given `foreign_keys`
     /// convention. Pure and deterministic: tables, columns, indexes, and FK constraints are
     /// all sorted by name so nothing map-ordered leaks in.
-    pub fn from_schema_with(schema: &CheckedSchema, fks: ForeignKeys) -> Snapshot {
+    pub fn from_schema_with(schema: &CheckedSchema, fks: ForeignKeys) -> Self {
         let mut tables: Vec<TableSnap> = schema
             .models
             .iter()
@@ -160,7 +160,7 @@ impl Snapshot {
         scopes.sort_by(|a, b| a.name.cmp(&b.name));
         let mut renames = collect_renames(schema);
         renames.sort();
-        Snapshot {
+        Self {
             scopes,
             tables,
             renames,
@@ -213,7 +213,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
                 // to the literal type string is an ordinary column-type diff.
                 ty: raw_type
                     .as_ref()
-                    .map(|r| r.canonical())
+                    .map(based_ast::RawSpec::canonical)
                     .or_else(|| enum_neutral_type(schema, enum_name.as_deref()))
                     .unwrap_or_else(|| neutral_type(*ty, *many)),
                 nullable: *optional,
@@ -287,8 +287,7 @@ pub fn foreign_key_snaps(
         };
         let ref_table = schema
             .model(target)
-            .map(|t| t.table.clone())
-            .unwrap_or_else(|| target.clone());
+            .map_or_else(|| target.clone(), |t| t.table.clone());
         out.push(ForeignKeySnap {
             column: fk_col.clone(),
             ref_table,
@@ -309,8 +308,7 @@ pub fn target_pk_column(schema: &CheckedSchema, target: &str) -> Option<String> 
     }
     Some(
         t.member("id")
-            .map(|m| m.physical_col().to_string())
-            .unwrap_or_else(|| "id".to_string()),
+            .map_or_else(|| "id".to_string(), |m| m.physical_col().to_string()),
     )
 }
 
@@ -717,7 +715,7 @@ impl Snapshot {
     /// on the leading indent; comments (`#…`) and the header line are skipped.
     ///
     /// [`render`]: Snapshot::render
-    pub fn parse(text: &str) -> Result<Snapshot, ParseError> {
+    pub fn parse(text: &str) -> Result<Self, ParseError> {
         let mut scopes: Vec<ScopeDeclSnap> = Vec::new();
         let mut tables: Vec<TableSnap> = Vec::new();
         let mut renames: Vec<Rename> = Vec::new();
@@ -758,7 +756,7 @@ impl Snapshot {
                 });
             }
         }
-        Ok(Snapshot {
+        Ok(Self {
             scopes,
             tables,
             renames,
@@ -1087,7 +1085,7 @@ fn parse_index(rest: &str, line: usize) -> Result<IndexSnap, ParseError> {
             .collect()
     };
     let flags = after[close + 1..].trim();
-    let mut toks = flags.split_whitespace().peekable();
+    let mut toks = flags.split_whitespace();
     let mut unique = false;
     let mut method = None;
     while let Some(tok) = toks.next() {

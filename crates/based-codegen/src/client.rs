@@ -32,10 +32,10 @@ pub enum ClientTarget {
 impl ClientTarget {
     /// Parse the manifest `client` string. Unknown values fall back to Rust (the
     /// documented default) rather than failing — target selection is not an error.
-    pub fn parse(s: &str) -> ClientTarget {
+    pub fn parse(s: &str) -> Self {
         match s {
-            "rust" => ClientTarget::Rust,
-            _ => ClientTarget::Rust,
+            "rust" => Self::Rust,
+            _ => Self::Rust,
         }
     }
 }
@@ -128,7 +128,7 @@ struct OutStruct {
     /// Auxiliary structs for to-one nested sub-objects (`buyer { … }`), each the
     /// projection of one nested relation, emitted alongside the parent and referenced by
     /// the parent's field type. Empty for a flat shape.
-    nested: Vec<OutStruct>,
+    nested: Vec<Self>,
 }
 
 // ---------- Rust target ----------------------------------------------------
@@ -592,7 +592,7 @@ mod rust {
                     // `max` → `Option<column-type>` (an empty/all-null group aggregates to
                     // null).
                     ShapeValue::Agg(agg) => {
-                        fields.push((out.node.clone(), agg_type(schema, model, agg)))
+                        fields.push((out.node.clone(), agg_type(schema, model, agg)));
                     }
                 },
                 ShapeField::Nest { field, body } => {
@@ -962,8 +962,7 @@ mod rust {
                     .arg
                     .as_ref()
                     .and_then(|p| col_primitive(schema, model, p))
-                    .map(primitive)
-                    .unwrap_or("Json");
+                    .map_or("Json", primitive);
                 format!("Option<{base}>")
             }
         }

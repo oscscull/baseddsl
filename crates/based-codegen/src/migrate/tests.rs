@@ -180,8 +180,8 @@ fn dropping_a_column_and_a_table_is_destructive() {
     };
     let steps = diff_snapshots(&prev, &now);
     // drop column keep.b + drop table gone.
-    let drops: Vec<_> = steps.iter().filter(|s| s.destructive()).collect();
-    assert_eq!(drops.len(), 2);
+    let drops = steps.iter().filter(|s| s.destructive()).count();
+    assert_eq!(drops, 2);
     assert!(steps
         .iter()
         .any(|s| matches!(s, Step::DropColumn { column, .. } if column == "b")));

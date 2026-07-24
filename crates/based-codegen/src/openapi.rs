@@ -101,7 +101,7 @@ struct OutSchema {
     /// Named shapes this schema's body references via `field -> Shape` (recursively),
     /// each a full schema of its own — registered in `components.schemas` so the
     /// property `$ref`s resolve, deduped by name across callables.
-    nested: Vec<OutSchema>,
+    nested: Vec<Self>,
 }
 
 // ---------- document assembly ----------------------------------------------
@@ -271,15 +271,13 @@ fn callable_ctx(schema: &CheckedSchema, c: &Callable) -> Vec<Value> {
             .mutations
             .iter()
             .find(|m| m.name == c.name)
-            .map(|m| m.ctx_requires.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[][..], |m| m.ctx_requires.as_slice())
     } else {
         schema
             .queries
             .iter()
             .find(|q| q.name == c.name)
-            .map(|q| q.ctx_requires.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[][..], |q| q.ctx_requires.as_slice())
     };
     reqs.iter()
         .map(|r| {
@@ -556,15 +554,11 @@ fn shape_fields(
                         "count" => (primitive_schema(Primitive::Int), true),
                         "avg" => (primitive_schema(Primitive::Float), false),
                         _ => {
-                            let base = agg
-                                .arg
-                                .as_ref()
-                                .map(|p| {
-                                    let segs: Vec<&str> =
-                                        p.segments.iter().map(|s| s.node.as_str()).collect();
-                                    reach_schema(schema, model, &segs).0
-                                })
-                                .unwrap_or_else(json_schema);
+                            let base = agg.arg.as_ref().map_or_else(json_schema, |p| {
+                                let segs: Vec<&str> =
+                                    p.segments.iter().map(|s| s.node.as_str()).collect();
+                                reach_schema(schema, model, &segs).0
+                            });
                             (base, false)
                         }
                     };
@@ -715,7 +709,7 @@ fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, Value, b
                 !*optional,
             )),
             MemberKind::Forward { optional, .. } => {
-                fields.push((mem.name.clone(), uuid_schema(), !*optional))
+                fields.push((mem.name.clone(), uuid_schema(), !*optional));
             }
             MemberKind::Inverse { .. } => {}
         }

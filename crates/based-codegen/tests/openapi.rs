@@ -148,8 +148,7 @@ fn paginated_query_response_is_page_envelope() {
     assert!(
         !input["required"]
             .as_array()
-            .map(|r| r.iter().any(|v| v == "cursor"))
-            .unwrap_or(false),
+            .is_some_and(|r| r.iter().any(|v| v == "cursor")),
         "\n{input}"
     );
     // Without `with count`, the envelope advertises no `total`.
@@ -261,7 +260,7 @@ fn optional_and_defaulted_params_are_not_required() {
     assert!(input["properties"]["limit"].is_object());
     let required = input["required"].as_array();
     assert!(
-        required.is_none_or(|r| r.is_empty()),
+        required.is_none_or(std::vec::Vec::is_empty),
         "expected no required params, got {:?}",
         input["required"]
     );

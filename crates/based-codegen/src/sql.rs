@@ -130,7 +130,7 @@ fn index_specs(model: &RModel, dialect: Dialect) -> Vec<IndexSpec> {
 pub(crate) fn raw_index_name(table: &str, spec: &RawSpec) -> String {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for b in spec.canonical().as_bytes() {
-        h ^= *b as u64;
+        h ^= u64::from(*b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("idx_{table}_raw_{:08x}", h as u32)
@@ -151,9 +151,47 @@ fn create_table(
     dialect: Dialect,
     fks: ForeignKeys,
 ) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = column_lines(schema, model, dialect);
 
-    // Columns: scalars and forward-relation FKs. Inverse edges store nothing here.
+    // Primary key — `id`, the first member `skeleton` inserts. A `@no_id` (keyless
+    // legacy) table has none.
+    if !model.no_id {
+        lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+    }
+    lines.extend(constraint_lines(schema, model, dialect, fks));
+
+    let specs = index_specs(model, dialect);
+
+    // MariaDB inlines the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
+    // have no inline form, so they trail the table as `CREATE INDEX` statements.
+    if dialect == Dialect::MariaDb {
+        for spec in specs.iter().filter(|s| inline_on_mariadb(s)) {
+            lines.push(inline_index_clause(dialect, spec));
+        }
+    }
+
+    let body = lines
+        .iter()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let mut out = format!(
+        "CREATE TABLE {} (\n{body}\n);\n",
+        dialect.quote(&model.table)
+    );
+
+    for spec in specs
+        .iter()
+        .filter(|s| dialect != Dialect::MariaDb || !inline_on_mariadb(s))
+    {
+        out.push_str(&create_index_stmt(dialect, &model.table, spec));
+    }
+    out
+}
+
+/// The column definitions: scalars and forward-relation FKs. Inverse edges store nothing.
+fn column_lines(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec<String> {
+    let mut lines = Vec::new();
     for mem in &model.members {
         match &mem.kind {
             MemberKind::Scalar {
@@ -197,12 +235,18 @@ fn create_table(
             MemberKind::Inverse { .. } => {}
         }
     }
+    lines
+}
 
-    // Primary key — `id`, the first member `skeleton` inserts. A `@no_id` (keyless
-    // legacy) table has none.
-    if !model.no_id {
-        lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
-    }
+/// The table-level constraint clauses, in emission order: column `(unique)` constraints,
+/// enum CHECKs, then foreign keys.
+fn constraint_lines(
+    schema: &CheckedSchema,
+    model: &RModel,
+    dialect: Dialect,
+    fks: ForeignKeys,
+) -> Vec<String> {
+    let mut lines = Vec::new();
 
     // Column-level `(unique)` constraints, in member order. All dialects accept the
     // inline `CONSTRAINT … UNIQUE (…)` table clause.
@@ -253,34 +297,7 @@ fn create_table(
     for fk in crate::migrate::foreign_key_snaps(schema, model, fks) {
         lines.push(fk_constraint_clause(dialect, &model.table, &fk));
     }
-
-    let specs = index_specs(model, dialect);
-
-    // MariaDB inlines the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
-    // have no inline form, so they trail the table as `CREATE INDEX` statements.
-    if dialect == Dialect::MariaDb {
-        for spec in specs.iter().filter(|s| inline_on_mariadb(s)) {
-            lines.push(inline_index_clause(dialect, spec));
-        }
-    }
-
-    let body = lines
-        .iter()
-        .map(|l| format!("  {l}"))
-        .collect::<Vec<_>>()
-        .join(",\n");
-    let mut out = format!(
-        "CREATE TABLE {} (\n{body}\n);\n",
-        dialect.quote(&model.table)
-    );
-
-    for spec in specs
-        .iter()
-        .filter(|s| dialect != Dialect::MariaDb || !inline_on_mariadb(s))
-    {
-        out.push_str(&create_index_stmt(dialect, &model.table, spec));
-    }
-    out
+    lines
 }
 
 /// A single column definition: `` `name` TYPE (NOT NULL|NULL) [DEFAULT x] ``. `en` is the
@@ -547,9 +564,9 @@ fn render_default(dv: &DefaultVal, en: Option<&based_sema::REnum>, dialect: Dial
         DefaultVal::Func(_) => "CURRENT_TIMESTAMP".to_string(),
         // An enum default (`default pending`) is its variant's wire value: a quoted
         // string for a string enum, a bare integer for an int enum.
-        DefaultVal::Variant(v) => en
-            .and_then(|e| e.wire_of(&v.node))
-            .map(enum_value_sql)
-            .unwrap_or_else(|| format!("'{}'", v.node.replace('\'', "''"))),
+        DefaultVal::Variant(v) => en.and_then(|e| e.wire_of(&v.node)).map_or_else(
+            || format!("'{}'", v.node.replace('\'', "''")),
+            enum_value_sql,
+        ),
     }
 }

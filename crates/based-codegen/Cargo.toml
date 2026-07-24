@@ -14,3 +14,6 @@ serde_json = { workspace = true }
 based-parser = { workspace = true }
 based-diagnostics = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

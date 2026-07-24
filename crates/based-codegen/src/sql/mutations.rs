@@ -146,13 +146,13 @@ pub fn lower_mutations(
     decls: &[Decl],
     dialect: Dialect,
 ) -> Vec<LoweredMutation> {
-    let mut out = Vec::new();
-    for decl in decls {
-        if let Decl::Mutation(m) = decl {
-            out.push(lower_mutation(schema, decls, m, dialect));
-        }
-    }
-    out
+    decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Mutation(m) => Some(lower_mutation(schema, decls, m, dialect)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn lower_mutation<'a>(
@@ -170,8 +170,7 @@ fn lower_mutation<'a>(
         .mutations
         .iter()
         .find(|rm| rm.name == m.name.node)
-        .map(|rm| rm.scope_inject.as_slice())
-        .unwrap_or(&[]);
+        .map_or(&[][..], |rm| rm.scope_inject.as_slice());
     let mut stmts = Vec::new();
     let no_bindings = HashMap::new();
     for stmt in &m.body {
@@ -806,7 +805,7 @@ fn lower_restore(
 fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
     match sel.dialect {
         Dialect::Postgres | Dialect::Sqlite => sel.dialect.quote(col),
-        _ => sel.qcol(&sel.root_alias, col),
+        Dialect::MariaDb => sel.qcol(&sel.root_alias, col),
     }
 }
 
@@ -817,18 +816,15 @@ fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
 /// single-table `UPDATE t SET … WHERE …`.
 fn update_stmt(sel: &Select, model: &RModel, sets: &[String], wheres: &[String]) -> String {
     let mut s = format!("UPDATE {}", sel.q(&model.table));
-    match sel.dialect {
-        Dialect::Postgres => {
-            s.push_str(&format!("\nSET {}", sets.join(", ")));
-            let mut wheres = wheres.to_vec();
-            push_from_using(&mut s, sel, &mut wheres, "FROM");
-            push_where(&mut s, &wheres);
-        }
-        _ => {
-            push_joins(&mut s, sel.dialect, &sel.joins);
-            s.push_str(&format!("\nSET {}", sets.join(", ")));
-            push_where(&mut s, wheres);
-        }
+    if sel.dialect == Dialect::Postgres {
+        s.push_str(&format!("\nSET {}", sets.join(", ")));
+        let mut wheres = wheres.to_vec();
+        push_from_using(&mut s, sel, &mut wheres, "FROM");
+        push_where(&mut s, &wheres);
+    } else {
+        push_joins(&mut s, sel.dialect, &sel.joins);
+        s.push_str(&format!("\nSET {}", sets.join(", ")));
+        push_where(&mut s, wheres);
     }
     s.push_str(";\n");
     s

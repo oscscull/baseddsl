@@ -166,11 +166,10 @@ fn field_was_removal(src: &str, lit_start: usize, lit_end: usize) -> Option<Rang
 /// line with other decorators, the minimal edit is taken: the directive plus one trailing
 /// space, or a leading space when it is last on the line.
 fn decorator_removal(src: &str, ds: usize, de: usize) -> Range<usize> {
-    let line_start = src[..ds].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_start = src[..ds].rfind('\n').map_or(0, |i| i + 1);
     let line_end = src[de..]
         .find('\n')
-        .map(|i| de + i + 1)
-        .unwrap_or_else(|| src.len());
+        .map_or_else(|| src.len(), |i| de + i + 1);
     let before_empty = src[line_start..ds].trim().is_empty();
     let after_empty = src[de..line_end].trim().is_empty();
     if before_empty && after_empty {

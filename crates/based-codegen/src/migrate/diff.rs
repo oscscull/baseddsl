@@ -116,8 +116,8 @@ impl Step {
     /// `--allow-destructive` / `unsafe("reason")`; this engine only reports the marker.
     pub fn destructive(&self) -> bool {
         match self {
-            Step::DropTable(_) | Step::DropColumn { .. } | Step::AddUnique { .. } => true,
-            Step::AlterColumn { changes, .. } => changes.iter().any(|c| match c {
+            Self::DropTable(_) | Self::DropColumn { .. } | Self::AddUnique { .. } => true,
+            Self::AlterColumn { changes, .. } => changes.iter().any(|c| match c {
                 ColumnChange::Type { from, to } => is_narrowing(from, to),
                 ColumnChange::SetNotNull { has_default } => !has_default,
                 _ => false,
@@ -163,15 +163,16 @@ pub fn diff_snapshots(prev: &Snapshot, now: &Snapshot) -> Vec<Step> {
     let mut renamed_from: HashSet<&str> = HashSet::new();
     let mut renamed_to: HashSet<&str> = HashSet::new();
     for r in &now.renames {
-        if let Rename::Table { from, to } = r {
-            if is_valid_table_rename(prev, now, from, to) {
-                steps.push(Step::RenameTable {
-                    from: from.clone(),
-                    to: to.clone(),
-                });
-                renamed_from.insert(from.as_str());
-                renamed_to.insert(to.as_str());
-            }
+        let Rename::Table { from, to } = r else {
+            continue;
+        };
+        if is_valid_table_rename(prev, now, from, to) {
+            steps.push(Step::RenameTable {
+                from: from.clone(),
+                to: to.clone(),
+            });
+            renamed_from.insert(from.as_str());
+            renamed_to.insert(to.as_str());
         }
     }
 
@@ -259,36 +260,45 @@ fn diff_scopes(prev: &Snapshot, now: &Snapshot, steps: &mut Vec<Step>) {
 }
 
 fn diff_table(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &mut Vec<Step>) {
-    // Column renames first (a valid field `@was`: old present in `prev`, new present in
-    // `now`, new absent from `prev`). A renamed column can also change attributes in the
-    // same migration, so its old-vs-new is diffed into a trailing `alter column`.
+    diff_columns(prev, now, renames, steps);
+    diff_indexes(prev, now, steps);
+    diff_foreign_keys(prev, now, steps);
+}
+
+/// Column-level diff: renames (a valid field `@was`) first, then adds, alters, and drops.
+/// A rename source/target is excluded from the plain add/drop passes.
+fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &mut Vec<Step>) {
+    // A renamed column can also change attributes in the same migration, so its old-vs-new
+    // is diffed into a trailing `alter column`.
     let mut renamed_from: HashSet<&str> = HashSet::new();
     let mut renamed_to: HashSet<&str> = HashSet::new();
     for r in renames {
-        if let Rename::Column { table, from, to } = r {
-            if table == &now.name
-                && prev.column(from).is_some()
-                && prev.column(to).is_none()
-                && now.column(to).is_some()
-            {
-                steps.push(Step::RenameColumn {
+        let Rename::Column { table, from, to } = r else {
+            continue;
+        };
+        if table != &now.name
+            || prev.column(from).is_none()
+            || prev.column(to).is_some()
+            || now.column(to).is_none()
+        {
+            continue;
+        }
+        steps.push(Step::RenameColumn {
+            table: now.name.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        });
+        renamed_from.insert(from.as_str());
+        renamed_to.insert(to.as_str());
+        if let (Some(old), Some(new)) = (prev.column(from), now.column(to)) {
+            let changes = column_changes(old, new);
+            if !changes.is_empty() {
+                steps.push(Step::AlterColumn {
                     table: now.name.clone(),
-                    from: from.clone(),
-                    to: to.clone(),
+                    column: to.clone(),
+                    changes,
+                    after: new.clone(),
                 });
-                renamed_from.insert(from.as_str());
-                renamed_to.insert(to.as_str());
-                if let (Some(old), Some(new)) = (prev.column(from), now.column(to)) {
-                    let changes = column_changes(old, new);
-                    if !changes.is_empty() {
-                        steps.push(Step::AlterColumn {
-                            table: now.name.clone(),
-                            column: to.clone(),
-                            changes,
-                            after: new.clone(),
-                        });
-                    }
-                }
             }
         }
     }
@@ -327,52 +337,40 @@ fn diff_table(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &mut
             });
         }
     }
+}
 
-    // Indexes added. A unique index is its own `add unique` step (destructive over
-    // existing data); a plain index is `add index` (safe).
-    for i in &now.indexes {
-        if prev.index(&i.name).map(|p| p == i) != Some(true) && prev.index(&i.name).is_none() {
-            if i.unique {
-                steps.push(Step::AddUnique {
-                    table: now.name.clone(),
-                    index: i.clone(),
-                });
-            } else {
-                steps.push(Step::AddIndex {
-                    table: now.name.clone(),
-                    index: i.clone(),
-                });
+/// Index-level diff: adds, definition changes (drop + re-add — a rename isn't auto-guessed),
+/// and drops. A unique index adds/re-adds as `AddUnique` (destructive over existing data);
+/// a plain one as `AddIndex` (safe).
+fn diff_indexes(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
+    let add_step = |i: &IndexSnap| {
+        if i.unique {
+            Step::AddUnique {
+                table: now.name.clone(),
+                index: i.clone(),
+            }
+        } else {
+            Step::AddIndex {
+                table: now.name.clone(),
+                index: i.clone(),
             }
         }
-    }
-    // Indexes changed (same name, different columns/unique) → drop + re-add. Renaming
-    // an index isn't auto-guessed either; a definition change is a drop then an add.
+    };
     for i in &now.indexes {
-        if let Some(old) = prev.index(&i.name) {
-            if old != i {
+        match prev.index(&i.name) {
+            None => steps.push(add_step(i)),
+            Some(old) if old != i => {
                 drop_index_step(old, now, steps);
-                if i.unique {
-                    steps.push(Step::AddUnique {
-                        table: now.name.clone(),
-                        index: i.clone(),
-                    });
-                } else {
-                    steps.push(Step::AddIndex {
-                        table: now.name.clone(),
-                        index: i.clone(),
-                    });
-                }
+                steps.push(add_step(i));
             }
+            Some(_) => {}
         }
     }
-    // Indexes dropped.
     for i in &prev.indexes {
         if now.index(&i.name).is_none() {
             drop_index_step(i, now, steps);
         }
     }
-
-    diff_foreign_keys(prev, now, steps);
 }
 
 /// Diff a table's FK constraints by column. An FK gained is `add foreign_key`; one dropped
@@ -460,20 +458,20 @@ impl Step {
     /// `None` for a scope-contract change or a raw escape (no single owning table).
     pub fn table_name(&self) -> Option<&str> {
         match self {
-            Step::CreateTable(t) => Some(&t.name),
-            Step::DropTable(n) => Some(n),
-            Step::AddColumn { table, .. }
-            | Step::DropColumn { table, .. }
-            | Step::AlterColumn { table, .. }
-            | Step::AddIndex { table, .. }
-            | Step::DropIndex { table, .. }
-            | Step::AddUnique { table, .. }
-            | Step::DropUnique { table, .. }
-            | Step::AddForeignKey { table, .. }
-            | Step::DropForeignKey { table, .. }
-            | Step::RenameColumn { table, .. } => Some(table),
-            Step::RenameTable { from, .. } => Some(from),
-            Step::ScopeChange(_) | Step::Raw { .. } => None,
+            Self::CreateTable(t) => Some(&t.name),
+            Self::DropTable(n) => Some(n),
+            Self::AddColumn { table, .. }
+            | Self::DropColumn { table, .. }
+            | Self::AlterColumn { table, .. }
+            | Self::AddIndex { table, .. }
+            | Self::DropIndex { table, .. }
+            | Self::AddUnique { table, .. }
+            | Self::DropUnique { table, .. }
+            | Self::AddForeignKey { table, .. }
+            | Self::DropForeignKey { table, .. }
+            | Self::RenameColumn { table, .. } => Some(table),
+            Self::RenameTable { from, .. } => Some(from),
+            Self::ScopeChange(_) | Self::Raw { .. } => None,
         }
     }
 
@@ -481,29 +479,29 @@ impl Step {
     /// ("uncaptured schema change: …"). Names the change in the schema's vocabulary.
     pub fn describe(&self) -> String {
         match self {
-            Step::CreateTable(t) => format!("new table `{}`", t.name),
-            Step::DropTable(n) => format!("dropped table `{n}`"),
-            Step::AddColumn { table, column } => format!("added column `{table}.{}`", column.name),
-            Step::DropColumn { table, column } => format!("dropped column `{table}.{column}`"),
-            Step::AlterColumn { table, column, .. } => format!("altered column `{table}.{column}`"),
-            Step::AddIndex { index, .. } | Step::AddUnique { index, .. } => {
+            Self::CreateTable(t) => format!("new table `{}`", t.name),
+            Self::DropTable(n) => format!("dropped table `{n}`"),
+            Self::AddColumn { table, column } => format!("added column `{table}.{}`", column.name),
+            Self::DropColumn { table, column } => format!("dropped column `{table}.{column}`"),
+            Self::AlterColumn { table, column, .. } => format!("altered column `{table}.{column}`"),
+            Self::AddIndex { index, .. } | Self::AddUnique { index, .. } => {
                 format!("added index `{}`", index.name)
             }
-            Step::DropIndex { name, .. } | Step::DropUnique { name, .. } => {
+            Self::DropIndex { name, .. } | Self::DropUnique { name, .. } => {
                 format!("dropped index `{name}`")
             }
-            Step::AddForeignKey { table, fk } => {
+            Self::AddForeignKey { table, fk } => {
                 format!("added foreign key `{table}.{}`", fk.column)
             }
-            Step::DropForeignKey { table, column } => {
+            Self::DropForeignKey { table, column } => {
                 format!("dropped foreign key `{table}.{column}`")
             }
-            Step::RenameTable { from, to } => format!("renamed table `{from}` → `{to}`"),
-            Step::RenameColumn { table, from, to } => {
+            Self::RenameTable { from, to } => format!("renamed table `{from}` → `{to}`"),
+            Self::RenameColumn { table, from, to } => {
                 format!("renamed column `{table}.{from}` → `{to}`")
             }
-            Step::ScopeChange(_) => "scope contract change".to_string(),
-            Step::Raw { dialect, .. } => format!("raw({}) step", dialect.name()),
+            Self::ScopeChange(_) => "scope contract change".to_string(),
+            Self::Raw { dialect, .. } => format!("raw({}) step", dialect.name()),
         }
     }
 }

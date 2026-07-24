@@ -161,15 +161,15 @@ pub fn lower_queries(
         .iter()
         .map(|q| (q.name.as_str(), q))
         .collect();
-    let mut out = Vec::new();
-    for decl in decls {
-        if let Decl::Query(q) = decl {
-            if let Some(rq) = queries.get(q.name.node.as_str()) {
-                out.push(lower_query(schema, decls, q, rq, dialect));
-            }
-        }
-    }
-    out
+    decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Query(q) => queries
+                .get(q.name.node.as_str())
+                .map(|rq| lower_query(schema, decls, q, rq, dialect)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Text emitter for one query: the SQL body framed with `-- query` comment
@@ -895,7 +895,7 @@ fn path_primitive(schema: &CheckedSchema, root: &RModel, path: &Path) -> Primiti
         let last = i + 1 == n;
         match cur.member(&seg.node).map(|m| &m.kind) {
             Some(MemberKind::Scalar { ty, .. }) => return *ty,
-            Some(MemberKind::Forward { target, .. }) | Some(MemberKind::Inverse { target, .. }) => {
+            Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
                 if last {
                     return Primitive::Uuid;
                 }
@@ -1102,8 +1102,7 @@ impl<'a> Select<'a> {
         self.scope_inject
             .iter()
             .find(|si| si.model == model)
-            .map(|si| si.terms.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[][..], |si| si.terms.as_slice())
     }
 
     /// The `@scope` conjunction the current callable injects for `model`, anchored at
@@ -1299,7 +1298,7 @@ impl<'a> Select<'a> {
     /// this select's schema/dialect/filters/scope injection and the current subquery
     /// counter (so nested aliases stay globally distinct). For a to-many / flatten
     /// correlated subquery's own reaches.
-    fn spawn_child(&self, root_alias: String) -> Select<'a> {
+    fn spawn_child(&self, root_alias: String) -> Self {
         Select {
             schema: self.schema,
             dialect: self.dialect,
@@ -1580,9 +1579,8 @@ impl<'a> Select<'a> {
         let n = path.segments.len();
         for (i, seg) in path.segments.iter().enumerate() {
             let name = &seg.node;
-            let mem = match cur.member(name) {
-                Some(m) => m,
-                None => return (alias, name.clone()), // sema already flagged this
+            let Some(mem) = cur.member(name) else {
+                return (alias, name.clone()); // sema already flagged this
             };
             let last = i + 1 == n;
             match &mem.kind {
@@ -1969,7 +1967,7 @@ impl<'a> Select<'a> {
     /// binds). Sema (E0281) guarantees the binding and the field resolve.
     fn binding_value(&self, pr: &ParamRef) -> String {
         let ctx = &self.bindings[pr.name.node.as_str()];
-        let field = pr.path.first().map(|s| s.node.as_str()).unwrap_or("");
+        let field = pr.path.first().map_or("", |s| s.node.as_str());
         // Reuse the value the bound create assigned to this field (a caller
         // param/literal the engine already binds), if it set one.
         if let Some(a) = ctx.assigns.iter().find(|a| a.col.node == field) {

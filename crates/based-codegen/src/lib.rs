@@ -47,12 +47,12 @@ impl Dialect {
     /// Parse the manifest `dialect` string. Unknown values fall back to MariaDB
     /// (the documented default) rather than failing — dialect selection is not a
     /// schema error.
-    pub fn parse(s: &str) -> Dialect {
+    pub fn parse(s: &str) -> Self {
         match s {
-            "sqlite" => Dialect::Sqlite,
-            "postgres" | "postgresql" => Dialect::Postgres,
-            "mariadb" | "mysql" => Dialect::MariaDb,
-            _ => Dialect::MariaDb,
+            "sqlite" => Self::Sqlite,
+            "postgres" | "postgresql" => Self::Postgres,
+            "mariadb" | "mysql" => Self::MariaDb,
+            _ => Self::MariaDb,
         }
     }
 
@@ -60,9 +60,9 @@ impl Dialect {
     /// emitted artifact records which target it was compiled for.
     pub fn name(self) -> &'static str {
         match self {
-            Dialect::MariaDb => "mariadb",
-            Dialect::Sqlite => "sqlite",
-            Dialect::Postgres => "postgres",
+            Self::MariaDb => "mariadb",
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
         }
     }
 
@@ -73,10 +73,10 @@ impl Dialect {
     /// through here rather than hardcoded at each `format!` site.
     pub fn quote(self, ident: &str) -> String {
         match self {
-            Dialect::MariaDb | Dialect::Sqlite => {
+            Self::MariaDb | Self::Sqlite => {
                 format!("`{}`", ident.replace('`', "``"))
             }
-            Dialect::Postgres => format!("\"{}\"", ident.replace('"', "\"\"")),
+            Self::Postgres => format!("\"{}\"", ident.replace('"', "\"\"")),
         }
     }
 
@@ -89,14 +89,14 @@ impl Dialect {
     /// keywords; SQLite stores bools as integers, so it is `1`/`0`.
     pub fn bool_lit(self, b: bool) -> &'static str {
         match self {
-            Dialect::MariaDb | Dialect::Postgres => {
+            Self::MariaDb | Self::Postgres => {
                 if b {
                     "TRUE"
                 } else {
                     "FALSE"
                 }
             }
-            Dialect::Sqlite => {
+            Self::Sqlite => {
                 if b {
                     "1"
                 } else {
@@ -111,9 +111,9 @@ impl Dialect {
     /// One element of a to-many nested shape array (L1) is built with it.
     pub fn json_object_fn(self) -> &'static str {
         match self {
-            Dialect::Sqlite => "json_object",
-            Dialect::MariaDb => "JSON_OBJECT",
-            Dialect::Postgres => "json_build_object",
+            Self::Sqlite => "json_object",
+            Self::MariaDb => "JSON_OBJECT",
+            Self::Postgres => "json_build_object",
         }
     }
 
@@ -130,9 +130,9 @@ impl Dialect {
             None => elem.to_string(),
         };
         match self {
-            Dialect::Sqlite => format!("json_group_array({ordered})"),
-            Dialect::MariaDb => format!("COALESCE(JSON_ARRAYAGG({ordered}), JSON_ARRAY())"),
-            Dialect::Postgres => format!("COALESCE(json_agg({ordered}), '[]'::json)"),
+            Self::Sqlite => format!("json_group_array({ordered})"),
+            Self::MariaDb => format!("COALESCE(JSON_ARRAYAGG({ordered}), JSON_ARRAY())"),
+            Self::Postgres => format!("COALESCE(json_agg({ordered}), '[]'::json)"),
         }
     }
 }
