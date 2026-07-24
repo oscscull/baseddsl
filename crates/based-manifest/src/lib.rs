@@ -37,7 +37,7 @@ pub struct SchemaConfig {
 
 impl Default for SchemaConfig {
     fn default() -> Self {
-        SchemaConfig {
+        Self {
             foreign_keys: default_foreign_keys(),
         }
     }
@@ -97,7 +97,7 @@ pub fn discover(root: &Path) -> Result<Project, Vec<Diagnostic>> {
     let mut files: Vec<DiscoveredFile> = WalkDir::new(&schema_root)
         .sort_by_file_name()
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().is_some_and(|x| x == "bsl"))
         .map(|e| DiscoveredFile {

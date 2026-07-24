@@ -20,7 +20,7 @@ fn conformance_golden() {
     let dir = conformance_dir();
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("read conformance dir")
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();

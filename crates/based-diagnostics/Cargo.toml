@@ -7,3 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 based-ast = { workspace = true }
+
+[lints]
+workspace = true

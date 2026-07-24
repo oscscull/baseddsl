@@ -35,3 +35,6 @@ clap = { workspace = true }
 # Graceful shutdown of `based serve`: catch SIGTERM/SIGINT and drain (principle 7 —
 # reuse a hardened signal crate rather than hand-roll platform signal handling).
 ctrlc = { workspace = true }
+
+[lints]
+workspace = true

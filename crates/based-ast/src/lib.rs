@@ -403,7 +403,7 @@ pub enum ShapeField {
     /// `out = path` or `out = raw`...``
     Rename { out: Ident, value: ShapeValue },
     /// `field { ... }` — expand a relation into a sub-object
-    Nest { field: Ident, body: Vec<ShapeField> },
+    Nest { field: Ident, body: Vec<Self> },
     /// `field -> ShapeName` — expand a relation into a sub-object projected by a
     /// named shape (whose `from` model must equal the relation's target)
     NestRef { field: Ident, shape: Ident },
@@ -415,7 +415,7 @@ pub enum ShapeField {
     Flatten {
         out: Ident,
         path: Path,
-        body: Vec<ShapeField>,
+        body: Vec<Self>,
     },
 }
 
@@ -619,7 +619,7 @@ pub enum WriteStmt {
         model: Ident,
         where_: Predicate,
     },
-    Tx(Vec<WriteStmt>),
+    Tx(Vec<Self>),
     Raw(RawSql),
 }
 
@@ -653,9 +653,9 @@ pub enum AssignRhs {
     /// `lhs op rhs`, e.g. `total + $n`. `*`/`/` bind tighter than `+`/`-`; the tree
     /// already encodes precedence and associativity. `span` covers the whole expression.
     Arith {
-        lhs: Box<AssignRhs>,
+        lhs: Box<Self>,
         op: ArithOp,
-        rhs: Box<AssignRhs>,
+        rhs: Box<Self>,
         span: Span,
     },
 }
@@ -665,8 +665,8 @@ impl AssignRhs {
     /// Lets the many sites that only handle the simple form keep their `Value` logic.
     pub fn as_value(&self) -> Option<&Value> {
         match self {
-            AssignRhs::Value(v) => Some(v),
-            AssignRhs::Arith { .. } => None,
+            Self::Value(v) => Some(v),
+            Self::Arith { .. } => None,
         }
     }
 }
@@ -691,9 +691,9 @@ pub struct NamedFilter {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
-    Or(Box<Predicate>, Box<Predicate>),
-    And(Box<Predicate>, Box<Predicate>),
-    Not(Box<Predicate>),
+    Or(Box<Self>, Box<Self>),
+    And(Box<Self>, Box<Self>),
+    Not(Box<Self>),
     Cmp {
         path: Path,
         op: Op,

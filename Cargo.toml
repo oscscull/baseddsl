@@ -59,15 +59,15 @@ lto = "thin"
 # `format_push_string` (forces `write!` + an unwrap), `option_if_let_else`,
 # `needless_raw_string_hashes` (golden SQL fixtures read better with uniform `r#"…"#`),
 # `wildcard_imports` (every one is an AST/IR node prelude — the explicit list is 30 names
-# of pure noise), and `match_same_arms` (exhaustive matches here document why each variant
-# is a no-op; merging the arms deletes the documentation).
+# of pure noise), `match_same_arms` (exhaustive matches here document why each variant
+# is a no-op; merging the arms deletes the documentation), and `useless_let_if_seq`
+# (over-fires on parser accumulators seeded then filled inside a side-effecting branch).
 [workspace.lints.clippy]
 # Real defects and waste.
 redundant_clone = "deny"
 needless_collect = "deny"
 or_fun_call = "deny"
 unused_peekable = "deny"
-useless_let_if_seq = "deny"
 needless_pass_by_ref_mut = "deny"
 implicit_clone = "deny"
 manual_is_variant_and = "deny"

@@ -40,10 +40,10 @@ impl FactKind {
     /// Stable short tag (used in `based facts` output + as an inlay-hint category).
     pub fn tag(self) -> &'static str {
         match self {
-            FactKind::InferredInverse => "inverse",
-            FactKind::CtxRequirement => "ctx",
-            FactKind::ResolvedQuery => "query",
-            FactKind::Scope => "scope",
+            Self::InferredInverse => "inverse",
+            Self::CtxRequirement => "ctx",
+            Self::ResolvedQuery => "query",
+            Self::Scope => "scope",
         }
     }
 }
@@ -392,7 +392,7 @@ mod tests {
                 || low.contains(".md")
                 || s.split(|c: char| !c.is_alphanumeric()).any(|w| {
                     let mut ch = w.chars();
-                    matches!(ch.next(), Some('D') | Some('P'))
+                    matches!(ch.next(), Some('D' | 'P'))
                         && ch.clone().count() >= 1
                         && ch.all(|c| c.is_ascii_digit())
                 })

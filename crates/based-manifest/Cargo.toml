@@ -11,3 +11,6 @@ based-diagnostics = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
+
+[lints]
+workspace = true

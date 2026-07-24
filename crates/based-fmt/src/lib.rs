@@ -55,7 +55,7 @@ impl Printer {
         }
         let mut lines = Vec::with_capacity(line_starts.len());
         for (i, &start) in line_starts.iter().enumerate() {
-            let end = line_starts.get(i + 1).map(|&n| n - 1).unwrap_or(src.len());
+            let end = line_starts.get(i + 1).map_or(src.len(), |&n| n - 1);
             let text = src[start..end].trim_end();
             lines.push(if text.is_empty() {
                 LineKind::Blank
@@ -65,7 +65,7 @@ impl Printer {
                 LineKind::Code
             });
         }
-        Printer {
+        Self {
             line_starts,
             lines,
             out: Vec::new(),
@@ -134,7 +134,7 @@ impl Printer {
         let mut header: Vec<HeaderItem> = Vec::new();
         header.extend(m.decorators.iter().map(HeaderItem::Deco));
         header.extend(m.scopes.iter().map(HeaderItem::Scope));
-        header.sort_by_key(|h| h.start());
+        header.sort_by_key(HeaderItem::start);
 
         let mut prev_end_line: Option<usize> = None;
         for item in &header {
@@ -711,7 +711,7 @@ fn param(p: &Param) -> String {
     match &p.binding {
         Some(ParamBinding::Edge(e)) => s.push_str(&format!(" -> {}", e.node)),
         Some(ParamBinding::ColOp { op, col }) => {
-            s.push_str(&format!(" {} {}", op_str(*op), col.node))
+            s.push_str(&format!(" {} {}", op_str(*op), col.node));
         }
         None => {}
     }
@@ -1026,12 +1026,12 @@ fn esc(s: &str) -> String {
 fn finish(lines: Vec<String>) -> String {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines {
-        if line.is_empty() && out.last().map(|l| l.is_empty()).unwrap_or(true) {
+        if line.is_empty() && out.last().is_none_or(std::string::String::is_empty) {
             continue;
         }
         out.push(line);
     }
-    while out.last().map(|l| l.is_empty()).unwrap_or(false) {
+    while out.last().is_some_and(std::string::String::is_empty) {
         out.pop();
     }
     if out.is_empty() {

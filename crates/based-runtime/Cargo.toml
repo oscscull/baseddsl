@@ -102,3 +102,6 @@ sqlx = { version = "0.9.0", default-features = false, features = [
     "rust_decimal",
     "bigdecimal",
 ] }
+
+[lints]
+workspace = true

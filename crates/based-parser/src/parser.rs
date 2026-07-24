@@ -90,15 +90,14 @@ impl<'a> Parser<'a> {
     }
     /// Span covering the current token, or a zero-width span at EOF.
     fn here(&self) -> Span {
-        match self.peek() {
-            Some(l) => self.span(l),
-            None => {
-                let end = self.src.len() as u32;
-                Span {
-                    file: self.file,
-                    start: end,
-                    end,
-                }
+        if let Some(l) = self.peek() {
+            self.span(l)
+        } else {
+            let end = self.src.len() as u32;
+            Span {
+                file: self.file,
+                start: end,
+                end,
             }
         }
     }
@@ -279,7 +278,7 @@ impl<'a> Parser<'a> {
         while self.eat(Tok::Comma) {
             names.push(self.upper_ident("scope name")?);
         }
-        let end = names.last().map(|n| n.span.end).unwrap_or(at.end);
+        let end = names.last().map_or(at.end, |n| n.span.end);
         Ok(ScopeRef {
             names,
             span: Span {
@@ -327,7 +326,7 @@ impl<'a> Parser<'a> {
         let ty = self.type_expr()?;
         self.expect(Tok::Eq, "`=` (a scope term is `col: Type = $ctx.field`)")?;
         let ctx = self.param_ref()?;
-        let end = ctx.path.last().map(|s| s.span.end).unwrap_or(ty.span.end);
+        let end = ctx.path.last().map_or(ty.span.end, |s| s.span.end);
         Ok(ScopeTerm {
             span: Span {
                 file: self.file,
@@ -553,8 +552,7 @@ impl<'a> Parser<'a> {
         let end = self
             .toks
             .get(self.pos.saturating_sub(1))
-            .map(|l| l.end)
-            .unwrap_or(at.end);
+            .map_or(at.end, |l| l.end);
         Ok(IndexDecl {
             columns,
             unique,
@@ -678,10 +676,11 @@ impl<'a> Parser<'a> {
         let mut reason = None;
         let mut on_delete = None;
         let mut on_update = None;
-        let mut end = at.end + 2; // past `fk`
-        if let Some(l) = self.toks.get(self.pos.saturating_sub(1)) {
-            end = l.end;
-        }
+        // Default span end: the last consumed token's end, else just past `fk`.
+        let mut end = self
+            .toks
+            .get(self.pos.saturating_sub(1))
+            .map_or(at.end + 2, |l| l.end);
         if self.eat(Tok::LParen) {
             // Optional leading positional reason string.
             if self.at(Tok::Str) {
@@ -739,10 +738,11 @@ impl<'a> Parser<'a> {
         let at = self.expect(Tok::At, "`@`")?;
         self.eat_kw("no_fk");
         let mut reason = None;
-        let mut end = at.end + 5; // past `no_fk`
-        if let Some(l) = self.toks.get(self.pos.saturating_sub(1)) {
-            end = l.end;
-        }
+        // Default span end: the last consumed token's end, else just past `no_fk`.
+        let mut end = self
+            .toks
+            .get(self.pos.saturating_sub(1))
+            .map_or(at.end + 5, |l| l.end);
         if self.eat(Tok::LParen) {
             if self.at(Tok::Str) {
                 let s = self.expect(Tok::Str, "a quoted reason")?;
@@ -846,7 +846,7 @@ impl<'a> Parser<'a> {
             self.err(format!("{what} must be a non-negative integer"));
             return Err(());
         }
-        Ok(n.min(u32::MAX as i64) as u32)
+        Ok(n.min(i64::from(u32::MAX)) as u32)
     }
 
     /// A type in a non-field position (param annotation, scope term). An opaque
@@ -1167,7 +1167,7 @@ impl<'a> Parser<'a> {
         while self.eat(Tok::Comma) {
             names.push(self.upper_ident("scope name")?);
         }
-        let end = names.last().map(|n| n.span.end).unwrap_or(start);
+        let end = names.last().map_or(start, |n| n.span.end);
         Ok(Scoped {
             names,
             span: Span {
@@ -1742,7 +1742,7 @@ impl<'a> Parser<'a> {
             Some(Tok::Dollar) => Ok(Value::Param(self.param_ref()?)),
             Some(Tok::Int | Tok::Float | Tok::Str) => Ok(Value::Lit(self.literal()?)),
             Some(Tok::LowerIdent) => match self.ident_at(0) {
-                Some("true") | Some("false") | Some("null") => Ok(Value::Lit(self.literal()?)),
+                Some("true" | "false" | "null") => Ok(Value::Lit(self.literal()?)),
                 _ if self.tok_at(1) == Some(Tok::LParen) => Ok(Value::Func(self.func_call()?)),
                 _ => Ok(Value::Path(self.path()?)),
             },
@@ -1823,8 +1823,7 @@ impl<'a> Parser<'a> {
         self.pos
             .checked_sub(1)
             .and_then(|i| self.toks.get(i))
-            .map(|l| l.end)
-            .unwrap_or(0)
+            .map_or(0, |l| l.end)
     }
 
     fn param_ref(&mut self) -> PResult<ParamRef> {
