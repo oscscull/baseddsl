@@ -145,13 +145,14 @@ pub mod code {
     pub const PK_STRATEGY_MISPLACED: &str = "E0267"; // `serial`/`ulid` on a non-primary-key column — they are PK generation strategies, valid only as the `id` type
     pub const PK_SERIAL_BACKREF: &str = "E0268"; // a `tx` step reads `$name.id` of a `serial` (DB-generated) create — the id is unknown until the row is written, so it can't bind a sibling step
 
-    // natural (nominated) primary key `@key(field)` (D111): a declared column *is* the
-    // primary key — no surrogate `id` is synthesized. The single-column case; composite
-    // `@key(f1, f2, …)` is PR6.
+    // nominated primary key `@key(f1, f2, …)` (D111): declared column(s) *are* the primary
+    // key — no surrogate `id` is synthesized. One field is a natural single-column key; two
+    // or more form a composite key over those columns in list order.
     pub const KEY_UNKNOWN_FIELD: &str = "E0275"; // `@key(x)` names a field the model does not declare
     pub const KEY_UNSUITABLE: &str = "E0276"; // the nominated field can't be a primary key (optional, `[]`, or a relation/opaque — a PK must be a required scalar column)
     pub const KEY_WITH_NO_ID: &str = "E0277"; // `@key` and `@no_id` on one model — a model either nominates a key or declares itself keyless, never both
-    pub const KEY_COMPOSITE: &str = "E0278"; // `@key(f1, f2, …)` composite key — not yet supported (single-column only)
+    pub const KEY_EMPTY: &str = "E0278"; // `@key()` names no field — a primary key must nominate at least one column
+    pub const KEY_DUPLICATE: &str = "E0279"; // `@key(f, …, f)` names the same field twice — each key column appears once
 
     // opaque `raw(…)` column types + exotic indexes (E027x): the escape hatch for a DB
     // type or index form the engine does not model. The literal string is stored and
@@ -372,6 +373,30 @@ impl CheckedSchema {
     pub fn enum_(&self, name: &str) -> Option<&REnum> {
         self.enum_index.get(name).map(|&i| &self.enums[i])
     }
+
+    /// The physical FK column(s) a forward relation occupies, each paired with the target
+    /// primary-key part it references (its type + physical column). A single-column-key
+    /// target yields one entry on the relation's own `fk_col` (its `(column "…")` override
+    /// honored). A composite-key target yields one `<field>_<part_col>` column per key
+    /// part, in key order — the auto-expanded multi-column FK. Empty for an inverse edge,
+    /// a missing target, or a keyless target (no key to reference).
+    pub fn fk_columns<'s>(&'s self, mem: &RMember) -> Vec<(String, &'s RMember)> {
+        let MemberKind::Forward { target, fk_col, .. } = &mem.kind else {
+            return Vec::new();
+        };
+        let Some(t) = self.model(target) else {
+            return Vec::new();
+        };
+        let parts = t.pk_members();
+        if parts.len() <= 1 {
+            parts.into_iter().map(|p| (fk_col.clone(), p)).collect()
+        } else {
+            parts
+                .into_iter()
+                .map(|p| (format!("{}_{}", mem.name, p.physical_col()), p))
+                .collect()
+        }
+    }
 }
 
 /// A resolved `enum Name { … }` decl: its inferred kind and ordered variant list. The
@@ -560,22 +585,47 @@ impl RModel {
         }
     }
 
-    /// The single primary-key field name — `id`, or a `@key(field)` natural key. `None` for
-    /// a keyless model. (A composite `@key` returns its first part; multi-column is PR6.)
+    /// The single primary-key field name — `id`, or a single-column `@key(field)` natural
+    /// key. `None` for a keyless model or a composite key (use [`pk_field_names`] there).
     pub fn pk_field(&self) -> Option<&str> {
         self.pk_field_names().into_iter().next()
     }
 
-    /// The resolved primary-key member (the `id` field, or the `@key`-nominated field), for
-    /// reading its type when mirroring an inbound FK. `None` for a keyless model.
+    /// The resolved primary-key member (the `id` field, or the single `@key`-nominated
+    /// field). `None` for a keyless model; the first part of a composite key.
     pub fn pk_member(&self) -> Option<&RMember> {
         self.pk_field().and_then(|f| self.member(f))
     }
 
     /// The physical primary-key column (its `(column "…")` override, else the field name).
-    /// `None` for a keyless model.
+    /// `None` for a keyless model; the first column of a composite key.
     pub fn pk_column(&self) -> Option<String> {
         self.pk_member().map(|m| m.physical_col().to_string())
+    }
+
+    /// The resolved primary-key member(s), in key order — one for a surrogate `id` or a
+    /// single-column `@key`, several for a composite `@key(f1, f2, …)`. Empty for a
+    /// keyless model. The one place the whole key is read for multi-column DDL/FK/joins.
+    pub fn pk_members(&self) -> Vec<&RMember> {
+        self.pk_field_names()
+            .into_iter()
+            .filter_map(|f| self.member(f))
+            .collect()
+    }
+
+    /// The physical primary-key column(s), in key order. Empty for a keyless model; more
+    /// than one for a composite `@key`.
+    pub fn pk_columns(&self) -> Vec<String> {
+        self.pk_members()
+            .into_iter()
+            .map(|m| m.physical_col().to_string())
+            .collect()
+    }
+
+    /// A composite (multi-column) `@key(f1, f2, …)` primary key — two or more nominated
+    /// key columns, so its id surface is structured (a per-part object, not one scalar).
+    pub fn is_composite_key(&self) -> bool {
+        self.key.len() >= 2
     }
 
     /// Does this model's PK come from the database (serial), so a `create` omits the id

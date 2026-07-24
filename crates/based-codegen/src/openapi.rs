@@ -725,18 +725,48 @@ fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, Value, b
     fields
 }
 
-/// The wire schema of a foreign key: the target model's primary-key schema (uuid/ulid
-/// string, or serial integer). Falls back to a uuid string when the target or its id is
-/// unresolved (sema would have flagged it).
+/// The wire schema of a foreign key: the target model's primary-key schema — a uuid/ulid
+/// string or serial integer for a single-column key, or a typed-property object (the
+/// structured id) for a composite `@key`. Falls back to a uuid string when the target or
+/// its id is unresolved (sema would have flagged it).
 fn fk_target_schema(schema: &CheckedSchema, target: &str) -> Value {
-    match schema
-        .model(target)
-        .and_then(based_sema::RModel::pk_member)
-        .map(|m| &m.kind)
-    {
+    let Some(t) = schema.model(target) else {
+        return uuid_schema();
+    };
+    if t.is_composite_key() {
+        return composite_id_schema(schema, t);
+    }
+    match t.pk_member().map(|m| &m.kind) {
         Some(MemberKind::Scalar { ty, .. }) => primitive_schema(*ty),
         _ => uuid_schema(),
     }
+}
+
+/// The structured-id object schema of a composite-key model: one required property per key
+/// part, each typed by the part's own schema (a relation part's target key, a scalar part's
+/// primitive).
+fn composite_id_schema(schema: &CheckedSchema, model: &based_sema::RModel) -> Value {
+    let mut props = Map::new();
+    let mut required = Vec::new();
+    for f in &model.key {
+        let Some(mem) = model.member(f) else { continue };
+        let part = match &mem.kind {
+            MemberKind::Forward { target, .. } => fk_target_schema(schema, target),
+            MemberKind::Scalar {
+                enum_name: Some(en),
+                ..
+            } => enum_schema(schema, en),
+            MemberKind::Scalar { ty, .. } => primitive_schema(*ty),
+            MemberKind::Inverse { .. } => uuid_schema(),
+        };
+        props.insert(f.clone(), part);
+        required.push(Value::String(f.clone()));
+    }
+    let mut obj = Map::new();
+    obj.insert("type".to_string(), Value::String("object".to_string()));
+    obj.insert("properties".to_string(), Value::Object(props));
+    obj.insert("required".to_string(), Value::Array(required));
+    Value::Object(obj)
 }
 
 // ---------- input object schemas -------------------------------------------

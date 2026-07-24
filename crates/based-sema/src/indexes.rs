@@ -462,11 +462,20 @@ fn push_join(joins: &mut Vec<(usize, String)>, ti: usize, via: &str) {
 
 // ---------- index availability ----------------------------------------------
 
-/// Does declared structure already lead with `field`? PK/`(unique)` columns and
-/// declared indexes count; a declared index may lead with the soft-delete column
-/// (predicate-leading by hand) — that leading column is skipped.
+/// Does declared structure already lead with `field`? PK/`(unique)` columns, the composite
+/// primary key (which leads with its first key column), and declared indexes count; a
+/// declared index may lead with the soft-delete column (predicate-leading by hand) — that
+/// leading column is skipped.
 fn covers(m: &RModel, field: &str) -> bool {
-    m.is_unique(field) || m.indexes.iter().any(|i| lead(m, i) == Some(field))
+    m.is_unique(field)
+        || pk_leads_with(m, field)
+        || m.indexes.iter().any(|i| lead(m, i) == Some(field))
+}
+
+/// A composite `@key` is a unique index that leads with its first key column, so a query
+/// keying on that column is index-served exactly as a declared leading index would be.
+fn pk_leads_with(m: &RModel, field: &str) -> bool {
+    m.is_composite_key() && m.key.first().map(String::as_str) == Some(field)
 }
 
 /// The effective leading column of an index: the first column, skipping a leading
@@ -488,7 +497,9 @@ fn lead<'a>(m: &RModel, idx: &'a RIndex) -> Option<&'a str> {
 fn check_pattern(pat: &Pattern, mi: usize, cx: &Cx, sink: &mut Sink) {
     let m = cx.model(mi);
     let leads = |field: &str| -> bool {
-        m.is_unique(field) || m.indexes.iter().any(|i| lead(m, i) == Some(field))
+        m.is_unique(field)
+            || pk_leads_with(m, field)
+            || m.indexes.iter().any(|i| lead(m, i) == Some(field))
     };
 
     // A filter with no leading index scans (unless it is opaque — then stay silent).

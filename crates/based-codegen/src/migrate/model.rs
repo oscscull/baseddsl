@@ -88,10 +88,11 @@ pub struct TableSnap {
     /// `@no_id` — a keyless legacy table (no `id` primary key). The diff renders no
     /// `PRIMARY KEY` for it.
     pub no_id: bool,
-    /// The primary-key column when the `id` field carries a `(column "…")` override, so
-    /// the from-scratch `CREATE TABLE` names the real column. `None` = the default `id`
-    /// (elided from the column list and re-synthesized) or a keyless (`@no_id`) table.
-    pub pk: Option<String>,
+    /// The primary-key column(s) when they are not the default single `id`: a renamed `id`,
+    /// a single-column `@key(field)`, or the ordered columns of a composite `@key(f1, f2, …)`.
+    /// Empty = the default `id` (elided from the column list and re-synthesized) or a keyless
+    /// (`@no_id`) table.
+    pub pk: Vec<String>,
     /// Columns, sorted by name.
     pub columns: Vec<ColumnSnap>,
     /// Declared indexes, sorted by name.
@@ -103,16 +104,29 @@ pub struct TableSnap {
     pub foreign_keys: Vec<ForeignKeySnap>,
 }
 
-/// One resolved foreign-key constraint: the local FK column, the referenced table + its
-/// primary-key column, and the optional referential actions. Diffed by value.
+/// One resolved foreign-key constraint: the local FK column(s), the referenced table + its
+/// primary-key column(s), and the optional referential actions. One column each for a
+/// single-column-key target; several (paired positionally, in key order) for a composite
+/// key. Diffed by value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ForeignKeySnap {
-    pub column: String,
+    pub columns: Vec<String>,
     pub ref_table: String,
-    pub ref_column: String,
+    pub ref_columns: Vec<String>,
     /// `cascade`/`restrict`/`set_null`/`no_action`, or `None` for the DB-default action.
     pub on_delete: Option<String>,
     pub on_update: Option<String>,
+}
+
+impl ForeignKeySnap {
+    /// A stable label for a constraint/error message: the sole column, or a
+    /// `(c1, c2)` tuple for a composite FK.
+    pub fn label(&self) -> String {
+        match self.columns.as_slice() {
+            [c] => c.clone(),
+            cols => format!("({})", cols.join(", ")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,16 +264,22 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
     columns.retain(|c| !is_default_id(c));
     columns.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut indexes = index_snaps(model);
+    let mut indexes = index_snaps(schema, model);
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut foreign_keys = foreign_key_snaps(schema, model, fks);
     foreign_keys.sort();
 
-    // Record a non-default PK column so the from-scratch `CREATE TABLE` names it: a renamed
-    // `id`, or a `@key(field)` natural key. The default `id` stays `None` (elided +
-    // re-synthesized); a keyless (`@no_id`) table has no PK column.
-    let pk = model.pk_column().filter(|c| c != "id");
+    // Record non-default PK column(s) so the from-scratch `CREATE TABLE` names them: a
+    // renamed `id`, a single-column `@key`, or a composite `@key`'s ordered columns. The
+    // default single `id` stays empty (elided + re-synthesized); a keyless (`@no_id`) table
+    // has none.
+    let pk_cols = model.pk_columns();
+    let pk = if pk_cols == ["id"] {
+        Vec::new()
+    } else {
+        pk_cols
+    };
 
     TableSnap {
         name: model.table.clone(),
@@ -286,22 +306,28 @@ pub fn foreign_key_snaps(
 ) -> Vec<ForeignKeySnap> {
     let mut out = Vec::new();
     for mem in &model.members {
-        let MemberKind::Forward { target, fk_col, .. } = &mem.kind else {
+        let MemberKind::Forward { target, .. } = &mem.kind else {
             continue;
         };
         let Some(resolved) = model.resolved_fk(mem, fks) else {
             continue;
         };
-        let Some(ref_column) = target_pk_column(schema, target) else {
+        // The FK column(s) + the target key column(s) they reference, paired in key order —
+        // one pair for a single-column-key target, several for a composite key.
+        let pairs = schema.fk_columns(mem);
+        if pairs.is_empty() {
             continue;
-        };
+        }
         let ref_table = schema
             .model(target)
             .map_or_else(|| target.clone(), |t| t.table.clone());
         out.push(ForeignKeySnap {
-            column: fk_col.clone(),
+            columns: pairs.iter().map(|(c, _)| c.clone()).collect(),
             ref_table,
-            ref_column,
+            ref_columns: pairs
+                .iter()
+                .map(|(_, p)| p.physical_col().to_string())
+                .collect(),
             on_delete: resolved.on_delete.map(|a| a.snap().to_string()),
             on_update: resolved.on_update.map(|a| a.snap().to_string()),
         });
@@ -387,7 +413,7 @@ fn canonical_scope_alts(alts: &[Vec<String>]) -> Vec<Vec<String>> {
 /// name. Mirrors `sql::ddl`'s naming so the snapshot's index identity matches the
 /// generated DDL exactly — a non-unique index on a soft-delete model prepends the
 /// tombstone column (predicate-leading).
-fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
+fn index_snaps(schema: &CheckedSchema, model: &RModel) -> Vec<IndexSnap> {
     model
         .indexes
         .iter()
@@ -409,7 +435,10 @@ fn index_snaps(model: &RModel) -> Vec<IndexSnap> {
                     }
                 }
             }
-            let cols: Vec<String> = fields.iter().map(|c| physical_col(model, c)).collect();
+            let cols: Vec<String> = fields
+                .iter()
+                .flat_map(|c| physical_cols(schema, model, c))
+                .collect();
             IndexSnap {
                 name: index_name(if idx.unique { "uq" } else { "idx" }, &model.table, &cols),
                 columns: cols,
@@ -450,6 +479,21 @@ fn physical_col(model: &RModel, field: &str) -> String {
         Some(MemberKind::Scalar { column, .. }) => column.clone(),
         Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
         _ => field.to_string(),
+    }
+}
+
+/// The physical column(s) backing a field: a scalar/single-column FK's column, else the
+/// ordered `<field>_<part>` columns of a composite FK (mirrors `sql::physical_cols`).
+fn physical_cols(schema: &CheckedSchema, model: &RModel, field: &str) -> Vec<String> {
+    match model.member(field) {
+        Some(mem) if matches!(mem.kind, MemberKind::Forward { .. }) => {
+            let fks = schema.fk_columns(mem);
+            if fks.len() > 1 {
+                return fks.into_iter().map(|(c, _)| c).collect();
+            }
+            vec![physical_col(model, field)]
+        }
+        _ => vec![physical_col(model, field)],
     }
 }
 
@@ -646,8 +690,8 @@ fn render_table(out: &mut String, t: &TableSnap) {
     if t.no_id {
         header.push_str(" no_id");
     }
-    if let Some(pk) = &t.pk {
-        let _ = write!(header, " pk={pk}");
+    if !t.pk.is_empty() {
+        let _ = write!(header, " pk={}", col_list_text(&t.pk));
     }
     header.push('\n');
     out.push_str(&header);
@@ -680,9 +724,15 @@ fn render_table(out: &mut String, t: &TableSnap) {
 }
 
 /// The `fk <col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]` line shared by
-/// the `schema.snap` FK line and the `up.mig` foreign-key step.
+/// the `schema.snap` FK line and the `up.mig` foreign-key step. A composite FK renders its
+/// column lists as `(c1, c2)` tuples; a single-column FK stays the bare-name form.
 pub fn fk_spec_text(f: &ForeignKeySnap) -> String {
-    let mut s = format!("fk {} -> {}.{}", f.column, f.ref_table, f.ref_column);
+    let mut s = format!(
+        "fk {} -> {}.{}",
+        col_list_text(&f.columns),
+        f.ref_table,
+        col_list_text(&f.ref_columns)
+    );
     if let Some(a) = &f.on_delete {
         let _ = write!(s, " on_delete={a}");
     }
@@ -878,16 +928,26 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     let mut scope_alts = Vec::new();
     let mut sort = Vec::new();
     let mut no_id = false;
-    let mut pk = None;
+    let mut pk: Vec<String> = Vec::new();
 
     while !head.is_empty() {
         if head == "no_id" || head.starts_with("no_id ") {
             no_id = true;
             head = head["no_id".len()..].trim_start();
         } else if let Some(after) = head.strip_prefix("pk=") {
-            let mut sp = after.splitn(2, char::is_whitespace);
-            pk = Some(sp.next().unwrap_or("").to_string());
-            head = sp.next().unwrap_or("").trim_start();
+            // `pk=col` (single) or `pk=(c1, c2)` (composite — the tuple carries spaces).
+            let (marker, rest) = if after.starts_with('(') {
+                let close = after.find(')').map_or(after.len(), |i| i + 1);
+                (&after[..close], after[close..].trim_start())
+            } else {
+                let mut sp = after.splitn(2, char::is_whitespace);
+                (
+                    sp.next().unwrap_or(""),
+                    sp.next().unwrap_or("").trim_start(),
+                )
+            };
+            pk = parse_col_list(marker);
+            head = rest;
         } else if let Some(after) = head.strip_prefix("soft_delete=") {
             let mut sp = after.splitn(2, char::is_whitespace);
             let spec = sp.next().unwrap_or("");
@@ -943,20 +1003,45 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     })
 }
 
+/// Render an FK column list: a bare name for one column, a `(c1, c2)` tuple for several.
+pub(crate) fn col_list_text(cols: &[String]) -> String {
+    match cols {
+        [c] => c.clone(),
+        cs => format!("({})", cs.join(", ")),
+    }
+}
+
+/// Parse an FK column list — a bare name, or a `(c1, c2)` parenthesized tuple.
+fn parse_col_list(s: &str) -> Vec<String> {
+    let s = s.trim();
+    match s.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        Some(inner) => inner.split(',').map(|c| c.trim().to_string()).collect(),
+        None => vec![s.to_string()],
+    }
+}
+
 /// Parse a `<col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]` FK line (the
-/// `fk ` prefix already stripped).
+/// `fk ` prefix already stripped). A composite FK carries `(c1, c2)` tuples on both sides.
 fn parse_fk(rest: &str, line: usize) -> Result<ForeignKeySnap, ParseError> {
     let malformed = || ParseError {
         line,
         message: format!("malformed fk: {rest}"),
     };
     let (col, tail) = rest.split_once("->").ok_or_else(malformed)?;
-    let mut toks = tail.split_whitespace();
-    let reference = toks.next().ok_or_else(malformed)?;
-    let (ref_table, ref_column) = reference.split_once('.').ok_or_else(malformed)?;
+    let tail = tail.trim();
+    // Split the `<ref_table>.<ref_cols>` reference from any trailing `on_*` attributes; the
+    // reference's `(p1, p2)` tuple carries spaces, so we can't just `split_whitespace`.
+    let attr_at = tail
+        .find(" on_delete=")
+        .or_else(|| tail.find(" on_update="));
+    let (reference, attrs) = match attr_at {
+        Some(i) => (&tail[..i], &tail[i..]),
+        None => (tail, ""),
+    };
+    let (ref_table, ref_cols) = reference.trim().split_once('.').ok_or_else(malformed)?;
     let mut on_delete = None;
     let mut on_update = None;
-    for tok in toks {
+    for tok in attrs.split_whitespace() {
         if let Some(a) = tok.strip_prefix("on_delete=") {
             on_delete = Some(a.to_string());
         } else if let Some(a) = tok.strip_prefix("on_update=") {
@@ -966,9 +1051,9 @@ fn parse_fk(rest: &str, line: usize) -> Result<ForeignKeySnap, ParseError> {
         }
     }
     Ok(ForeignKeySnap {
-        column: col.trim().to_string(),
+        columns: parse_col_list(col),
         ref_table: ref_table.trim().to_string(),
-        ref_column: ref_column.trim().to_string(),
+        ref_columns: parse_col_list(ref_cols),
         on_delete,
         on_update,
     })

@@ -22,7 +22,7 @@ fn table(name: &str, columns: Vec<ColumnSnap>) -> TableSnap {
         scope_alts: Vec::new(),
         sort: Vec::new(),
         no_id: false,
-        pk: None,
+        pk: Vec::new(),
         columns,
         indexes: Vec::new(),
         foreign_keys: Vec::new(),
@@ -55,7 +55,7 @@ fn render_then_parse_round_trips_every_attribute() {
             scope_alts: vec![vec!["Tenant".to_string()]],
             sort: vec![("placed_at".to_string(), "desc".to_string())],
             no_id: false,
-            pk: None,
+            pk: Vec::new(),
             columns: vec![
                 ColumnSnap {
                     name: "status".to_string(),
@@ -82,9 +82,9 @@ fn render_then_parse_round_trips_every_attribute() {
                 raw: None,
             }],
             foreign_keys: vec![ForeignKeySnap {
-                column: "org_id".to_string(),
+                columns: vec!["org_id".to_string()],
                 ref_table: "org".to_string(),
-                ref_column: "id".to_string(),
+                ref_columns: vec!["id".to_string()],
                 on_delete: Some("cascade".to_string()),
                 on_update: None,
             }],

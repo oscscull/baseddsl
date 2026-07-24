@@ -86,7 +86,9 @@ fn render_step(out: &mut String, step: &Step) {
         Step::AddForeignKey { table, fk } => {
             let mut line = format!(
                 "add foreign_key {table}.{} -> {}.{}",
-                fk.column, fk.ref_table, fk.ref_column
+                super::model::col_list_text(&fk.columns),
+                fk.ref_table,
+                super::model::col_list_text(&fk.ref_columns)
             );
             if let Some(a) = &fk.on_delete {
                 let _ = write!(line, " on_delete={a}");
@@ -96,8 +98,12 @@ fn render_step(out: &mut String, step: &Step) {
             }
             let _ = writeln!(out, "{line}");
         }
-        Step::DropForeignKey { table, column } => {
-            let _ = writeln!(out, "drop foreign_key {table}.{column}");
+        Step::DropForeignKey { table, columns } => {
+            let _ = writeln!(
+                out,
+                "drop foreign_key {table}.{}",
+                super::model::col_list_text(columns)
+            );
         }
         Step::RenameTable { from, to } => {
             let _ = writeln!(out, "rename table {from} -> {to}");

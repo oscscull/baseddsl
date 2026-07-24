@@ -34,7 +34,7 @@
 //! MariaDB/SQLite and double-quoted on Postgres ([`Dialect::quote`]).
 
 use based_ast::{DefaultVal, Literal, Primitive, RawSpec};
-use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel};
 
 use crate::Dialect;
 
@@ -85,7 +85,7 @@ struct IndexSpec {
 /// the always-filtered tombstone column is physically prepended (neither MariaDB nor
 /// SQLite has partial indexes), so the written index still leads with what selects. A
 /// unique index is a constraint — its column set is never reshaped.
-fn index_specs(model: &RModel, dialect: Dialect) -> Vec<IndexSpec> {
+fn index_specs(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec<IndexSpec> {
     model
         .indexes
         .iter()
@@ -117,13 +117,32 @@ fn index_specs(model: &RModel, dialect: Dialect) -> Vec<IndexSpec> {
                     &model.table,
                     &columns,
                 ),
-                columns: columns.iter().map(|c| physical_col(model, c)).collect(),
+                columns: columns
+                    .iter()
+                    .flat_map(|c| physical_cols(schema, model, c))
+                    .collect(),
                 unique: idx.unique,
                 method: idx.method.clone(),
                 raw: None,
             }
         })
         .collect()
+}
+
+/// The physical column(s) backing a field in an index: a scalar's column or a single-column
+/// FK, else the ordered `<field>_<part>` columns of a composite FK (so `@index enrollment`
+/// on a relation into a composite-key model covers the whole multi-column FK).
+fn physical_cols(schema: &CheckedSchema, model: &RModel, field: &str) -> Vec<String> {
+    match model.member(field) {
+        Some(mem) if matches!(mem.kind, MemberKind::Forward { .. }) => {
+            let fks = schema.fk_columns(mem);
+            if fks.len() > 1 {
+                return fks.into_iter().map(|(c, _)| c).collect();
+            }
+            vec![physical_col(model, field)]
+        }
+        _ => vec![physical_col(model, field)],
+    }
 }
 
 /// A stable, order-independent name for an opaque index: `idx_<table>_raw_<hash>` over
@@ -155,17 +174,24 @@ fn create_table(
 ) -> String {
     let mut lines: Vec<String> = column_lines(schema, model, dialect);
 
-    // Primary key — the PK member's physical column: the `id` field's, or the column a
-    // `@key(field)` nominates. A `@no_id` (keyless legacy) table has none. SQLite spells a
+    // Primary key — the PK member's physical column(s): the `id` field's, the column a
+    // single-column `@key(field)` nominates, or the ordered columns of a composite
+    // `@key(f1, f2, …)`. A `@no_id` (keyless legacy) table has none. SQLite spells a
     // `serial` PK inline on the column (`INTEGER PRIMARY KEY AUTOINCREMENT`), so it needs no
     // separate clause; every other case (and every other dialect's serial) gets the clause.
     let sqlite_serial = dialect == Dialect::Sqlite && model.pk_is_db_generated();
-    if let Some(pk) = model.pk_column().filter(|_| !sqlite_serial) {
-        lines.push(format!("PRIMARY KEY ({})", dialect.quote(&pk)));
+    let pk_cols = model.pk_columns();
+    if !pk_cols.is_empty() && !sqlite_serial {
+        let cols = pk_cols
+            .iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("PRIMARY KEY ({cols})"));
     }
     lines.extend(constraint_lines(schema, model, dialect, fks));
 
-    let specs = index_specs(model, dialect);
+    let specs = index_specs(schema, model, dialect);
 
     // MySQL/MariaDB inline the indexes as `KEY` / `UNIQUE KEY` clauses; SQLite and Postgres
     // have no inline form, so they trail the table as `CREATE INDEX` statements.
@@ -233,15 +259,14 @@ fn column_lines(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec
                     dialect,
                 ));
             }
-            MemberKind::Forward {
-                fk_col,
-                optional,
-                target,
-                ..
-            } => {
-                // FK column type mirrors the target's primary-key type (default uuid).
-                let ty = fk_type(schema, target, dialect);
-                lines.push(column_line(fk_col, &ty, *optional, None, None, dialect));
+            MemberKind::Forward { optional, .. } => {
+                // FK column(s) mirror the target's primary key: one column for a
+                // single-column-key target, one `<field>_<part>` column per key part for a
+                // composite-key target. Each column's type is that key part's own type.
+                for (col, part) in schema.fk_columns(mem) {
+                    let ty = key_part_sql_type(schema, part, dialect);
+                    lines.push(column_line(&col, &ty, *optional, None, None, dialect));
+                }
             }
             MemberKind::Inverse { .. } => {}
         }
@@ -445,13 +470,19 @@ pub(crate) fn fk_constraint_clause(
     table: &str,
     fk: &crate::migrate::ForeignKeySnap,
 ) -> String {
-    let name = constraint_name("fk", table, std::slice::from_ref(&fk.column));
+    let name = constraint_name("fk", table, &fk.columns);
+    let quote_list = |cols: &[String]| {
+        cols.iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let mut s = format!(
         "CONSTRAINT {name} FOREIGN KEY ({col}) REFERENCES {ref_table} ({ref_col})",
         name = dialect.quote(&name),
-        col = dialect.quote(&fk.column),
+        col = quote_list(&fk.columns),
         ref_table = dialect.quote(&fk.ref_table),
-        ref_col = dialect.quote(&fk.ref_column),
+        ref_col = quote_list(&fk.ref_columns),
     );
     if let Some(a) = &fk.on_delete {
         s.push_str(&format!(" ON DELETE {}", fk_action_sql(a)));
@@ -595,6 +626,24 @@ fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> String {
     match id_kind {
         Some(MemberKind::Scalar { ty, .. }) => sql_type(*ty, false, dialect),
         _ => sql_type(Primitive::Uuid, false, dialect),
+    }
+}
+
+/// The SQL type of a primary-key part column — used to type the FK column(s) that mirror
+/// it. A scalar part carries its own (raw or primitive) type; a relation part (a junction
+/// key `@key(order, product)`) carries its own target's key type, so the mirror composes.
+fn key_part_sql_type(schema: &CheckedSchema, part: &RMember, dialect: Dialect) -> String {
+    match &part.kind {
+        MemberKind::Scalar {
+            raw_type: Some(spec),
+            ..
+        } => spec
+            .for_dialect(dialect.name())
+            .unwrap_or_default()
+            .to_string(),
+        MemberKind::Scalar { ty, .. } => sql_type(*ty, false, dialect),
+        MemberKind::Forward { target, .. } => fk_type(schema, target, dialect),
+        MemberKind::Inverse { .. } => sql_type(Primitive::Uuid, false, dialect),
     }
 }
 

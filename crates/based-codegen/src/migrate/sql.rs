@@ -126,8 +126,8 @@ fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String>
             vec![drop_index_sql(dialect, table, name)]
         }
         Step::AddForeignKey { table, fk } => add_foreign_key_statements(table, fk, dialect)?,
-        Step::DropForeignKey { table, column } => {
-            drop_foreign_key_statements(table, column, dialect)?
+        Step::DropForeignKey { table, columns } => {
+            drop_foreign_key_statements(table, columns, dialect)?
         }
         // Renames are a safe in-place ALTER on every target (Postgres always; MariaDB
         // ≥10.5.2 / SQLite ≥3.25 for `RENAME COLUMN`; `RENAME TO` universal) — existing
@@ -246,7 +246,7 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
         // An added FK reverses to a drop (safe on PG/MariaDB; SQLite has no in-place drop,
         // so its reverse is left to a hand-authored raw step — mark irreversible here).
         Step::AddForeignKey { table, fk } => {
-            match drop_foreign_key_statements(table, &fk.column, dialect) {
+            match drop_foreign_key_statements(table, &fk.columns, dialect) {
                 Ok(stmts) => stmts,
                 Err(_) => return None,
             }
@@ -284,12 +284,16 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
 fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    // Primary key: its physical column is the `pk=` override, else the default `id`. The
+    // Primary key: its physical column(s) are the `pk=` marker, else the default `id`. The
     // default `id` is elided from the snapshot, so re-synthesize it as the default uuid; a
-    // renamed or otherwise non-default `id` rides in the column list instead. A keyless
-    // (`@no_id`) table has neither the column nor the `PRIMARY KEY`.
-    let pk_col = t.pk.as_deref().unwrap_or("id");
-    if !t.no_id && pk_col == "id" && t.column("id").is_none() {
+    // renamed `id`, a single-column `@key`, or a composite `@key`'s columns ride in the
+    // column list instead. A keyless (`@no_id`) table has neither the column nor the clause.
+    let pk_cols: Vec<String> = if t.pk.is_empty() {
+        vec!["id".to_string()]
+    } else {
+        t.pk.clone()
+    };
+    if !t.no_id && t.pk.is_empty() && t.column("id").is_none() {
         lines.push(format!(
             "{} {} NOT NULL",
             dialect.quote("id"),
@@ -309,7 +313,12 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     }
     let sqlite_serial = dialect == Dialect::Sqlite && serial_pk;
     if !t.no_id && !sqlite_serial {
-        lines.push(format!("PRIMARY KEY ({})", dialect.quote(pk_col)));
+        let cols = pk_cols
+            .iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("PRIMARY KEY ({cols})"));
     }
 
     // Column-level `(unique)` constraints (a declared `@index (unique)` is an IndexSnap
@@ -389,17 +398,23 @@ fn add_foreign_key_statements(
     if dialect == Dialect::Sqlite {
         return Err(format!(
             "SQLite cannot ALTER TABLE {table} ADD the foreign key on `{}`; author a raw(sqlite) table-rebuild migration.",
-            fk.column
+            fk.label()
         ));
     }
-    let name = index_name("fk", table, std::slice::from_ref(&fk.column));
+    let name = index_name("fk", table, &fk.columns);
+    let quote_list = |cols: &[String]| {
+        cols.iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let mut s = format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         dialect.quote(table),
         dialect.quote(&name),
-        dialect.quote(&fk.column),
+        quote_list(&fk.columns),
         dialect.quote(&fk.ref_table),
-        dialect.quote(&fk.ref_column),
+        quote_list(&fk.ref_columns),
     );
     if let Some(a) = &fk.on_delete {
         let _ = write!(s, " ON DELETE {}", crate::sql::fk_action_sql(a));
@@ -414,10 +429,10 @@ fn add_foreign_key_statements(
 /// in-place FK drop either — same honest table-rebuild message.
 fn drop_foreign_key_statements(
     table: &str,
-    column: &str,
+    columns: &[String],
     dialect: Dialect,
 ) -> Result<Vec<String>, String> {
-    let name = index_name("fk", table, std::slice::from_ref(&column.to_string()));
+    let name = index_name("fk", table, columns);
     Ok(match dialect {
         Dialect::Postgres => vec![format!(
             "ALTER TABLE {} DROP CONSTRAINT {}",
@@ -431,7 +446,8 @@ fn drop_foreign_key_statements(
         )],
         Dialect::Sqlite => {
             return Err(format!(
-                "SQLite cannot ALTER TABLE {table} DROP the foreign key on `{column}`; author a raw(sqlite) table-rebuild migration."
+                "SQLite cannot ALTER TABLE {table} DROP the foreign key on `{}`; author a raw(sqlite) table-rebuild migration.",
+                columns.join(", ")
             ))
         }
     })

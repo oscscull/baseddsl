@@ -51,7 +51,7 @@
 use std::collections::HashMap;
 
 use based_ast::*;
-use based_sema::{CheckedSchema, RModel, ScopeInject, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, MemberKind, RModel, ScopeInject, SoftDelete, SoftMode};
 
 use crate::sql::dml::{
     physical_col, project_return, push_joins, render_raw, soft_pred, BackCtx, Select,
@@ -527,6 +527,23 @@ fn lower_create<'a>(
         std::collections::HashMap::new();
 
     for a in assigns {
+        // A relation into a composite-key model is a multi-column FK: the one assign
+        // (`enrollment = $e`) fills every `<field>_<part>` column, each part's value pulled
+        // from the RHS (a tx binding's key-part assign, or a structured-id param's part).
+        let fk_cols = model
+            .member(&a.col.node)
+            .filter(|m| matches!(m.kind, MemberKind::Forward { .. }))
+            .map(|m| schema.fk_columns(m))
+            .filter(|p| p.len() > 1);
+        if let Some(pairs) = fk_cols {
+            for (fk_col, part) in &pairs {
+                let val = sel.fk_assign_part(&a.value, &part.name);
+                cols.push(dialect.quote(fk_col));
+                vals.push(val);
+                assigned.push(fk_col.clone());
+            }
+            continue;
+        }
         let col = physical_col(model, &a.col.node);
         cols.push(dialect.quote(&col));
         // An enum column takes a bare variant → its wire string literal.
@@ -570,12 +587,14 @@ fn lower_create<'a>(
         None
     };
 
-    // A create with no generated id reads its row back by a unique column it set: a keyless
-    // (`@no_id`) model's `(unique)` column, or a `@key(field)` model's nominated key. Sema
-    // (E0264) guarantees a keyless declared-shape return sets one; a `@key` model's key is a
-    // required column, always set. Picking the first unique column keeps codegen
-    // deterministic. `None` when the model has a generated/serial id.
-    let read_key = if model.no_id || !model.key.is_empty() {
+    // A create with no generated id reads its row back by column(s) it set: a keyless
+    // (`@no_id`) model's `(unique)` column, a single `@key(field)`'s column, or the full
+    // composite `@key(f1, f2, …)` tuple. Sema guarantees a keyless declared-shape return
+    // sets a unique column (E0264); a `@key` model's key columns are required, always set.
+    // `None` when the model has a generated/serial id.
+    let read_key = if model.is_composite_key() {
+        composite_read_key(model, &assigned, &vals)
+    } else if model.no_id || !model.key.is_empty() {
         model.unique_cols.iter().find_map(|u| {
             value_by_field
                 .get(u)
@@ -622,6 +641,28 @@ fn lower_create<'a>(
         read_key,
         serial_return,
     }
+}
+
+/// The read-back key for a composite-`@key` create: every key column the create set, paired
+/// with the value SQL it set. `None` if any key column went unset (an already-erroring
+/// schema) so codegen never emits a half-keyed re-select.
+fn composite_read_key(
+    model: &RModel,
+    assigned: &[String],
+    vals: &[String],
+) -> Option<Vec<(String, String)>> {
+    let key: Vec<(String, String)> = model
+        .key
+        .iter()
+        .filter_map(|f| {
+            let col = physical_col(model, f);
+            assigned
+                .iter()
+                .position(|c| c == &col)
+                .map(|i| (col.clone(), vals[i].clone()))
+        })
+        .collect();
+    (key.len() == model.key.len()).then_some(key)
 }
 
 /// Assemble the `INSERT` statement text. A `serial` create reads its DB-assigned id back —

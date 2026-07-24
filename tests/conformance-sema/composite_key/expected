@@ -1,0 +1,24 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Course  table=course
+  id: Id
+  title: text
+model Student  table=student
+  id: Id
+  name: text
+model Enrollment  table=enrollment  key=(course, student)
+  course: -> Course  fk=course_id
+  student: -> Student  fk=student_id
+  grade: int
+  sessions: <- Session via enrollment
+model Session  table=session
+  id: Id
+  enrollment: -> Enrollment  fk=enrollment_id
+  note: text
+  index(enrollment)
+shape EnrollmentRow from Enrollment
+shape SessionRow from Session
+shape EnrollmentWithSessions from Enrollment
+query enrollment  target=Enrollment verb=get  shape=EnrollmentRow
+query enrollment_sessions  target=Enrollment verb=get  shape=EnrollmentWithSessions

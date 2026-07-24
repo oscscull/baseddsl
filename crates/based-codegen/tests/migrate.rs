@@ -671,3 +671,41 @@ fn key_model_from_scratch_names_the_natural_key_and_round_trips() {
     let ddl = sql::ddl(&schema, Dialect::Postgres);
     assert!(ddl.contains(r#"PRIMARY KEY ("sku")"#), "\n{ddl}");
 }
+
+#[test]
+fn composite_key_snapshot_round_trips_with_multi_column_pk_and_fk() {
+    let schema = checked(
+        r#"
+        Course  { id: Id  title: text }
+        Student { id: Id  name: text }
+        @key(course, student)
+        Enrollment { course: Course  student: Student  grade: int }
+        Session { id: Id  enrollment: Enrollment @fk }
+        "#,
+    );
+
+    // The snapshot text carries the composite `pk=(…)` marker and the multi-column FK line.
+    let text = migrate::snapshot(&schema);
+    assert!(text.contains("pk=(course_id, student_id)"), "\n{text}");
+    assert!(
+        text.contains("fk (enrollment_course_id, enrollment_student_id) -> enrollment.(course_id, student_id)"),
+        "\n{text}"
+    );
+
+    // Round-trips through parse, and a re-diff is empty (stable).
+    let parsed = Snapshot::parse(&text).expect("round-trip parse");
+    assert_eq!(Snapshot::from_schema(&schema), parsed);
+    assert!(migrate::diff(&parsed, &schema).is_empty());
+
+    // From-scratch migration builds the composite PK + multi-column FK, matching gen sql.
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#"PRIMARY KEY ("course_id", "student_id")"#),
+        "\n{pg}"
+    );
+    assert!(
+        pg.contains(r#"FOREIGN KEY ("enrollment_course_id", "enrollment_student_id") REFERENCES "enrollment" ("course_id", "student_id")"#),
+        "\n{pg}"
+    );
+}

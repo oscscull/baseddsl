@@ -896,6 +896,50 @@ fn fk_to_a_key_model_mirrors_the_natural_key_type() {
 }
 
 #[test]
+fn composite_key_is_a_multi_column_primary_key() {
+    // `@key(course, student)` makes the two FK columns a composite `PRIMARY KEY`, in list
+    // order, with no surrogate `id`.
+    let src = r#"
+        Course  { id: Id  title: text }
+        Student { id: Id  name: text }
+        @key(course, student)
+        Enrollment { course: Course  student: Student  grade: int }
+    "#;
+    for (ddl, q) in [(gen(src), '`'), (gen_sqlite(src), '`'), (gen_pg(src), '"')] {
+        assert!(
+            ddl.contains(&format!("PRIMARY KEY ({q}course_id{q}, {q}student_id{q})")),
+            "\n{ddl}"
+        );
+    }
+}
+
+#[test]
+fn fk_into_a_composite_key_model_is_multi_column() {
+    // A relation into a composite-key model auto-expands to `<field>_<part>` columns and a
+    // multi-column FK referencing every key column.
+    let src = r#"
+        Course  { id: Id  title: text }
+        Student { id: Id  name: text }
+        @key(course, student)
+        Enrollment { course: Course  student: Student  grade: int }
+        Session { id: Id  enrollment: Enrollment @fk }
+    "#;
+    let p = gen_pg(src);
+    assert!(
+        p.contains(r#""enrollment_course_id" UUID NOT NULL"#),
+        "\n{p}"
+    );
+    assert!(
+        p.contains(r#""enrollment_student_id" UUID NOT NULL"#),
+        "\n{p}"
+    );
+    assert!(
+        p.contains(r#"FOREIGN KEY ("enrollment_course_id", "enrollment_student_id") REFERENCES "enrollment" ("course_id", "student_id")"#),
+        "\n{p}"
+    );
+}
+
+#[test]
 fn key_with_int_column_is_an_integer_primary_key() {
     // A `@key` over an `int` column is a plain integer PK (app-supplied, *not* `serial` —
     // no AUTO_INCREMENT/identity clause).

@@ -21,9 +21,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   via `raw("…")` — literal type-string in DDL+snapshot, opaque client value; `sql` banned as syntax),
   D110 (PK generation-strategy axis: `[schema] id` default + per-model type override `uuid`/`ulid`/
   `serial`, DB-generated sequential ids + read-back planner, natural single-column keys; impl in PLAN
-  PR4), D111 (natural single-column key `@key(field)` DONE; composite/multi-column PKs via `@key(f1,f2,…)`
-  decorator + structured `Id<M>` object surface + serial-part-where-legal is PR6 — raw does NOT cover it
-  per PR5 so PR6 ships codegen), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
+  PR4), D111 (nominated primary key `@key(f1, f2, …)` DONE — natural single-column + composite/multi-column
+  PKs, structured `Id<M>` object surface, multi-column FK auto-expansion; serial-part-inside-composite
+  deferred), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
   family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
@@ -5074,8 +5074,38 @@ goldens + a live example per dialect; `spec/syntax/models.md`. Spec: `spec/synta
 
 ## D111 — Composite (multi-column) primary keys via `@key(…)`; structured id surface
 
-**Status: single-column `@key(field)` implemented; composite `@key(f1,…)` is PLAN PR6. Owner-approved
+**Status: implemented — single-column `@key(field)` and composite `@key(f1, f2, …)`. Owner-approved
 2026-07-24.**
+
+**Impl note (composite, PR6).** `@key` with ≥2 fields now resolves to a composite `PRIMARY KEY (…)` in
+list order — `RModel.key` already held the list; `pk_members()`/`pk_columns()`/`is_composite_key()` join
+the single-value `pk_field`/`pk_member`/`pk_column` resolvers. Key parts may be scalars **or** to-one
+relations (the junction case — the part's FK column carries the key). `resolve_key` validates each part
+exists (`E0275`) + is a required single-valued scalar/relation (`E0276`); `E0278` is repurposed from the
+old composite-not-supported stub to "empty `@key()`", and `E0279` added for a duplicated part.
+`compute_unique` no longer seeds per-part uniqueness for a composite key (only the tuple is unique). One
+codegen/runtime seam carries the multi-column FK: `CheckedSchema::fk_columns(mem)` returns the
+`(fk_column, target_key_part)` pairs — one for a single-column-key target, `<field>_<part>` per key part
+for a composite target — and every FK site iterates it: DDL columns + composite `FOREIGN KEY (…)
+REFERENCES t (…)`, `dml.rs` JOIN/correlation `ON`s (forward/inverse joins, to-many + m2m near-side
+correlation, keyset over the full tuple), `@index`-on-a-composite-FK expansion, and the migration
+snapshot (`ForeignKeySnap`/`TableSnap.pk` became `Vec`; `pk=(…)` + `fk (…) -> t.(…)` snapshot/up.mig
+lines round-trip). The structured id is realized by **reusing the nested-alias reassembly**: a bare
+composite-FK projection emits `<field>.<part>` aliases the runtime folds into `{ part: … }`, and the
+client emits a per-part `<M>Id` struct (`id_type` returns `<M>Id` for a composite model, `Id<entity::M>`
+otherwise), with a matching OpenAPI object schema. A composite-key `create` sets the key columns and reads
+the row back on the whole tuple (`read_key` extended to the full key); an inbound composite-FK assign
+expands to N columns pulled per part from a **`tx` whole-row binding** (`create Session { enrollment = $e
+}`, `$e` a prior composite create — `check_binding_ref` allows the bare `$e` for this case). Composite PK
+registered as a unique + covering index for the query checks (E0144 get-keyed on the full key; E0260/
+`covers` recognizes the PK leads with its first key column). E0130 relaxed to allow a bare composite-FK
+projection (it *is* the structured id). **Proven live on SQLite**
+(`crates/based-runtime/tests/key_composite_integration.rs`). Conformance golden `composite_key`;
+DDL/client/migrate goldens. **Deferred, cleanly:** a serial part inside a composite key (per-dialect +
+the non-leading `INDEX(seq)` helper) — the leaf/junction case needs no read-back; a standalone
+structured-id param at the runtime binding layer (the `tx` whole-row path + per-column get sidestep it);
+a column-map override for inbound-FK legacy names (auto-expansion ships, a rename map is additive); and
+composite m2m endpoints.
 
 **Impl note (single-column, follow-up to PR4).** The natural single-column key shipped: `@key(field)`
 is a generic model decorator (no grammar change — args are field-name `ident`/`path`, like `@sort`)

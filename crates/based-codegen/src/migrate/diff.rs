@@ -52,9 +52,10 @@ pub enum Step {
     /// column. `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` on Postgres/MariaDB; SQLite
     /// cannot ALTER-add an FK (needs a table rebuild) — the renderer surfaces that loudly.
     AddForeignKey { table: String, fk: ForeignKeySnap },
-    /// `drop foreign_key <table>.<col>` — drop the FK constraint on a column. Safe.
-    /// `ALTER TABLE … DROP CONSTRAINT`/`DROP FOREIGN KEY`; SQLite needs a rebuild (loud).
-    DropForeignKey { table: String, column: String },
+    /// `drop foreign_key <table>.<col>` — drop the FK constraint on a column (or the
+    /// `(c1, c2)` column set of a composite FK). Safe. `ALTER TABLE … DROP
+    /// CONSTRAINT`/`DROP FOREIGN KEY`; SQLite needs a rebuild (loud).
+    DropForeignKey { table: String, columns: Vec<String> },
     /// `rename table <old> -> <new>` — only ever emitted via a model `@was` (never
     /// auto-guessed). Safe: an in-place `ALTER TABLE … RENAME`.
     RenameTable { from: String, to: String },
@@ -377,16 +378,16 @@ fn diff_indexes(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
 /// is `drop foreign_key`; a changed constraint (retargeted or an action change) is a drop +
 /// re-add. Keyed on the local column, so it is stable across a target/action edit.
 fn diff_foreign_keys(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
-    let prev_fk = |col: &str| prev.foreign_keys.iter().find(|f| f.column == col);
-    let now_fk = |col: &str| now.foreign_keys.iter().find(|f| f.column == col);
+    let prev_fk = |cols: &[String]| prev.foreign_keys.iter().find(|f| f.columns == cols);
+    let now_fk = |cols: &[String]| now.foreign_keys.iter().find(|f| f.columns == cols);
     // Added or changed.
     for f in &now.foreign_keys {
-        match prev_fk(&f.column) {
+        match prev_fk(&f.columns) {
             Some(old) if old == f => {}
             Some(_) => {
                 steps.push(Step::DropForeignKey {
                     table: now.name.clone(),
-                    column: f.column.clone(),
+                    columns: f.columns.clone(),
                 });
                 steps.push(Step::AddForeignKey {
                     table: now.name.clone(),
@@ -401,10 +402,10 @@ fn diff_foreign_keys(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
     }
     // Dropped.
     for f in &prev.foreign_keys {
-        if now_fk(&f.column).is_none() {
+        if now_fk(&f.columns).is_none() {
             steps.push(Step::DropForeignKey {
                 table: now.name.clone(),
-                column: f.column.clone(),
+                columns: f.columns.clone(),
             });
         }
     }
@@ -491,10 +492,10 @@ impl Step {
                 format!("dropped index `{name}`")
             }
             Self::AddForeignKey { table, fk } => {
-                format!("added foreign key `{table}.{}`", fk.column)
+                format!("added foreign key `{table}.{}`", fk.label())
             }
-            Self::DropForeignKey { table, column } => {
-                format!("dropped foreign key `{table}.{column}`")
+            Self::DropForeignKey { table, columns } => {
+                format!("dropped foreign key `{table}.{}`", columns.join(", "))
             }
             Self::RenameTable { from, to } => format!("renamed table `{from}` → `{to}`"),
             Self::RenameColumn { table, from, to } => {

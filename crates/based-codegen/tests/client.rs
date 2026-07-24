@@ -909,3 +909,25 @@ fn key_model_types_the_natural_key_and_inbound_fk_as_the_entity_id() {
     // Get-by-key takes the typed id.
     assert!(out.contains("sku: Id<entity::Product>"), "\n{out}");
 }
+
+#[test]
+fn composite_key_emits_a_structured_id_struct() {
+    // A composite `@key(course, student)` model's id is a generated per-part struct
+    // (`EnrollmentId`), each part its own phantom-typed id; an inbound FK carries that
+    // struct, and the row projects each part under `<field>.<part>`.
+    let out = gen(r#"
+        Course  { id: Id, title: text }
+        Student { id: Id, name: text }
+        @key(course, student)
+        Enrollment { course: Course, student: Student, grade: int }
+        Session { id: Id, enrollment: Enrollment, note: text, @index enrollment }
+        shape SessionCard from Session { id, enrollment, note }
+        query session(id) -> SessionCard;
+        "#);
+    // The structured id struct, one phantom-typed field per key part.
+    assert!(out.contains("pub struct EnrollmentId {"), "\n{out}");
+    assert!(out.contains("pub course: Id<entity::Course>,"), "\n{out}");
+    assert!(out.contains("pub student: Id<entity::Student>,"), "\n{out}");
+    // An inbound FK to the composite-key model carries the structured id, not a scalar.
+    assert!(out.contains("pub enrollment: EnrollmentId,"), "\n{out}");
+}

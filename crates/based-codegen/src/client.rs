@@ -168,6 +168,21 @@ mod rust {
         }
         out.push_str("}\n");
 
+        // Structured ids: one struct per composite `@key(f1, f2, …)` model, a typed field
+        // per key part. The wire form is a JSON object (`{ order, product }`); each part
+        // keeps its own phantom typing, so a part id can't be swapped for another entity's.
+        let composite: Vec<&RModel> = schema
+            .models
+            .iter()
+            .filter(|m| m.is_composite_key())
+            .collect();
+        if !composite.is_empty() {
+            out.push_str("\n// ---------- composite ids ----------\n");
+            for m in &composite {
+                out.push_str(&composite_id_struct(schema, m));
+            }
+        }
+
         // Enum types: one real Rust enum per `enum` decl, serde-renamed to the wire
         // variant strings (the enum's own values). A field/param typed by an enum maps to
         // this type instead of `String`.
@@ -204,7 +219,7 @@ mod rust {
             if !c.ctx_requires.is_empty() {
                 out.push_str(&render_struct(
                     &ctx_name(c.name),
-                    &ctx_fields(c.ctx_requires),
+                    &ctx_fields(schema, c.ctx_requires),
                 ));
             }
             out.push_str(&format!(
@@ -345,21 +360,52 @@ mod rust {
 
     // ---------- entity-id resolution --------------------------------------
 
-    /// The Rust type of an entity id: a phantom-typed `Id<entity::M>` newtype, distinct
-    /// per model so ids of different entities can't be swapped.
-    fn id_type(entity: &str) -> String {
-        format!("Id<entity::{entity}>")
+    /// The Rust type of an entity id: a phantom-typed `Id<entity::M>` newtype for a
+    /// single-column key (distinct per model so ids can't be swapped), or the generated
+    /// per-part struct `<M>Id` for a composite `@key(f1, f2, …)` model.
+    fn id_type(schema: &CheckedSchema, entity: &str) -> String {
+        if schema.model(entity).is_some_and(RModel::is_composite_key) {
+            format!("{entity}Id")
+        } else {
+            format!("Id<entity::{entity}>")
+        }
+    }
+
+    /// The generated `<M>Id` struct for a composite-key model: one typed field per key part
+    /// (a relation part keeps its target's typed id, a scalar part its own type). Serde
+    /// (de)serializes it as a JSON object of the parts.
+    fn composite_id_struct(schema: &CheckedSchema, m: &RModel) -> String {
+        let mut s = format!(
+            "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct {}Id {{\n",
+            m.name
+        );
+        for f in &m.key {
+            let Some(mem) = m.member(f) else { continue };
+            let ty = match &mem.kind {
+                MemberKind::Forward { target, .. } => id_type(schema, target),
+                MemberKind::Scalar {
+                    enum_name: Some(en),
+                    ..
+                } => en.clone(),
+                MemberKind::Scalar { ty, .. } => primitive(*ty).to_string(),
+                MemberKind::Inverse { .. } => "Json".to_string(),
+            };
+            s.push_str(&format!("    pub {f}: {ty},\n"));
+        }
+        s.push_str("}\n");
+        s
     }
 
     /// The model a member identifies as an id: a Forward FK's target, or the model's own
-    /// primary-key column (whatever its generation strategy — `Id`/`uuid`/`ulid`/`serial`).
-    /// `None` for any other scalar or an inverse edge.
+    /// single-column primary key (whatever its generation strategy). `None` for any other
+    /// scalar, an inverse edge, or a composite-key model's individual key part (its parts
+    /// are ordinary typed fields; the whole id is the `<M>Id` struct, reached via a FK).
     fn member_entity(model: &RModel, field: &str) -> Option<String> {
         match model.member(field).map(|m| &m.kind)? {
             MemberKind::Forward { target, .. } => Some(target.clone()),
-            // The PK column carries the phantom-typed `Id<entity::M>` — the `id` field, or
-            // the column a `@key(field)` nominates, regardless of its strategy/natural type.
-            MemberKind::Scalar { .. } if model.pk_field() == Some(field) => {
+            MemberKind::Scalar { .. }
+                if !model.is_composite_key() && model.pk_field() == Some(field) =>
+            {
                 Some(model.name.clone())
             }
             _ => None,
@@ -547,7 +593,7 @@ mod rust {
         match root {
             Some(m) => OutStruct {
                 name: m.name.clone(),
-                fields: model_fields(m),
+                fields: model_fields(schema, m),
                 nested: Vec::new(),
             },
             // Unresolvable (sema would have flagged it) — an empty struct keeps the
@@ -765,18 +811,20 @@ mod rust {
     /// column as this model's typed id), forward FKs as the target's typed id under the
     /// relation field name (matching the SELECT alias). Inverse edges store nothing, so
     /// they are omitted.
-    fn model_fields(model: &RModel) -> Vec<(String, String)> {
+    fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, String)> {
         let mut fields = Vec::new();
         for mem in &model.members {
             match &mem.kind {
-                // The primary-key column carries this model's typed id — the `id` field or a
-                // `@key(field)` natural key, whatever its strategy/declared type.
+                // The single-column primary-key column carries this model's typed id — the
+                // `id` field or a `@key(field)` natural key, whatever its declared type. A
+                // composite key has no single id field; its parts fall through as ordinary
+                // scalar/relation fields.
                 MemberKind::Scalar { optional, many, .. }
-                    if model.pk_field() == Some(mem.name.as_str()) =>
+                    if !model.is_composite_key() && model.pk_field() == Some(mem.name.as_str()) =>
                 {
                     fields.push((
                         mem.name.clone(),
-                        wrap(&id_type(&model.name), *optional, *many),
+                        wrap(&id_type(schema, &model.name), *optional, *many),
                     ));
                 }
                 MemberKind::Scalar {
@@ -790,7 +838,10 @@ mod rust {
                 } => fields.push((mem.name.clone(), wrap(primitive(*ty), *optional, *many))),
                 MemberKind::Forward {
                     target, optional, ..
-                } => fields.push((mem.name.clone(), wrap(&id_type(target), *optional, false))),
+                } => fields.push((
+                    mem.name.clone(),
+                    wrap(&id_type(schema, target), *optional, false),
+                )),
                 MemberKind::Inverse { .. } => {}
             }
         }
@@ -858,7 +909,7 @@ mod rust {
         }
         let base = if let Some(entity) = param_entity(c, p) {
             let many = p.ty.as_ref().is_some_and(|t| t.many);
-            wrap(&id_type(&entity), false, many)
+            wrap(&id_type(schema, &entity), false, many)
         } else {
             match &p.ty {
                 Some(te) => wrap(base_type(&te.base), false, te.many),
@@ -910,12 +961,11 @@ mod rust {
         let n = path.len();
         for (i, seg) in path.iter().enumerate() {
             let last = i + 1 == n;
-            let is_pk = cur.pk_field() == Some(*seg);
+            let is_pk = !cur.is_composite_key() && cur.pk_field() == Some(*seg);
             match cur.member(seg).map(|m| &m.kind) {
-                // The model's own primary key is that model's typed id, whatever its
-                // generation strategy.
+                // The model's own single-column primary key is that model's typed id.
                 Some(MemberKind::Scalar { optional, many, .. }) if is_pk => {
-                    return wrap(&id_type(&cur.name), *optional, *many)
+                    return wrap(&id_type(schema, &cur.name), *optional, *many)
                 }
                 Some(MemberKind::Scalar {
                     enum_name: Some(en),
@@ -930,7 +980,7 @@ mod rust {
                     target, optional, ..
                 }) => {
                     if last {
-                        return wrap(&id_type(target), *optional, false);
+                        return wrap(&id_type(schema, target), *optional, false);
                     }
                     match schema.model(target) {
                         Some(m) => cur = m,
@@ -940,7 +990,7 @@ mod rust {
                 Some(MemberKind::Inverse { target, .. }) => {
                     if last {
                         // Terminal to-many reach: a collection of the target's typed ids.
-                        return format!("Vec<{}>", id_type(target));
+                        return format!("Vec<{}>", id_type(schema, target));
                     }
                     match schema.model(target) {
                         Some(m) => cur = m,
@@ -1224,18 +1274,18 @@ mod rust {
 
     /// The context fields for a callable: one per required `$ctx.<field>`, typed by
     /// the inference (a relation requirement carries the model's key `Uuid`).
-    fn ctx_fields(reqs: &[CtxReq]) -> Vec<(String, String)> {
+    fn ctx_fields(schema: &CheckedSchema, reqs: &[CtxReq]) -> Vec<(String, String)> {
         reqs.iter()
-            .map(|r| (r.field.clone(), ctx_field_type(&r.ty)))
+            .map(|r| (r.field.clone(), ctx_field_type(schema, &r.ty)))
             .collect()
     }
 
     /// A `$ctx` field's Rust type: a scalar by its alias, a relation as that model's
     /// typed id (`Id<entity::M>`) — the same mapping the input side uses.
-    fn ctx_field_type(ty: &CtxField) -> String {
+    fn ctx_field_type(schema: &CheckedSchema, ty: &CtxField) -> String {
         match ty {
             CtxField::Scalar(p) => primitive(*p).to_string(),
-            CtxField::Relation(model) => id_type(model),
+            CtxField::Relation(model) => id_type(schema, model),
         }
     }
 

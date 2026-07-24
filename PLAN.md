@@ -104,14 +104,12 @@ history is in `PLAN-archive.md`.
 
 Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
 system into an existing production environment as a pluggable replacement — plus two example/quality
-fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → PR6 → PR5 → PR2 →
-PR3 → PR1.** PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); its `@key(field)` natural
-single-column key is **done** (D111 impl — single-column; composite `@key(f1,f2,…)` is PR6). The primary-key
-story (**PR4 single-column + PR6 composite**) is priority 1 — owner: the single most important capability
-the system is missing for the pluggable-replacement goal; a schema whose keys can't be represented can't
-be onboarded at all. Its design fork is **resolved and owner-approved (D110)** — build to that. PR5's
-onboarding audit informs PR6's shape. PR1 is a cheap standalone win, sequenced last only because it isn't
-on the onboarding critical path.
+fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → ~~PR6~~ → PR5 → PR2 →
+PR3 → PR1.** PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
+nominated primary key — natural single-column **and** composite — is **done** (D111 impl). The
+primary-key story (**PR4 single-column + PR6 composite**) was priority 1 and is now complete: a schema
+whose keys are meaningful columns or multi-column junctions can be represented and onboarded. PR1 is a
+cheap standalone win, sequenced last only because it isn't on the onboarding critical path.
 
 - **PR1. axum-helpdesk login route — the example is seed-locked.** `start_session` ("login issues the
   session every later context derives from") exists in `schema/session/queries.bsl` but is **not exposed
@@ -174,25 +172,38 @@ on the onboarding critical path.
     all three drivers, conformance goldens + a live example per dialect, `spec/syntax/models.md`.
   - Strategy change on a live table is `@was`-shaped (explicit marker, reviewable migration) but rewrites
     the PK type + every inbound FK — a multi-table step; `schema.snap` records the strategy so diff sees it.
-- **PR6. Composite / multi-column primary keys — `@key(…)` (design resolved, D111; priority 1 cluster
-  with PR4).** Multi-column PKs — junction `(order_id, product_id)`, tenant-scoped `(tenant_id,
-  external_id)`, time-series `(device_id, ts)` — are pervasive, so a pluggable replacement must represent
-  them (principle 9) or force adopters to add surrogate keys to tables that deliberately lack them.
-  Unsupported today: every model has exactly one PK member (or `@no_id`). **Resolved shape (D111):**
-  - `@key(f1, f2, …)` stacked model decorator names the PK columns in order; fields declared normally; a
-    `@key` model has no synthesized `id`. Arity 1 (`@key(sku)`) is PR4's natural single-column key — one
-    unified spelling. Subsumes the explicit-junction `@index (a,b) unique` (D102/D109).
-  - **Structured id (option A):** `Id<entity::M>` becomes a generated per-part struct (`EnrollmentId {
-    order, product }`), wire = JSON object, OpenAPI = typed-property object; parts keep phantom typing
-    (D70). get-by-id / keyset tiebreak use the full tuple (keyset already lexicographic-multi-column).
-  - **Serial part where the dialect allows (per-dialect, principle 9):** Postgres legal; MariaDB InnoDB
-    legal with an auto-emitted helper `INDEX(seq)`; SQLite via the raw DDL hatch + honest diagnostic. A
-    serial part reuses PR4's read-back; a key of only known-at-insert parts (FKs + scalars) needs none.
-  - **Inbound FK to a composite-key model:** first-class auto-expansion to `<field>_<part>` columns
-    (+ column-map override), sequenced after the junction/leaf case. **No raw interim backstop** — PR5
-    proved raw can't express a structural composite PK / multi-column FK (D111), so PR6 ships all of it
-    in codegen (extend `ForeignKeySnap`/`TableSnap` to `Vec` columns; multi-column get/read-back/keyset).
-  - Sequenced after PR4 (shares the read-back path for serial parts); own decisions entry D111.
+- **PR6. ✅ DONE (D111 impl). Composite / multi-column primary keys — `@key(f1, f2, …)`.** Multi-column
+  PKs — junction `(order_id, product_id)`, tenant-scoped `(tenant_id, external_id)`, time-series
+  `(device_id, ts)` — now representable, so a pluggable replacement no longer forces surrogate keys onto
+  tables that deliberately lack them (principle 9). What shipped:
+  - `@key(f1, f2, …)` (≥2 fields) → composite `PRIMARY KEY (…)` in list order, no synthesized `id`. Key
+    parts may be scalars or to-one relations (the junction case). Subsumes the explicit-junction
+    `@index (a,b) unique`. Sema: parts exist (`E0275`) + required single-valued scalar/relation (`E0276`);
+    empty `@key()` `E0278`, duplicate part `E0279`, `@key`+`@no_id` `E0277` (E0278 repurposed from the old
+    composite-not-supported stub). Composite PK registered as a unique + covering index (get-by-full-key
+    is keyed/served; keyset orders by + compares the full tuple).
+  - **Structured id:** the client emits a per-part struct `<M>Id { … }` (each part its own phantom-typed
+    id), wire = JSON object, OpenAPI = typed-property object. An inbound FK field carries `<M>Id`; a bare
+    composite-FK projection reads back as the object (reusing the nested-alias reassembly).
+  - **Multi-column FK:** a relation into a composite-key model auto-expands to `<field>_<part>` columns
+    (real per-part types) with a composite FK constraint; all JOIN/correlation `ON` sites AND every key
+    part (forward/inverse joins, to-many correlation, m2m near side, keyset). `@index` on a composite FK
+    expands to all its columns. `ForeignKeySnap`/`TableSnap.pk` became `Vec`; snapshot `pk=(…)` + multi-col
+    `fk (…) -> t.(…)` lines round-trip.
+  - **Create:** a composite-key model's `create` sets the key columns and reads the row back on the whole
+    tuple. An inbound composite-FK assign expands to N columns via a `tx` whole-row binding
+    (`create Session { enrollment = $e }`, `$e` a prior composite create — E0281 relaxed for this case).
+  - Proven live on SQLite (`crates/based-runtime/tests/key_composite_integration.rs`: composite create →
+    read-back, get-by-composite-key, inbound multi-column FK write, to-many nest correlated on the parent's
+    composite key, and a bare composite-FK projected as the structured id object). Sema conformance golden
+    `composite_key`; DDL/client/migrate goldens.
+  - **Deferred (own follow-ups, clean):** a **serial part inside a composite key** (Postgres/MariaDB
+    per-dialect + the non-leading `INDEX(seq)` helper; SQLite raw hatch) — the leaf/junction case needs no
+    read-back, so this was cut cleanly; a **standalone structured-id param** at the runtime binding layer
+    (create/get taking a pre-existing composite id as one JSON-object param — the `tx` whole-row path +
+    per-column get sidestep it today); a **column-map override** for inbound-FK legacy names (auto-expansion
+    `<field>_<part>` ships; a rename map is additive); **composite m2m endpoints** (single-column m2m
+    correlation unchanged; a composite far/near side is exotic and untouched).
 - **PR5. Representability audit + doc-truth pass (owner-raised 2026-07-24).** A dedicated systematic
   sweep — **run as a parallel-subagent fan-out** — enforcing principle 9: for **every** ugly legacy
   construct, prove there is *either* a first-class feature *or* a raw escape hatch; a valid DB state

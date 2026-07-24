@@ -119,13 +119,14 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
     }
 }
 
-/// Resolve `@key(field, …)` — the nominated natural primary key. Returns the field names
-/// in list order (empty when no `@key`). A single-column `@key(sku)` names one declared
-/// field to carry the `PRIMARY KEY` in place of a synthesized `id`; each nominated field
-/// must exist (`E0275`) and be a required scalar column (`E0276`). `@key` on a keyless
-/// (`@no_id`) model is contradictory (`E0277`); composite keys are not yet supported
-/// (`E0278`, single-column only). A rejected key resolves to empty so the model still
-/// needs an `id` (the ordinary path), never a half-formed key.
+/// Resolve `@key(f1, f2, …)` — the nominated primary key. Returns the field names in list
+/// order (empty when no `@key`). One field is a natural single-column key; two or more form
+/// a composite `PRIMARY KEY` over those columns in list order. Either way no surrogate `id`
+/// is synthesized. Each nominated field must exist (`E0275`) and be a required, single-valued
+/// column — a scalar, or a to-one relation whose FK column carries the key (`E0276`). `@key`
+/// on a keyless (`@no_id`) model is contradictory (`E0277`); an empty `@key()` (`E0278`) and a
+/// field named twice (`E0279`) are rejected. A rejected key resolves to empty so the model
+/// still needs an `id` (the ordinary path), never a half-formed key.
 fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> Vec<String> {
     let mut fields: Vec<String> = Vec::new();
     let mut key_span: Option<Span> = None;
@@ -157,20 +158,31 @@ fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> 
         );
         return Vec::new();
     }
-    if fields.len() > 1 {
+    if fields.is_empty() {
         sink.error_note(
-            code::KEY_COMPOSITE,
+            code::KEY_EMPTY,
             span,
-            format!(
-                "composite `@key({})` is not yet supported",
-                fields.join(", ")
-            ),
-            "only a single-column natural key (`@key(field)`) is supported for now",
+            format!("`@key()` on `{}` names no field", m.name.node),
+            "a primary key must nominate at least one declared column: `@key(field, …)`",
         );
         return Vec::new();
     }
-    // Each nominated field must exist and be usable as a primary key.
     let mut ok = true;
+    // Each key column appears once — a repeated field is a copy-paste slip, not a key.
+    let mut seen: Vec<&str> = Vec::new();
+    for f in &fields {
+        if seen.contains(&f.as_str()) {
+            sink.error_note(
+                code::KEY_DUPLICATE,
+                span,
+                format!("`@key` on `{}` names `{f}` twice", m.name.node),
+                "each key column appears once, in the order it should index",
+            );
+            ok = false;
+        }
+        seen.push(f);
+    }
+    // Each nominated field must exist and be usable as a primary-key column.
     for f in &fields {
         match members
             .iter()
@@ -188,19 +200,27 @@ fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> 
                 );
                 ok = false;
             }
-            // A required, single-valued, engine-modelled scalar is keyable.
-            Some(MemberKind::Scalar {
-                optional: false,
-                many: false,
-                raw_type: None,
-                ..
-            }) => {}
+            // A required, single-valued scalar is keyable; so is a required to-one relation
+            // — its FK column carries the key (the junction pattern `@key(order, product)`).
+            Some(
+                MemberKind::Scalar {
+                    optional: false,
+                    many: false,
+                    raw_type: None,
+                    ..
+                }
+                | MemberKind::Forward {
+                    optional: false,
+                    custom_join: false,
+                    ..
+                },
+            ) => {}
             Some(_) => {
                 sink.error_note(
                     code::KEY_UNSUITABLE,
                     span,
-                    format!("`@key({f})` — `{f}` cannot be a primary key"),
-                    "a nominated primary key must be a required (non-optional, single-valued) scalar column",
+                    format!("`@key({f})` — `{f}` cannot be a primary-key column"),
+                    "a key column must be a required (non-optional, single-valued) scalar or to-one relation",
                 );
                 ok = false;
             }
@@ -989,9 +1009,13 @@ fn resolve_managed_ts(
 /// single-column unique indexes. (Composite unique indexes make no *single*
 /// column unique, so they do not count here.)
 fn compute_unique(ast: &Model, m: &mut RModel) {
-    // The primary key column(s) are unique: a keyless model has none, a `@key` model its
-    // nominated field(s), an ordinary model its `id`.
-    let mut unique: Vec<String> = m.pk_field_names().iter().map(ToString::to_string).collect();
+    // The single primary-key column is unique: `id`, or a single-column `@key(field)`. A
+    // composite `@key` makes no *single* column unique (only the tuple is), so it seeds none.
+    let mut unique: Vec<String> = if m.is_composite_key() {
+        Vec::new()
+    } else {
+        m.pk_field_names().iter().map(ToString::to_string).collect()
+    };
     for mem in &ast.members {
         match mem {
             Member::Field(f) if f.modifiers.iter().any(|x| matches!(x, Modifier::Unique)) => {

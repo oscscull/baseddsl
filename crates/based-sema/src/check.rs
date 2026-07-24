@@ -59,18 +59,29 @@ fn check_shape_body(
 ) {
     for f in fields {
         match f {
-            ShapeField::Bare(id) => match cx.model(mi).member(&id.node).map(|m| &m.kind) {
-                Some(MemberKind::Scalar { .. }) => {}
-                Some(_) => sink.error(
-                    code::SHAPE_BARE_RELATION,
-                    id.span,
-                    format!(
-                        "relation `{}` can't be projected bare; nest it (`{} {{ … }}`) or reach a column with `=`",
-                        id.node, id.node
+            ShapeField::Bare(id) => {
+                // A composite-key relation projects bare as its structured id object (one
+                // sub-column per key part); every other relation must nest or reach a column.
+                let composite_fk = match cx.model(mi).member(&id.node).map(|m| &m.kind) {
+                    Some(MemberKind::Forward { target, .. }) => cx
+                        .find(target)
+                        .is_some_and(|i| cx.model(i).is_composite_key()),
+                    _ => false,
+                };
+                match cx.model(mi).member(&id.node).map(|m| &m.kind) {
+                    Some(MemberKind::Scalar { .. }) => {}
+                    Some(MemberKind::Forward { .. }) if composite_fk => {}
+                    Some(_) => sink.error(
+                        code::SHAPE_BARE_RELATION,
+                        id.span,
+                        format!(
+                            "relation `{}` can't be projected bare; nest it (`{} {{ … }}`) or reach a column with `=`",
+                            id.node, id.node
+                        ),
                     ),
-                ),
-                None => unknown_field(cx, mi, id, sink),
-            },
+                    None => unknown_field(cx, mi, id, sink),
+                }
+            }
             // A rename reaches a column via a path, computes one with raw SQL (a leaf
             // trapdoor — shapes have no params, so raw is left unchecked), or aggregates
             // a column (`= count()` / `= sum(total)`).
@@ -101,7 +112,10 @@ fn check_shape_body(
             ShapeField::Flatten { path, body, .. } => {
                 if let Some(far) = check_flatten_path(path, mi, cx, sink) {
                     if cx.model(far).no_id {
-                        let span = path.segments.last().map_or(path.segments[0].span, |s| s.span);
+                        let span = path
+                            .segments
+                            .last()
+                            .map_or(path.segments[0].span, |s| s.span);
                         sink.error_note(
                             code::FLATTEN_KEYLESS,
                             span,
@@ -1147,27 +1161,39 @@ fn join_path(p: &Path) -> String {
         .join(".")
 }
 
-/// A `get` is validly keyed if some equality-constrained column is unique.
+/// A `get` is validly keyed if some equality-constrained column is unique, or the
+/// equality columns together cover the model's full composite `@key` (the PK is unique).
 fn get_is_keyed(q: &Query, ti: usize, cx: &Cx) -> bool {
     let m = cx.model(ti);
-    match &q.body {
-        QueryBody::Block(s) => {
-            let smi = cx.find(&s.model.node).unwrap_or(ti);
-            let sm = cx.model(smi);
-            let mut cols = Vec::new();
-            for c in &s.clauses {
-                if let Clause::Where(p) = c {
-                    collect_eq_cols(p, &mut cols);
-                }
+    if let QueryBody::Block(s) = &q.body {
+        let smi = cx.find(&s.model.node).unwrap_or(ti);
+        let sm = cx.model(smi);
+        let mut cols = Vec::new();
+        for c in &s.clauses {
+            if let Clause::Where(p) = c {
+                collect_eq_cols(p, &mut cols);
             }
-            cols.iter().any(|c| sm.is_unique(c))
         }
-        _ => q.params.iter().any(|p| match &p.binding {
-            None => m.is_unique(&p.name.node),
-            Some(ParamBinding::ColOp { op: Op::Eq, col }) => m.is_unique(&col.node),
-            _ => false,
-        }),
+        cols.iter().any(|c| sm.is_unique(c)) || covers_composite_key(sm, &cols)
+    } else {
+        let cols: Vec<String> = q
+            .params
+            .iter()
+            .filter_map(|p| match &p.binding {
+                None => Some(p.name.node.clone()),
+                Some(ParamBinding::Edge(e)) => Some(e.node.clone()),
+                Some(ParamBinding::ColOp { op: Op::Eq, col }) => Some(col.node.clone()),
+                _ => None,
+            })
+            .collect();
+        cols.iter().any(|c| m.is_unique(c)) || covers_composite_key(m, &cols)
     }
+}
+
+/// The equality-constrained columns cover the model's full composite `@key` — the PK is a
+/// unique index, so keying on every part identifies at most one row.
+fn covers_composite_key(m: &RModel, eq_cols: &[String]) -> bool {
+    m.is_composite_key() && m.key.iter().all(|k| eq_cols.iter().any(|c| c == k))
 }
 
 /// Collect single-segment columns constrained by equality anywhere in a predicate.
@@ -1967,6 +1993,17 @@ fn check_binding_ref(
         sink.error(code::BINDING_UNBOUND, pr.name.span, msg);
         return;
     };
+    // A bare `$name` (no field) referencing a composite-key create's whole row: its key
+    // parts are the multi-column FK's values, pulled per part from the bound create. Valid
+    // only when assigning a relation *into* that same composite-key model.
+    if pr.path.is_empty() {
+        if let MemberKind::Forward { target: tgt, .. } = target {
+            let bound = cx.model(mi);
+            if bound.is_composite_key() && &bound.name == tgt {
+                return;
+            }
+        }
+    }
     let [field] = pr.path.as_slice() else {
         sink.error(
             code::BINDING_UNBOUND,

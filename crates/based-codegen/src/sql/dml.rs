@@ -56,7 +56,8 @@ use std::collections::HashMap;
 
 use based_ast::*;
 use based_sema::{
-    CheckedSchema, EnumValue, MemberKind, REnum, RModel, RQuery, ScopeInject, SoftDelete, SoftMode,
+    CheckedSchema, EnumValue, MemberKind, REnum, RMember, RModel, RQuery, ScopeInject, SoftDelete,
+    SoftMode,
 };
 
 use crate::Dialect;
@@ -619,12 +620,12 @@ pub(crate) fn project_return<'a>(
                             sel.q(&mem.name)
                         ));
                     }
-                    MemberKind::Forward { fk_col, .. } => {
-                        cols.push(format!(
-                            "{} AS {}",
-                            sel.qcol(&sel.root_alias, fk_col),
-                            sel.q(&mem.name)
-                        ));
+                    MemberKind::Forward { .. } => {
+                        // A single-column FK projects its flat value; a composite FK projects
+                        // one column per key part under a `<field>.<part>` alias, so the
+                        // runtime reassembles the structured id object.
+                        let root_alias = sel.root_alias.clone();
+                        push_fk_projection(sel, mem, &root_alias, &mem.name, &mut cols);
                     }
                     MemberKind::Inverse { .. } => {}
                 }
@@ -635,6 +636,39 @@ pub(crate) fn project_return<'a>(
         .map(|c| format!("  {c}"))
         .collect::<Vec<_>>()
         .join(",\n")
+}
+
+/// Project a forward-relation FK under `out_field`. A single-column FK is a flat scalar
+/// column; a composite FK (a relation into a `@key(f1, f2, …)` model) projects one column
+/// per key part under a `<out_field>.<part>` alias, so the runtime reassembles the
+/// structured id object (`{ order: …, product: … }`).
+fn push_fk_projection(
+    sel: &Select,
+    mem: &RMember,
+    alias: &str,
+    out_field: &str,
+    cols: &mut Vec<String>,
+) {
+    let pairs: Vec<(String, String)> = sel
+        .schema
+        .fk_columns(mem)
+        .into_iter()
+        .map(|(c, part)| (c, part.name.clone()))
+        .collect();
+    if pairs.len() <= 1 {
+        let fk = pairs
+            .first()
+            .map_or_else(|| mem.physical_col().to_string(), |(c, _)| c.clone());
+        cols.push(format!("{} AS {}", sel.qcol(alias, &fk), sel.q(out_field)));
+    } else {
+        for (fk, part) in &pairs {
+            cols.push(format!(
+                "{} AS {}",
+                sel.qcol(alias, fk),
+                sel.q(&format!("{out_field}{NEST_SEP}{part}"))
+            ));
+        }
+    }
 }
 
 /// Project a shape body against `model`, appending `expr AS out` lines to `cols`.
@@ -656,6 +690,16 @@ fn project_body<'a>(
     for f in fields {
         match f {
             ShapeField::Bare(id) => {
+                // A bare composite-FK field projects as a structured id object (one column
+                // per key part); every other bare field is a single scalar column.
+                if let Some(mem) = model.member(&id.node) {
+                    if matches!(mem.kind, MemberKind::Forward { .. })
+                        && sel.schema.fk_columns(mem).len() > 1
+                    {
+                        push_fk_projection(sel, mem, alias, &out_alias(out_prefix, &id.node), cols);
+                        continue;
+                    }
+                }
                 let (a, col) = sel.resolve_from(&single(&id.node), alias, prefix, model);
                 cols.push(format!(
                     "{} AS {}",
@@ -755,9 +799,8 @@ fn project_nest<'a>(
             &nested_out,
             cols,
         );
-    } else if let Some((child_model, via_fk, edge_sort)) = sel.to_many_edge(&field.node, model) {
-        let arr =
-            sel.json_array_subquery(body, child_model, &via_fk, alias, &pk_col(model), edge_sort);
+    } else if let Some((child_model, via_field, edge_sort)) = sel.to_many_edge(&field.node, model) {
+        let arr = sel.json_array_subquery(body, child_model, &via_field, alias, model, edge_sort);
         let out = out_alias(out_prefix, &format!("{}{ARRAY_MARK}", field.node));
         cols.push(format!("{arr} AS {}", sel.q(&out)));
     }
@@ -857,13 +900,37 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
     };
     let terms: &[SortTerm] = query_order.unwrap_or(&root.sort);
 
-    let pk_col = root.pk_column();
+    // The primary-key column(s) + each part's own primitive — the deterministic keyset
+    // tiebreaker. One entry for a surrogate/natural key; the full tuple, in key order, for a
+    // composite `@key`.
+    let pk_cols: Vec<(String, Primitive)> = root
+        .pk_members()
+        .into_iter()
+        .map(|m| {
+            let prim = match &m.kind {
+                MemberKind::Scalar { ty, .. } => *ty,
+                // A relation key part (a junction FK) mirrors its own target's key type.
+                MemberKind::Forward { target, .. } => sel
+                    .schema
+                    .model(target)
+                    .and_then(RModel::pk_member)
+                    .and_then(|t| match &t.kind {
+                        MemberKind::Scalar { ty, .. } => Some(*ty),
+                        _ => None,
+                    })
+                    .unwrap_or(Primitive::Uuid),
+                MemberKind::Inverse { .. } => Primitive::Id,
+            };
+            (m.physical_col().to_string(), prim)
+        })
+        .collect();
     let mut out: Vec<OrderKey> = Vec::new();
     let mut last_is_pk = false;
     for t in terms {
         let prim = path_primitive(sel.schema, root, &t.path);
         let (alias, col) = sel.resolve(&t.path, root);
-        last_is_pk = alias == sel.root_alias && pk_col.as_deref() == Some(col.as_str());
+        last_is_pk =
+            alias == sel.root_alias && pk_cols.len() == 1 && pk_cols[0].0.as_str() == col.as_str();
         out.push(OrderKey {
             col_ref: sel.qcol(&alias, &col),
             dir: t.dir,
@@ -871,25 +938,19 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         });
     }
     if let Some(page) = query_page(q) {
-        // A keyset page must be deterministic: append the unique primary-key
-        // tiebreaker unless the sort already ends on it. This holds even with no
-        // explicit `order`/`@sort` — an empty order still yields `ORDER BY <pk>`, so the
-        // cursor comparison has a unique basis and never drops or repeats a row. Offset
-        // pages don't need the tiebreaker (their window is positional). A keyless
-        // (`@no_id`) model has no PK to append — sema (E0263) guarantees its declared
-        // sort already carries a unique tiebreaker. The PK is `id`, or a `@key(field)` key.
+        // A keyset page must be deterministic: append the unique primary-key tiebreaker
+        // unless the sort already ends on it. This holds even with no explicit
+        // `order`/`@sort` — an empty order still yields `ORDER BY <pk>`, so the cursor
+        // comparison has a unique basis and never drops or repeats a row. Offset pages
+        // don't need the tiebreaker (their window is positional). A keyless (`@no_id`) model
+        // has no PK to append — sema (E0263) guarantees its declared sort already carries a
+        // unique tiebreaker. A composite `@key` appends the full key tuple, in key order.
         if !page.offset && !last_is_pk {
-            if let Some(pk_col) = &pk_col {
-                // The tiebreaker's primitive is the PK column's own type: a declared
-                // `id: text` (or natural-key) cursor value must re-bind as that type.
-                let prim = match root.pk_member().map(|m| &m.kind) {
-                    Some(MemberKind::Scalar { ty, .. }) => *ty,
-                    _ => Primitive::Id,
-                };
+            for (col, prim) in &pk_cols {
                 out.push(OrderKey {
-                    col_ref: sel.qcol(&sel.root_alias, pk_col),
+                    col_ref: sel.qcol(&sel.root_alias, col),
                     dir: SortDir::Asc,
-                    prim,
+                    prim: *prim,
                 });
             }
         }
@@ -1182,14 +1243,8 @@ impl<'a> Select<'a> {
         let mem = model.member(field)?;
         let mut prefix = prefix.to_string();
         match &mem.kind {
-            MemberKind::Forward {
-                target,
-                fk_col,
-                optional,
-                ..
-            } => {
-                let (a, m) =
-                    self.join_forward(alias, &mut prefix, field, target, fk_col, *optional);
+            MemberKind::Forward { optional, .. } => {
+                let (a, m) = self.join_forward(alias, model, &mut prefix, field, *optional);
                 Some((a, prefix, m))
             }
             MemberKind::Inverse { target, via } => {
@@ -1197,8 +1252,7 @@ impl<'a> Select<'a> {
                 if !tmodel.is_unique(via) {
                     return None; // to-many collection — handled by the to-many subquery path.
                 }
-                let (a, m) =
-                    self.join_inverse(alias, &pk_col(model), &mut prefix, field, target, via);
+                let (a, m) = self.join_inverse(alias, model, &mut prefix, field, target, via);
                 Some((a, prefix, m))
             }
             MemberKind::Scalar { .. } => None,
@@ -1224,13 +1278,24 @@ impl<'a> Select<'a> {
                 if tmodel.is_unique(via) {
                     return None; // to-one back edge — handled by `enter_to_one`.
                 }
-                let via_fk = match tmodel.member(via).map(|m| &m.kind) {
-                    Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
-                    _ => format!("{via}_id"),
-                };
-                Some((tmodel, via_fk, &member.sort))
+                Some((tmodel, via.clone(), &member.sort))
             }
             _ => None,
+        }
+    }
+
+    /// The `(child_fk_col, parent_pk_col)` correlation pairs of a to-many edge — the child's
+    /// back-FK column(s) referencing the parent's primary key. One pair for a single-column
+    /// key, several for a composite key.
+    fn to_many_pairs(
+        &self,
+        child: &RModel,
+        via_field: &str,
+        parent: &RModel,
+    ) -> Vec<(String, String)> {
+        match child.member(via_field) {
+            Some(m) if matches!(m.kind, MemberKind::Forward { .. }) => self.fk_join_pairs(m),
+            _ => vec![(format!("{via_field}_id"), pk_col(parent))],
         }
     }
 
@@ -1247,9 +1312,9 @@ impl<'a> Select<'a> {
         &mut self,
         body: &'a [ShapeField],
         child: &'a RModel,
-        via_fk: &str,
+        via_field: &str,
         outer_alias: &str,
-        outer_pk: &str,
+        outer_model: &RModel,
         edge_sort: &[SortTerm],
     ) -> String {
         self.sub_counter += 1;
@@ -1294,11 +1359,17 @@ impl<'a> Select<'a> {
         let order = (!order_keys.is_empty()).then(|| order_keys.join(", "));
         self.sub_counter = sub.sub_counter;
 
-        let mut wheres = vec![format!(
-            "{} = {}",
-            self.qcol(&child_alias, via_fk),
-            self.qcol(outer_alias, outer_pk)
-        )];
+        let mut wheres: Vec<String> = self
+            .to_many_pairs(child, via_field, outer_model)
+            .iter()
+            .map(|(child_fk, parent_pk)| {
+                format!(
+                    "{} = {}",
+                    self.qcol(&child_alias, child_fk),
+                    self.qcol(outer_alias, parent_pk)
+                )
+            })
+            .collect();
         if let Some(sd) = &child.soft_delete {
             wheres.push(soft_pred(self.dialect, &child_alias, child, sd));
         }
@@ -1368,7 +1439,7 @@ impl<'a> Select<'a> {
     ) -> Option<String> {
         let segs = &path.segments;
         // First hop: a to-many inverse edge into the junction.
-        let (junction, near_fk, _) = self.to_many_edge(&segs[0].node, root)?;
+        let (junction, near_via, _) = self.to_many_edge(&segs[0].node, root)?;
         self.sub_counter += 1;
         let jx_alias = format!("s{}_{}", self.sub_counter, junction.table);
 
@@ -1396,10 +1467,9 @@ impl<'a> Select<'a> {
                     } else {
                         let (a, m) = inner.join_forward(
                             &cur_alias,
+                            cur_model,
                             &mut prefix,
                             &seg.node,
-                            target,
-                            fk_col,
                             *optional,
                         );
                         cur_alias = a;
@@ -1412,11 +1482,17 @@ impl<'a> Select<'a> {
         let (far_fk, far_model) = (far_fk?, far_model?);
         self.sub_counter = inner.sub_counter;
 
-        let mut inner_wheres = vec![format!(
-            "{} = {}",
-            self.qcol(&jx_alias, &near_fk),
-            self.qcol(outer_alias, &pk_col(root))
-        )];
+        let mut inner_wheres: Vec<String> = self
+            .to_many_pairs(junction, &near_via, root)
+            .iter()
+            .map(|(fk, pk)| {
+                format!(
+                    "{} = {}",
+                    self.qcol(&jx_alias, fk),
+                    self.qcol(outer_alias, pk)
+                )
+            })
+            .collect();
         if let Some(sd) = &junction.soft_delete {
             inner_wheres.push(soft_pred(self.dialect, &jx_alias, junction, sd));
         }
@@ -1578,16 +1654,11 @@ impl<'a> Select<'a> {
                 nested
             };
             pairs.push(format!("'{}', {}", field.node, nested));
-        } else if let Some((child_model, via_fk, edge_sort)) = self.to_many_edge(&field.node, model)
+        } else if let Some((child_model, via_field, edge_sort)) =
+            self.to_many_edge(&field.node, model)
         {
-            let arr = self.json_array_subquery(
-                body,
-                child_model,
-                &via_fk,
-                alias,
-                &pk_col(model),
-                edge_sort,
-            );
+            let arr =
+                self.json_array_subquery(body, child_model, &via_field, alias, model, edge_sort);
             pairs.push(format!("'{}', {}", field.node, arr));
         }
     }
@@ -1616,16 +1687,13 @@ impl<'a> Select<'a> {
             match &mem.kind {
                 MemberKind::Scalar { column, .. } => return (alias, column.clone()),
                 MemberKind::Forward {
-                    target,
-                    fk_col,
-                    optional,
-                    ..
+                    fk_col, optional, ..
                 } => {
                     if last {
                         return (alias, fk_col.clone());
                     }
                     let (next_alias, next) =
-                        self.join_forward(&alias, &mut prefix, name, target, fk_col, *optional);
+                        self.join_forward(&alias, cur, &mut prefix, name, *optional);
                     alias = next_alias;
                     cur = next;
                 }
@@ -1636,7 +1704,7 @@ impl<'a> Select<'a> {
                         return (alias, "id".to_string());
                     }
                     let (next_alias, next) =
-                        self.join_inverse(&alias, &pk_col(cur), &mut prefix, name, target, via);
+                        self.join_inverse(&alias, cur, &mut prefix, name, target, via);
                     alias = next_alias;
                     cur = next;
                 }
@@ -1645,28 +1713,42 @@ impl<'a> Select<'a> {
         (alias, "id".to_string())
     }
 
-    /// FK on this table -> JOIN target ON target.id = cur.fk. Optional -> LEFT JOIN.
+    /// The `(fk_col, referenced_pk_col)` pairs a forward relation joins on — one pair for a
+    /// single-column-key target, several (in key order) for a composite key. Owned strings,
+    /// so the schema borrow is released before the join `ON` is built.
+    fn fk_join_pairs(&self, mem: &RMember) -> Vec<(String, String)> {
+        self.schema
+            .fk_columns(mem)
+            .into_iter()
+            .map(|(fk, part)| (fk, part.physical_col().to_string()))
+            .collect()
+    }
+
+    /// FK on this table -> JOIN target ON target.<pk> = cur.<fk>, every key part ANDed for a
+    /// composite key. Optional -> LEFT JOIN.
     fn join_forward(
         &mut self,
         cur_alias: &str,
+        cur_model: &RModel,
         prefix: &mut String,
         field: &str,
-        target: &str,
-        fk_col: &str,
         optional: bool,
     ) -> (String, &'a RModel) {
         push_prefix(prefix, field);
+        let mem = cur_model.member(field).expect("forward member resolved");
+        let target = mem.kind.target().expect("forward has a target");
         let tmodel = self.schema.model(target).expect("relation target resolved");
         if let Some(a) = self.seen.get(prefix) {
             return (a.clone(), tmodel);
         }
         let alias = format!("j_{}", prefix.replace('.', "_"));
         let kind = if optional { "LEFT JOIN" } else { "JOIN" };
-        let mut on = format!(
-            "{} = {}",
-            self.qcol(&alias, &pk_col(tmodel)),
-            self.qcol(cur_alias, fk_col)
-        );
+        let pairs = self.fk_join_pairs(mem);
+        let mut on = pairs
+            .iter()
+            .map(|(fk, pk)| format!("{} = {}", self.qcol(&alias, pk), self.qcol(cur_alias, fk)))
+            .collect::<Vec<_>>()
+            .join(" AND ");
         if let Some(sd) = &tmodel.soft_delete {
             on.push_str(&format!(
                 " AND {}",
@@ -1685,12 +1767,13 @@ impl<'a> Select<'a> {
         (alias, tmodel)
     }
 
-    /// FK on the target table -> LEFT JOIN target ON target.<via_fk> = cur.<pk>. `cur_pk`
-    /// is the current (parent) model's primary-key column — `id`, or a `@key(field)` key.
+    /// FK on the target table -> LEFT JOIN target ON target.<via_fk> = cur.<pk>, every key
+    /// part ANDed for a composite key. `cur_model` is the current (parent) model, whose
+    /// primary-key column(s) the child's back-FK references.
     fn join_inverse(
         &mut self,
         cur_alias: &str,
-        cur_pk: &str,
+        cur_model: &RModel,
         prefix: &mut String,
         field: &str,
         target: &str,
@@ -1702,16 +1785,23 @@ impl<'a> Select<'a> {
             return (a.clone(), tmodel);
         }
         let alias = format!("j_{}", prefix.replace('.', "_"));
-        // The forward field `via` on the target carries the FK column back to us.
-        let via_fk = match tmodel.member(via).map(|m| &m.kind) {
-            Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
-            _ => format!("{via}_id"),
+        // The forward field `via` on the target carries the FK column(s) back to us, paired
+        // with our primary-key column(s) in key order.
+        let pairs: Vec<(String, String)> = match tmodel.member(via) {
+            Some(m) if matches!(m.kind, MemberKind::Forward { .. }) => self.fk_join_pairs(m),
+            _ => vec![(format!("{via}_id"), pk_col(cur_model))],
         };
-        let mut on = format!(
-            "{} = {}",
-            self.qcol(&alias, &via_fk),
-            self.qcol(cur_alias, cur_pk)
-        );
+        let mut on = pairs
+            .iter()
+            .map(|(via_fk, cur_pk)| {
+                format!(
+                    "{} = {}",
+                    self.qcol(&alias, via_fk),
+                    self.qcol(cur_alias, cur_pk)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
         if let Some(sd) = &tmodel.soft_delete {
             on.push_str(&format!(
                 " AND {}",
@@ -1998,8 +2088,14 @@ impl<'a> Select<'a> {
     /// the value that create assigned to it (a caller param/literal the engine already
     /// binds). Sema (E0281) guarantees the binding and the field resolve.
     fn binding_value(&self, pr: &ParamRef) -> String {
-        let ctx = &self.bindings[pr.name.node.as_str()];
         let field = pr.path.first().map_or("", |s| s.node.as_str());
+        self.binding_field_value(&pr.name.node, field)
+    }
+
+    /// The value a bound tx step (`$name`) carries for one of its fields — reused by a
+    /// composite-FK assign to pull each key part from the bound create's part assigns.
+    fn binding_field_value(&self, name: &str, field: &str) -> String {
+        let ctx = &self.bindings[name];
         // Reuse the value the bound create assigned to this field (a caller
         // param/literal the engine already binds), if it set one.
         if let Some(a) = ctx.assigns.iter().find(|a| a.col.node == field) {
@@ -2010,7 +2106,7 @@ impl<'a> Select<'a> {
                 // A path or arithmetic RHS in the bound create is not a plain bind; leave
                 // a visible marker rather than emit something unbindable. (A create never
                 // carries arithmetic — sema E0230.)
-                _ => format!("NULL /* ${}.{field} unresolved */", pr.name.node),
+                _ => format!("NULL /* ${name}.{field} unresolved */"),
             };
         }
         // Otherwise: `$name.id` is the app-generated id the bound create binds under
@@ -2018,11 +2114,22 @@ impl<'a> Select<'a> {
         if field == "id" {
             format!(":{}", ctx.id_param)
         } else {
-            format!(
-                "NULL /* ${}.{field} not set by bound create */",
-                pr.name.node
-            )
+            format!("NULL /* ${name}.{field} not set by bound create */")
         }
+    }
+
+    /// The value SQL for one key part of a composite-FK assign (`enrollment = $rhs`). A tx
+    /// binding (`$e`) pulls the part from the bound create's matching key-part assign; a
+    /// plain structured-id param (`$enrollment`) binds a per-part placeholder the runtime
+    /// splits from the JSON object.
+    pub(crate) fn fk_assign_part(&self, rhs: &AssignRhs, part_field: &str) -> String {
+        if let AssignRhs::Value(Value::Param(pr)) = rhs {
+            if self.bindings.contains_key(pr.name.node.as_str()) {
+                return self.binding_field_value(&pr.name.node, part_field);
+            }
+            return format!(":{}__{}", pr.name.node, part_field);
+        }
+        "NULL".to_string()
     }
 
     /// Inline a named filter: bind its params to the call arguments, substitute those

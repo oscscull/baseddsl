@@ -112,22 +112,38 @@ compiler enforces the loss:
 - A forward relation **to** a keyless model is `E0265` — there is no `id` for its foreign
   key to reference.
 
-### `@key(field)` — a natural (nominated) primary key
-A table whose key is a **meaningful existing column** — a `sku`, an `iso_code` — has a key;
-it is not `@no_id` (which means genuinely keyless). `@key(field)` nominates a declared field
-as the primary key, so no surrogate `id` is synthesized: that column carries the `PRIMARY
-KEY`, and it is the entity's typed id everywhere (`Id<entity::M>` in the client, the value an
-inbound relation FK mirrors — with the key's own type, e.g. `TEXT`/`BIGINT`, not a uuid).
+### `@key(f1, f2, …)` — a nominated primary key (natural / composite)
+A table whose key is **meaningful existing column(s)** — a `sku`, an `iso_code`, a junction's
+`(order, product)` — has a key; it is not `@no_id` (which means genuinely keyless).
+`@key(…)` nominates the declared field(s) that form the primary key, in list order, so no
+surrogate `id` is synthesized. One field is a **natural single-column key**; two or more form
+a **composite key** over those columns.
 ```
 @key(iso_code)
 Country { iso_code: text  name: text }
 # → PRIMARY KEY (iso_code); no `id`; a relation to Country references iso_code
+
+@key(course, student)
+Enrollment { course: Course  student: Student  grade: int }
+# → PRIMARY KEY (course_id, student_id); no `id`; the junction has a real key
 ```
-The natural key is **app-supplied**, not engine-generated (unlike `serial`): the `create`
-sets it like any column and the row reads back keyed on it. The nominated field must be a
-required, single-valued scalar (`E0276`) and must exist (`E0275`); `@key` on a `@no_id` model
-is contradictory (`E0277`). `@key` is the unified nominate-the-PK spelling — the composite
-form `@key(f1, f2, …)` (multi-column keys) is a planned extension (currently `E0278`).
+The nominated key is **app-supplied**, not engine-generated (unlike `serial`): the `create`
+sets the key column(s) like any other, and the row reads back keyed on the whole key. Each
+key field must exist (`E0275`) and be a required, single-valued scalar **or to-one relation**
+(its FK column carries the key — `E0276`); an empty `@key()` is `E0278`, a repeated field
+`E0279`, and `@key` + `@no_id` is contradictory (`E0277`).
+
+**Single-column key** → the column is the entity's typed id everywhere (`Id<entity::M>` in
+the client; an inbound FK mirrors the key's own type, e.g. `TEXT`/`BIGINT`, not a uuid).
+
+**Composite key** → the entity id is a **structured object**, one part per key field. In the
+generated client it is a per-part struct (`EnrollmentId { course, student }`), on the wire a
+JSON object, in OpenAPI a typed-property object; each part keeps its own typing. A relation
+*into* a composite-key model is a **multi-column FK** that auto-expands to `<field>_<part>`
+columns (`enrollment: Enrollment` → `enrollment_course_id`, `enrollment_student_id`)
+referencing every key column; projected bare, that FK reads back as the structured object.
+The composite PK is a unique, covering index — a `get` keyed on the whole tuple is served by
+it, and keyset pagination orders by and compares the full key.
 
 ## Decorators (model-level)
 Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8), `@no_id("reason")` (a keyless legacy table — see Defaults), `@no_fk[("reason")]` (opt the whole table out of FK constraints — see relations.md). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).

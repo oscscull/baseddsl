@@ -1347,14 +1347,13 @@ fn key_field_must_be_a_required_scalar() {
     );
     assert!(errors(&d).contains(&"E0276"), "{:?}", errors(&d));
     // A relation can't be a single-column natural key either (composite FK-keys are PR6).
-    let (_, d) = analyze(
+    assert_clean(
         r#"
         Org { id: Id  name: text }
         @key(org)
         Membership { org: Org  role: text }
         "#,
     );
-    assert!(errors(&d).contains(&"E0276"), "{:?}", errors(&d));
 }
 
 #[test]
@@ -1371,9 +1370,10 @@ fn key_and_no_id_conflict() {
 }
 
 #[test]
-fn composite_key_is_not_yet_supported() {
-    // `@key(a, b)` composite keys are deferred to PR6 — E0278 for now.
-    let (_, d) = analyze(
+fn composite_key_is_supported() {
+    // `@key(a, b)` is a composite primary key over two declared columns — clean, no `id`
+    // synthesized, no E0261/E0278.
+    assert_clean(
         r#"
         Order { id: Id  n: int }
         Product { id: Id  n: int }
@@ -1381,7 +1381,26 @@ fn composite_key_is_not_yet_supported() {
         Enrollment { order: Order  product: Product  at: timestamp }
         "#,
     );
+}
+
+#[test]
+fn composite_key_rejects_empty_and_duplicate() {
+    // `@key()` names no column — E0278.
+    let (_, d) = analyze(
+        r#"
+        @key()
+        Enrollment { order: text  product: text }
+        "#,
+    );
     assert!(errors(&d).contains(&"E0278"), "{:?}", errors(&d));
+    // `@key(a, a)` repeats a column — E0279.
+    let (_, d) = analyze(
+        r#"
+        @key(order, order)
+        Enrollment { order: text  product: text }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0279"), "{:?}", errors(&d));
 }
 
 #[test]
