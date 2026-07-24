@@ -192,6 +192,24 @@ fn int_enum_from_scratch_renders_integer_column_and_int_check() {
 }
 
 #[test]
+fn renamed_pk_from_scratch_names_the_real_column_and_round_trips() {
+    let schema = checked(r#"User { id: Id (column "user_pk"), name: text }"#);
+
+    // From-scratch migration names the renamed PK column, never a phantom `id`.
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    let sql = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(sql.contains(r#"PRIMARY KEY ("user_pk")"#), "\n{sql}");
+    assert!(!sql.contains(r#""id""#), "\n{sql}");
+
+    // The `pk=` marker survives the snapshot round-trip (the diff baseline property).
+    let snap = Snapshot::from_schema(&schema);
+    let parsed = Snapshot::parse(&snap.render()).expect("round-trip parse");
+    assert_eq!(snap, parsed);
+    // A re-diff against the persisted baseline is empty (no phantom-column churn).
+    assert!(migrate::diff(&parsed, &schema).is_empty());
+}
+
+#[test]
 fn dropping_a_model_is_a_marked_drop_table() {
     let base = "
         Org { id: Id  name: text }

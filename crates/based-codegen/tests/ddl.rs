@@ -42,6 +42,37 @@ fn implicit_id_is_uuid_primary_key() {
 }
 
 #[test]
+fn renamed_pk_column_is_the_primary_key_on_every_dialect() {
+    // `id: Id (column "user_pk")` renames the PK's physical column: the column and the
+    // `PRIMARY KEY` clause must both name `user_pk` — never a phantom `id` (unexecutable).
+    let src = r#"User { id: Id (column "user_pk"), name: text }"#;
+    for (ddl, q) in [(gen(src), '`'), (gen_sqlite(src), '`'), (gen_pg(src), '"')] {
+        assert!(ddl.contains(&format!("{q}user_pk{q}")), "\n{ddl}");
+        assert!(
+            ddl.contains(&format!("PRIMARY KEY ({q}user_pk{q})")),
+            "\n{ddl}"
+        );
+        // No phantom `id` column or PK survives.
+        assert!(!ddl.contains(&format!("{q}id{q}")), "\n{ddl}");
+    }
+}
+
+#[test]
+fn fk_targeting_a_renamed_pk_references_the_real_column() {
+    // A relation to a model whose PK is renamed must reference that physical column, not
+    // a phantom `id`, in the FK constraint.
+    let src = r#"
+        User { id: Id (column "user_pk"), name: text }
+        Post { id: Id, author: User @fk }
+        "#;
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#"FOREIGN KEY ("author_id") REFERENCES "user" ("user_pk")"#),
+        "\n{pg}"
+    );
+}
+
+#[test]
 fn type_mapping_and_nullability() {
     let ddl = gen(r#"
         Widget {

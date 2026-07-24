@@ -7,7 +7,7 @@
 //! dialect — SQL lives in [`super::sql`].
 
 use based_ast::{DefaultVal, Literal, Primitive, SortDir, SortTerm};
-use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel, SoftDelete, SoftMode};
 use std::fmt::Write as _;
 
 // ---------- neutral snapshot model ----------------------------------------
@@ -88,6 +88,10 @@ pub struct TableSnap {
     /// `@no_id` — a keyless legacy table (no `id` primary key). The diff renders no
     /// `PRIMARY KEY` for it.
     pub no_id: bool,
+    /// The primary-key column when the `id` field carries a `(column "…")` override, so
+    /// the from-scratch `CREATE TABLE` names the real column. `None` = the default `id`
+    /// (elided from the column list and re-synthesized) or a keyless (`@no_id`) table.
+    pub pk: Option<String>,
     /// Columns, sorted by name.
     pub columns: Vec<ColumnSnap>,
     /// Declared indexes, sorted by name.
@@ -252,6 +256,18 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
     let mut foreign_keys = foreign_key_snaps(schema, model, fks);
     foreign_keys.sort();
 
+    // Record a renamed PK column so the from-scratch `CREATE TABLE` names it; the default
+    // `id` stays `None` (elided + re-synthesized).
+    let pk = if model.no_id {
+        None
+    } else {
+        model
+            .member("id")
+            .map(RMember::physical_col)
+            .filter(|c| *c != "id")
+            .map(str::to_string)
+    };
+
     TableSnap {
         name: model.table.clone(),
         soft_delete: model.soft_delete.as_ref().map(soft_delete_snap),
@@ -260,6 +276,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
         scope_alts: canonical_scope_alts(&model.scope_alts),
         sort: model.sort.iter().map(sort_term).collect(),
         no_id: model.no_id,
+        pk,
         columns,
         indexes,
         foreign_keys,
@@ -632,6 +649,9 @@ fn render_table(out: &mut String, t: &TableSnap) {
     if t.no_id {
         header.push_str(" no_id");
     }
+    if let Some(pk) = &t.pk {
+        let _ = write!(header, " pk={pk}");
+    }
     header.push('\n');
     out.push_str(&header);
 
@@ -861,11 +881,16 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
     let mut scope_alts = Vec::new();
     let mut sort = Vec::new();
     let mut no_id = false;
+    let mut pk = None;
 
     while !head.is_empty() {
         if head == "no_id" || head.starts_with("no_id ") {
             no_id = true;
             head = head["no_id".len()..].trim_start();
+        } else if let Some(after) = head.strip_prefix("pk=") {
+            let mut sp = after.splitn(2, char::is_whitespace);
+            pk = Some(sp.next().unwrap_or("").to_string());
+            head = sp.next().unwrap_or("").trim_start();
         } else if let Some(after) = head.strip_prefix("soft_delete=") {
             let mut sp = after.splitn(2, char::is_whitespace);
             let spec = sp.next().unwrap_or("");
@@ -914,6 +939,7 @@ fn parse_table_header(rest: &str, line: usize) -> Result<TableSnap, ParseError> 
         scope_alts,
         sort,
         no_id,
+        pk,
         columns: Vec::new(),
         indexes: Vec::new(),
         foreign_keys: Vec::new(),

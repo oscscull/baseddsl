@@ -32,7 +32,7 @@
 //! MariaDB/SQLite and double-quoted on Postgres ([`Dialect::quote`]).
 
 use based_ast::{DefaultVal, Literal, Primitive, RawSpec};
-use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel};
 
 use crate::Dialect;
 
@@ -153,10 +153,11 @@ fn create_table(
 ) -> String {
     let mut lines: Vec<String> = column_lines(schema, model, dialect);
 
-    // Primary key — `id`, the first member `skeleton` inserts. A `@no_id` (keyless
-    // legacy) table has none.
+    // Primary key — the `id` member's physical column (its `(column "…")` override, else
+    // `id`). A `@no_id` (keyless legacy) table has none.
     if !model.no_id {
-        lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+        let pk = model.member("id").map_or("id", RMember::physical_col);
+        lines.push(format!("PRIMARY KEY ({})", dialect.quote(pk)));
     }
     lines.extend(constraint_lines(schema, model, dialect, fks));
 

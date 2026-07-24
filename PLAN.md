@@ -195,11 +195,13 @@ on the onboarding critical path.
   answered NEGATIVE: composite PK / multi-col FK is representable by neither feature nor raw → folded into
   D111/PR6 (no interim backstop). Two audit overclaims were overturned by verify (charset + timezone are
   fine via raw — not bugs). Confirmed findings, filed as items:
-  - **PR7 (miscompile, small, high-value). PK column-name override emits unexecutable DDL.** `id: Id
-    (column "user_pk")` compiles clean but emits `PRIMARY KEY ("id")` for a nonexistent column (MariaDB
-    err 1072) — empirically reproduced. **Contradicts D3's documented `(column "…")` hook.** Fix: resolve
-    the PK column via `member("id").physical_col()` in `sql.rs:159` + `migrate/sql.rs:290,301` (drop the
-    phantom-id re-synthesis); add a renamed-PK conformance golden. Small, self-contained; do early.
+  - **PR7 ✅ DONE. PK column-name override emits unexecutable DDL.** Was: `id: Id (column "user_pk")`
+    emitted `PRIMARY KEY ("id")` for a nonexistent column (MariaDB err 1072). Fixed: both DDL paths
+    (`sql::create_table`, migration `create_table_statements`) resolve the PK through the `id` member's
+    physical column; the migration snapshot carries a `pk=<col>` marker so a renamed PK rides in the
+    column list (no phantom-id re-synthesis) and round-trips. FK-to-renamed-PK already resolved via
+    `target_pk_column`. Goldens: `ddl.rs` (per-dialect renamed PK + FK), `migrate.rs` (from-scratch +
+    round-trip). D3 impl note added.
   - **PR8 (miscompile — design RESOLVED, D112). `id UUID` is rejected on `dialect="mysql"` and MariaDB
     < 10.7.** Fix (D112, owner-approved 2026-07-24): **split a real `mysql` dialect** from `mariadb` (own
     `Dialect::MySql`, no longer aliased at `lib.rs:54`); **default `uuid`/`Id` to `CHAR(36)`** for the
@@ -219,7 +221,7 @@ on the onboarding critical path.
     fine (drift check only drops objects in its own snapshot).
   - **Doc-truth drift to correct (own cleanup item):** D1 (phantom `BINARY(16)`; calls `id` "implicit" —
     explicit since D103, only D2 got the banner); `sql.rs:22` + `lib.rs:24-26` (`UUID` "native"/"MySQL-8
-    compatible" false for MySQL/<10.7); D3 (no note that `(column …)` breaks on the PK); D11/D12/D13
+    compatible" false for MySQL/<10.7); D11/D12/D13
     "Deferred…" tails describing *shipped* features (nested shapes D55/D57, named-filter inlining D14, tx
     back-refs D107) + the retired `sql` keyword spelling (→`raw`, D96); `sql.rs:156-157` stale PK comment.
 

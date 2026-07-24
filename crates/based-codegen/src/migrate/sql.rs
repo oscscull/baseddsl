@@ -284,10 +284,12 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
 fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    // Implicit `id` primary key: synthesized as the default uuid when the snapshot
-    // elided it; a declared non-default `id` rides in the column list instead. A keyless
+    // Primary key: its physical column is the `pk=` override, else the default `id`. The
+    // default `id` is elided from the snapshot, so re-synthesize it as the default uuid; a
+    // renamed or otherwise non-default `id` rides in the column list instead. A keyless
     // (`@no_id`) table has neither the column nor the `PRIMARY KEY`.
-    if !t.no_id && t.column("id").is_none() {
+    let pk_col = t.pk.as_deref().unwrap_or("id");
+    if !t.no_id && pk_col == "id" && t.column("id").is_none() {
         lines.push(format!(
             "{} {} NOT NULL",
             dialect.quote("id"),
@@ -298,7 +300,7 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
         lines.push(column_ddl(c, dialect));
     }
     if !t.no_id {
-        lines.push(format!("PRIMARY KEY ({})", dialect.quote("id")));
+        lines.push(format!("PRIMARY KEY ({})", dialect.quote(pk_col)));
     }
 
     // Column-level `(unique)` constraints (a declared `@index (unique)` is an IndexSnap

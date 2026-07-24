@@ -219,6 +219,13 @@ A query may only sort by `created_at` if that model declares it (see the product
   words — D8): `@table("legacy_name")` on the model; `(column "legacy_name")` on a field;
   `(on: ...)` on a relation (relations.md). The convention is the default only, never a
   requirement on the existing database.
+- **Impl note (PR7):** `(column "…")` on the `id` field renames the PK's physical column. Both DDL
+  paths resolve the PK constraint through the `id` member's physical column (the `based gen sql`
+  `create_table` and the migration from-scratch `create_table_statements`), never a hardcoded `id` —
+  earlier they emitted `PRIMARY KEY ("id")` for a nonexistent column (unexecutable, MariaDB err 1072).
+  The migration snapshot carries a `pk=<col>` marker (a renamed PK rides in the column list, is not
+  re-synthesized) so the persisted baseline round-trips. FK columns pointing at a renamed PK already
+  resolve the target's physical PK column (`target_pk_column`), so they stay consistent.
 
 ## D4 — `$ctx` (per-request context; inferred, never a global type)
 `$ctx` is a reserved param namespace holding caller-supplied request context (auth.md
