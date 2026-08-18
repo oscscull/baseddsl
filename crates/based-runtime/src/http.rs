@@ -52,7 +52,7 @@ use axum::Router;
 
 use crate::guard::Guards;
 use crate::id::UuidGen;
-use crate::idempotency::MemStore;
+use crate::idempotency::{IdempotencyStore, MemStore};
 use crate::load::Compiled;
 use crate::run::{Backend, ShapedStream};
 use crate::serve::{
@@ -162,10 +162,10 @@ struct Shared {
     backend: Box<dyn Backend>,
     ctx_source: Box<dyn ContextSource>,
     /// The mutation idempotency store, shared across all requests so a retry that lands
-    /// on any task dedupes. `MemStore` dedupes within this one process; a
-    /// multi-instance deployment wants a shared/durable store behind the same
-    /// `IdempotencyStore` trait.
-    idempotency: MemStore,
+    /// on any task dedupes. Defaults to an in-process `MemStore` (dedupes within this one
+    /// process); a multi-instance deployment injects a shared/durable store via
+    /// [`serve_with_store`], behind the same `IdempotencyStore` trait.
+    idempotency: Box<dyn IdempotencyStore>,
     /// Set once when a graceful shutdown is requested (SIGTERM/SIGINT). `/readyz` reads
     /// it to fail readiness first (drain).
     draining: Arc<AtomicBool>,
@@ -304,6 +304,30 @@ pub async fn serve_with_handle(
     config: ServeConfig,
     on_start: impl FnOnce(Handle),
 ) -> Result<(), ServeError> {
+    serve_with_store(
+        compiled,
+        backend,
+        ctx_source,
+        Box::new(MemStore::new()),
+        config,
+        on_start,
+    )
+    .await
+}
+
+/// Like [`serve_with_handle`], but with a custom idempotency store instead of the default
+/// in-process [`MemStore`] — a shared/durable [`IdempotencyStore`] so a keyed-mutation
+/// retry that lands on a *different* instance still dedupes. The store injection seam for
+/// the standalone listener, the twin of [`Engine::with_store`](crate::Engine::with_store)
+/// for an embed.
+pub async fn serve_with_store(
+    compiled: Compiled,
+    backend: impl Backend + 'static,
+    ctx_source: impl ContextSource + 'static,
+    store: Box<dyn IdempotencyStore>,
+    config: ServeConfig,
+    on_start: impl FnOnce(Handle),
+) -> Result<(), ServeError> {
     // A guard is a host function only an embedding app can register; this listener has
     // no host code, so a guarded schema must not come up here — refusing at startup is
     // what keeps a declared check from silently not running.
@@ -318,7 +342,7 @@ pub async fn serve_with_handle(
         compiled,
         backend: Box::new(backend),
         ctx_source: Box::new(ctx_source),
-        idempotency: MemStore::new(),
+        idempotency: store,
         draining: Arc::clone(&draining),
         guards: Guards::new(),
     });
@@ -402,7 +426,7 @@ async fn handle(
             &*shared.backend,
             &d.shard_key,
             &id_gen,
-            &shared.idempotency,
+            shared.idempotency.as_ref(),
             &shared.guards,
             // The standalone listener refuses a guarded schema at startup, so no guard
             // ever runs here — there is no re-entry handle to hand out.

@@ -7,13 +7,17 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use based_ast::FileId;
 use based_parser::parse_file;
-use based_runtime::http::{serve_with_handle, Handle, ServeConfig, TrustedHeaderContext};
-use based_runtime::{Backend, Compiled, Db, DbError, MockDb, Row};
+use based_runtime::http::{
+    serve_with_handle, serve_with_store, Handle, ServeConfig, TrustedHeaderContext,
+};
+use based_runtime::{Backend, Compiled, Db, DbError, MockDb, NoStore, Row};
 use serde_json::json;
 
 const SCHEMA: &str = r#"
@@ -39,6 +43,9 @@ struct MockBackend {
     /// When set, every connection's `fetch` yields its rows then this failure —
     /// the database breaking mid-stream.
     mid_stream_fail: Option<String>,
+    /// Counts every `checkout` — an idempotency-replay skips the backend, so this
+    /// distinguishes a real write from a dedupe-replay in the store-injection test.
+    checkouts: Arc<AtomicUsize>,
 }
 
 impl MockBackend {
@@ -47,6 +54,7 @@ impl MockBackend {
             rows,
             ready: true,
             mid_stream_fail: None,
+            checkouts: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -56,6 +64,7 @@ impl MockBackend {
             rows: vec![],
             ready: false,
             mid_stream_fail: None,
+            checkouts: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -65,6 +74,7 @@ impl MockBackend {
             rows: vec![rows],
             ready: true,
             mid_stream_fail: Some(message.to_string()),
+            checkouts: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -72,6 +82,7 @@ impl MockBackend {
 #[async_trait::async_trait]
 impl Backend for MockBackend {
     async fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        self.checkouts.fetch_add(1, Ordering::SeqCst);
         Ok(match &self.mid_stream_fail {
             Some(m) => Box::new(MockDb::failing_mid_stream(
                 self.rows.first().cloned().unwrap_or_default(),
@@ -110,6 +121,38 @@ fn compile() -> Compiled {
 /// thread runs forever (killed on process exit) — fine for a test.
 fn start(backend: MockBackend) -> String {
     start_with_handle(backend).0
+}
+
+/// Start a listener whose idempotency store is the injected `store` (via
+/// [`serve_with_store`]) rather than the default `MemStore`.
+fn start_with_store(
+    backend: MockBackend,
+    store: Box<dyn based_runtime::IdempotencyStore>,
+) -> String {
+    let addr = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let listen = addr.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<Handle>();
+    thread::spawn(move || {
+        let config = ServeConfig { listen };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(serve_with_store(
+                compile(),
+                backend,
+                TrustedHeaderContext,
+                store,
+                config,
+                |handle| tx.send(handle).unwrap(),
+            ))
+            .unwrap();
+    });
+    rx.recv().unwrap();
+    wait_until_up(&addr);
+    addr
 }
 
 /// Like [`start`] but also returns the [`Handle`] (for the graceful-shutdown test) and
@@ -454,6 +497,24 @@ fn idempotency_key_header_dedupes_a_write_over_the_socket() {
     );
     assert_eq!(other.status, 200);
     assert_eq!(other.body, json!({ "status": "open", "total": 5 }));
+}
+
+#[test]
+fn serve_with_store_injects_the_idempotency_store() {
+    // `serve_with_store` plugs in a custom store. With `NoStore` (dedupe off), a retry
+    // under the same key runs a *second* write — an extra checkout the default `MemStore`
+    // would have elided by replaying. The checkout counter makes the difference observable.
+    let backend = MockBackend::new(vec![vec![row(json!({ "status": "open", "total": 5 }))]]);
+    let checkouts = Arc::clone(&backend.checkouts);
+    let addr = start_with_store(backend, Box::new(NoStore));
+
+    let body = r#"{"org":"org-1","status":"open","total":5}"#;
+    let key = &[("Idempotency-Key", "req-nostore")];
+
+    assert_eq!(post(&addr, "/m/place_order", body, key).status, 200);
+    assert_eq!(post(&addr, "/m/place_order", body, key).status, 200);
+    // Two real writes: the injected NoStore never deduped the second call.
+    assert_eq!(checkouts.load(Ordering::SeqCst), 2);
 }
 
 #[test]

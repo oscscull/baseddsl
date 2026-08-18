@@ -104,8 +104,9 @@ history is in `PLAN-archive.md`.
 
 Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
 system into an existing production environment as a pluggable replacement — plus two example/quality
-fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → ~~PR6~~ → PR5 → PR2 →
-PR3 → PR1.** PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
+fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → ~~PR6~~ → ~~PR5~~ →
+~~PR2~~ → PR3 → PR1.** PR2 (idempotency store injection seam + `MemStore` TTL) is **done** (D114 impl);
+remaining is PR3 → PR1. PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
 nominated primary key — natural single-column **and** composite — is **done** (D111 impl). The
 primary-key story (**PR4 single-column + PR6 composite**) was priority 1 and is now complete: a schema
 whose keys are meaningful columns or multi-column junctions can be represented and onboarded. PR1 is a
@@ -119,14 +120,17 @@ cheap standalone win, sequenced last only because it isn't on the onboarding cri
   (`POST /sessions`) that mints a **server-generated** random token and returns it; keep `seed` for demo
   *content* (tickets/comments) only. Optionally a minimal credential check so it is login, not bare
   issuance. Pure example code, no engine change — lowest risk.
-- **PR2. Idempotency store: injection seam + `MemStore` TTL.** `IdempotencyStore` is a trait, but
-  `EngineInner.store` is a **concrete `MemStore`** hardwired in `embed.rs`/`http.rs` — unlike `id_gen`
-  and `guards`, which ARE injected as `Box<dyn …>`. So a user-written store cannot be plugged in without
-  editing runtime source; the "the store is a seam" doc-comment (`idempotency.rs`) is aspirational.
-  Separately, `MemStore` has no eviction ("keys accumulate", per its own doc) → unbounded memory growth
-  on a long-lived server. Fix: (a) `Engine::with_store` / serve-builder accepting `Box<dyn
-  IdempotencyStore>`; (b) TTL/eviction on `MemStore`. (This is the "durable multi-instance idempotency
-  store" that was on the Deferred list — now promoted.)
+- **PR2. ✅ DONE (D114 impl). Idempotency store: injection seam + `MemStore` TTL.** Both hardwired
+  concrete-`MemStore` fields (`EngineInner.store`, listener `Shared.idempotency`) became
+  `Box<dyn IdempotencyStore>` (default `MemStore`), injected the way `id_gen`/`guards` already are:
+  (a) `Engine::with_store(Box<dyn IdempotencyStore>)` (fluent post-construction override, mirrors
+  `with_guards`) for an embed; `serve_with_store(…, store, …)` — the new most-general listener entry,
+  with `serve`/`serve_with_handle` delegating to it on a default store — for the standalone edge; the
+  "store is a seam" doc-comment is now true. (b) `MemStore` gained per-key TTL (`expires_at` per entry,
+  lazy expiry on `begin` + an amortized `retain` sweep so never-revisited keys are reclaimed), default
+  24h, `MemStore::with_ttl(Duration)`. Unit-tested (TTL expiry, sweep eviction, `NoStore` injection
+  disables dedupe both in-process and over the socket); full `make check` green. PR3 (DB-backed durable
+  store) now has its seam.
 - **PR3. Idempotency store: DB-backed durable impl.** Ship a database-backed `IdempotencyStore` (keys in
   a table in the same DB). The strong form commits the key in the **same transaction** as the mutation →
   genuine exactly-once even when a retry lands on another app instance, and it is on-brand for a DB-first

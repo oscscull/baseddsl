@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use crate::guard::{GuardSetupError, Guards};
 use crate::id::IdGen;
-use crate::idempotency::MemStore;
+use crate::idempotency::{IdempotencyStore, MemStore};
 use crate::load::Compiled;
 use crate::run::Backend;
 use crate::serve::{dispatch, dispatch_stream, resolve_shard_key, route_target, WireResponse};
@@ -64,10 +64,11 @@ struct EngineInner {
     // holds an engine-wide lock across dispatch — a guard may call back into its
     // own engine.
     id_gen: Box<dyn IdGen>,
-    // An in-process idempotency store for keyed mutation retries via
-    // [`Engine::call_with_key`]. `MemStore` is correct for a single embedded instance;
-    // [`Engine::call`] (no key) never consults it.
-    store: MemStore,
+    // The idempotency store for keyed mutation retries via [`Engine::call_with_key`].
+    // Defaults to an in-process [`MemStore`] (correct for a single embedded instance);
+    // [`Engine::with_store`] swaps in a shared/durable one. [`Engine::call`] (no key)
+    // never consults it.
+    store: Box<dyn IdempotencyStore>,
     // The registered host guard implementations (auth.md Handle 3); construction
     // guarantees every guard the schema declares is present.
     guards: Guards,
@@ -118,10 +119,28 @@ impl Engine {
                 compiled,
                 backend: Arc::new(backend),
                 id_gen: Box::new(id_gen),
-                store: MemStore::new(),
+                store: Box::new(MemStore::new()),
                 guards,
             }),
         })
+    }
+
+    /// Replace the idempotency store (default in-process [`MemStore`]) with a custom one —
+    /// e.g. a shared/durable store so a keyed-mutation retry that lands on a *different*
+    /// app instance still dedupes. Mirrors how [`with_guards`](Self::with_guards) injects
+    /// guards; chain it right after construction, before the engine is cloned into shared
+    /// state.
+    ///
+    /// # Panics
+    /// If the engine has already been cloned (the store is shared state; there is no one
+    /// owner to swap it on). Building the engine and calling `with_store` on it are a
+    /// single construction step, so this cannot fire in correct use.
+    #[must_use]
+    pub fn with_store(mut self, store: Box<dyn IdempotencyStore>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("Engine::with_store must be called before the engine is cloned")
+            .store = store;
+        self
     }
 
     /// Run one callable and return the wire response — the same status + JSON body the
@@ -162,7 +181,7 @@ impl Engine {
             &*self.inner.backend,
             &shard_key,
             self.inner.id_gen.as_ref(),
-            &self.inner.store,
+            self.inner.store.as_ref(),
             &self.inner.guards,
             Some(self),
             "POST",

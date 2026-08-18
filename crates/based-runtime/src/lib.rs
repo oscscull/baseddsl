@@ -108,8 +108,8 @@ pub use value::SqlValue;
 
 #[cfg(feature = "serve")]
 pub use http::{
-    serve, serve_with_handle, Context, ContextSource, Handle, HeaderView, ServeConfig, ServeError,
-    TrustedHeaderContext,
+    serve, serve_with_handle, serve_with_store, Context, ContextSource, Handle, HeaderView,
+    ServeConfig, ServeError, TrustedHeaderContext,
 };
 
 #[cfg(feature = "sqlite")]

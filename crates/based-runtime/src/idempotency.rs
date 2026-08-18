@@ -35,10 +35,18 @@
 //! for a single instance, and the whole request→response path is testable against it with
 //! no infra). A multi-instance deployment backs the store with a shared/durable store (the
 //! database itself, or a cache) so a retry that lands on a different app instance still
-//! dedupes, behind the same trait.
+//! dedupes, behind the same trait, and plugs its own store in without editing runtime
+//! source: [`Engine::with_store`](crate::Engine::with_store) for an embed, or
+//! [`serve_with_store`](crate::http::serve_with_store) for the standalone listener.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a [`MemStore`] key is retained before it expires. A retried mutation arrives
+/// within seconds of the first attempt, so a day is ample for dedupe while bounding how
+/// long a key occupies memory (the industry-standard idempotency-key window).
+const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A stable hash of a request's args + `$ctx` — the payload a keyed mutation carries.
 ///
@@ -97,70 +105,147 @@ pub trait IdempotencyStore: Send + Sync {
     fn abandon(&self, callable: &str, key: &str);
 }
 
-/// The state one key sits in inside a [`MemStore`]. Each variant carries the
-/// [`Fingerprint`] of the attempt that created it, so a later `begin` under a *different*
-/// fingerprint is caught as a [`KeyState::Mismatch`] instead of being replayed/blocked.
-enum Entry {
-    /// A `begin` has claimed it; no response recorded yet. Holds the claiming attempt's
-    /// fingerprint.
-    InFlight(Fingerprint),
-    /// A response has been recorded; `begin` replays it for a matching fingerprint. Holds
-    /// the completed attempt's fingerprint alongside its response.
-    Done(Fingerprint, serde_json::Value),
+/// One key's stored state inside a [`MemStore`]: its [`Fingerprint`] (so a later `begin`
+/// under a *different* fingerprint is caught as a [`KeyState::Mismatch`] rather than
+/// replayed/blocked), its outcome, and the instant it expires.
+struct Entry {
+    fingerprint: Fingerprint,
+    outcome: Outcome,
+    expires_at: Instant,
 }
 
-/// An in-process [`IdempotencyStore`]: a `Mutex`-guarded map keyed by `(callable, key)`.
+/// Whether a claimed key is still running or has a recorded response to replay.
+enum Outcome {
+    /// A `begin` has claimed it; no response recorded yet.
+    InFlight,
+    /// A response has been recorded; `begin` replays it for a matching fingerprint.
+    Done(serde_json::Value),
+}
+
+/// The [`MemStore`] map plus the next time a full sweep of expired keys is due.
+struct State {
+    entries: HashMap<(String, String), Entry>,
+    next_sweep: Instant,
+}
+
+impl State {
+    /// Drop every expired key when a sweep interval has elapsed, so keys never accumulate
+    /// past their TTL even if never revisited. Amortized: one pass per `ttl`, not per call.
+    fn sweep_if_due(&mut self, now: Instant, ttl: Duration) {
+        if now >= self.next_sweep {
+            self.entries.retain(|_, e| e.expires_at > now);
+            self.next_sweep = now + ttl;
+        }
+    }
+}
+
+/// An in-process [`IdempotencyStore`]: a `Mutex`-guarded map keyed by `(callable, key)`,
+/// with per-key TTL expiry.
 ///
 /// Correct for a single app instance (one process dedupes its own retries). It is
 /// `Send + Sync`, so the shared HTTP worker pool uses one behind an `Arc`. A
 /// multi-instance deployment wants a shared store (so a retry on another instance also
-/// dedupes) behind the same trait. Keys accumulate (no eviction); a production store adds
-/// a TTL. For local/embedded use and tests this is complete.
-#[derive(Default)]
+/// dedupes) behind the same trait — injected via
+/// [`Engine::with_store`](crate::Engine::with_store) /
+/// [`serve_with_store`](crate::http::serve_with_store). Keys expire after the TTL
+/// ([`DEFAULT_TTL`], or [`with_ttl`](Self::with_ttl)): an expired key reads as fresh, and
+/// a periodic sweep reclaims keys that are never revisited, so memory stays bounded on a
+/// long-lived server.
 pub struct MemStore {
-    entries: Mutex<HashMap<(String, String), Entry>>,
+    ttl: Duration,
+    state: Mutex<State>,
 }
 
 impl MemStore {
+    /// A store with the default 24-hour key TTL.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_ttl(DEFAULT_TTL)
+    }
+
+    /// A store whose keys expire after `ttl`. A retry must arrive within `ttl` of the
+    /// first attempt to be deduped; after it the key reads as fresh and is reclaimed.
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            state: Mutex::new(State {
+                entries: HashMap::new(),
+                next_sweep: Instant::now() + ttl,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("idempotency store poisoned")
+            .entries
+            .len()
+    }
+}
+
+impl Default for MemStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl IdempotencyStore for MemStore {
     fn begin(&self, callable: &str, key: &str, fingerprint: Fingerprint) -> KeyState {
-        let mut map = self.entries.lock().expect("idempotency store poisoned");
+        let now = Instant::now();
+        let mut st = self.state.lock().expect("idempotency store poisoned");
+        st.sweep_if_due(now, self.ttl);
         let k = (callable.to_string(), key.to_string());
-        match map.get(&k) {
-            None => {
-                map.insert(k, Entry::InFlight(fingerprint));
-                KeyState::Fresh
-            }
-            // A key seen before only replays/blocks for the *same* request payload; a
-            // different fingerprint is one key reused for two different requests → reject.
-            Some(Entry::InFlight(fp)) if *fp == fingerprint => KeyState::InFlight,
-            Some(Entry::Done(fp, resp)) if *fp == fingerprint => KeyState::Done(resp.clone()),
-            Some(_) => KeyState::Mismatch,
-        }
+        // A key seen before only replays/blocks for the *same* request payload and while
+        // unexpired; a different fingerprint is one key reused for two requests → reject.
+        let live = st
+            .entries
+            .get(&k)
+            .filter(|e| e.expires_at > now)
+            .map(|e| match &e.outcome {
+                _ if e.fingerprint != fingerprint => KeyState::Mismatch,
+                Outcome::InFlight => KeyState::InFlight,
+                Outcome::Done(resp) => KeyState::Done(resp.clone()),
+            });
+        live.unwrap_or_else(|| {
+            // Absent or expired → claim it fresh (overwriting any expired entry).
+            st.entries.insert(
+                k,
+                Entry {
+                    fingerprint,
+                    outcome: Outcome::InFlight,
+                    expires_at: now + self.ttl,
+                },
+            );
+            KeyState::Fresh
+        })
     }
 
     fn record(&self, callable: &str, key: &str, response: serde_json::Value) {
-        let mut map = self.entries.lock().expect("idempotency store poisoned");
+        let now = Instant::now();
+        let mut st = self.state.lock().expect("idempotency store poisoned");
         let k = (callable.to_string(), key.to_string());
         // Preserve the fingerprint the `begin` claim recorded (a `record` always follows a
         // `Fresh` claim for the same request). If the claim is somehow gone, fall back to a
         // fingerprint that never matches a future `begin`, so a stray record can't be
         // replayed under a mismatched payload.
-        let fp = match map.get(&k) {
-            Some(Entry::InFlight(fp) | Entry::Done(fp, _)) => *fp,
-            None => Fingerprint::MAX,
-        };
-        map.insert(k, Entry::Done(fp, response));
+        let fingerprint = st
+            .entries
+            .get(&k)
+            .map_or(Fingerprint::MAX, |e| e.fingerprint);
+        st.entries.insert(
+            k,
+            Entry {
+                fingerprint,
+                outcome: Outcome::Done(response),
+                expires_at: now + self.ttl,
+            },
+        );
     }
 
     fn abandon(&self, callable: &str, key: &str) {
-        let mut map = self.entries.lock().expect("idempotency store poisoned");
-        map.remove(&(callable.to_string(), key.to_string()));
+        let mut st = self.state.lock().expect("idempotency store poisoned");
+        st.entries.remove(&(callable.to_string(), key.to_string()));
     }
 }
 
@@ -236,6 +321,31 @@ mod tests {
         // A concurrent claim under the same key but a different payload is a mismatch, not
         // an in-flight block (a genuine retry would carry the same fingerprint).
         assert_eq!(s.begin("m", "k", FP + 1), KeyState::Mismatch);
+    }
+
+    #[test]
+    fn an_expired_key_reads_as_fresh() {
+        let s = MemStore::with_ttl(Duration::from_millis(30));
+        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
+        s.record("m", "k", json!({ "id": "a" }));
+        // Within the TTL the recorded response still replays.
+        assert_eq!(s.begin("m", "k", FP), KeyState::Done(json!({ "id": "a" })));
+        std::thread::sleep(Duration::from_millis(60));
+        // Past the TTL the key is gone → a retry runs fresh, not a stale replay.
+        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
+    }
+
+    #[test]
+    fn the_sweep_reclaims_keys_that_are_never_revisited() {
+        let s = MemStore::with_ttl(Duration::from_millis(30));
+        s.begin("m", "k1", FP);
+        s.begin("m", "k2", FP);
+        assert_eq!(s.entry_count(), 2);
+        std::thread::sleep(Duration::from_millis(60));
+        // A later begin (past the sweep interval) evicts the two expired keys it never
+        // touches, so memory doesn't accumulate on a long-lived store.
+        s.begin("m", "k3", FP);
+        assert_eq!(s.entry_count(), 1);
     }
 
     #[test]

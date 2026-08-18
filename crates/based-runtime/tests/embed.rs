@@ -304,6 +304,40 @@ async fn keyed_mutation_replays_in_process() {
     );
 }
 
+/// `Engine::with_store` injects a custom store — the engine consults the injected one,
+/// not the hardwired default. A `NoStore` turns dedupe off, so a "retry" with the same
+/// key runs a second write (proving the injected store, not the built-in `MemStore`, is
+/// the one being consulted).
+#[tokio::test]
+async fn with_store_injects_the_idempotency_store() {
+    use based_runtime::NoStore;
+
+    let db = MockDb::new(vec![
+        vec![row(json!({ "status": "open", "total": 7 }))],
+        vec![row(json!({ "status": "open", "total": 7 }))],
+    ]);
+    let engine =
+        Engine::new(compiled(), db.clone(), SeqIdGen::default()).with_store(Box::new(NoStore));
+    let api = client::embedded(&engine);
+    let input = || client::PlaceOrderInput {
+        org: client::Id::from_raw("o-1"),
+        status: "open".into(),
+        total: 7,
+    };
+
+    api.place_order_with_key(input(), (), "key-nostore")
+        .await
+        .expect("first write");
+    api.place_order_with_key(input(), (), "key-nostore")
+        .await
+        .expect("second write — NoStore does not dedupe");
+    assert_eq!(
+        db.tx_log(),
+        vec!["begin", "commit", "begin", "commit"],
+        "with NoStore injected, the second keyed call must open its own transaction"
+    );
+}
+
 // ---------- guards (auth.md Handle 3) ---------------------------------------
 
 /// A schema whose one mutation declares a host guard.

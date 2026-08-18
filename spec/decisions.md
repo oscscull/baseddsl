@@ -122,7 +122,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Runtime architecture** — D18 (in-process, not artifact-consuming), D20 (serving model: sync +
   bounded pools, single-shard scale-out — execution model superseded by D84), D22 (in-process `embed`
   door), D25 (write-retry idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency
-  key fingerprint), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
+  key fingerprint), D114 (idempotency store injection seam `Engine::with_store` / `serve_with_store` +
+  `MemStore` TTL/eviction — PR2 DONE), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
   pool-exhaustion→fast-503), D84 (async-native execution architecture: sqlx driver layer, typestate
   tx, stream-first reads, enforced coloring boundary — Track N0 design), D88 (guard registry on
   the engine; single dispatch enforcement point on both doors), D95 (`IdGen` mints by
@@ -5305,3 +5306,45 @@ tables in different schemas is not distinguished by the diff — documented, not
 
 **Impl note under D3.** See D3's naming hooks: `@schema` is the namespace-qualifier sibling of the
 `@table`/`(column "…")` legacy-name hooks; a `.` in `@table` is now steered to `@schema` (`E0297`).
+
+## D114 — idempotency store: injection seam + `MemStore` TTL/eviction (PR2 impl)
+Closes two of D25's deferred bullets. The `IdempotencyStore` seam was real *in the trait* but not
+*in the wiring*: `EngineInner.store` and the listener's `Shared.idempotency` were a hardwired concrete
+`MemStore`, so a user-written store (the on-brand DB-backed one, PR3; a Redis one) could not be plugged
+in without editing runtime source — unlike `id_gen`/`guards`, already injected as `Box<dyn …>`. And
+`MemStore` never evicted ("keys accumulate"), so a long-lived server grew unboundedly.
+
+**(a) Injection seam — mirrors `id_gen`/`guards`.** Both hardwired fields become `Box<dyn
+IdempotencyStore>`, defaulting to `MemStore::new()`:
+- **Embed:** `Engine::with_store(self, Box<dyn IdempotencyStore>) -> Self` — a fluent post-construction
+  override (via `Arc::get_mut`, so it must precede the first clone; it panics otherwise, and building +
+  overriding are one construction step). `new`/`with_guards` keep the default store; chaining
+  `.with_store(...)` swaps it. Same "clean default constructor + explicit injection" shape as
+  `with_guards`.
+- **Serve:** `serve_with_store(compiled, backend, ctx_source, store, config, on_start)` is the new
+  most-general listener entry; `serve`/`serve_with_handle` delegate to it with a default `MemStore`, so
+  every existing caller is unchanged. This is the standalone-listener twin of `Engine::with_store`.
+
+**(b) `MemStore` TTL/eviction.** Each entry carries an `expires_at: Instant` (`created/refreshed + ttl`).
+A `begin` on an expired key reads as `Fresh` (lazy expiry); an amortized full sweep (`retain`, at most
+one pass per `ttl`) reclaims keys that are never revisited, so memory stays bounded. Default TTL is
+24h (`MemStore::new()`; the industry-standard idempotency window — a retry lands within seconds);
+`MemStore::with_ttl(Duration)` sets it. `NoStore` is unchanged (idempotency off).
+
+**Blast radius.** `based-runtime`: `idempotency.rs` (`Entry` → struct with `Outcome` + `expires_at`,
+`State { entries, next_sweep }`, `sweep_if_due`, `with_ttl`, `DEFAULT_TTL`), `embed.rs`
+(`store: Box<dyn IdempotencyStore>`, `with_store`), `http.rs` (`Shared.idempotency: Box<…>`,
+`serve_with_store`), `lib.rs` (export `serve_with_store`). No wire/client/codegen surface — the store
+is engine infrastructure, never application data. `dispatch`'s `store: &dyn IdempotencyStore` was
+already trait-object, so the core is untouched.
+
+**Tested.** Unit: TTL expiry (an expired key reads `Fresh`) + the sweep reclaims never-revisited keys;
+`Engine::with_store(NoStore)` disables dedupe in-process (a second keyed call opens its own tx);
+`serve_with_store(NoStore)` disables dedupe over the socket (observed via a checkout counter — the
+default `MemStore` would have elided the second checkout by replaying). Full `make check` green (both
+live suites + all three examples + LSP).
+
+**Deferred (PR3, next).** The DB-backed durable `IdempotencyStore` — keys in a table, ideally the key
+committed in the *same* tx as the mutation for genuine cross-instance exactly-once — now has its seam.
+D25's remaining deferral (a shared/durable store) is what PR3 fills; the fingerprint/mismatch bullet
+was already closed (D31).
