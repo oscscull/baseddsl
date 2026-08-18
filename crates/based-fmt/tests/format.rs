@@ -264,6 +264,25 @@ fn ack_return_prints_bare_ok() {
 }
 
 #[test]
+fn distinct_list_reprints_after_verb() {
+    // `distinct` follows the `list` verb. A one-clause block stays inline; a three-clause
+    // block breaks one clause per line, `distinct` riding the head.
+    let inline =
+        fmt("query regions() -> RegionName[] {  list  distinct City where (region = $r); }");
+    assert_eq!(
+        inline,
+        "query regions() -> RegionName[] { list distinct City where (region = $r); }\n"
+    );
+    let block = fmt("query regions() -> RegionName[] { list distinct City where (region = $r) order (region) page (20) offset; }");
+    assert_eq!(
+        block,
+        "query regions() -> RegionName[] {\n  list distinct City\n    where (region = $r)\n    order (region)\n    page (20) offset;\n}\n"
+    );
+    assert!(based_parser::parse_file(&block, FileId(0)).is_ok());
+    assert_eq!(fmt(&block), block);
+}
+
+#[test]
 fn aggregate_shape_and_group_by_render_canonically() {
     let src = "shape BuyerStats from Order {\n who = buyer\n orders = count()\n revenue = sum(total)\n}\nquery buyer_stats() -> BuyerStats[] {\n list Order group by (buyer) having (revenue > 100) order (revenue desc);\n}\n";
     let out = fmt(src);

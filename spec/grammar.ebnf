@@ -293,9 +293,12 @@ tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;
 
 (* ---------- Read statement (query block body) ----------------------------- *)
 
-statement   = verb model_ref { clause } ';' ;
-verb        = 'get' | 'list' ;          (* signature [] vs scalar still drives  *)
-                                        (* the client contract independently   *)
+statement   = 'get' model_ref { clause } ';'
+            | 'list' [ 'distinct' ] model_ref { clause } ';' ;
+                                        (* signature [] vs scalar still drives  *)
+                                        (* the client contract independently.   *)
+                                        (* `list distinct` dedups projected rows *)
+                                        (* (SELECT DISTINCT); `list`-only.       *)
 clause      = where_clause | order_clause | page_clause | unindexed_clause
             | group_clause | having_clause ;
 where_clause= 'where' '(' predicate ')' ;

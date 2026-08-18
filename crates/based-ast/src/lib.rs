@@ -526,6 +526,10 @@ pub struct Statement {
     pub verb: Verb,
     pub model: Ident,
     pub clauses: Vec<Clause>,
+    /// `list distinct <M>` — dedup the projected rows (`SELECT DISTINCT`). A `list`-only
+    /// modifier (a `get` reads one row); the automatic sort cascade is suppressed so an
+    /// injected key column can't defeat the dedup.
+    pub distinct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,18 @@
+DIAGNOSTICS
+  E0260: query `paged` will scan `City`: no index leads with any of (region)
+  E0310: `distinct` query `paged` uses a keyset `page`
+  E0311: `distinct` on aggregate query `counts` is redundant
+  E0312: `distinct` query `bad_order` orders by unprojected column `name`
+  W0111: `distinct` query `all` returns whole `City` rows
+SCHEMA
+model City  table=city
+  id: Id
+  name: text
+  region: text
+shape RegionName from City
+shape RegionCount from City
+query regions  target=City verb=list many  shape=RegionName
+query counts  target=City verb=list many  shape=RegionCount
+query paged  target=City verb=list many  shape=RegionName  page
+query bad_order  target=City verb=list many  shape=RegionName
+query all  target=City verb=list many

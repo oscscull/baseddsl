@@ -299,7 +299,8 @@ fn lower_query(
     }
 
     // Assemble. Joins were accumulated by every resolve above, so emit them now.
-    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.qt(root));
+    let distinct = if query_distinct(q) { " DISTINCT" } else { "" };
+    let mut sql = format!("SELECT{distinct}\n{}\nFROM {}", projection, sel.qt(root));
     push_joins(&mut sql, sel.dialect, &sel.joins);
     if !main_wheres.is_empty() {
         sql.push_str(&format!("\nWHERE {}", main_wheres.join(" AND ")));
@@ -898,7 +899,14 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         QueryBody::Block(s) => s.clauses.iter().find_map(order_of),
         QueryBody::Bare | QueryBody::Raw(_) => None,
     };
-    let terms: &[SortTerm] = query_order.unwrap_or(&root.sort);
+    // A `distinct` list takes only its explicit `order` — the model `@sort` default is
+    // suppressed, since a non-projected default-sort column would break `SELECT DISTINCT`
+    // (and defeat the dedup). Sema (E0312) guarantees any explicit order is projected.
+    let terms: &[SortTerm] = match query_order {
+        Some(o) => o,
+        None if query_distinct(q) => &[],
+        None => &root.sort,
+    };
 
     // The primary-key column(s) + each part's own primitive — the deterministic keyset
     // tiebreaker. One entry for a surrogate/natural key; the full tuple, in key order, for a
@@ -945,7 +953,7 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         // don't need the tiebreaker (their window is positional). A keyless (`@no_id`) model
         // has no PK to append — sema (E0263) guarantees its declared sort already carries a
         // unique tiebreaker. A composite `@key` appends the full key tuple, in key order.
-        if !page.offset && !last_is_pk {
+        if !page.offset && !last_is_pk && !query_distinct(q) {
             for (col, prim) in &pk_cols {
                 out.push(OrderKey {
                     col_ref: sel.qcol(&sel.root_alias, col),
@@ -2305,6 +2313,12 @@ fn order_of(c: &Clause) -> Option<&[SortTerm]> {
         Clause::Order(terms) => Some(terms),
         _ => None,
     }
+}
+
+/// `list distinct <M>` — emit `SELECT DISTINCT` and suppress the automatic sort cascade
+/// (an injected key column would defeat the row dedup). Block-body only.
+fn query_distinct(q: &Query) -> bool {
+    matches!(&q.body, QueryBody::Block(s) if s.distinct)
 }
 
 fn query_page(q: &Query) -> Option<&PageClause> {

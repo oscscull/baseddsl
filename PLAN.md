@@ -96,8 +96,11 @@ follow-ups are done. **Track T is complete (T6 FK referential actions, D108)** �
 + toml `foreign_keys` convention + the divergence-reason rule, DDL/snapshot/migration all three dialects,
 SQLite cascade proven live. The **T5 m2m far-side flattening projection is now done (D109)** —
 `courses = enrollments.course { … }` → a flat distinct `Vec<Course>`, junction hidden (two-level IN
-subquery, runtime unchanged, proven live on SQLite); implicit-junction sugar stays rejected. Next is
-Track T tier-2, with the SQLite incremental-FK rebuild left as the one explicit deferral. Batch-by-batch
+subquery, runtime unchanged, proven live on SQLite); implicit-junction sugar stays rejected. **Track T
+tier-2 is now in progress: `list distinct` is done (D116)** — `SELECT DISTINCT` deduped projection, a
+`list`-only modifier that suppresses the auto sort cascade (E0310/E0311/E0312/W0111), runtime/client/
+OpenAPI unchanged, proven live on SQLite. Remaining tier-2: for-update locking, computed shape fields,
+time/bytes types; the SQLite incremental-FK rebuild is the one explicit deferral. Batch-by-batch
 history is in `PLAN-archive.md`.
 
 ## URGENT — production-readiness / onboarding gaps (owner-raised 2026-07-24) — ✅ CLOSED
@@ -863,7 +866,7 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   mutations.md Atomic groups + grammar.ebnf; parser/sema/codegen + helpdesk example
   (`open_ticket`) + conformance goldens follow.
 
-## Track T — core DB feature parity (owner-approved 2026-07-09; T1–T6 done, tier-2 next)
+## Track T — core DB feature parity (owner-approved 2026-07-09; T1–T6 done, tier-2 in progress)
 
 A confirmed 6-item queue closing the gap to a general DB-first DSL (commerce is only a *named*
 example, not the domain). **T1–T6 all done (enum D82, decimal/float D83, atomic update exprs D100,
@@ -959,7 +962,21 @@ iteration marks its item + D#.
     `create table` already carries FKs inline on SQLite, so init + `based gen sql` work — only an
     *incremental* FK change on an existing SQLite table needs the rebuild.
 
-Tier-2 (later): for-update locking, computed shape fields, `distinct`, time/bytes types.
+- **Tier-2. `distinct` ✅ done (D116).** `list distinct <Model>` dedups the projected rows
+  (`SELECT DISTINCT`) — a `list`-only modifier written between the verb and the model. It
+  suppresses the automatic sort cascade (model `@sort` + keyset `id` tiebreaker) so a
+  non-projected key column can't defeat the dedup or break Postgres's `SELECT DISTINCT … ORDER
+  BY` rule; only an explicit `order` applies, and each order column must be projected (E0312,
+  enforced uniformly so it's never a Postgres-only runtime failure). Incompatible with a keyset
+  `page` (E0310 — the cursor needs `id`; offset paging is fine), redundant on an aggregate query
+  (E0311), and a no-op when the projection carries the primary key (W0111). Runtime/client/OpenAPI
+  unchanged (a deduped `list` is still `Vec<Shape>`) — surface is parser/AST/grammar → sema (4
+  codes) → codegen `dml.rs` → fmt → LSP + TextMate keyword → `spec/syntax/queries.md`. Tests:
+  parser round-trip via fmt, sema (clean + one per code), codegen SQL (MariaDB + Postgres), sema
+  conformance golden `distinct`, **live SQLite** `distinct_integration.rs` (five rows / two
+  categories → deduped). `make check` green.
+
+Tier-2 (remaining): for-update locking, computed shape fields, time/bytes types.
 
 ## Post-completion backlog (surfaced after the DoD was met)
 

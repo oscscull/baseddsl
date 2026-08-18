@@ -111,6 +111,30 @@ only `group by` columns; it takes **no** default model `@sort` (an ungrouped sor
 a valid grouped column) and **cannot** be paginated (`page` is `E0244` — grouped keyset
 paging is deferred).
 
+## Distinct
+`list distinct <Model>` dedups the projected rows — it lowers to `SELECT DISTINCT`. A
+`list`-only modifier (a `get` reads one row), written between the verb and the model:
+```
+query regions() -> RegionName[] {
+  list distinct City order (region);
+}
+```
+Distinct is about the *projected tuple*, so:
+- The **automatic sort cascade is suppressed** — a `distinct` list takes only the `order`
+  it writes explicitly; the model `@sort` default and the keyset `id` tiebreaker do **not**
+  apply (an injected, non-projected key column would defeat the dedup and, on Postgres,
+  make `SELECT DISTINCT … ORDER BY` invalid). With no explicit `order` the result set is
+  unordered.
+- Every explicit `order` column **must be projected** by the shape (`E0312`) — the SQL
+  `DISTINCT`+`ORDER BY` rule, enforced uniformly so it is never a Postgres-only runtime
+  failure.
+- It is **incompatible with a keyset `page`** (`E0310`): the cursor needs the unique `id`,
+  which defeats the dedup. Use `page (…) offset` instead.
+- It is **redundant on an aggregate query** (`E0311`): a `group by` already returns one row
+  per distinct group.
+- It is a **no-op when the projection carries the primary key** (`W0111`): every row is
+  then already unique, so the dedup does nothing — drop `distinct` or the key column.
+
 ## Named filters (reuse)
 ```
 filter active = not banned and deleted_at = null;

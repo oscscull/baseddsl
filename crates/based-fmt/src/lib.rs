@@ -272,7 +272,7 @@ impl Printer {
             return;
         }
         self.out
-            .push(format!("{INDENT}{} {}", verb(stmt.verb), stmt.model.node));
+            .push(format!("{INDENT}{} {}", verb_head(stmt), stmt.model.node));
         let last = stmt.clauses.len() - 1;
         for (i, c) in stmt.clauses.iter().enumerate() {
             let semi = if i == last { ";" } else { "" };
@@ -627,7 +627,7 @@ fn aggregate(a: &AggCall) -> String {
 // ---------- queries / statements / clauses ---------------------------------
 
 fn statement_inline(stmt: &Statement) -> String {
-    let mut s = format!("{} {}", verb(stmt.verb), stmt.model.node);
+    let mut s = format!("{} {}", verb_head(stmt), stmt.model.node);
     for c in &stmt.clauses {
         s.push(' ');
         s.push_str(&clause(c));
@@ -640,6 +640,15 @@ fn verb(v: Verb) -> &'static str {
     match v {
         Verb::Get => "get",
         Verb::List => "list",
+    }
+}
+
+/// The statement head: the verb, plus `distinct` on a `list distinct` read.
+fn verb_head(stmt: &Statement) -> String {
+    if stmt.distinct {
+        format!("{} distinct", verb(stmt.verb))
+    } else {
+        verb(stmt.verb).to_string()
     }
 }
 

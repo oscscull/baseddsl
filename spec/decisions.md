@@ -87,7 +87,10 @@ relevant entries instead of scanning. A decision may appear under more than one 
   `@sort` > child model `@sort` as ORDER BY inside the JSON aggregate, all three dialects —
   supersedes D57's order-unspecified caveat), D109 (far-side flattening projection
   `out = edge.far { … }` — a two-level correlated IN-subquery skipping a m2m junction to the
-  distinct far side; reuses D57's json-agg + `field[]` marker, runtime unchanged; E0300–E0302)
+  distinct far side; reuses D57's json-agg + `field[]` marker, runtime unchanged; E0300–E0302),
+  D116 (`list distinct <Model>` — deduped projected rows via `SELECT DISTINCT`; a `list`-only
+  modifier that suppresses the auto sort cascade; E0310 keyset / E0311 aggregate / E0312
+  order-not-projected / W0111 projects-primary-key-no-op; runtime/client/OpenAPI unchanged)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres), D85 (streaming is
   the non-paginating full pass; `page` on a stream query is E0201), D97 (`Page<T>.total: Option<i64>`
@@ -5421,3 +5424,54 @@ reuse is 422, a fresh key runs. `db_store_dedupes_a_retry_on_a_second_instance` 
 **and** Postgres suites (two independent routers over one container): the cross-instance keyed retry
 replays `place_order` through the shared table, creating exactly one order. Full `make check` green (both
 live suites + all three examples + axum-helpdesk smoke + LSP).
+
+## D116 — `list distinct` — deduped projected rows (Track T tier-2)
+`list distinct <Model>` dedups the projected rows, lowering to `SELECT DISTINCT`. It is a
+`list`-only modifier (a `get` reads one row), written between the verb and the model
+(`list distinct City`), mirroring SQL. Block-body form only — that is where the verb is
+explicit; the bare/inline forms carry no verb, so `distinct` has no place there. Chosen
+over a trailing clause (`… distinct`) because a leading modifier reads as the SQL it
+becomes and pairs unambiguously with `list`.
+
+**Distinct is about the projected tuple, not the row's identity** — every design point
+follows from that:
+- **The automatic sort cascade is suppressed.** A `distinct` list takes only the `order` it
+  writes explicitly; the model `@sort` default and the keyset `id` tiebreaker do **not**
+  apply. An injected, non-projected key column would defeat the dedup, and on Postgres a
+  `SELECT DISTINCT … ORDER BY <unselected>` is outright invalid. With no explicit `order`
+  the set is unordered (as `SELECT DISTINCT` with no `ORDER BY` is). `build_order` returns
+  the empty order (not `root.sort`) for a distinct query, and the tiebreaker append is
+  gated on `!query_distinct`.
+- **Every explicit `order` column must be projected** (`E0312`). This is the SQL
+  `DISTINCT`+`ORDER BY` rule, enforced uniformly at compile time so it is never a
+  Postgres-only runtime failure (principle 9: never mislead). Checked against the shape's
+  top-level scalar projections (bare fields + `out = path` renames).
+- **Incompatible with a keyset `page`** (`E0310`): the opaque cursor needs the unique `id`
+  column, which defeats the dedup. `page (…) offset` is allowed (its window is positional,
+  no hidden columns).
+- **Redundant on an aggregate query** (`E0311`): a `group by` already returns one row per
+  distinct group.
+- **No-op when the projection carries the primary key** (`W0111`): a bare-model return, or a
+  shape projecting a `@key`/`id` column, makes every row unique, so the dedup does nothing.
+  A warning (principle 9: friction proportional — it is valid, just pointless), not an error.
+
+**Runtime is unchanged** — `distinct` is purely a SELECT-emission concern; the runtime
+executes the emitted SQL. Client/OpenAPI are unchanged too (same return type — a deduped
+`list` is still a `Vec<Shape>`). So the surface is parser/AST/grammar → sema (four codes) →
+codegen `dml.rs` (`SELECT DISTINCT` + sort suppression) → fmt → LSP keyword + TextMate.
+
+**Blast radius.** `based-ast` (`Statement.distinct`), `based-parser` (`eat_kw("distinct")`
+after `list`), `based-sema` (`check_distinct` + `projected_paths`/`same_segments`; codes
+`DISTINCT_KEYSET` E0310 / `DISTINCT_AGGREGATE` E0311 / `DISTINCT_ORDER_UNPROJECTED` E0312 /
+`DISTINCT_NOOP` W0111), `based-codegen::sql::dml` (`query_distinct`, `SELECT DISTINCT`,
+`build_order` suppression, tiebreaker gate), `based-fmt` (`verb_head`), `based-lsp`
+(completion keyword), `editors/vscode` (TextMate keyword), `spec/grammar.ebnf` +
+`spec/syntax/queries.md`.
+
+**Tested.** Parser round-trip via fmt (`distinct_list_reprints_after_verb`, inline + block,
+reparse-identical); sema `check.rs` (clean projected-non-key case + one test per code);
+codegen `dml.rs` (SELECT DISTINCT + `@sort` suppression, explicit order preserved, offset
+page with no tiebreaker, MariaDB + Postgres); sema conformance golden `distinct` (all four
+diagnostics); **live SQLite** `distinct_integration.rs` — five seeded rows across two
+categories, the plain `list` returns all five (duplicates), the `distinct` twin returns the
+two categories once each, ordered (the DB actually deduped). `make check` green.

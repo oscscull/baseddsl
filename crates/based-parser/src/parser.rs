@@ -1258,10 +1258,11 @@ impl<'a> Parser<'a> {
             let end = self.expect(Tok::RBrace, "`}`")?.end;
             return Ok((QueryBody::Raw(raw), end));
         }
-        let verb = if self.eat_kw("get") {
-            Verb::Get
+        let (verb, distinct) = if self.eat_kw("get") {
+            (Verb::Get, false)
         } else if self.eat_kw("list") {
-            Verb::List
+            // `list distinct <M>` — dedup projected rows. `distinct` pairs with `list` only.
+            (Verb::List, self.eat_kw("distinct"))
         } else {
             self.err("expected `get`, `list`, or a `raw` body");
             return Err(());
@@ -1278,6 +1279,7 @@ impl<'a> Parser<'a> {
                 verb,
                 model,
                 clauses,
+                distinct,
             }),
             end,
         ))

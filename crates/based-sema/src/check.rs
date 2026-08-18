@@ -487,6 +487,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         paginated: matches!(&q.body, QueryBody::Inline(cs) | QueryBody::Block(Statement{clauses: cs, ..}) if cs.iter().any(|c| matches!(c, Clause::Page(_)))),
     };
     check_query_envelope(q, ti, &shape, cx, sink);
+    check_distinct(q, &ret, ti, shape.agg, cx, sink);
 
     // Scope acknowledgement: a callable touching a scoped
     // model must name it (`scoped …`) or opt out (`unscoped(…)`) — E0182/E0183/E0185.
@@ -685,6 +686,124 @@ fn check_query_envelope(q: &Query, ti: usize, shape: &QueryShape, cx: &Cx, sink:
             );
         }
     }
+}
+
+/// `list distinct` guards. `distinct` dedups the projected rows (`SELECT DISTINCT`), so:
+/// it can't ride a keyset `page` (the hidden id/cursor columns are part of the row and
+/// defeat the dedup — E0310); it is redundant on an aggregate query (a `group by` already
+/// returns distinct groups — E0311); each explicit `order` column must be projected (a
+/// `SELECT DISTINCT … ORDER BY <unselected>` is rejected on Postgres — enforced uniformly
+/// as E0312); and it is a no-op when the projection already carries the primary key (every
+/// row is then unique — W0111).
+fn check_distinct(q: &Query, ret: &Resolved, ti: usize, agg: bool, cx: &Cx, sink: &mut Sink) {
+    let stmt = match &q.body {
+        QueryBody::Block(s) if s.distinct => s,
+        _ => return,
+    };
+    if agg {
+        sink.error_note(
+            code::DISTINCT_AGGREGATE,
+            q.span,
+            format!(
+                "`distinct` on aggregate query `{}` is redundant",
+                q.name.node
+            ),
+            "a `group by` already returns one row per distinct group — drop `distinct`",
+        );
+        return;
+    }
+    if stmt
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::Page(p) if !p.offset))
+    {
+        sink.error_note(
+            code::DISTINCT_KEYSET,
+            q.span,
+            format!("`distinct` query `{}` uses a keyset `page`", q.name.node),
+            "a keyset cursor needs the unique id column, which defeats `distinct` — use `page (…) offset`",
+        );
+    }
+
+    // The shape's top-level scalar projections. `None` = a bare-model return (projects
+    // every column, primary key included).
+    let projected: Option<Vec<&[Ident]>> = ret
+        .shape
+        .as_deref()
+        .and_then(|n| cx.shape_bodies.get(n).copied())
+        .map(projected_paths);
+
+    match &projected {
+        Some(paths) => {
+            for c in &stmt.clauses {
+                if let Clause::Order(terms) = c {
+                    for t in terms {
+                        if !paths.iter().any(|p| same_segments(p, &t.path.segments)) {
+                            sink.error_note(
+                                code::DISTINCT_ORDER_UNPROJECTED,
+                                q.span,
+                                format!(
+                                    "`distinct` query `{}` orders by unprojected column `{}`",
+                                    q.name.node,
+                                    join_path(&t.path)
+                                ),
+                                "under `distinct` every `order` column must be projected (Postgres rejects an unselected `ORDER BY` column) — project it or drop it from `order`",
+                            );
+                        }
+                    }
+                }
+            }
+            // A shape projecting the primary key can never dedup — every row is unique.
+            let pks = cx.model(ti).pk_field_names();
+            if paths
+                .iter()
+                .any(|p| p.len() == 1 && pks.contains(&p[0].node.as_str()))
+            {
+                sink.warn_note(
+                    code::DISTINCT_NOOP,
+                    q.span,
+                    format!(
+                        "`distinct` query `{}` projects the primary key",
+                        q.name.node
+                    ),
+                    "a projected primary key makes every row unique — `distinct` has no effect",
+                );
+            }
+        }
+        None => sink.warn_note(
+            code::DISTINCT_NOOP,
+            q.span,
+            format!(
+                "`distinct` query `{}` returns whole `{}` rows",
+                q.name.node, ret.model
+            ),
+            "a full-model row already includes the primary key, so every row is unique — `distinct` has no effect",
+        ),
+    }
+}
+
+/// The top-level scalar column paths a shape projects (as segment slices): bare fields
+/// and `out = path` renames. Nests, flattens, raw expressions, and aggregates are not
+/// plain orderable columns, so they don't count toward the `distinct` order rule.
+fn projected_paths(body: &[ShapeField]) -> Vec<&[Ident]> {
+    let mut out = Vec::new();
+    for f in body {
+        match f {
+            ShapeField::Bare(id) => out.push(std::slice::from_ref(id)),
+            ShapeField::Rename {
+                value: ShapeValue::Path(p),
+                ..
+            } => out.push(p.segments.as_slice()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Two segment slices naming the same path (segment-for-segment). The slice twin of
+/// [`same_path`], used to match an `order` term against a shape's projected columns.
+fn same_segments(a: &[Ident], b: &[Ident]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.node == y.node)
 }
 
 /// Resolve a return type to its underlying model. A shape resolves via its `from`;

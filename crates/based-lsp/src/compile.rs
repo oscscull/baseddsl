@@ -1626,6 +1626,7 @@ const KEYWORDS: &[&str] = &[
     "unscoped",
     "get",
     "list",
+    "distinct",
     "create",
     "update",
     "delete",

@@ -192,6 +192,12 @@ pub mod code {
     pub const FLATTEN_NOT_TOMANY: &str = "E0300"; // the flatten path's first segment is not a to-many inverse edge (nothing to flatten through)
     pub const FLATTEN_SEGMENT: &str = "E0301"; // a segment after the first does not resolve as a forward edge to the next model
     pub const FLATTEN_KEYLESS: &str = "E0302"; // the far-side model is `@no_id` (keyless) — a distinct set of far rows has no key to dedup on
+
+    // `list distinct <M>` (E031x): dedup the projected rows (`SELECT DISTINCT`).
+    pub const DISTINCT_KEYSET: &str = "E0310"; // `distinct` with a keyset `page` — the hidden id/cursor columns defeat the dedup
+    pub const DISTINCT_AGGREGATE: &str = "E0311"; // `distinct` on an aggregate query — a `group by` already returns distinct groups
+    pub const DISTINCT_ORDER_UNPROJECTED: &str = "E0312"; // an `order` column under `distinct` is not projected (invalid `SELECT DISTINCT … ORDER BY` on Postgres)
+    pub const DISTINCT_NOOP: &str = "W0111"; // `distinct` on a query that projects the primary key — every row is already unique
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`
