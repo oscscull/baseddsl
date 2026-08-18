@@ -89,7 +89,9 @@ pub mod http;
 pub use embed::Engine;
 pub use guard::{GuardRequest, GuardSetupError, GuardVerdict, Guards};
 pub use id::{IdGen, SeqIdGen};
-pub use idempotency::{Fingerprint, IdempotencyStore, KeyState, MemStore, NoStore};
+pub use idempotency::{
+    DbStore, Fingerprint, IdempotencyStore, KeyState, MemStore, NoStore, TxClaim, TxIdempotency,
+};
 pub use load::Compiled;
 pub use migrate::{
     applied as applied_migrations, apply as apply_migrations, ensure_ledger, load_migrations,

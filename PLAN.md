@@ -105,8 +105,9 @@ history is in `PLAN-archive.md`.
 Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
 system into an existing production environment as a pluggable replacement — plus two example/quality
 fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → ~~PR6~~ → ~~PR5~~ →
-~~PR2~~ → PR3 → PR1.** PR2 (idempotency store injection seam + `MemStore` TTL) is **done** (D114 impl);
-remaining is PR3 → PR1. PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
+~~PR2~~ → ~~PR3~~ → PR1.** PR2 (idempotency store injection seam + `MemStore` TTL) is **done** (D114 impl);
+PR3 (DB-backed durable idempotency store, atomic strong form) is **done** (D115 impl); remaining is PR1.
+PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
 nominated primary key — natural single-column **and** composite — is **done** (D111 impl). The
 primary-key story (**PR4 single-column + PR6 composite**) was priority 1 and is now complete: a schema
 whose keys are meaningful columns or multi-column junctions can be represented and onboarded. PR1 is a
@@ -131,10 +132,22 @@ cheap standalone win, sequenced last only because it isn't on the onboarding cri
   24h, `MemStore::with_ttl(Duration)`. Unit-tested (TTL expiry, sweep eviction, `NoStore` injection
   disables dedupe both in-process and over the socket); full `make check` green. PR3 (DB-backed durable
   store) now has its seam.
-- **PR3. Idempotency store: DB-backed durable impl.** Ship a database-backed `IdempotencyStore` (keys in
-  a table in the same DB). The strong form commits the key in the **same transaction** as the mutation →
-  genuine exactly-once even when a retry lands on another app instance, and it is on-brand for a DB-first
-  engine (more correct than Redis; Redis stays a viable TTL-friendly alternative). Depends on PR2's seam.
+- **PR3. ✅ DONE (D115 impl). Idempotency store: DB-backed durable impl (atomic strong form).** `DbStore`
+  keeps its keys in a `_based_idempotency` table **in the same database** and commits each key **inside the
+  mutation's own transaction** → genuine cross-instance exactly-once (the key can't commit apart from the
+  writes it guards). Owner-approved fork (trait reshape + a concurrency-semantics change): an **additive**
+  `IdempotencyStore::tx_participant() -> Option<&dyn TxIdempotency>` hook (default `None`, so
+  `MemStore`/`NoStore`/Redis-style stores keep the existing before/after path + 409) lets a store opt into
+  the in-tx path; the new `TxIdempotency` trait's `claim`/`record` run on the mutation connection, threaded
+  through `run_mutation → apply → apply_once` (claim right after `begin`, record right before `commit`).
+  Concurrency is **block-and-replay, not 409**: a concurrent retry's claim INSERT blocks on the first
+  uncommitted attempt via the `(callable, key)` unique index, then replays — so this store never emits a
+  409, at the cost of holding a connection while blocked (documented). Portable insert-or-ignore claim
+  (`ON CONFLICT DO NOTHING` / `INSERT IGNORE`) avoids a Postgres aborted-tx. Table DDL via the Dialect seam
+  (`based_codegen::sql::idempotency_table_ddl`), created by `DbStore::create(&backend, dialect)` at
+  startup; `created_at` anchors a **deferred** age-reclaim sweeper (clean follow-up — no GC ships here).
+  Proven live all three dialects: two instances over one DB (SQLite file / MariaDB / Postgres) — a keyed
+  retry on the *second* instance replays via the shared table, exactly one row written; reuse → 422.
 - **PR4. ✅ DONE (D110 impl), `@key` deferred. PK generation-strategy axis — single-column.** The full
   type-driven axis shipped: `id: uuid | ulid | serial` (+ `[schema] id` default resolving `id: Id`),
   `serial` DDL per dialect, wire honesty (serial id = JSON number, OpenAPI `{type:integer}`, client

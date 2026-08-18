@@ -30,7 +30,7 @@ use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::id::UuidGen;
-use based_runtime::idempotency::{MemStore, NoStore};
+use based_runtime::idempotency::{DbStore, MemStore, NoStore};
 use based_runtime::run::{Backend, Db, DbError, DbErrorKind, DbRead};
 use based_runtime::shard::PoolConfig;
 use based_runtime::{dispatch, fetch_all, Compiled, Guards, PgRouter};
@@ -360,6 +360,79 @@ async fn idempotency_key_dedupes_a_retried_write() {
     let listed = call(
         &c,
         &router,
+        "POST",
+        "/q/my_org_orders",
+        json!({}),
+        json!({ "org": ORG_1 }),
+    )
+    .await;
+    assert_eq!(listed.body.as_array().expect("list").len(), 2);
+}
+
+#[tokio::test]
+async fn db_store_dedupes_a_retry_on_a_second_instance() {
+    // The durable DB-backed store keeps its keys in a `_based_idempotency` table in the
+    // same database, committed in the mutation's own transaction — so a keyed retry that
+    // lands on a *different* app instance still deduplicates (atomic exactly-once, the
+    // guarantee a per-process `MemStore` cannot give). Two independent routers over the
+    // same live database stand in for two instances behind a load balancer.
+    let Some((c, instance_a, guard)) = live().await else {
+        return;
+    };
+    let instance_b =
+        PgRouter::single(&guard.url(), PoolConfig::default()).expect("second instance router");
+    let ids = UuidGen;
+    let store_a = DbStore::create(&instance_a, Dialect::Postgres)
+        .await
+        .expect("create store a");
+    let store_b = DbStore::create(&instance_b, Dialect::Postgres)
+        .await
+        .expect("create store b");
+
+    let first = dispatch(
+        &c,
+        &instance_a,
+        "",
+        &ids,
+        &store_a,
+        &Guards::new(),
+        None,
+        "POST",
+        "/m/place_order",
+        json!({ "buyer": USER_1, "total": "7.00" }),
+        json!({ "org": ORG_1 }),
+        Some("cross-instance-key".to_string()),
+    )
+    .await;
+    assert_eq!(first.status, 200, "{:?}", first.body);
+
+    // The SAME keyed retry lands on the second instance: it replays A's response through
+    // the shared key table, writing no second order.
+    let replay = dispatch(
+        &c,
+        &instance_b,
+        "",
+        &ids,
+        &store_b,
+        &Guards::new(),
+        None,
+        "POST",
+        "/m/place_order",
+        json!({ "buyer": USER_1, "total": "7.00" }),
+        json!({ "org": ORG_1 }),
+        Some("cross-instance-key".to_string()),
+    )
+    .await;
+    assert_eq!(replay.status, 200, "{:?}", replay.body);
+    assert_eq!(
+        first.body, replay.body,
+        "the second instance replayed the first's response"
+    );
+
+    // Exactly one order was created for this key (plus the seeded order-1) → 2 total.
+    let listed = call(
+        &c,
+        &instance_b,
         "POST",
         "/q/my_org_orders",
         json!({}),

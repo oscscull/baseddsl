@@ -19,7 +19,7 @@
 use async_trait::async_trait;
 
 use crate::id::IdGen;
-use crate::idempotency::{IdempotencyStore, KeyState};
+use crate::idempotency::{Fingerprint, IdempotencyStore, KeyState, TxClaim, TxIdempotency};
 use crate::load::Compiled;
 use crate::plan::{
     plan_mutation, plan_query, Envelope, KeysetPlan, MutationPlan, PlanError, QueryPlan, Request,
@@ -359,17 +359,36 @@ pub async fn run_mutation(
     // Plan first: a bad arg / missing `$ctx` is a boundary error that must not consume an
     // idempotency slot (a client fixes the request and retries with the *same* key).
     let plan = plan_mutation(compiled, req, id_gen)?;
+    let key = req.idempotency_key.as_ref();
+
+    // A tx-participant store (the durable DB-backed one) commits the key *inside* the
+    // mutation's own transaction, so it can't bracket the write from out here: hand the
+    // claim context to `apply`, which claims right after `begin` and records right before
+    // `commit`. Concurrency is block-and-replay (a concurrent retry blocks on the key's
+    // unique index, then replays), so there is no in-flight/409 branch for this store.
+    if let (Some(key), Some(participant)) = (key, store.tx_participant()) {
+        let claim = TxClaimCtx {
+            participant,
+            callable: &req.callable,
+            key,
+            fingerprint: req.fingerprint(),
+        };
+        return match apply(backend, shard_key, &plan, Some(&claim)).await? {
+            TxOutcome::Done(r) | TxOutcome::Replayed(r) => Ok(r),
+            TxOutcome::Mismatch => Err(RunError::KeyReuse(key.clone())),
+            TxOutcome::NotFound => Err(RunError::NotFound(req.callable.clone())),
+        };
+    }
 
     // No key → the plain path (run every time). This is also what `NoStore` yields, but
     // short-circuiting here means a keyless request never touches the store at all.
-    let Some(key) = &req.idempotency_key else {
-        return apply(backend, shard_key, &plan)
-            .await?
-            .ok_or_else(|| RunError::NotFound(req.callable.clone()));
+    let Some(key) = key else {
+        return plain_outcome(apply(backend, shard_key, &plan, None).await?, &req.callable);
     };
 
-    // Fingerprint the request payload (args + `$ctx`) so the store can tell a genuine
-    // retry (same payload) from one key reused for a different request.
+    // An out-of-band store (in-process `MemStore`, a Redis store): fingerprint the request
+    // payload (args + `$ctx`) so the store can tell a genuine retry (same payload) from one
+    // key reused for a different request, then bracket the mutation with begin/record.
     match store.begin(&req.callable, key, req.fingerprint()) {
         // A prior attempt with the same payload already committed: replay it, run no writes.
         KeyState::Done(response) => Ok(response),
@@ -389,14 +408,51 @@ pub async fn run_mutation(
                 key,
                 armed: true,
             };
-            let response = apply(backend, shard_key, &plan)
-                .await?
-                .ok_or_else(|| RunError::NotFound(req.callable.clone()))?;
+            let response =
+                plain_outcome(apply(backend, shard_key, &plan, None).await?, &req.callable)?;
             claim.armed = false;
             store.record(&req.callable, key, response.clone());
             Ok(response)
         }
     }
+}
+
+/// Map a mutation-attempt [`TxOutcome`] for a path that carried **no** in-transaction claim
+/// (keyless, or an out-of-band store): only `Done`/`NotFound` can arise — `Replayed` and
+/// `Mismatch` are produced solely by a tx-participant claim.
+fn plain_outcome(outcome: TxOutcome, callable: &str) -> Result<serde_json::Value, RunError> {
+    match outcome {
+        TxOutcome::Done(r) => Ok(r),
+        TxOutcome::NotFound => Err(RunError::NotFound(callable.to_string())),
+        TxOutcome::Replayed(_) | TxOutcome::Mismatch => {
+            unreachable!("replay/mismatch require an in-transaction claim context")
+        }
+    }
+}
+
+/// The context a tx-participant store ([`TxIdempotency`]) needs to claim + record its key
+/// inside the mutation's own transaction (atomic exactly-once).
+struct TxClaimCtx<'a> {
+    participant: &'a dyn TxIdempotency,
+    callable: &'a str,
+    key: &'a str,
+    fingerprint: Fingerprint,
+}
+
+/// The result of one mutation-transaction attempt ([`apply_once`]).
+enum TxOutcome {
+    /// The write body ran and produced this response (recorded in-tx when a tx-participant
+    /// store claimed the key).
+    Done(serde_json::Value),
+    /// A prior committed attempt under the same idempotency key already recorded this
+    /// response; it was replayed with no writes (tx-participant store only).
+    Replayed(serde_json::Value),
+    /// The idempotency key was reused for a different request — fingerprint mismatch
+    /// (tx-participant store only).
+    Mismatch,
+    /// The write's `where` matched no row — nothing was written (the transaction rolled
+    /// back).
+    NotFound,
 }
 
 /// An armed idempotency claim: dropped without being disarmed (write failure, or the
@@ -442,16 +498,20 @@ fn deadlock_backoff(attempt: u32) -> std::time::Duration {
 /// server-side; each retry is a fresh checkout + fresh [`Tx`], so re-running usually
 /// succeeds once the contending transaction commits. A bounded [`TX_RETRY_LIMIT`] then a
 /// `503` prevents a hot row retrying forever. Every other failure surfaces immediately.
-/// `Ok(None)` is [`apply_once`]'s matched-no-row outcome, passed through.
+/// The [`TxOutcome`] (including a matched-no-row `NotFound`) is passed through. When
+/// `claim` is present the whole attempt — key claim, writes, and response record — retries
+/// as one unit, so a re-run after a deadlock re-reads the key and replays if a sibling
+/// attempt has since committed it.
 async fn apply(
     backend: &dyn Backend,
     shard_key: &str,
     plan: &MutationPlan,
-) -> Result<Option<serde_json::Value>, DbError> {
+    claim: Option<&TxClaimCtx<'_>>,
+) -> Result<TxOutcome, DbError> {
     let mut attempt = 0u32;
     loop {
         let db = backend.checkout(shard_key).await?;
-        match apply_once(db, plan).await {
+        match apply_once(db, plan, claim).await {
             Err(e) if e.is_deadlock() && attempt < TX_RETRY_LIMIT => {
                 attempt += 1;
                 tokio::time::sleep(deadlock_backoff(attempt)).await;
@@ -482,9 +542,27 @@ async fn apply(
 async fn apply_once(
     db: Box<dyn Db>,
     plan: &MutationPlan,
-) -> Result<Option<serde_json::Value>, DbError> {
+    claim: Option<&TxClaimCtx<'_>>,
+) -> Result<TxOutcome, DbError> {
     use serde_json::Value as J;
     let mut tx = db.begin().await?;
+
+    // Strong-form idempotency: claim the key on the mutation's own connection, inside this
+    // transaction, before any write. A concurrent retry blocks here on the first,
+    // still-uncommitted attempt (the key's unique index) and replays its result once that
+    // transaction commits — so a done/mismatch here drops `tx` (rollback, nothing written).
+    if let Some(c) = claim {
+        match c
+            .participant
+            .claim(&mut *tx, c.callable, c.key, c.fingerprint)
+            .await?
+        {
+            TxClaim::Fresh => {}
+            TxClaim::Done(resp) => return Ok(TxOutcome::Replayed(resp)),
+            TxClaim::Mismatch => return Ok(TxOutcome::Mismatch),
+        }
+    }
+
     // A `serial` (DB-generated PK) create yields its id only when it runs; capture it so
     // the deferred re-select can key on it.
     let serial_insert = plan.serial.as_ref().map(|s| s.insert_idx);
@@ -497,7 +575,7 @@ async fn apply_once(
         }
         let affected = tx.execute(&stmt.sql, &stmt.params).await?;
         if plan.ack_check == Some(i) && affected == 0 {
-            return Ok(None);
+            return Ok(TxOutcome::NotFound);
         }
     }
     // Read the written row back in its declared shape, still inside the transaction. A
@@ -509,7 +587,7 @@ async fn apply_once(
                 let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
                 match rows.into_iter().next() {
                     Some(row) => nest_row(row),
-                    None => return Ok(None),
+                    None => return Ok(TxOutcome::NotFound),
                 }
             }
             None => crate::plan::SerialReadback::id_response(id),
@@ -520,7 +598,7 @@ async fn apply_once(
                 let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
                 match rows.into_iter().next() {
                     Some(row) => nest_row(row),
-                    None => return Ok(None),
+                    None => return Ok(TxOutcome::NotFound),
                 }
             }
             // No declared-shape re-select (the row did not survive — a real DELETE):
@@ -535,8 +613,15 @@ async fn apply_once(
             },
         }
     };
+    // Record the response inside the same transaction, before commit, so the key, the
+    // writes, and the response commit atomically (or roll back together).
+    if let Some(c) = claim {
+        c.participant
+            .record(&mut *tx, c.callable, c.key, &response)
+            .await?;
+    }
     tx.commit().await?;
-    Ok(Some(response))
+    Ok(TxOutcome::Done(response))
 }
 
 /// Reassemble a flat result row into the response object, nesting sub-objects/arrays.

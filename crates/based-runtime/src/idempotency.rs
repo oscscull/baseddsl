@@ -103,6 +103,70 @@ pub trait IdempotencyStore: Send + Sync {
     /// Release a claimed key without recording a response (the attempt failed): a later
     /// retry may re-run the write. Called on the mutation-error path.
     fn abandon(&self, callable: &str, key: &str);
+
+    /// A store that commits the key **inside the mutation's own transaction** (atomic
+    /// exactly-once across app instances) returns a [`TxIdempotency`] here; the default
+    /// `None` is the out-of-band store (in-process [`MemStore`], a Redis store) whose
+    /// [`begin`](Self::begin)/[`record`](Self::record)/[`abandon`](Self::abandon) bracket
+    /// the mutation instead. When this is `Some`, [`crate::run::run_mutation`] ignores the
+    /// out-of-band trio and drives claim/record on the mutation connection instead — so the
+    /// two paths never mix for one store.
+    fn tx_participant(&self) -> Option<&dyn TxIdempotency> {
+        None
+    }
+}
+
+/// The outcome of claiming an idempotency key on the mutation's own connection — the
+/// tx-participant analogue of [`KeyState`], minus `InFlight`: a concurrent attempt does not
+/// report a conflict, it *blocks* on the unclaimed row and then reads the committed result
+/// (see [`TxIdempotency`]).
+pub enum TxClaim {
+    /// No committed prior attempt: this attempt holds the claim (its in-flight row is
+    /// written in the mutation's transaction) and should run the write body.
+    Fresh,
+    /// A prior attempt with the **same fingerprint** already committed: replay this stored
+    /// response, run nothing.
+    Done(serde_json::Value),
+    /// The key was seen before with a **different** fingerprint (one key reused for two
+    /// requests): reject rather than replay the wrong result.
+    Mismatch,
+}
+
+/// A durable store that commits the idempotency key **in the mutation's own transaction**,
+/// giving genuine exactly-once even when a retry lands on a *different* app instance (the
+/// key lives in a shared table, not per-process memory). Returned by
+/// [`IdempotencyStore::tx_participant`].
+///
+/// Concurrency is **block-and-replay**, not 409: a concurrent retry's [`claim`](Self::claim)
+/// blocks on the first attempt's still-uncommitted key row (the table's unique index) and,
+/// once that transaction commits, reads and replays its recorded response — so this store
+/// never emits a 409 conflict, at the cost of holding a database connection while blocked
+/// (pool pressure under a retry storm). [`claim`](Self::claim) runs right after the
+/// mutation's `begin`, [`record`](Self::record) right before its `commit`, both on the
+/// mutation connection.
+#[async_trait::async_trait]
+pub trait TxIdempotency: Send + Sync {
+    /// Claim `(callable, key)` on the mutation's connection, inside its transaction, before
+    /// any write. A concurrent retry blocks here on the first, still-uncommitted attempt and
+    /// resolves to [`TxClaim::Done`] once it commits.
+    async fn claim(
+        &self,
+        db: &mut dyn crate::run::DbRead,
+        callable: &str,
+        key: &str,
+        fingerprint: Fingerprint,
+    ) -> Result<TxClaim, crate::run::DbError>;
+
+    /// Record the response for a claimed key on the same connection, before the transaction
+    /// commits — so the key, the writes, and the response commit atomically (or roll back
+    /// together).
+    async fn record(
+        &self,
+        db: &mut dyn crate::run::DbRead,
+        callable: &str,
+        key: &str,
+        response: &serde_json::Value,
+    ) -> Result<(), crate::run::DbError>;
 }
 
 /// One key's stored state inside a [`MemStore`]: its [`Fingerprint`] (so a later `begin`
@@ -263,6 +327,208 @@ impl IdempotencyStore for NoStore {
     }
     fn record(&self, _callable: &str, _key: &str, _response: serde_json::Value) {}
     fn abandon(&self, _callable: &str, _key: &str) {}
+}
+
+/// A durable [`IdempotencyStore`] that keeps its keys in a `_based_idempotency` table in
+/// the same database the mutations write to, committing each key **in the mutation's own
+/// transaction** — so a keyed retry that lands on a *different* app instance still
+/// deduplicates, and the key can never commit apart from the writes it guards (genuine
+/// exactly-once, the DB-first alternative to a Redis store). It is a [`TxIdempotency`], so
+/// [`crate::run::run_mutation`] drives it inside the transaction rather than bracketing it;
+/// its out-of-band [`begin`](IdempotencyStore::begin)/[`record`](IdempotencyStore::record)/
+/// [`abandon`](IdempotencyStore::abandon) are never consulted (they exist only to satisfy
+/// the one injection trait).
+///
+/// Inject it like any other store — [`Engine::with_store`](crate::Engine::with_store) or
+/// [`serve_with_store`](crate::http::serve_with_store) — after
+/// [`create`](Self::create)ing the key table. Concurrency is block-and-replay (see
+/// [`TxIdempotency`]): this store never returns a 409.
+pub struct DbStore {
+    dialect: based_codegen::Dialect,
+}
+
+impl DbStore {
+    /// Build the store and ensure its key table exists (idempotent DDL, per dialect through
+    /// the codegen seam). Run once at startup with the engine's backend + dialect.
+    pub async fn create(
+        backend: &dyn crate::run::Backend,
+        dialect: based_codegen::Dialect,
+    ) -> Result<Self, crate::run::DbError> {
+        let mut db = backend.checkout("").await?;
+        db.execute(&based_codegen::sql::idempotency_table_ddl(dialect), &[])
+            .await?;
+        Ok(Self { dialect })
+    }
+
+    /// Build the store assuming the key table already exists (e.g. created by a migration
+    /// or a prior [`create`](Self::create)).
+    pub fn new(dialect: based_codegen::Dialect) -> Self {
+        Self { dialect }
+    }
+
+    /// `?` for MySQL/MariaDB/SQLite, `$n` for Postgres — the driver's positional bind form.
+    fn ph(&self, n: usize) -> String {
+        match self.dialect {
+            based_codegen::Dialect::Postgres => format!("${n}"),
+            _ => "?".to_string(),
+        }
+    }
+
+    /// Insert the in-flight claim row, ignoring a duplicate key (the dialect's
+    /// insert-or-ignore): 1 row affected ⇒ we claimed it fresh, 0 ⇒ a prior attempt holds
+    /// the key. `created_at` is the DB clock; `response` defaults to NULL until `record`.
+    fn insert_sql(&self) -> String {
+        use based_codegen::Dialect as D;
+        let q = |s: &str| self.dialect.quote(s);
+        let cols = format!(
+            "({}, {}, {}, {})",
+            q("callable"),
+            q("key"),
+            q("fingerprint"),
+            q("created_at"),
+        );
+        let vals = format!(
+            "({}, {}, {}, CURRENT_TIMESTAMP)",
+            self.ph(1),
+            self.ph(2),
+            self.ph(3),
+        );
+        let tbl = q(based_codegen::sql::IDEMPOTENCY_TABLE);
+        match self.dialect {
+            D::Postgres => format!(
+                "INSERT INTO {tbl} {cols} VALUES {vals} ON CONFLICT ({}, {}) DO NOTHING",
+                q("callable"),
+                q("key"),
+            ),
+            D::Sqlite => format!("INSERT OR IGNORE INTO {tbl} {cols} VALUES {vals}"),
+            D::MariaDb | D::MySql => format!("INSERT IGNORE INTO {tbl} {cols} VALUES {vals}"),
+        }
+    }
+
+    fn select_sql(&self) -> String {
+        let q = |s: &str| self.dialect.quote(s);
+        format!(
+            "SELECT {fp}, {resp} FROM {tbl} WHERE {c} = {p1} AND {k} = {p2}",
+            fp = q("fingerprint"),
+            resp = q("response"),
+            tbl = q(based_codegen::sql::IDEMPOTENCY_TABLE),
+            c = q("callable"),
+            k = q("key"),
+            p1 = self.ph(1),
+            p2 = self.ph(2),
+        )
+    }
+
+    fn update_sql(&self) -> String {
+        let q = |s: &str| self.dialect.quote(s);
+        format!(
+            "UPDATE {tbl} SET {resp} = {p1} WHERE {c} = {p2} AND {k} = {p3}",
+            tbl = q(based_codegen::sql::IDEMPOTENCY_TABLE),
+            resp = q("response"),
+            c = q("callable"),
+            k = q("key"),
+            p1 = self.ph(1),
+            p2 = self.ph(2),
+            p3 = self.ph(3),
+        )
+    }
+}
+
+impl IdempotencyStore for DbStore {
+    // Unused: a tx-participant store deduplicates inside the mutation's transaction (see
+    // `tx_participant`), so `run_mutation` never takes the out-of-band path for it. These
+    // exist only to satisfy the one injection trait.
+    fn begin(&self, _callable: &str, _key: &str, _fingerprint: Fingerprint) -> KeyState {
+        KeyState::Fresh
+    }
+    fn record(&self, _callable: &str, _key: &str, _response: serde_json::Value) {}
+    fn abandon(&self, _callable: &str, _key: &str) {}
+
+    fn tx_participant(&self) -> Option<&dyn TxIdempotency> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl TxIdempotency for DbStore {
+    async fn claim(
+        &self,
+        db: &mut dyn crate::run::DbRead,
+        callable: &str,
+        key: &str,
+        fingerprint: Fingerprint,
+    ) -> Result<TxClaim, crate::run::DbError> {
+        use crate::run::DbError;
+        use crate::value::SqlValue;
+        let fp = fingerprint.to_string();
+        let affected = db
+            .execute(
+                &self.insert_sql(),
+                &[
+                    SqlValue::Text(callable.to_string()),
+                    SqlValue::Text(key.to_string()),
+                    SqlValue::Text(fp.clone()),
+                ],
+            )
+            .await?;
+        if affected >= 1 {
+            // We inserted the in-flight row: the claim is ours.
+            return Ok(TxClaim::Fresh);
+        }
+        // A prior attempt holds the key. Because a concurrent attempt's row is invisible
+        // until it commits (and our insert blocks until then), a visible row here always
+        // has its response recorded.
+        let rows = crate::run::fetch_all(db.fetch(
+            &self.select_sql(),
+            &[
+                SqlValue::Text(callable.to_string()),
+                SqlValue::Text(key.to_string()),
+            ],
+        ))
+        .await?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| DbError::new("idempotency key row vanished after a conflict"))?;
+        let stored_fp = row
+            .get("fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if stored_fp != fp {
+            return Ok(TxClaim::Mismatch);
+        }
+        match row.get("response") {
+            // Stored as text (a TEXT column): parse the recorded JSON response.
+            Some(serde_json::Value::String(s)) => serde_json::from_str(s)
+                .map(TxClaim::Done)
+                .map_err(|e| DbError::new(format!("stored idempotency response is not JSON: {e}"))),
+            // A driver that decoded the column natively hands back the value directly.
+            Some(other) if !other.is_null() => Ok(TxClaim::Done(other.clone())),
+            _ => Err(DbError::new(
+                "idempotency claim conflicted with a committed row that recorded no response",
+            )),
+        }
+    }
+
+    async fn record(
+        &self,
+        db: &mut dyn crate::run::DbRead,
+        callable: &str,
+        key: &str,
+        response: &serde_json::Value,
+    ) -> Result<(), crate::run::DbError> {
+        use crate::value::SqlValue;
+        db.execute(
+            &self.update_sql(),
+            &[
+                SqlValue::Text(response.to_string()),
+                SqlValue::Text(callable.to_string()),
+                SqlValue::Text(key.to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

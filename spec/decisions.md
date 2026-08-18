@@ -123,7 +123,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   bounded pools, single-shard scale-out — execution model superseded by D84), D22 (in-process `embed`
   door), D25 (write-retry idempotency), D26 (health/readiness + graceful shutdown), D31 (idempotency
   key fingerprint), D114 (idempotency store injection seam `Engine::with_store` / `serve_with_store` +
-  `MemStore` TTL/eviction — PR2 DONE), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
+  `MemStore` TTL/eviction — PR2 DONE), D115 (DB-backed durable idempotency store, atomic strong form:
+  `tx_participant()` hook + `TxIdempotency`, key claimed/recorded in the mutation's own tx, block-and-replay
+  concurrency — PR3 DONE), D65 (live-DB hardening: statement timeouts, bounded deadlock-retry,
   pool-exhaustion→fast-503), D84 (async-native execution architecture: sqlx driver layer, typestate
   tx, stream-first reads, enforced coloring boundary — Track N0 design), D88 (guard registry on
   the engine; single dispatch enforcement point on both doors), D95 (`IdGen` mints by
@@ -5348,3 +5350,74 @@ live suites + all three examples + LSP).
 committed in the *same* tx as the mutation for genuine cross-instance exactly-once — now has its seam.
 D25's remaining deferral (a shared/durable store) is what PR3 fills; the fingerprint/mismatch bullet
 was already closed (D31).
+
+## D115 — DB-backed durable idempotency store, atomic strong form (PR3 impl)
+Fills D25's last deferral and builds on PR2's seam (D114). Ships `DbStore`: a durable `IdempotencyStore`
+that keeps its keys in a `_based_idempotency` table **in the same database the mutations write to**, and
+commits each key **inside the mutation's own transaction** — so the key can never commit apart from the
+writes it guards, and a keyed retry that lands on a *different* app instance still deduplicates. Genuine
+exactly-once, the DB-first alternative to a Redis store (which stays a viable out-of-band option). This
+was an owner-signed-off fork (below) because the strong form can't be expressed through the out-of-band
+`begin`/`record`/`abandon` trait alone.
+
+**The fork it required + the resolution.** The existing `IdempotencyStore` trio is *out-of-band*: it
+brackets the mutation (`store.begin()` before, `store.record()` after) and its methods never see the
+mutation's `Tx`. A store can't emit its key-INSERT onto the mutation's own connection through that
+contract, so same-tx atomicity was impossible without reshaping it. Resolved (owner-approved) by an
+**additive** hook rather than a breaking change:
+- `IdempotencyStore::tx_participant(&self) -> Option<&dyn TxIdempotency>`, default `None`. `MemStore`,
+  `NoStore`, and any Redis-style store keep the default → the existing before/after path and its
+  `InFlight`→409 behavior are unchanged. Only a store that returns `Some` opts into the in-tx path.
+- New `TxIdempotency` trait (async): `claim(db, callable, key, fp) -> TxClaim` and
+  `record(db, callable, key, response)`, both taking the mutation connection (`&mut dyn DbRead`). `run.rs`
+  threads a `TxClaimCtx` down `run_mutation → apply → apply_once`: `claim` runs **right after** `db.begin()`
+  (before any write), `record` **right before** `tx.commit()`, so key + writes + response commit atomically
+  (or roll back together — a not-found/error drops the `Tx`, taking the in-flight key row with it).
+- `apply_once` now returns a `TxOutcome` (`Done` / `Replayed` / `Mismatch` / `NotFound`) instead of
+  `Option<Value>`; the keyless and out-of-band paths funnel through `plain_outcome` (only `Done`/`NotFound`
+  can arise there — `Replayed`/`Mismatch` require an in-tx claim).
+
+**Concurrency: block-and-replay, not 409 (semantics change, scoped to this store).** A tx-participant
+store has **no** `InFlight`/409 state. A concurrent retry's `claim` INSERT **blocks** on the first,
+still-uncommitted attempt via the table's `(callable, key)` unique index; when that transaction commits,
+the blocked INSERT resolves as a conflict, reads the now-committed row, and **replays** its response —
+when it rolls back, the INSERT succeeds and the retry runs fresh. So the DB's row-lock *is* the
+concurrency control; this store never emits a 409, at the cost of **holding a database connection while
+blocked** (pool pressure under a retry storm — documented in the `TxIdempotency` doc-comment). The
+out-of-band `MemStore` keeps its 409 (`KeyState::InFlight`); the two models never mix for one store.
+
+**Claim mechanism (portable, no aborted-tx hazard).** `claim` uses the dialect's *insert-or-ignore* so a
+duplicate key never errors the mutation's transaction (a plain INSERT that raised a unique violation would
+poison the tx on Postgres): `INSERT … ON CONFLICT (callable, key) DO NOTHING` (Postgres/SQLite),
+`INSERT IGNORE` (MySQL/MariaDB) — 1 row affected ⇒ claimed fresh, 0 ⇒ read the existing row's fingerprint
++ response. A visible conflicting row always carries a recorded response (an in-flight row is invisible
+until its tx commits, and our INSERT blocks until then), so the fingerprint decides replay vs
+`Mismatch` (422 key-reuse); a mismatched fingerprint is rejected, never replayed. Fingerprint is stored as
+its decimal text (the `u64` doesn't fit a signed `BIGINT`); the response as JSON text.
+
+**Table DDL through the codegen seam.** `based_codegen::sql::idempotency_table_ddl(dialect)` renders
+`CREATE TABLE IF NOT EXISTS _based_idempotency (callable, key, fingerprint, response NULL, created_at,
+PRIMARY KEY (callable, key))` per dialect via the shared `sql_type` map — never hand-rolled per driver.
+`DbStore::create(&backend, dialect)` runs it once at startup (idempotent DDL); `DbStore::new(dialect)`
+assumes a migration created it. Injected like any store — `Engine::with_store` / `serve_with_store`.
+Not part of the entity's typed identity → no wire/client/OpenAPI surface. `key` (a MySQL reserved word)
+is quoted at every reference through `Dialect::quote`. **Reclaim by age is deferred** (a clean
+follow-up): the `created_at` column is the anchor a future periodic `DELETE … WHERE created_at < now − ttl`
+sweeper needs, but no sweeper ships here — the table grows until one is added or keys are pruned out of
+band (this is the durable-store analogue of the `MemStore` TTL, sized differently because a table isn't
+memory-pressured the same way).
+
+**Blast radius.** `based-codegen`: `sql.rs` (`IDEMPOTENCY_TABLE`, `idempotency_table_ddl`).
+`based-runtime`: `idempotency.rs` (`TxIdempotency`, `TxClaim`, `tx_participant` default, `DbStore` + its
+per-dialect claim/select/update SQL), `run.rs` (`TxOutcome`, `TxClaimCtx`, `plain_outcome`, threaded
+claim through `run_mutation`/`apply`/`apply_once` — return type `Option<Value>` → `TxOutcome`), `lib.rs`
+(exports `DbStore`/`TxIdempotency`/`TxClaim`). `&mut dyn Tx → &mut dyn DbRead` uses Rust trait upcasting
+(stable ≥ 1.86). No change to `MemStore`/`NoStore` behavior, no wire/codegen-artifact surface.
+
+**Tested (live, all three dialects).** `tests/idempotency_db.rs` (SQLite, two `SqliteBackend`s over one
+file database = two instances): a keyed create on instance A, the same key on instance B replays A's
+response with **no** second write (row count stays 1, one shared key row), a same-key/different-payload
+reuse is 422, a fresh key runs. `db_store_dedupes_a_retry_on_a_second_instance` added to the live MariaDB
+**and** Postgres suites (two independent routers over one container): the cross-instance keyed retry
+replays `place_order` through the shared table, creating exactly one order. Full `make check` green (both
+live suites + all three examples + axum-helpdesk smoke + LSP).

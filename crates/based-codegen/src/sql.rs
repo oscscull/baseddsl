@@ -619,6 +619,38 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
     }
 }
 
+/// The table the DB-backed idempotency store keeps its keys in — created in the same
+/// database the mutations write to, so a keyed retry deduplicates across every app
+/// instance sharing that database.
+pub const IDEMPOTENCY_TABLE: &str = "_based_idempotency";
+
+/// `CREATE TABLE IF NOT EXISTS` for the DB-backed idempotency store, rendered per dialect
+/// through the shared DDL type map (not hand-rolled per driver). The `(callable, key)`
+/// primary key is the unique index that makes a concurrent retry's claim block on the
+/// first, still-uncommitted attempt and then replay its result; `response` is NULL while a
+/// claim is in flight and set — inside the mutation's own transaction — when the write
+/// records its result, so key + writes + response commit atomically. `created_at` anchors a
+/// future age-based reclaim.
+pub fn idempotency_table_ddl(dialect: Dialect) -> String {
+    let text = sql_type(Primitive::Text, false, dialect);
+    let ts = sql_type(Primitive::Timestamp, false, dialect);
+    format!(
+        "CREATE TABLE IF NOT EXISTS {tbl} (\n  \
+         {callable} {text} NOT NULL,\n  \
+         {key} {text} NOT NULL,\n  \
+         {fp} {text} NOT NULL,\n  \
+         {response} {text},\n  \
+         {created} {ts} NOT NULL,\n  \
+         PRIMARY KEY ({callable}, {key})\n);",
+        tbl = dialect.quote(IDEMPOTENCY_TABLE),
+        callable = dialect.quote("callable"),
+        key = dialect.quote("key"),
+        fp = dialect.quote("fingerprint"),
+        response = dialect.quote("response"),
+        created = dialect.quote("created_at"),
+    )
+}
+
 /// The SQL type of a relation's FK column — the target model's primary-key type.
 /// A PK with a `raw` type (e.g. native `UUID`) propagates that literal so the escape
 /// hatch composes across the FK. Defaults to the dialect's id type (from the implicit
