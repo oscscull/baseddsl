@@ -1,8 +1,15 @@
-# The auth bootstrap. Both callables opt out of the Tenant scope with a written
-# reason: a token must resolve — and a login must issue — before any tenant
-# context exists to scope by. Every `unscoped` in the app greps to a reason.
+# The auth bootstrap. The token resolver and the login issuer opt out of the Tenant
+# scope with a written reason: a token must resolve — and a login must issue — before
+# any tenant context exists to scope by. Every `unscoped` in the app greps to a reason.
 
 query session_by_token(token) -> SessionCtx unscoped("auth: resolves the bearer token before any tenant context exists");
+
+# What a login resolves a caller's credential (their email) into: the ids a fresh
+# session is issued for. Reads unscoped User (no @scope), so it needs no acknowledgement;
+# the route mints the token server-side and calls start_session with these ids.
+shape LoginIdentity from User { org = org.id, user = id }
+
+query login_identity(email) -> LoginIdentity;
 
 mutation start_session(org: Id, user: Id, token: text) -> SessionCtx unscoped("auth: login issues the session every later context derives from") {
   create Session { org = $org, user = $user, token = $token };

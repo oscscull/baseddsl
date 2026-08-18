@@ -100,27 +100,34 @@ subquery, runtime unchanged, proven live on SQLite); implicit-junction sugar sta
 Track T tier-2, with the SQLite incremental-FK rebuild left as the one explicit deferral. Batch-by-batch
 history is in `PLAN-archive.md`.
 
-## URGENT — production-readiness / onboarding gaps (owner-raised 2026-07-24)
+## URGENT — production-readiness / onboarding gaps (owner-raised 2026-07-24) — ✅ CLOSED
 
 Owner-flagged as the most urgent queue: gaps that block the existential use case — swapping this
 system into an existing production environment as a pluggable replacement — plus two example/quality
-fixes that surfaced alongside. **Priority order: ~~PR4~~ → ~~PR4-key (`@key`)~~ → ~~PR6~~ → ~~PR5~~ →
-~~PR2~~ → ~~PR3~~ → PR1.** PR2 (idempotency store injection seam + `MemStore` TTL) is **done** (D114 impl);
-PR3 (DB-backed durable idempotency store, atomic strong form) is **done** (D115 impl); remaining is PR1.
-PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
+fixes that surfaced alongside. **The whole queue is now complete: ~~PR4~~ → ~~PR4-key (`@key`)~~ →
+~~PR6~~ → ~~PR5~~ → ~~PR2~~ → ~~PR3~~ → ~~PR1~~.** PR2 (idempotency store injection seam + `MemStore`
+TTL) is **done** (D114 impl); PR3 (DB-backed durable idempotency store, atomic strong form) is **done**
+(D115 impl). PR4's uuid/ulid/serial strategy axis is **done** (D110 impl); the `@key(f1, f2, …)`
 nominated primary key — natural single-column **and** composite — is **done** (D111 impl). The
 primary-key story (**PR4 single-column + PR6 composite**) was priority 1 and is now complete: a schema
-whose keys are meaningful columns or multi-column junctions can be represented and onboarded. PR1 is a
-cheap standalone win, sequenced last only because it isn't on the onboarding critical path.
+whose keys are meaningful columns or multi-column junctions can be represented and onboarded. PR5's
+representability audit shipped PR7/PR8/PR9 (D112/D113 + PR7 DDL fix). PR1 (axum-helpdesk login route) is
+now **done** — the last item, a cheap standalone example fix. **Nothing remains in this queue.**
 
-- **PR1. axum-helpdesk login route — the example is seed-locked.** `start_session` ("login issues the
-  session every later context derives from") exists in `schema/session/queries.bsl` but is **not exposed
-  over HTTP** — only `src/bin/seed.rs` calls it in-process, printing six hardcoded tokens (`tok-acme-*`).
-  A running server cannot mint a session for any caller the seed didn't bake, so the example reads as a
-  seed-driven integration fixture, not a usable service (owner concern). Fix: expose a login route
-  (`POST /sessions`) that mints a **server-generated** random token and returns it; keep `seed` for demo
-  *content* (tickets/comments) only. Optionally a minimal credential check so it is login, not bare
-  issuance. Pure example code, no engine change — lowest risk.
+- **PR1. ✅ DONE. axum-helpdesk login route — the example was seed-locked.** Was: `start_session`
+  existed in `schema/session/queries.bsl` but was **not exposed over HTTP** — only `src/bin/seed.rs`
+  called it in-process, printing six hardcoded tokens (`tok-acme-*`), so a running server could not mint
+  a session for any caller the seed didn't bake (the example read as a seed-driven fixture, not a usable
+  service). Fixed, pure example code (no engine change): a public **`POST /sessions`** login route
+  (`src/routes.rs`, outside the auth layer) resolves a caller by credential via a new `login_identity`
+  query (`schema/session/queries.bsl`, `email` → the tenant/user ids — `User` is unscoped, so it needs
+  no acknowledgement), mints a **server-generated** random bearer token (`sess_<uuid-v4>`, new `uuid`
+  dep), and issues the session through `start_session`, returning `{token, org, user, role}`. `seed` no
+  longer bakes sessions — it seeds demo *content* only and prints the demo login **emails**; the smoke
+  gate (`src/bin/smoke.rs`) now logs every persona in over `POST /sessions` (proving login e2e: unknown
+  email → 401, known → a fresh `sess_…` token that then authenticates the rest of the suite) instead of
+  using hardcoded tokens. README documents the curl login flow. Credential check is demo-grade (known
+  email, no secret) — noted as such. No D# (example-only, no language/engine decision).
 - **PR2. ✅ DONE (D114 impl). Idempotency store: injection seam + `MemStore` TTL.** Both hardwired
   concrete-`MemStore` fields (`EngineInner.store`, listener `Shared.idempotency`) became
   `Box<dyn IdempotencyStore>` (default `MemStore`), injected the way `id_gen`/`guards` already are:

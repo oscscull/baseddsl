@@ -20,8 +20,8 @@ streaming NDJSON export, raw-SQL leaves, migrations with a data-preserving renam
 | `src/client.rs` | **verbatim** output of `based gen client -o src/client.rs --embedded`; regenerate after a schema change, never edit |
 | `src/app.rs` | the wiring: the app's `PgPool` → `PgRouter::from_pool` → `Engine`, plus the close-policy guard |
 | `src/auth.rs` | bearer middleware: the token resolves to a session **through the client itself** |
-| `src/routes.rs` | the HTTP surface — one typed call per handler |
-| `src/bin/seed.rs` | demo data through the client's own mutations; prints the bearer tokens |
+| `src/routes.rs` | the HTTP surface — one typed call per handler; `POST /sessions` is the public login |
+| `src/bin/seed.rs` | demo **content** (tickets/comments) through the client's own mutations; prints the demo login emails |
 | `src/bin/smoke.rs` | the CI gate: boots the service and drives every route over real HTTP |
 
 ## Run it
@@ -43,47 +43,61 @@ set -a; source .env; set +a
 # 2. Create the tables from the checked-in migrations.
 based migrate apply --database-url "$DATABASE_URL"
 
-# 3. Demo data — two tenants, agents and requesters, tickets in every state.
+# 3. Demo content — two tenants, agents and requesters, tickets in every state.
+#    (Content only: sessions are minted at login, not baked here.)
 cargo run --bin seed
 
 # 4. The desk, on http://127.0.0.1:8000.
 cargo run
 ```
 
-The seed ends by printing the demo bearer tokens the service's auth middleware resolves:
+The seed ends by printing the demo logins — the emails you exchange for a token at
+`POST /sessions`:
 
 ```
-demo bearer tokens:
-  acme    agent      Mara   tok-acme-mara
-  acme    agent      Noah   tok-acme-noah
-  acme    requester  Ada    tok-acme-ada
+demo logins — POST /sessions {"email": …} for a fresh bearer token:
+  acme    agent      Mara   mara@acme.test
+  acme    agent      Noah   noah@acme.test
+  acme    requester  Ada    ada@customer.test
   ...
 ```
 
-Try it (from another terminal):
+Try it (from another terminal). **Log in first** — `POST /sessions` resolves the caller
+by credential and returns a fresh, **server-minted** bearer token (a real deployment
+would verify a secret here; this demo just checks the email is a known one):
 
 ```sh
-# Ada — a requester — sees exactly her own tickets, nobody else's:
-curl -s http://127.0.0.1:8000/my/tickets -H 'Authorization: Bearer tok-acme-ada'
+# Log in as Ada — a requester — and capture the token the server mints:
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ada@customer.test"}' | jq -r .token)
 
-# Mara's queue: assigned to her, still open, urgent by rank or sitting too long:
-curl -s http://127.0.0.1:8000/queue -H 'Authorization: Bearer tok-acme-mara'
+# Ada sees exactly her own tickets, nobody else's:
+curl -s http://127.0.0.1:8000/my/tickets -H "Authorization: Bearer $TOKEN"
 
 # Open a ticket with a retry-safe key. Run it twice: the retry replays the first
 # response — same id, one row ever written.
 curl -s -X POST http://127.0.0.1:8000/tickets \
-  -H 'Authorization: Bearer tok-acme-ada' \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Idempotency-Key: demo-1' -H 'Content-Type: application/json' \
   -d '{"subject":"Printer on fire","body":"Actual flames."}'
+
+# Log in as Mara — an agent — for the desk routes:
+AGENT=$(curl -s -X POST http://127.0.0.1:8000/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"mara@acme.test"}' | jq -r .token)
+
+# Mara's queue: assigned to her, still open, urgent by rank or sitting too long:
+curl -s http://127.0.0.1:8000/queue -H "Authorization: Bearer $AGENT"
 
 # Closing an unresolved ticket is denied by the app's own close policy —
 # 403 {"error":{"code":"guard_denied","message":"only a resolved ticket can be closed"}}.
 # (Take any id from Mara's queue above.)
-curl -s -X POST http://127.0.0.1:8000/tickets/<id>/close -H 'Authorization: Bearer tok-acme-mara'
+curl -s -X POST http://127.0.0.1:8000/tickets/<id>/close -H "Authorization: Bearer $AGENT"
 
 # The compliance export streams NDJSON: one {"row":…} per line, then a terminal
 # {"done":{"rows":N}} checksum line.
-curl -sN http://127.0.0.1:8000/export/tickets.ndjson -H 'Authorization: Bearer tok-acme-mara'
+curl -sN http://127.0.0.1:8000/export/tickets.ndjson -H "Authorization: Bearer $AGENT"
 ```
 
 To start over: `cargo run --bin smoke -- reset` drops and recreates the schema; then repeat
@@ -155,9 +169,13 @@ client method yields a typed `RowStream` (rows arrive as the database produces t
 the route re-serves it as NDJSON. A client that disconnects cancels the database pass.
 `age_days` in the export shape is a raw-SQL value leaf.
 
-**7. Auth is dogfooding** — `src/auth.rs` trades `Authorization: Bearer <token>` for a
-session by calling `session_by_token` — a query in the same schema — so everything handlers
-later pass as `$ctx` is **derived server-side**, never read from a request body.
+**7. Auth is dogfooding** — the public `POST /sessions` (`src/routes.rs`) resolves a
+caller by credential (`login_identity`, a query in the same schema), mints a random
+**server-side** token, and issues the session via `start_session`; `seed` bakes content,
+never identities. On every later request `src/auth.rs` trades `Authorization: Bearer
+<token>` for that session by calling `session_by_token` — another query in the same schema
+— so everything handlers pass as `$ctx` is **derived server-side**, never read from a
+request body.
 
 ## Where each idea is specified
 

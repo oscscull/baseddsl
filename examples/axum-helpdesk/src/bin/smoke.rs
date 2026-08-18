@@ -15,12 +15,6 @@ use axum_helpdesk::{routes, App};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-const ADA: &str = "tok-acme-ada"; // acme requester
-const MARA: &str = "tok-acme-mara"; // acme agent
-const NOAH: &str = "tok-acme-noah"; // acme agent
-const GUS: &str = "tok-globex-gus"; // globex agent
-const GRETA: &str = "tok-globex-greta"; // globex requester
-
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -43,6 +37,43 @@ async fn main() {
         base: format!("http://{addr}"),
     };
 
+    // ---- login: POST /sessions mints a fresh, server-side bearer token ---------
+    // Every token below is minted *here*, by the running service, not baked by the
+    // seed — the whole point of the login route. Unknown credentials are refused.
+    let (status, body) = desk
+        .post(
+            None,
+            "/sessions",
+            json!({ "email": "nobody@nowhere.test" }),
+            None,
+        )
+        .await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["error"]["code"], "unauthorized");
+    // A known email yields a random `sess_…` token (not caller-supplied) and the role.
+    let (status, issued) = desk
+        .post(
+            None,
+            "/sessions",
+            json!({ "email": "ada@customer.test" }),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{issued}");
+    let ada_token = issued["token"].as_str().expect("a minted token");
+    assert!(ada_token.starts_with("sess_"), "server-minted: {ada_token}");
+    assert_eq!(issued["role"], "requester");
+    let ada: &str = Box::leak(ada_token.to_string().into_boxed_str());
+    // Seat the rest of the demo personas the same way.
+    let mara = login(&desk, "mara@acme.test").await;
+    let noah = login(&desk, "noah@acme.test").await;
+    let gus = login(&desk, "gus@globex.test").await;
+    let greta = login(&desk, "greta@partner.test").await;
+    // The minted token authenticates a real request end-to-end.
+    let (status, _) = desk.get(Some(ada), "/my/tickets").await;
+    assert_eq!(status, 200, "the minted token authenticates");
+    println!("ok - POST /sessions: unknown -> 401; known -> a fresh server-minted token");
+
     // ---- auth: 401 without a token, 401 on an unknown one ---------------------
     let (status, body) = desk.get(None, "/my/tickets").await;
     assert_eq!(status, 401, "{body}");
@@ -52,7 +83,7 @@ async fn main() {
     println!("ok - missing/unknown bearer token -> 401");
 
     // ---- requester portal: each tenant's requester sees only their own --------
-    let (status, ada_tickets) = desk.get(Some(ADA), "/my/tickets").await;
+    let (status, ada_tickets) = desk.get(Some(ada), "/my/tickets").await;
     assert_eq!(status, 200, "{ada_tickets}");
     assert_eq!(ada_tickets.as_array().unwrap().len(), 3);
     assert!(ada_tickets
@@ -63,7 +94,7 @@ async fn main() {
     let t1 = find(&ada_tickets, "subject", "Password reset loop");
     let t2 = find(&ada_tickets, "subject", "Invoice PDF won't download");
 
-    let (status, greta_tickets) = desk.get(Some(GRETA), "/my/tickets").await;
+    let (status, greta_tickets) = desk.get(Some(greta), "/my/tickets").await;
     assert_eq!(status, 200, "{greta_tickets}");
     assert_eq!(greta_tickets.as_array().unwrap().len(), 1);
     let g1 = greta_tickets[0]["id"].as_str().unwrap().to_string();
@@ -77,13 +108,13 @@ async fn main() {
     println!("ok - two tenants' requesters see disjoint tickets");
 
     // ---- role gate: a requester has no desk ------------------------------------
-    let (status, body) = desk.get(Some(ADA), "/queue").await;
+    let (status, body) = desk.get(Some(ada), "/queue").await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "forbidden");
     println!("ok - requester hitting the desk -> 403 forbidden");
 
     // ---- scoped search: default status filter, wire enum values, isolation ----
-    let (status, page) = desk.get(Some(MARA), "/tickets").await;
+    let (status, page) = desk.get(Some(mara), "/tickets").await;
     assert_eq!(status, 200, "{page}");
     let rows = page["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 3, "acme's open tickets: {page}");
@@ -95,31 +126,31 @@ async fn main() {
     // The string enum's stored value is the wire value ("waiting_on_customer"),
     // even though the schema spells the variant `waiting`.
     let (status, page) = desk
-        .get(Some(MARA), "/tickets?status=waiting_on_customer")
+        .get(Some(mara), "/tickets?status=waiting_on_customer")
         .await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["rows"].as_array().unwrap().len(), 1);
     assert_eq!(page["rows"][0]["id"].as_str().unwrap(), t2);
 
-    let (status, page) = desk.get(Some(GUS), "/tickets").await;
+    let (status, page) = desk.get(Some(gus), "/tickets").await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["rows"].as_array().unwrap().len(), 1);
     assert_eq!(page["rows"][0]["id"].as_str().unwrap(), g1);
 
-    let (status, body) = desk.get(Some(MARA), "/tickets?cursor=garbage").await;
+    let (status, body) = desk.get(Some(mara), "/tickets?cursor=garbage").await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["error"]["code"], "bad_cursor");
     println!("ok - scoped search: status filter, sort order, tenant isolation, bad cursor -> 400");
 
     // ---- the queue: priority >= high, assigned to the caller ------------------
-    let (status, queue) = desk.get(Some(MARA), "/queue").await;
+    let (status, queue) = desk.get(Some(mara), "/queue").await;
     assert_eq!(status, 200, "{queue}");
     assert_eq!(queue.as_array().unwrap().len(), 1, "{queue}");
     assert_eq!(queue[0]["id"].as_str().unwrap(), t1);
     println!("ok - queue: priority >= high and assignee = $ctx.user");
 
     // ---- ticket detail: nested shapes with ordered to-many arrays -------------
-    let (status, detail) = desk.get(Some(MARA), &format!("/tickets/{t1}")).await;
+    let (status, detail) = desk.get(Some(mara), &format!("/tickets/{t1}")).await;
     assert_eq!(status, 200, "{detail}");
     assert_eq!(detail["requester"]["name"], "Ada");
     assert_eq!(detail["assignee"]["name"], "Mara");
@@ -145,7 +176,7 @@ async fn main() {
     println!("ok - detail: nested to-one shapes + to-many arrays in declared sort order");
 
     // ---- cross-tenant read: another tenant's ticket does not exist here -------
-    let (status, body) = desk.get(Some(MARA), &format!("/tickets/{g1}")).await;
+    let (status, body) = desk.get(Some(mara), &format!("/tickets/{g1}")).await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"]["code"], "not_found");
     println!("ok - cross-tenant ticket read -> 404");
@@ -153,7 +184,7 @@ async fn main() {
     // ---- cross-tenant write: an update that matches no row is a clean 404 -----
     let (status, body) = desk
         .post(
-            Some(GUS),
+            Some(gus),
             &format!("/tickets/{t1}/status"),
             json!({ "status": "waiting_on_customer" }),
             None,
@@ -166,25 +197,25 @@ async fn main() {
     // ---- idempotent open: one key, one row -------------------------------------
     let open = json!({ "subject": "Printer on fire", "body": "Actual flames.", "priority": 3 });
     let (status, first) = desk
-        .post(Some(ADA), "/tickets", open.clone(), Some("smoke-open-1"))
+        .post(Some(ada), "/tickets", open.clone(), Some("smoke-open-1"))
         .await;
     assert_eq!(status, 201, "{first}");
     let (status, replay) = desk
-        .post(Some(ADA), "/tickets", open.clone(), Some("smoke-open-1"))
+        .post(Some(ada), "/tickets", open.clone(), Some("smoke-open-1"))
         .await;
     assert_eq!(status, 201, "{replay}");
     assert_eq!(
         first["id"], replay["id"],
         "the retry replays, never re-writes"
     );
-    let (_, after) = desk.get(Some(ADA), "/my/tickets").await;
+    let (_, after) = desk.get(Some(ada), "/my/tickets").await;
     assert_eq!(after.as_array().unwrap().len(), 4, "exactly one new row");
     // The opening comment landed in the same transaction as the ticket.
     assert_eq!(first["comments"].as_array().unwrap().len(), 1);
     // The same key with a different request is a loud 422, never a replay.
     let (status, body) = desk
         .post(
-            Some(ADA),
+            Some(ada),
             "/tickets",
             json!({ "subject": "Different", "body": "request" }),
             Some("smoke-open-1"),
@@ -196,7 +227,7 @@ async fn main() {
 
     // ---- the close guard: deny while unresolved, allow once resolved ----------
     let (status, body) = desk
-        .post(Some(MARA), &format!("/tickets/{t1}/close"), json!({}), None)
+        .post(Some(mara), &format!("/tickets/{t1}/close"), json!({}), None)
         .await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "guard_denied");
@@ -206,13 +237,13 @@ async fn main() {
     );
     // Another tenant's agent can't even see the ticket — same guard, same 403.
     let (status, body) = desk
-        .post(Some(GUS), &format!("/tickets/{t1}/close"), json!({}), None)
+        .post(Some(gus), &format!("/tickets/{t1}/close"), json!({}), None)
         .await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "guard_denied");
     let (status, row) = desk
         .post(
-            Some(MARA),
+            Some(mara),
             &format!("/tickets/{t1}/status"),
             json!({ "status": "resolved" }),
             None,
@@ -220,16 +251,16 @@ async fn main() {
         .await;
     assert_eq!(status, 200, "{row}");
     let (status, row) = desk
-        .post(Some(MARA), &format!("/tickets/{t1}/close"), json!({}), None)
+        .post(Some(mara), &format!("/tickets/{t1}/close"), json!({}), None)
         .await;
     assert_eq!(status, 200, "{row}");
     assert_eq!(row["status"], "closed");
     println!("ok - close guard: 403 guard_denied while unresolved, allowed once resolved");
 
     // ---- archive / restore (soft delete round trip) -----------------------------
-    let (status, _) = desk.delete(Some(MARA), &format!("/tickets/{t2}")).await;
+    let (status, _) = desk.delete(Some(mara), &format!("/tickets/{t2}")).await;
     assert_eq!(status, 200);
-    let (_, mine) = desk.get(Some(ADA), "/my/tickets").await;
+    let (_, mine) = desk.get(Some(ada), "/my/tickets").await;
     assert_eq!(
         mine.as_array().unwrap().len(),
         3,
@@ -237,21 +268,21 @@ async fn main() {
     );
     let (status, _) = desk
         .post(
-            Some(MARA),
+            Some(mara),
             &format!("/tickets/{t2}/restore"),
             json!({}),
             None,
         )
         .await;
     assert_eq!(status, 200);
-    let (_, mine) = desk.get(Some(ADA), "/my/tickets").await;
+    let (_, mine) = desk.get(Some(ada), "/my/tickets").await;
     assert_eq!(mine.as_array().unwrap().len(), 4, "and back");
     println!("ok - archive tombstones, restore lifts it");
 
     // ---- comments + billable time land and come back in order ------------------
     let (status, comment) = desk
         .post(
-            Some(ADA),
+            Some(ada),
             &format!("/tickets/{t2}/comments"),
             json!({ "body": "Any update?" }),
             None,
@@ -261,7 +292,7 @@ async fn main() {
     assert_eq!(comment["author"]["name"], "Ada");
     let (status, entry) = desk
         .post(
-            Some(MARA),
+            Some(mara),
             &format!("/tickets/{t2}/time"),
             json!({
                 "hours": 0.25,
@@ -280,34 +311,34 @@ async fn main() {
     let cid = comment["id"].as_str().unwrap().to_string();
     // A requester has no purge desk.
     let (status, _) = desk
-        .delete(Some(ADA), &format!("/admin/comments/{cid}"))
+        .delete(Some(ada), &format!("/admin/comments/{cid}"))
         .await;
     assert_eq!(status, 403);
     // Another tenant's agent gets the same 404 an absent row would — and deletes
     // nothing (no existence leak across the scope boundary).
     let (status, body) = desk
-        .delete(Some(GUS), &format!("/admin/comments/{cid}"))
+        .delete(Some(gus), &format!("/admin/comments/{cid}"))
         .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"]["code"], "not_found");
     // The tenant's own agent purges it: a bare 200 acknowledgement, no body.
     let (status, body) = desk
-        .delete(Some(MARA), &format!("/admin/comments/{cid}"))
+        .delete(Some(mara), &format!("/admin/comments/{cid}"))
         .await;
     assert_eq!(status, 200, "{body}");
     // Purging the same id again matches nothing: the engine's own 404.
     let (status, body) = desk
-        .delete(Some(MARA), &format!("/admin/comments/{cid}"))
+        .delete(Some(mara), &format!("/admin/comments/{cid}"))
         .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"]["code"], "not_found");
     println!("ok - purge comment: hard delete acks with 200, cross-tenant/re-purge -> 404");
 
     // ---- drafts: the AND scope (org AND author) ---------------------------------
-    let (status, drafts) = desk.get(Some(MARA), &format!("/tickets/{t1}/drafts")).await;
+    let (status, drafts) = desk.get(Some(mara), &format!("/tickets/{t1}/drafts")).await;
     assert_eq!(status, 200, "{drafts}");
     assert_eq!(drafts.as_array().unwrap().len(), 1, "Mara's seeded draft");
-    let (_, drafts) = desk.get(Some(NOAH), &format!("/tickets/{t1}/drafts")).await;
+    let (_, drafts) = desk.get(Some(noah), &format!("/tickets/{t1}/drafts")).await;
     assert_eq!(
         drafts.as_array().unwrap().len(),
         0,
@@ -315,16 +346,16 @@ async fn main() {
     );
     let (status, _) = desk
         .post(
-            Some(NOAH),
+            Some(noah),
             &format!("/tickets/{t1}/drafts"),
             json!({ "body": "Check the mail previewer theory." }),
             None,
         )
         .await;
     assert_eq!(status, 200);
-    let (_, drafts) = desk.get(Some(NOAH), &format!("/tickets/{t1}/drafts")).await;
+    let (_, drafts) = desk.get(Some(noah), &format!("/tickets/{t1}/drafts")).await;
     assert_eq!(drafts.as_array().unwrap().len(), 1, "Noah now sees his own");
-    let (_, drafts) = desk.get(Some(MARA), &format!("/tickets/{t1}/drafts")).await;
+    let (_, drafts) = desk.get(Some(mara), &format!("/tickets/{t1}/drafts")).await;
     assert_eq!(
         drafts.as_array().unwrap().len(),
         1,
@@ -333,15 +364,15 @@ async fn main() {
     println!("ok - drafts: AND scope isolates by org and author");
 
     // ---- tag containment + per-param bindings -----------------------------------
-    let (status, tagged) = desk.get(Some(MARA), "/tags/vip/tickets").await;
+    let (status, tagged) = desk.get(Some(mara), "/tags/vip/tickets").await;
     assert_eq!(status, 200, "{tagged}");
     assert_eq!(tagged.as_array().unwrap().len(), 1);
     assert_eq!(tagged[0]["id"].as_str().unwrap(), t4);
 
-    let (_, t4_detail) = desk.get(Some(MARA), &format!("/tickets/{t4}")).await;
+    let (_, t4_detail) = desk.get(Some(mara), &format!("/tickets/{t4}")).await;
     let noah_id = t4_detail["assignee"]["id"].as_str().unwrap().to_string();
     let (status, noahs) = desk
-        .get(Some(MARA), &format!("/agents/{noah_id}/tickets"))
+        .get(Some(mara), &format!("/agents/{noah_id}/tickets"))
         .await;
     assert_eq!(status, 200, "{noahs}");
     assert_eq!(noahs.as_array().unwrap().len(), 1);
@@ -349,20 +380,23 @@ async fn main() {
     println!("ok - tags has + per-param bindings (agent -> assignee, since > created_at)");
 
     // ---- workload report: raw-SQL rollups over the engine-owned row set --------
-    let (status, report) = desk.get(Some(MARA), "/reports/workload").await;
+    let (status, report) = desk.get(Some(mara), "/reports/workload").await;
     assert_eq!(status, 200, "{report}");
     let agents = report.as_array().unwrap();
     assert_eq!(agents.len(), 2, "acme's two agents, sorted by name");
     assert_eq!(agents[0]["name"], "Mara");
     assert_eq!(agents[0]["rate"], "95.00");
-    let noah = &agents[1];
-    assert_eq!(noah["name"], "Noah");
-    assert_eq!(noah["open_tickets"], 1, "t4 is open and Noah's: {noah}");
-    assert_eq!(noah["hours_logged"].as_f64(), Some(1.0));
+    let noah_row = &agents[1];
+    assert_eq!(noah_row["name"], "Noah");
+    assert_eq!(
+        noah_row["open_tickets"], 1,
+        "t4 is open and Noah's: {noah_row}"
+    );
+    assert_eq!(noah_row["hours_logged"].as_f64(), Some(1.0));
     println!("ok - workload report: raw-SQL aggregate leaves");
 
     // ---- admin listing: unscoped, offset-paged ----------------------------------
-    let (status, all) = desk.get(Some(MARA), "/admin/tickets").await;
+    let (status, all) = desk.get(Some(mara), "/admin/tickets").await;
     assert_eq!(status, 200, "{all}");
     let subjects: Vec<&str> = all["rows"]
         .as_array()
@@ -381,7 +415,7 @@ async fn main() {
         Some(total as i64),
         "`with count` serves the total: {all}"
     );
-    let (_, offset) = desk.get(Some(MARA), "/admin/tickets?offset=2").await;
+    let (_, offset) = desk.get(Some(mara), "/admin/tickets?offset=2").await;
     assert_eq!(offset["rows"].as_array().unwrap().len(), total - 2);
     assert_ne!(offset["rows"][0]["id"], all["rows"][0]["id"]);
     assert_eq!(
@@ -395,7 +429,7 @@ async fn main() {
     let resp = desk
         .http
         .get(format!("{}/export/tickets.ndjson", desk.base))
-        .bearer_auth(MARA)
+        .bearer_auth(mara)
         .send()
         .await
         .expect("export request");
@@ -430,14 +464,14 @@ async fn main() {
     let resp = desk
         .http
         .get(format!("{}/export/tickets.ndjson", desk.base))
-        .bearer_auth(MARA)
+        .bearer_auth(mara)
         .send()
         .await
         .expect("second export request");
     let mut body = resp.bytes_stream();
     let _first = body.next().await;
     drop(body); // hang up mid-stream — the server must cancel the pass
-    let (status, _) = desk.get(Some(MARA), "/queue").await;
+    let (status, _) = desk.get(Some(mara), "/queue").await;
     assert_eq!(status, 200, "the pool is healthy after a dropped stream");
     println!("ok - dropped export stream: connection recovered, next request green");
 
@@ -445,6 +479,18 @@ async fn main() {
 }
 
 // ---- helpers -----------------------------------------------------------------
+
+/// Log a demo persona in over `POST /sessions` and return the server-minted bearer
+/// token. Leaked to `&'static` so it can be handed to every later request cheaply —
+/// a smoke fixture, not a pattern for real code.
+async fn login(desk: &Desk, email: &str) -> &'static str {
+    let (status, body) = desk
+        .post(None, "/sessions", json!({ "email": email }), None)
+        .await;
+    assert_eq!(status, 201, "login {email}: {body}");
+    let token = body["token"].as_str().expect("a minted token");
+    Box::leak(token.to_string().into_boxed_str())
+}
 
 struct Desk {
     http: reqwest::Client,

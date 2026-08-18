@@ -18,7 +18,9 @@ use crate::client::{self, entity, Cursor, Id, SessionCtx, Status};
 use crate::App;
 
 pub fn router(app: App) -> Router {
-    Router::new()
+    // Everything past the auth layer needs a session; `POST /sessions` is how you
+    // get one, so it sits *outside* the layer (there's no token to resolve yet).
+    let authed = Router::new()
         // requester portal
         .route("/tickets", post(open_ticket).get(search_tickets))
         .route("/my/tickets", get(my_tickets))
@@ -44,8 +46,55 @@ pub fn router(app: App) -> Router {
         .layer(middleware::from_fn_with_state(
             app.clone(),
             auth::require_session,
-        ))
+        ));
+    Router::new()
+        // login — public, mints the session everything else authenticates with
+        .route("/sessions", post(login))
+        .merge(authed)
         .with_state(app)
+}
+
+// ---- login ------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LoginBody {
+    email: String,
+}
+
+/// Log in: resolve a caller by credential, mint a **server-generated** bearer token,
+/// and issue the session every later request derives its `$ctx` from. The token is
+/// random and minted here — never supplied by the caller — so a running desk can seat
+/// any registered user, not just the identities `seed` baked. (A demo-grade check:
+/// a real deployment verifies a secret here; this one just resolves a known email.)
+async fn login(
+    State(app): State<App>,
+    Json(b): Json<LoginBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let api = app.api();
+    let who = api
+        .login_identity(client::LoginIdentityInput { email: b.email }, ())
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("unknown credentials"))?;
+    let token = format!("sess_{}", uuid::Uuid::new_v4().simple());
+    let session = api
+        .start_session(
+            client::StartSessionInput {
+                org: who.org,
+                user: who.user,
+                token: token.clone(),
+            },
+            (),
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "token": token,
+            "org": session.org,
+            "user": session.user,
+            "role": session.role,
+        })),
+    ))
 }
 
 // ---- requester portal -------------------------------------------------------

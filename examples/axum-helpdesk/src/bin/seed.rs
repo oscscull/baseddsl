@@ -1,9 +1,10 @@
-//! Seed the helpdesk with demo data — two tenants, agents and requesters, tickets
-//! in every state — through the typed client's own mutations. No raw SQL.
+//! Seed the helpdesk with demo *content* — two tenants, agents and requesters,
+//! tickets in every state — through the typed client's own mutations. No raw SQL.
+//! Sessions are not seeded: a caller mints one at login (`POST /sessions`).
 //!
 //! Run it once against a freshly migrated database (`based migrate apply`, then
-//! `cargo run --bin seed`). It prints the demo bearer tokens the service's auth
-//! middleware resolves into per-request context.
+//! `cargo run --bin seed`). It prints the demo login emails to exchange for a
+//! server-minted bearer token at `POST /sessions`.
 
 use axum_helpdesk::client::{self, Id, Priority, Role, Status};
 use based_runtime::guard::{GuardVerdict, Guards};
@@ -96,34 +97,9 @@ async fn main() {
     )
     .await;
 
-    // ---- sessions (the demo bearer tokens) ----------------------------------
-    let tokens = [
-        ("tok-acme-mara", &acme, &mara, "acme", "agent", "Mara"),
-        ("tok-acme-noah", &acme, &noah, "acme", "agent", "Noah"),
-        ("tok-acme-ada", &acme, &ada, "acme", "requester", "Ada"),
-        ("tok-acme-bea", &acme, &bea, "acme", "requester", "Bea"),
-        ("tok-globex-gus", &globex, &gus, "globex", "agent", "Gus"),
-        (
-            "tok-globex-greta",
-            &globex,
-            &greta,
-            "globex",
-            "requester",
-            "Greta",
-        ),
-    ];
-    for (token, org_id, user_id, _, _, _) in &tokens {
-        api.start_session(
-            client::StartSessionInput {
-                org: (*org_id).clone(),
-                user: (*user_id).clone(),
-                token: (*token).to_string(),
-            },
-            (),
-        )
-        .await
-        .expect("start_session");
-    }
+    // Sessions are NOT seeded: a caller logs in over HTTP (`POST /sessions`) to get
+    // a fresh server-minted token. `seed` bakes demo *content* only; the demo login
+    // emails are printed at the end.
 
     // ---- Acme's desk ---------------------------------------------------------
     // Requesters open tickets (a ticket + its first comment land in one tx).
@@ -351,9 +327,17 @@ async fn main() {
     );
 
     println!("seeded 2 orgs, 6 users, 7 tickets\n");
-    println!("demo bearer tokens:");
-    for (token, _, _, org_slug, role, name) in &tokens {
-        println!("  {org_slug:<7} {role:<10} {name:<6} {token}");
+    println!("demo logins — POST /sessions {{\"email\": …}} for a fresh bearer token:");
+    let logins = [
+        ("acme", "agent", "Mara", "mara@acme.test"),
+        ("acme", "agent", "Noah", "noah@acme.test"),
+        ("acme", "requester", "Ada", "ada@customer.test"),
+        ("acme", "requester", "Bea", "bea@customer.test"),
+        ("globex", "agent", "Gus", "gus@globex.test"),
+        ("globex", "requester", "Greta", "greta@partner.test"),
+    ];
+    for (org_slug, role, name, email) in &logins {
+        println!("  {org_slug:<7} {role:<10} {name:<6} {email}");
     }
 }
 

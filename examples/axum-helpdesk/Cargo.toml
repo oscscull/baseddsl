@@ -32,6 +32,8 @@ serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-str"] }
 # The streaming export returns a `RowStream` — a `futures_core::Stream` of typed rows.
 futures-core = "0.3"
+# The login route mints a random, server-generated bearer token (a v4 uuid).
+uuid = { version = "1", features = ["v4"] }
 # Load `DATABASE_URL` from `.env` (the conventional 12-factor crate).
 dotenvy = "0.15"
 # The live smoke (`cargo run --bin smoke`) drives the service over real HTTP.

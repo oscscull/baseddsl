@@ -50,7 +50,7 @@ impl App {
 /// The close policy: a ticket must be resolved before anyone closes it. The engine
 /// guarantees this runs before the write; the decision is app code — but the *read*
 /// it decides on goes back through the schema's own `ticket` query over `req.engine()`,
-/// so the workspace scope and the soft-delete filter are the ones the schema declares. 
+/// so the workspace scope and the soft-delete filter are the ones the schema declares.
 /// A check that cannot decide denies — fail closed.
 async fn caller_can_close(req: GuardRequest) -> GuardVerdict {
     let (Ok(input), Ok(ctx)) = (
