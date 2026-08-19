@@ -326,6 +326,14 @@ pub enum Primitive {
         precision: u32,
         scale: u32,
     },
+    /// `time` — a time of day with no date (`TIME` / `TEXT` on SQLite). Carried lossless
+    /// as a string end-to-end (wire JSON string `"14:30:00"`, client `Time` = `String`),
+    /// ordered like `timestamp`/`date`.
+    Time,
+    /// `bytes` — a binary blob (`BYTEA` / `BLOB`). Carried as a **base64** string on the
+    /// wire (never a raw JSON byte array); client `Bytes` = `String`. Equality-only — it
+    /// is not orderable or summable.
+    Bytes,
 }
 
 /// Opt-in inverse: `(Model.field)` points at the forward edge it pairs with.

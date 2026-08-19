@@ -901,7 +901,9 @@ fn string_in_family(s: String, family: Family) -> SqlValue {
         Family::Uuid => SqlValue::Uuid(s),
         Family::Timestamp => SqlValue::Timestamp(s),
         Family::Date => SqlValue::Date(s),
+        Family::Time => SqlValue::Time(s),
         Family::Decimal => SqlValue::Decimal(s),
+        Family::Bytes => SqlValue::Bytes(s),
         _ => SqlValue::Text(s),
     }
 }

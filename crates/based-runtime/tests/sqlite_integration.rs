@@ -715,6 +715,77 @@ async fn in_value_list_filters_end_to_end() {
     );
 }
 
+/// `time` and `bytes` round-trip through a real SQLite database: a `time` rides the wire
+/// as its `HH:MM:SS` string (stored TEXT — SQLite has no native TIME), a `bytes` value as
+/// base64 (stored as a real `BLOB`, decoded/encoded at the driver boundary). An ordered
+/// filter on the `time` column works (bytes stays equality-only, enforced by sema).
+#[tokio::test]
+async fn time_and_bytes_round_trip_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        Event { id: Id, name: text, start_at: time, payload: bytes, @index(start_at) }
+        shape EventRow from Event { name, start_at, payload }
+        mutation add_event(name: text, start_at: time, payload: bytes) -> EventRow {
+          create Event { name = $name, start_at = $start_at, payload = $payload };
+        }
+        query after(min: time) -> EventRow[] {
+          list Event where (start_at >= $min) order (name);
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    // Raw-seed an earlier event: a SQLite blob literal `X'000102FF'` decodes back to base64
+    // `AAEC/w==`, and the `08:00:00` time string round-trips (TEXT affinity).
+    backend
+        .execute_batch(
+            "INSERT INTO `event` (`id`, `name`, `start_at`, `payload`) VALUES \
+                ('seed', 'early', '08:00:00', X'000102FF');",
+        )
+        .await
+        .expect("seed");
+
+    // Create: a `time` is sent (and returned) as its `HH:MM:SS` string; a `bytes` value is
+    // sent (and returned) as base64 ("hello" = `aGVsbG8=`) — the driver base64-decodes it into
+    // the `BLOB` at the bind and re-encodes it on read-back.
+    let created = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/add_event",
+        json!({ "name": "launch", "start_at": "14:30:00", "payload": "aGVsbG8=" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{:?}", created.body);
+    assert_eq!(
+        created.body,
+        json!({ "name": "launch", "start_at": "14:30:00", "payload": "aGVsbG8=" }),
+        "create re-selects the row with the time string + base64 bytes exact"
+    );
+
+    // `start_at >= "09:00:00"` keeps only `launch` (08:00 < 09:00 lexicographically too),
+    // proving the `time` column is ordered; the seeded blob decodes for the excluded row too.
+    let filtered = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/after",
+        json!({ "min": "09:00:00" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(filtered.status, 200, "{:?}", filtered.body);
+    assert_eq!(
+        filtered.body,
+        json!([{ "name": "launch", "start_at": "14:30:00", "payload": "aGVsbG8=" }])
+    );
+}
+
 #[tokio::test]
 async fn decimal_and_float_round_trip_end_to_end() {
     let c = compile_sqlite(

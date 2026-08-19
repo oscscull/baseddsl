@@ -259,6 +259,8 @@ fn prim(p: Primitive) -> String {
         Primitive::Bool => "bool".into(),
         Primitive::Timestamp => "timestamp".into(),
         Primitive::Date => "date".into(),
+        Primitive::Time => "time".into(),
+        Primitive::Bytes => "bytes".into(),
         Primitive::Json => "json".into(),
         Primitive::Uuid => "uuid".into(),
         Primitive::Id => "Id".into(),

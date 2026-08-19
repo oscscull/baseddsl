@@ -958,6 +958,8 @@ impl<'a> Parser<'a> {
                     "bool" => Primitive::Bool,
                     "timestamp" => Primitive::Timestamp,
                     "date" => Primitive::Date,
+                    "time" => Primitive::Time,
+                    "bytes" => Primitive::Bytes,
                     "json" => Primitive::Json,
                     "uuid" => Primitive::Uuid,
                     "ulid" => Primitive::Ulid,

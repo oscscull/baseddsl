@@ -221,6 +221,39 @@ fn decimal_and_float_map_per_dialect() {
 }
 
 #[test]
+fn time_and_bytes_map_per_dialect() {
+    let src = r#"
+        Event {
+          id: Id
+          start_at: time
+          payload:  bytes
+        }
+        "#;
+    let maria = gen(src);
+    assert!(maria.contains("`start_at` TIME NOT NULL"), "\n{maria}");
+    assert!(maria.contains("`payload` BLOB NOT NULL"), "\n{maria}");
+
+    // SQLite has no native TIME — it degrades to TEXT (like date/timestamp/decimal);
+    // a `bytes` column is a real `BLOB`.
+    let sqlite = gen_sqlite(src);
+    assert!(sqlite.contains("`start_at` TEXT NOT NULL"), "\n{sqlite}");
+    assert!(sqlite.contains("`payload` BLOB NOT NULL"), "\n{sqlite}");
+
+    let pg = gen_pg(src);
+    assert!(pg.contains("\"start_at\" TIME NOT NULL"), "\n{pg}");
+    assert!(pg.contains("\"payload\" BYTEA NOT NULL"), "\n{pg}");
+}
+
+#[test]
+fn time_default_renders_as_sql() {
+    let ddl = gen("Event { id: Id, start_at: time (default \"09:00:00\") }");
+    assert!(
+        ddl.contains("`start_at` TIME NOT NULL DEFAULT '09:00:00'"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
 fn decimal_default_is_byte_exact() {
     // The trailing zero survives (a float round-trip would drop it).
     let ddl = gen("Order { id: Id, total: decimal(12, 2) (default 0.10) }");

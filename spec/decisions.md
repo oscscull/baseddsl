@@ -27,7 +27,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
   family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8),
   D113 (schema/database namespace qualifier `@schema("name")` DONE — Postgres schema / MySQL
   database, `quote_table` per-part quoting across DDL/DML/FK/index/migration, `Step::AlterSchema`
-  move, E0296/E0297; incremental-ALTER-on-namespaced-table deferred)
+  move, E0296/E0297; incremental-ALTER-on-namespaced-table deferred),
+  D117 (`time` + `bytes` scalar types: `time` = time-of-day (`TIME`/TEXT-on-SQLite), ordered like
+  date/timestamp, wire = `HH:MM:SS` string; `bytes` = binary blob (`BYTEA`/`BLOB`), wire = base64
+  string, equality-only; 3-driver binary decode incl. Postgres `pg_time`/`bytea`→base64;
+  E0313 time-default-not-string, E0314 bytes-literal-default)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
 - **`$ctx` (per-request context)** — D4 (inferred, never a global type)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
@@ -5475,3 +5479,72 @@ page with no tiebreaker, MariaDB + Postgres); sema conformance golden `distinct`
 diagnostics); **live SQLite** `distinct_integration.rs` — five seeded rows across two
 categories, the plain `list` returns all five (duplicates), the `distinct` twin returns the
 two categories once each, ordered (the DB actually deduped). `make check` green.
+
+## D117 — `time` + `bytes` scalar types (Track T tier-2)
+
+Two new scalar primitives, peers of `timestamp`/`date`/`decimal`/`float` — modelled end to end,
+not raw-only. `time` is a **time of day** (`TIME`, distinct from an instant/date); `bytes` is a
+**binary blob** (`BYTEA` / `BLOB`). Both are new `Primitive` variants (fieldless, `Copy`), threaded
+the way `Primitive::Decimal` was (D83).
+
+**`time` — ordered, string on the wire.**
+- **Wire = its `HH:MM:SS[.ffffff]` string** (lossless text, like decimal); client `Time` = `String`
+  (dep-free — no chrono in the client, matching the decimal-as-wire-string precedent); OpenAPI
+  `{type: string, format: time}`.
+- **Ordered** (`= != < > <= >= in`, `min`/`max`) like `timestamp`/`date` — it joins `Family::Textual`
+  in the operand checker (resolve.rs) and the ctx/scope prim-family mirrors.
+- **Per-dialect DDL:** `TIME` (MariaDB/Postgres); **`TEXT` on SQLite** (no native `TIME` — the same
+  degradation `date`/`timestamp`/`decimal` take; the zero-padded string still compares chronologically).
+- **A `time` column may take a string-literal default** (`(default "09:00:00")`); a non-string default
+  is **`E0313`** (mirrors the E0159 decimal-default check).
+
+**`bytes` — equality-only, base64 on the wire.**
+- **Wire = a base64 string** (never a raw JSON byte array), lossless; client `Bytes` = `String` (its
+  base64 text, dep-free); OpenAPI `{type: string, format: byte}` (3.1). `SqlValue::Bytes(String)`
+  carries the base64 wire string — a concrete driver base64-decodes it to raw bytes **only at the bind**
+  and base64-encodes a read value back (the `base64` crate is an optional dep, on only under a driver
+  feature; value.rs stays codec-free, carrying the wire form like every other text-riding variant).
+- **Equality-only** (`= != in`) — a new `Family::Binary` bucket that is **rejected for ordered ops**
+  (`< > <= >=` → the existing `E0150` "needs an orderable column") and is never a `sum`/`avg`/`min`/`max`
+  operand (`E0241`). A blob has no meaningful order.
+- **Per-dialect DDL:** `BYTEA` (Postgres) / `BLOB` (MariaDB family — no length, the plain variable
+  binary; a bigger payload takes a raw `MEDIUMBLOB`/`LONGBLOB`) / `BLOB` (SQLite, a real blob).
+- **A `bytes` column cannot carry a literal default** (there is no source spelling for a blob) —
+  **`E0314`**; set it from a raw migration / DB default, or make it nullable. Loud, not silent
+  (principle 2).
+
+**Per-driver decode — the main blast radius (3 drivers).** Postgres transmits both **binary**: a new
+`pg_time` decoder turns a `TIME`'s i64-microseconds-since-midnight into the `HH:MM:SS` string, and a
+`BYTEA`'s raw bytes are base64-encoded (mirroring the D61/D83 uuid/timestamp/numeric decoders). MariaDB
+decodes `TIME` via `chrono::NaiveTime` (already present) and adds a `BLOB`/`VARBINARY`/`BINARY` family
+arm → base64. SQLite reads `TIME` as its stored `TEXT` string and a `BLOB` → base64. All three bind a
+`time` (MariaDB/SQLite as the wire string the server coerces; Postgres as a native `NaiveTime`) and a
+`bytes` (base64-decoded raw bytes into the blob column).
+
+**Nested (to-many JSON array) projection.** A `time` field nests fine everywhere (it renders as a JSON
+string). A `bytes` field is base64-encoded inside the SQL-built JSON element (`encode(…, 'base64')` /
+`TO_BASE64(…)`), so the array carries the same base64 the flat path does — **except SQLite**, whose
+JSON functions cannot hold a `BLOB`; a `bytes` field inside a to-many array is unsupported there (a
+clean deferral — SQLite is the degraded dialect, and the flat/top-level projection is the supported
+path). Documented in models.md.
+
+**Neutral migration snapshot** encodes `time`/`bytes` (`neutral_type` ↔ `parse_neutral`), so a type
+change to/from them diffs as an `alter column` and a from-scratch init emits the right type.
+
+**Blast radius.** `based-ast` (`Primitive::{Time,Bytes}`), `based-parser` (`"time"`/`"bytes"` keywords)
++ `spec/grammar.ebnf`, `based-fmt`/`based-facts`/`based-lsp` (primitive spelling + LSP type-keyword
+completion), `based-sema` (resolve `Family::Binary` + prim-family/name/agg; ctx + scope prim-family
+mirrors; model.rs `validate_time_bytes` defaults; codes `TIME_DEFAULT` E0313 / `BYTES_DEFAULT` E0314),
+`based-codegen` (`sql::sql_type` all 3 dialects, `dml::json_scalar` base64 cast, `client` alias +
+`Time`/`Bytes` type aliases, `openapi` schemas, `migrate` neutral type both directions), `based-runtime`
+(`SqlValue::{Time,Bytes}` + `Family::{Time,Bytes}` + coerce + shared `b64_encode`/`b64_decode`; the
+three drivers' bind + decode; `base64` optional dep), `spec/syntax/models.md`.
+
+**Tested.** Parser golden `time_bytes`; sema conformance golden `time_bytes` (E0150 ordered-op-on-bytes,
+E0313, E0314, clean ordered `time` filter + `bytes` equality); fmt round-trip (unit + the idempotency
+harness over the new inputs); codegen `ddl.rs` (all 3 dialects + time default), `client.rs` (`Time`/
+`Bytes` aliases), `openapi.rs` (formats `time`/`byte`); runtime `pg_time`/`bytea`→base64/`parse_time`
+unit tests; **live SQLite** (`time_and_bytes_round_trip_end_to_end`: raw-seeded blob decodes to base64,
+engine-bound create round-trips time + base64 bytes, ordered `time` filter) plus **live Postgres +
+MariaDB** (`time_and_bytes_columns_round_trip_live`: binary `TIME`/`BYTEA` decode + native bind, raw-seed
++ engine create). `make check` green.

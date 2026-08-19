@@ -527,6 +527,8 @@ fn neutral_type(ty: Primitive, many: bool) -> String {
         Primitive::Bool => "bool",
         Primitive::Timestamp => "timestamp",
         Primitive::Date => "date",
+        Primitive::Time => "time",
+        Primitive::Bytes => "bytes",
         Primitive::Json => "json",
         Primitive::Uuid | Primitive::Id => "uuid",
         // `ulid`/`serial` are recorded distinctly so a PK generation-strategy change

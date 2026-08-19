@@ -1068,6 +1068,10 @@ mod rust {
             Primitive::Bool => "bool",
             Primitive::Timestamp => "Timestamp",
             Primitive::Date => "Date",
+            Primitive::Time => "Time",
+            // A `bytes` value rides the wire as a **base64** string, so the client carries
+            // it as a `String` (its base64 text) — no extra dep, lossless.
+            Primitive::Bytes => "Bytes",
             Primitive::Json => "Json",
             Primitive::Uuid | Primitive::Id | Primitive::Ulid => "Uuid",
             // A bare `serial` value (not the typed `Id<entity::M>`, which the id-resolution
@@ -1358,6 +1362,9 @@ use std::marker::PhantomData;
 pub type Uuid = String;
 pub type Timestamp = String;
 pub type Date = String;
+pub type Time = String;
+// A `bytes` value is base64-encoded on the wire — carried as its base64 string.
+pub type Bytes = String;
 pub type Json = serde_json::Value;
 
 /// A typed id: the primary key of entity `E`. The wire repr is honest to the entity's

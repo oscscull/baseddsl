@@ -100,6 +100,21 @@ fn get_query_response_is_nullable_shape() {
 }
 
 #[test]
+fn time_and_bytes_fields_carry_string_formats() {
+    let doc = gen(r#"
+        Event { id: Id, start_at: time, payload: bytes }
+        shape EventRow from Event { start_at, payload }
+        query events() -> EventRow[];
+        "#);
+    let row = &doc["components"]["schemas"]["EventRow"];
+    // `time` → an RFC 3339 partial-time string; `bytes` → base64 (`format: byte`).
+    assert_eq!(row["properties"]["start_at"]["type"], "string");
+    assert_eq!(row["properties"]["start_at"]["format"], "time");
+    assert_eq!(row["properties"]["payload"]["type"], "string");
+    assert_eq!(row["properties"]["payload"]["format"], "byte");
+}
+
+#[test]
 fn list_query_response_is_array() {
     let doc = gen(r#"
         @soft_delete(deleted_at)

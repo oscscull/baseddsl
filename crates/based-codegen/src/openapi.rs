@@ -942,6 +942,10 @@ fn primitive_schema(p: Primitive) -> Value {
         Primitive::Bool => json!({ "type": "boolean" }),
         Primitive::Timestamp => json!({ "type": "string", "format": "date-time" }),
         Primitive::Date => json!({ "type": "string", "format": "date" }),
+        // `time` → an RFC 3339 partial-time string; `bytes` → a base64 string (OpenAPI
+        // 3.1 `format: byte`), never a raw JSON byte array.
+        Primitive::Time => json!({ "type": "string", "format": "time" }),
+        Primitive::Bytes => json!({ "type": "string", "format": "byte" }),
         Primitive::Json => json_schema(),
         Primitive::Uuid | Primitive::Id => uuid_schema(),
         // A `ulid` is a 26-char string (not a uuid); a `serial` id is a JSON integer.
@@ -1018,6 +1022,8 @@ fn primitive_name(p: Primitive) -> &'static str {
         Primitive::Bool => "bool",
         Primitive::Timestamp => "timestamp",
         Primitive::Date => "date",
+        Primitive::Time => "time",
+        Primitive::Bytes => "bytes",
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "Id",

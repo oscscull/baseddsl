@@ -65,7 +65,12 @@ fn bind_all<'q>(
             | SqlValue::Uuid(s)
             | SqlValue::Timestamp(s)
             | SqlValue::Date(s)
+            | SqlValue::Time(s)
             | SqlValue::Decimal(s) => q.bind(s.clone()),
+            // A `bytes` value arrives base64; store the raw bytes in the `BLOB` column. A
+            // malformed base64 string binds as empty bytes — the same shape a bad literal
+            // would take (the value never reaches the DB well-formed).
+            SqlValue::Bytes(s) => q.bind(crate::value::b64_decode(s).unwrap_or_default()),
             SqlValue::Json(j) => q.bind(j.to_string()),
         };
     }
@@ -103,20 +108,13 @@ fn decode_sqlite(
         "INTEGER" | "BOOLEAN" => J::Number(row.try_get_unchecked::<i64, _>(i)?.into()),
         "REAL" => serde_json::Number::from_f64(row.try_get_unchecked::<f64, _>(i)?)
             .map_or(J::Null, J::Number),
-        "BLOB" => J::String(hex(&row.try_get_unchecked::<Vec<u8>, _>(i)?)),
+        // A `bytes` column (`BLOB` affinity) rides the wire as base64.
+        "BLOB" => J::String(crate::value::b64_encode(
+            &row.try_get_unchecked::<Vec<u8>, _>(i)?,
+        )),
         // TEXT (and anything else stringlike): the stored string, verbatim.
         _ => J::String(row.try_get_unchecked::<String, _>(i)?),
     })
-}
-
-/// Lowercase hex of a byte slice (for a blob column value).
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap());
-        s.push(char::from_digit(u32::from(b & 0xf), 16).unwrap());
-    }
-    s
 }
 
 /// One pooled SQLite connection, running one request.

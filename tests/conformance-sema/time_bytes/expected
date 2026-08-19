@@ -1,0 +1,18 @@
+DIAGNOSTICS
+  E0150: `>` needs an orderable column, but `bytes` is not
+  E0313: default for time column `t` must be a time string literal (e.g. "14:30:00")
+  E0314: a bytes column (`blob`) cannot have a literal default — set it from a raw migration or a DB default
+SCHEMA
+model Event  table=event
+  id: Id
+  start_at: time  default=lit
+  payload: bytes?
+  index(start_at)
+  index(payload)
+model BadDefaults  table=bad_defaults
+  id: Id
+  t: time  default=lit
+  blob: bytes  default=lit
+query after  target=Event verb=list many
+query by_payload  target=Event verb=list many
+query bad_cmp  target=Event verb=list many

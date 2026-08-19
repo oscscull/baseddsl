@@ -79,6 +79,15 @@ fn fmt(src: &str) -> String {
 }
 
 #[test]
+fn time_and_bytes_primitives_round_trip() {
+    let got = fmt("Event {\n start_at: time (default \"09:00:00\")\n payload: bytes?\n}");
+    assert_eq!(
+        got,
+        "Event {\n  start_at: time (default \"09:00:00\")\n  payload:  bytes?\n}\n"
+    );
+}
+
+#[test]
 fn field_type_column_aligns() {
     let got = fmt("Order {\n deleted_at: timestamp?\n fulfilled_by: User?\n total: int\n}");
     assert_eq!(

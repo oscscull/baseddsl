@@ -1627,22 +1627,30 @@ impl<'a> Select<'a> {
         format!("{}({})", self.dialect.json_object_fn(), pairs.join(", "))
     }
 
-    /// One scalar column inside a JSON element body. A `decimal` column is cast to
-    /// text first: the wire contract carries a decimal as its exact JSON *string*, but
-    /// a SQL-built JSON object would render the native numeric as a JSON number and
-    /// lose the contract (SQLite already stores decimal as TEXT — no cast needed).
+    /// One scalar column inside a JSON element body. Two families need a cast so the
+    /// SQL-built JSON element matches the wire contract:
+    ///   * a `decimal` — the wire carries its exact JSON *string*, but a native numeric
+    ///     would render as a JSON number and lose digits (SQLite stores it as TEXT — no
+    ///     cast needed);
+    ///   * a `bytes` — the wire carries **base64**, but the DB's own JSON rendering of a
+    ///     binary column is the wrong form (Postgres hex `\x…`, MariaDB a `base64:type…`
+    ///     tag), so it is base64-encoded in SQL (`encode`/`TO_BASE64`). SQLite's JSON
+    ///     functions cannot carry a `BLOB`, so a `bytes` field inside a to-many array is
+    ///     unsupported there — project it flat instead.
     fn json_scalar(&self, alias: &str, col: &str, path: &Path, model: &RModel) -> String {
         let qcol = self.qcol(alias, col);
-        if !matches!(
-            path_primitive(self.schema, model, path),
-            Primitive::Decimal { .. }
-        ) {
-            return qcol;
-        }
-        match self.dialect {
-            Dialect::Postgres => format!("({qcol})::text"),
-            Dialect::MariaDb | Dialect::MySql => format!("CAST({qcol} AS CHAR)"),
-            Dialect::Sqlite => qcol,
+        match path_primitive(self.schema, model, path) {
+            Primitive::Decimal { .. } => match self.dialect {
+                Dialect::Postgres => format!("({qcol})::text"),
+                Dialect::MariaDb | Dialect::MySql => format!("CAST({qcol} AS CHAR)"),
+                Dialect::Sqlite => qcol,
+            },
+            Primitive::Bytes => match self.dialect {
+                Dialect::Postgres => format!("encode({qcol}, 'base64')"),
+                Dialect::MariaDb | Dialect::MySql => format!("TO_BASE64({qcol})"),
+                Dialect::Sqlite => qcol,
+            },
+            _ => qcol,
         }
     }
 

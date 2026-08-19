@@ -87,7 +87,11 @@ fn bind_all<'q>(
             | SqlValue::Uuid(s)
             | SqlValue::Timestamp(s)
             | SqlValue::Date(s)
+            | SqlValue::Time(s)
             | SqlValue::Decimal(s) => q.bind(s.clone()),
+            // A `bytes` value arrives base64; bind the raw bytes into the `BLOB` column
+            // (a malformed base64 string binds as empty, as a bad literal would).
+            SqlValue::Bytes(s) => q.bind(crate::value::b64_decode(s).unwrap_or_default()),
             SqlValue::Json(j) => q.bind(j.to_string()),
         };
     }
@@ -144,9 +148,13 @@ fn decode_mysql(row: &MySqlRow, i: usize, ty: &str) -> Result<serde_json::Value,
         "TIME" => J::String(mysql_time(
             row.try_get_unchecked::<chrono::NaiveTime, _>(i)?,
         )),
+        // A `bytes` column (`BLOB`/`VARBINARY`/`BINARY` family) rides the wire as base64.
+        "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "VARBINARY" | "BINARY" => J::String(
+            crate::value::b64_encode(&row.try_get_unchecked::<Vec<u8>, _>(i)?),
+        ),
         // Everything string-ish, including the binary-charset-flagged UUID/JSON
-        // columns sqlx types BINARY/BLOB: raw bytes → UTF-8 (the value is already the
-        // canonical text), hex for genuinely binary data.
+        // columns sqlx types as raw bytes → UTF-8 (the value is already the canonical
+        // text), hex for genuinely binary data.
         _ => match String::from_utf8(row.try_get_unchecked::<Vec<u8>, _>(i)?) {
             Ok(s) => J::String(s),
             Err(e) => J::String(hex(e.as_bytes())),

@@ -198,6 +198,10 @@ pub mod code {
     pub const DISTINCT_AGGREGATE: &str = "E0311"; // `distinct` on an aggregate query — a `group by` already returns distinct groups
     pub const DISTINCT_ORDER_UNPROJECTED: &str = "E0312"; // an `order` column under `distinct` is not projected (invalid `SELECT DISTINCT … ORDER BY` on Postgres)
     pub const DISTINCT_NOOP: &str = "W0111"; // `distinct` on a query that projects the primary key — every row is already unique
+
+    // `time` and `bytes` scalar types (D117): a time-of-day and a binary blob.
+    pub const TIME_DEFAULT: &str = "E0313"; // a `time` column's `default` must be a time string literal (e.g. "14:30:00")
+    pub const BYTES_DEFAULT: &str = "E0314"; // a `bytes` column cannot carry a literal default — set it from a raw migration or a DB default
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

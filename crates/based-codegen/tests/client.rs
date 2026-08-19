@@ -723,6 +723,20 @@ fn decimal_field_emits_rust_decimal_and_float_emits_f64() {
     assert!(out.contains("pub score: f64,"), "\n{out}");
 }
 
+#[test]
+fn time_and_bytes_fields_emit_string_aliases() {
+    let out = gen(r#"
+        Event { id: Id, start_at: time, payload: bytes }
+        shape EventRow from Event { start_at, payload }
+        query events() -> EventRow[];
+        "#);
+    // Both ride the wire as strings (time = "HH:MM:SS", bytes = base64) — dep-free aliases.
+    assert!(out.contains("pub start_at: Time,"), "\n{out}");
+    assert!(out.contains("pub payload: Bytes,"), "\n{out}");
+    assert!(out.contains("pub type Time = String;"), "\n{out}");
+    assert!(out.contains("pub type Bytes = String;"), "\n{out}");
+}
+
 // ---------- idempotency keys -------------------------------------------------
 
 const KEYED_SRC: &str = r#"

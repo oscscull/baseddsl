@@ -704,9 +704,11 @@ fn prim_family(ty: Primitive) -> u8 {
         | Primitive::Id
         | Primitive::Ulid
         | Primitive::Timestamp
-        | Primitive::Date => 0,
+        | Primitive::Date
+        | Primitive::Time => 0,
         Primitive::Int | Primitive::Serial | Primitive::Float | Primitive::Decimal { .. } => 1,
         Primitive::Bool => 2,
         Primitive::Json => 3,
+        Primitive::Bytes => 4,
     }
 }

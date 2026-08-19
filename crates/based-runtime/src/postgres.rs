@@ -113,9 +113,17 @@ fn bind_all<'q>(
                 chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
                     .map_err(|e| DbError::new(format!("invalid date `{s}`: {e}")))?,
             ),
+            SqlValue::Time(s) => {
+                q.bind(parse_time(s).ok_or_else(|| DbError::new(format!("invalid time `{s}`")))?)
+            }
             SqlValue::Decimal(s) => q.bind(
                 sqlx::types::BigDecimal::from_str(s)
                     .map_err(|e| DbError::new(format!("invalid decimal `{s}`: {e}")))?,
+            ),
+            // A `bytes` value arrives base64 → the raw bytes bind to the `BYTEA` column.
+            SqlValue::Bytes(s) => q.bind(
+                crate::value::b64_decode(s)
+                    .map_err(|e| DbError::new(format!("invalid base64 bytes: {e}")))?,
             ),
             SqlValue::Json(j) => q.bind(j.clone()),
         };
@@ -140,6 +148,17 @@ fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
         if let Ok(n) = NaiveDateTime::parse_from_str(s, fmt) {
             return Some(n.and_utc());
+        }
+    }
+    None
+}
+
+/// Parse a wire time-of-day (`HH:MM:SS` with an optional fractional part) into a
+/// `NaiveTime` for a native `TIME` bind.
+fn parse_time(s: &str) -> Option<chrono::NaiveTime> {
+    for fmt in ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"] {
+        if let Ok(t) = chrono::NaiveTime::parse_from_str(s, fmt) {
+            return Some(t);
         }
     }
     None
@@ -197,6 +216,9 @@ fn decode_pg_binary(ty: &str, b: &[u8]) -> serde_json::Value {
         "UUID" => pg_uuid(b),
         "TIMESTAMPTZ" | "TIMESTAMP" => pg_timestamp(b),
         "DATE" => pg_date(b),
+        "TIME" => pg_time(b),
+        // `bytea` transmits its raw bytes → base64 (the wire form for a `bytes` value).
+        "BYTEA" => J::String(crate::value::b64_encode(b)),
         "JSONB" => pg_jsonb(b),
         // `numeric`/`decimal` carries a packed base-10000 digit array, not its text — so a
         // decimal returns as its exact string (a JSON string, the wire form), losing no digit.
@@ -222,8 +244,24 @@ fn decode_pg_text(ty: &str, s: &str) -> serde_json::Value {
             .ok()
             .and_then(serde_json::Number::from_f64)
             .map_or(J::Null, J::Number),
+        // text-format `bytea` is `\xHEX`; re-encode as base64 to keep the wire contract.
+        "BYTEA" => J::String(crate::value::b64_encode(
+            &s.strip_prefix("\\x").and_then(unhex).unwrap_or_default(),
+        )),
         _ => J::String(s.to_string()),
     }
+}
+
+/// Decode a hex string (even length, lowercase or upper) into bytes, or `None` if
+/// malformed — the inverse of [`hex`], used for a text-format `bytea` value.
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// Postgres's binary temporal epoch: 2000-01-01 is 10957 days after the Unix epoch, the
@@ -266,6 +304,22 @@ fn pg_timestamp(b: &[u8]) -> serde_json::Value {
         s.push_str(&format!(".{frac:06}"));
     }
     s.push_str("+00");
+    serde_json::Value::String(s)
+}
+
+/// A binary `time` (an i64 of microseconds since 00:00:00) → an `HH:MM:SS[.ffffff]`
+/// string — the same canonical form a literal would take, so it round-trips exactly.
+fn pg_time(b: &[u8]) -> serde_json::Value {
+    let Some(micros) = read_i64(b) else {
+        return serde_json::Value::String(hex(b));
+    };
+    let secs = micros / 1_000_000;
+    let frac = micros % 1_000_000;
+    let (hh, mm, ss) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let mut s = format!("{hh:02}:{mm:02}:{ss:02}");
+    if frac != 0 {
+        s.push_str(&format!(".{frac:06}"));
+    }
     serde_json::Value::String(s)
 }
 
@@ -703,6 +757,37 @@ mod tests {
     fn binary_date_decodes_to_iso() {
         assert_eq!(pg_date(&0i32.to_be_bytes()), json!("2000-01-01"));
         assert_eq!(pg_date(&31i32.to_be_bytes()), json!("2000-02-01"));
+    }
+
+    #[test]
+    fn binary_time_decodes_to_hms() {
+        // Midnight, no fractional part.
+        assert_eq!(pg_time(&0i64.to_be_bytes()), json!("00:00:00"));
+        // 14:30:00 = (14*3600 + 30*60) seconds of microseconds.
+        let micros = (14 * 3600 + 30 * 60) * 1_000_000i64;
+        assert_eq!(pg_time(&micros.to_be_bytes()), json!("14:30:00"));
+        // A fractional second is preserved to microseconds.
+        let micros = 1_500_000i64; // 00:00:01.500000
+        assert_eq!(pg_time(&micros.to_be_bytes()), json!("00:00:01.500000"));
+        // A wrong length never panics — it falls back to hex.
+        assert_eq!(pg_time(&[0x01, 0x02]), json!("0102"));
+    }
+
+    #[test]
+    fn binary_bytea_decodes_to_base64() {
+        // `bytea` transmits raw bytes; the wire carries them base64.
+        assert_eq!(
+            decode_pg_binary("BYTEA", &[0x00, 0x01, 0x02, 0xff]),
+            json!("AAEC/w==")
+        );
+    }
+
+    #[test]
+    fn parse_time_accepts_wire_forms() {
+        assert!(parse_time("14:30:00").is_some());
+        assert!(parse_time("14:30:00.500").is_some());
+        assert!(parse_time("14:30").is_some());
+        assert!(parse_time("not-a-time").is_none());
     }
 
     #[test]

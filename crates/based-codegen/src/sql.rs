@@ -558,6 +558,10 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
                 Primitive::Bool => "BOOLEAN".into(),
                 Primitive::Timestamp => "DATETIME".into(),
                 Primitive::Date => "DATE".into(),
+                Primitive::Time => "TIME".into(),
+                // A binary blob — `BLOB` (no length; up to 64 KiB, the family's plain
+                // variable binary). A bigger payload takes a raw `MEDIUMBLOB`/`LONGBLOB`.
+                Primitive::Bytes => "BLOB".into(),
                 Primitive::Json => "JSON".into(),
                 Primitive::Uuid | Primitive::Id => "CHAR(36)".into(),
                 // `ulid` is a 26-char Crockford-base32 string (not a UUID) — a fixed CHAR.
@@ -583,7 +587,10 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
             match ty {
                 Primitive::Text => "TEXT".into(),
                 Primitive::Int | Primitive::Bool => "INTEGER".into(),
-                Primitive::Timestamp | Primitive::Date => "TEXT".into(),
+                // SQLite has no native TIME — store the canonical `HH:MM:SS` string as
+                // `TEXT` (the same degradation `date`/`timestamp`/`decimal` take here).
+                Primitive::Timestamp | Primitive::Date | Primitive::Time => "TEXT".into(),
+                Primitive::Bytes => "BLOB".into(),
                 Primitive::Json => "TEXT".into(),
                 Primitive::Uuid | Primitive::Id | Primitive::Ulid => "TEXT".into(),
                 // `serial`'s storage type (the `PRIMARY KEY AUTOINCREMENT` rides the column).
@@ -605,6 +612,8 @@ pub(crate) fn sql_type(ty: Primitive, many: bool, dialect: Dialect) -> String {
                 Primitive::Bool => "BOOLEAN".into(),
                 Primitive::Timestamp => "TIMESTAMPTZ".into(),
                 Primitive::Date => "DATE".into(),
+                Primitive::Time => "TIME".into(),
+                Primitive::Bytes => "BYTEA".into(),
                 Primitive::Json => "JSONB".into(),
                 Primitive::Uuid | Primitive::Id => "UUID".into(),
                 // `ulid` is a 26-char string, not a valid `UUID` value — store as text.

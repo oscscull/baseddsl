@@ -538,6 +538,7 @@ pub fn validate(
     validate_fk(ast, mi, models, sink);
     validate_was(ast, mi, models, sink);
     validate_decimals(ast, sink);
+    validate_time_bytes(ast, sink);
     compute_unique(ast, &mut models[mi]);
 }
 
@@ -576,6 +577,49 @@ fn validate_decimals(ast: &Model, sink: &mut Sink) {
                         f.name.node
                     ),
                 );
+            }
+        }
+    }
+}
+
+/// Validate `time`/`bytes` column defaults. A `time` default must be a string literal
+/// (a time-of-day like `"14:30:00"`) — a non-string is `E0313`. A `bytes` column cannot
+/// carry any literal default (there is no source spelling for a binary blob) — `E0314`;
+/// supply it from a raw migration or a DB default instead. Purely local.
+fn validate_time_bytes(ast: &Model, sink: &mut Sink) {
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        let BaseType::Primitive(prim) = f.ty.base else {
+            continue;
+        };
+        for m in &f.modifiers {
+            let Modifier::Default(DefaultVal::Lit(lit)) = m else {
+                continue;
+            };
+            match prim {
+                Primitive::Time if !matches!(lit, Literal::Str(_) | Literal::Null) => {
+                    sink.error(
+                        code::TIME_DEFAULT,
+                        f.span,
+                        format!(
+                            "default for time column `{}` must be a time string literal \
+                             (e.g. \"14:30:00\")",
+                            f.name.node
+                        ),
+                    );
+                }
+                Primitive::Bytes if !matches!(lit, Literal::Null) => {
+                    sink.error(
+                        code::BYTES_DEFAULT,
+                        f.span,
+                        format!(
+                            "a bytes column (`{}`) cannot have a literal default — set it \
+                             from a raw migration or a DB default",
+                            f.name.node
+                        ),
+                    );
+                }
+                _ => {}
             }
         }
     }

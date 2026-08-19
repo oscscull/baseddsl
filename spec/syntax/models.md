@@ -9,7 +9,7 @@ One model per file. References out are fine; editing a model never mutates anoth
 Uniform for columns and relations: `name: Type (modifiers)`
 
 ## Types
-- Primitives lowercase: `text int bool timestamp date json uuid float decimal`
+- Primitives lowercase: `text int bool timestamp date time json uuid float decimal bytes`
 - Primary-key strategy types (valid only as `id`, see Defaults): `uuid ulid serial`
 - Models capitalized: `User Order`
 - Casing is load-bearing + committed: capital = relation, lowercase = column. Never lowercase a model or capitalize a primitive.
@@ -31,6 +31,27 @@ Uniform for columns and relations: `name: Type (modifiers)`
   added later as an alias. Use `decimal` when exactness matters — `float` is inexact.
 - `int`, `float`, and `decimal` share one **numeric** family: a numeric literal compares/assigns to
   any of them, and they inter-compare with `= != < > <= >= in`.
+
+### Time + binary
+| type | form | DDL (MariaDB / SQLite / Postgres) | wire | client |
+|------|------|-----------------------------------|------|--------|
+| `time` | time of day, no date (`HH:MM:SS[.ffffff]`) | `TIME` / `TEXT` / `TIME` | JSON **string** | `Time` (= `String`) |
+| `bytes` | binary blob | `BLOB` / `BLOB` / `BYTEA` | JSON **base64 string** | `Bytes` (= `String`) |
+
+- **`time`** is a bare time of day, distinct from `timestamp` (an instant) and `date`. It rides the
+  wire as its `HH:MM:SS` string (a fractional part is kept), and — like `timestamp`/`date` — it is
+  **ordered**: `= != < > <= >= in` and `min`/`max` all apply. SQLite has no native `TIME`, so it
+  degrades to `TEXT` (the zero-padded string compares lexicographically, which is chronologically
+  correct); the production dialects use a real `TIME`. A `time` column may take a **string-literal
+  default** (`(default "00:00:00")`); a non-string default is `E0313`.
+- **`bytes`** is a binary blob. It rides the wire as a **base64** string (never a raw JSON byte
+  array), lossless; the client carries it as its base64 `String`, and the engine base64-decodes it
+  to raw bytes only at the driver bind (and re-encodes a read value). It is **equality-only** —
+  `= != in`; an ordered comparison (`< > <= >=`) or a `sum`/`avg`/`min`/`max` on it is `E0150`/`E0241`
+  (a blob has no meaningful order). A `bytes` column **cannot carry a literal default** (there is no
+  source spelling for a blob) — that is `E0314`; set it from a raw migration or a DB default, or make
+  it nullable (`?`). A `bytes` field inside a **to-many array** projection is unsupported on SQLite
+  (its JSON functions cannot carry a `BLOB`) — project it as a flat/top-level field there.
 
 ### Opaque columns — `raw("…")`
 The primitive set is closed. A column whose DB type the engine does not model — PostGIS

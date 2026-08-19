@@ -24,8 +24,13 @@ pub enum SqlValue {
     Uuid(String),
     Timestamp(String),
     Date(String),
+    /// A time-of-day string (`HH:MM:SS[.ffffff]`).
+    Time(String),
     /// An exact decimal string — never an `f64`.
     Decimal(String),
+    /// A binary blob carried as its **base64** wire string — a concrete driver base64-decodes
+    /// it to raw bytes at the bind, and base64-encodes a read value back to this form.
+    Bytes(String),
     Json(serde_json::Value),
 }
 
@@ -43,8 +48,12 @@ pub enum Family {
     Uuid,
     Timestamp,
     Date,
+    /// `time` — a time-of-day string on the wire.
+    Time,
     /// `decimal` — its exact string on the wire, never an `f64`.
     Decimal,
+    /// `bytes` — a base64 string on the wire, decoded to raw bytes at a typed bind.
+    Bytes,
     /// `json` — any JSON value passes through unchanged.
     Json,
     /// Untyped: coerce by the JSON value's own shape (a string stays a plain text
@@ -63,9 +72,11 @@ impl Family {
             Primitive::Bool => Self::Bool,
             Primitive::Json => Self::Json,
             Primitive::Decimal { .. } => Self::Decimal,
+            Primitive::Bytes => Self::Bytes,
             Primitive::Text => Self::Text,
             Primitive::Timestamp => Self::Timestamp,
             Primitive::Date => Self::Date,
+            Primitive::Time => Self::Time,
             // `ulid` is an app-minted sortable string id — same wire family as `uuid`.
             Primitive::Uuid | Primitive::Id | Primitive::Ulid => Self::Uuid,
         }
@@ -81,7 +92,9 @@ impl Family {
             Self::Uuid => "uuid",
             Self::Timestamp => "timestamp",
             Self::Date => "date",
+            Self::Time => "time",
             Self::Decimal => "decimal",
+            Self::Bytes => "bytes",
             Self::Json => "json",
             Self::Any => "value",
         }
@@ -159,8 +172,18 @@ pub fn coerce(
             J::String(s) => Ok(SqlValue::Date(s.clone())),
             _ => mismatch(json_kind(v)),
         },
+        Family::Time => match v {
+            J::String(s) => Ok(SqlValue::Time(s.clone())),
+            _ => mismatch(json_kind(v)),
+        },
         Family::Decimal => match v {
             J::String(s) => Ok(SqlValue::Decimal(s.clone())),
+            _ => mismatch(json_kind(v)),
+        },
+        // A `bytes` value crosses the wire as a base64 string; the concrete driver decodes
+        // it to raw bytes at the bind (validated there, uniformly across drivers).
+        Family::Bytes => match v {
+            J::String(s) => Ok(SqlValue::Bytes(s.clone())),
             _ => mismatch(json_kind(v)),
         },
         Family::Json => Ok(SqlValue::Json(v.clone())),
@@ -182,6 +205,21 @@ fn by_shape(v: &serde_json::Value) -> SqlValue {
         J::String(s) => SqlValue::Text(s.clone()),
         J::Array(_) | J::Object(_) => SqlValue::Json(v.clone()),
     }
+}
+
+/// base64 (standard alphabet, padded) between a `bytes` value's wire string and its raw
+/// bytes — the concrete drivers decode at a bind and encode a read `BYTEA`/`BLOB` value
+/// back. Kept here so all three drivers share one codec.
+#[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
+pub(crate) fn b64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s.trim())
+}
+
+#[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
+pub(crate) fn b64_encode(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(b)
 }
 
 /// Human name of a JSON value's kind, for the "expected X, got Y" error.

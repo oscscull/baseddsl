@@ -9,7 +9,14 @@ rust-version.workspace = true
 # The concrete MariaDB driver + shard router, over sqlx's MySql driver. Off by default
 # so the core runtime (planning + dispatch) stays dependency-light and the seam tests
 # need no database.
-mariadb = ["dep:sqlx", "sqlx/mysql", "sqlx/chrono", "sqlx/bigdecimal", "dep:chrono"]
+mariadb = [
+    "dep:sqlx",
+    "sqlx/mysql",
+    "sqlx/chrono",
+    "sqlx/bigdecimal",
+    "dep:chrono",
+    "dep:base64",
+]
 # The concrete Postgres driver + shard router, over sqlx's Postgres driver. Postgres
 # transmits every parameter binary-typed, so this driver parses the typed text-riding
 # `SqlValue` variants into native uuid/chrono/json/decimal binds.
@@ -21,11 +28,12 @@ postgres = [
     "sqlx/uuid",
     "sqlx/json",
     "dep:chrono",
+    "dep:base64",
 ]
 # The SQLite driver + backend over sqlx's async SQLite driver (bundled engine, no
 # system dependency, no live server) — the infra-free `Db`/`Backend` behind real
 # end-to-end integration tests.
-sqlite = ["dep:sqlx", "sqlx/sqlite"]
+sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:base64"]
 # The HTTP listener (`based serve`) — the axum socket edge over `serve::dispatch` —
 # plus the production uuid id-gen. Off by default so the core stays a plain library.
 serve = ["dep:axum", "dep:uuid", "dep:ulid", "tokio/net"]
@@ -73,6 +81,9 @@ axum = { version = "0.8", optional = true }
 uuid = { version = "1", optional = true, features = ["v4"] }
 # Production id generation for the `ulid` PK strategy: sortable 128-bit ids.
 ulid = { version = "1", optional = true }
+# Encoding/decoding a `bytes` value between its base64 wire string and the raw bytes a
+# driver binds/reads (in the concrete driver impls only).
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 based-parser.workspace = true

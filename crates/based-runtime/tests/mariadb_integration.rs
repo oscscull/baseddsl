@@ -1087,3 +1087,59 @@ async fn schema_qualified_models_create_read_and_fk_across_databases() {
         json!([{ "note": "hello", "org": { "name": "Acme" } }])
     );
 }
+
+/// `time` and `bytes` round-trip live against MariaDB: a `TIME` column binds/decodes via
+/// chrono, a `BLOB` column base64-decodes at the bind and base64-encodes at the read. Proven
+/// through a `create` (bind path) and a raw-seeded row (decode path independent of our binds).
+#[tokio::test]
+async fn time_and_bytes_columns_round_trip_live() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        Event { id: Id, start_at: time, payload: bytes, label: text, @index(start_at) }
+        shape EventCard from Event { start_at, payload, label }
+        mutation add_event(start_at: time, payload: bytes, label: text) -> EventCard {
+          create Event { start_at = $start_at, payload = $payload, label = $label };
+        }
+        query events() -> EventCard[] { list Event order (start_at asc); }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    // Raw-seed a row (engine `Id` = a `CHAR(36)` uuid): a hex blob literal `x'000102FF'`
+    // decodes to base64 `AAEC/w==` — proving the decode path independent of our own binds.
+    container
+        .exec_batch(
+            "INSERT INTO `event` (`id`, `start_at`, `payload`, `label`) VALUES \
+                ('00000000-0000-4000-8000-0000000000e0', '08:15:00', x'000102FF', 'seed');",
+        )
+        .await;
+
+    // Create through the engine: `14:30:00` binds to a native `TIME`; `aGVsbG8=` ("hello")
+    // base64-decodes into the `BLOB`. The read-back re-encodes both to the wire form.
+    let created = call(
+        &c,
+        &router,
+        "POST",
+        "/m/add_event",
+        json!({ "start_at": "14:30:00", "payload": "aGVsbG8=", "label": "made" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{:?}", created.body);
+    assert_eq!(
+        created.body,
+        json!({ "start_at": "14:30:00", "payload": "aGVsbG8=", "label": "made" })
+    );
+
+    let all = call(&c, &router, "POST", "/q/events", json!({}), json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        all.body,
+        json!([
+            { "start_at": "08:15:00", "payload": "AAEC/w==", "label": "seed" },
+            { "start_at": "14:30:00", "payload": "aGVsbG8=", "label": "made" }
+        ])
+    );
+}

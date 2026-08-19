@@ -132,8 +132,9 @@ enum Family {
     Textual,
     Numeric,
     Bool,
-    Json, // holds anything → never mismatches
-    Key,  // a relation edge, compared to its key (uuid string or int)
+    Json,   // holds anything → never mismatches
+    Key,    // a relation edge, compared to its key (uuid string or int)
+    Binary, // a `bytes` blob — equality-only, never orderable
 }
 
 fn prim_family(ty: Primitive) -> Family {
@@ -143,12 +144,16 @@ fn prim_family(ty: Primitive) -> Family {
         | Primitive::Id
         | Primitive::Ulid
         | Primitive::Timestamp
-        | Primitive::Date => Family::Textual,
+        | Primitive::Date
+        // `time` rides with text: string-writable and orderable (`< > <= >=`), like the
+        // other temporal types.
+        | Primitive::Time => Family::Textual,
         Primitive::Int | Primitive::Serial | Primitive::Float | Primitive::Decimal { .. } => {
             Family::Numeric
         }
         Primitive::Bool => Family::Bool,
         Primitive::Json => Family::Json,
+        Primitive::Bytes => Family::Binary,
     }
 }
 
@@ -177,6 +182,8 @@ fn prim_name(p: Primitive) -> &'static str {
         Primitive::Bool => "bool",
         Primitive::Timestamp => "timestamp",
         Primitive::Date => "date",
+        Primitive::Time => "time",
+        Primitive::Bytes => "bytes",
         Primitive::Json => "json",
         Primitive::Uuid => "uuid",
         Primitive::Id => "id",
@@ -222,7 +229,9 @@ pub fn agg_operand_reason(func: &str, term: &Terminal, is_enum: bool) -> Option<
     let comparable = numeric
         || matches!(
             term,
-            Terminal::Scalar(Primitive::Timestamp | Primitive::Date | Primitive::Text)
+            Terminal::Scalar(
+                Primitive::Timestamp | Primitive::Date | Primitive::Time | Primitive::Text
+            )
         ) && !is_enum;
     match func {
         "sum" | "avg" if !numeric => Some(format!(
@@ -230,7 +239,7 @@ pub fn agg_operand_reason(func: &str, term: &Terminal, is_enum: bool) -> Option<
             terminal_name(term)
         )),
         "min" | "max" if !comparable => Some(format!(
-            "`{func}` needs a comparable column (numeric/timestamp/date/text), not {}",
+            "`{func}` needs a comparable column (numeric/timestamp/date/time/text), not {}",
             terminal_name(term)
         )),
         _ => None,
@@ -279,7 +288,7 @@ fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink:
         Op::Gt | Op::Lt | Op::Ge | Op::Le => {
             if matches!(
                 terminal_family(&lhs),
-                Family::Bool | Family::Json | Family::Key
+                Family::Bool | Family::Json | Family::Key | Family::Binary
             ) {
                 sink.error(
                     code::OP_TYPE,
@@ -619,6 +628,7 @@ fn family_name(f: Family) -> &'static str {
         Family::Bool => "bool",
         Family::Json => "json",
         Family::Key => "relation-key",
+        Family::Binary => "bytes",
     }
 }
 

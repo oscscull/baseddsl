@@ -686,6 +686,69 @@ async fn uuid_and_timestamp_columns_round_trip_and_keyset() {
     assert_eq!(p2.body["cursor"], json!(null), "last page has no cursor");
 }
 
+/// `time` and `bytes` round-trip live against Postgres — the risky path, since Postgres
+/// transmits both binary: a `TIME` as an i64 of microseconds since midnight, a `BYTEA` as
+/// raw bytes. The bind side parses the wire `HH:MM:SS` into a native `time` and base64-decodes
+/// the wire string into `bytea`; the decode side turns the binary `time` back into its string
+/// and base64-encodes the `bytea` — both through a `create` (bind) and a read-back (decode),
+/// plus a raw-seeded row to prove the decoders independently of our own binds.
+#[tokio::test]
+async fn time_and_bytes_columns_round_trip_live() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        Event { id: Id, start_at: time, payload: bytes, label: text, @index(start_at) }
+        shape EventCard from Event { start_at, payload, label }
+        mutation add_event(start_at: time, payload: bytes, label: text) -> EventCard {
+          create Event { start_at = $start_at, payload = $payload, label = $label };
+        }
+        query events() -> EventCard[] { list Event order (start_at asc); }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    // Raw-seed a row (engine `Id` = a real `uuid` column): a bytea hex literal `\x000102ff`
+    // decodes to base64 `AAEC/w==`, and the `TIME` literal decodes (from binary microseconds)
+    // back to `08:15:00` — proving the decoders independently of our own bind path.
+    container
+        .exec_batch(
+            "INSERT INTO \"event\" (\"id\", \"start_at\", \"payload\", \"label\") VALUES \
+                ('00000000-0000-4000-8000-0000000000e0', '08:15:00', '\\x000102ff', 'seed');",
+        )
+        .await;
+
+    // Create through the engine: the bind parses `14:30:00` into a native `time` and base64-
+    // decodes `aGVsbG8=` ("hello") into `bytea`; the read-back decodes both to the wire form.
+    let created = call(
+        &c,
+        &router,
+        "POST",
+        "/m/add_event",
+        json!({ "start_at": "14:30:00", "payload": "aGVsbG8=", "label": "made" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{:?}", created.body);
+    assert_eq!(
+        created.body,
+        json!({ "start_at": "14:30:00", "payload": "aGVsbG8=", "label": "made" }),
+        "create re-selects the time string + base64 bytes exact (binary bind + decode)"
+    );
+
+    // List both (ordered by time): the raw-seeded row's binary `TIME`/`BYTEA` decode to the
+    // same canonical forms as the engine-bound row.
+    let all = call(&c, &router, "POST", "/q/events", json!({}), json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        all.body,
+        json!([
+            { "start_at": "08:15:00", "payload": "AAEC/w==", "label": "seed" },
+            { "start_at": "14:30:00", "payload": "aGVsbG8=", "label": "made" }
+        ])
+    );
+}
+
 /// Soft-delete + restore read-back, proven live against Postgres. A soft
 /// `delete` rewrites to `deleted_at = now()` (never a real DELETE) and reads the tombstoned row
 /// back in its declared shape; the row then
