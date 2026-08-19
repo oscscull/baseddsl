@@ -209,6 +209,19 @@ impl Dialect {
             }
         }
     }
+
+    /// The row-locking clause a `get|list … for update` query appends after `ORDER BY`/`LIMIT`
+    /// (transactions.md). Postgres and the MySQL/MariaDB family take `FOR UPDATE`. SQLite has no
+    /// row-level lock, so it returns the empty string (a no-op): its transaction locks the whole
+    /// database (`BEGIN IMMEDIATE`/`EXCLUSIVE`) and already serializes writers, so the lock intent
+    /// is honored at the transaction boundary rather than per row. Routed through this seam so the
+    /// spelling can never drift from the compile target.
+    pub fn for_update_clause(self) -> &'static str {
+        match self {
+            Self::Postgres | Self::MariaDb | Self::MySql => "FOR UPDATE",
+            Self::Sqlite => "",
+        }
+    }
 }
 
 /// A transaction isolation level, a parameter on every transaction entry point. The
@@ -271,6 +284,16 @@ pub struct TxBegin {
 #[cfg(test)]
 mod tests {
     use super::{AccessMode, Dialect, Isolation};
+
+    #[test]
+    fn for_update_clause_per_dialect() {
+        // Postgres + MySQL/MariaDB family lock rows with FOR UPDATE; SQLite has no
+        // row-level lock, so the clause is empty (its transaction locks the whole database).
+        assert_eq!(Dialect::Postgres.for_update_clause(), "FOR UPDATE");
+        assert_eq!(Dialect::MariaDb.for_update_clause(), "FOR UPDATE");
+        assert_eq!(Dialect::MySql.for_update_clause(), "FOR UPDATE");
+        assert_eq!(Dialect::Sqlite.for_update_clause(), "");
+    }
 
     #[test]
     fn begin_transaction_sql_per_dialect() {

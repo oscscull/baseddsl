@@ -314,6 +314,7 @@ fn lower_query(
             sql.push_str(" OFFSET :offset");
         }
     }
+    push_lock_clause(&mut sql, q, sel.dialect); // `for update` row lock, appended last
     sql.push_str(";\n");
 
     // `with count`: a second query for the live-row total (soft-delete applied, no
@@ -2327,6 +2328,24 @@ fn order_of(c: &Clause) -> Option<&[SortTerm]> {
 /// (an injected key column would defeat the row dedup). Block-body only.
 fn query_distinct(q: &Query) -> bool {
     matches!(&q.body, QueryBody::Block(s) if s.distinct)
+}
+
+/// `get|list … for update` — a pessimistic locking read (`SELECT … FOR UPDATE`, a no-op on
+/// SQLite via the [`Dialect`](crate::Dialect) seam). Block-body only. Sema confines it to
+/// well-defined single-row sets; the client confines it to transaction transports.
+fn query_for_update(q: &Query) -> bool {
+    matches!(&q.body, QueryBody::Block(s) if s.for_update)
+}
+
+/// Append the `for update` row-locking clause (after ORDER BY/LIMIT) per dialect: `FOR UPDATE`
+/// on Postgres/MySQL/MariaDB, nothing on SQLite (its transaction lock already serializes writers).
+fn push_lock_clause(sql: &mut String, q: &Query, dialect: Dialect) {
+    if query_for_update(q) {
+        let lock = dialect.for_update_clause();
+        if !lock.is_empty() {
+            sql.push_str(&format!("\n{lock}"));
+        }
+    }
 }
 
 fn query_page(q: &Query) -> Option<&PageClause> {

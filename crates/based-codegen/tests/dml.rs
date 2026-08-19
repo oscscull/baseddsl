@@ -728,6 +728,49 @@ fn nested_to_many_without_any_sort_stays_unordered() {
 }
 
 #[test]
+fn for_update_emits_lock_clause_per_dialect() {
+    // `for update` appends the row-locking clause last (after ORDER BY / LIMIT). Postgres
+    // and the MySQL/MariaDB family emit `FOR UPDATE`; SQLite emits nothing (whole-database
+    // locking on the transaction already serializes writers).
+    let src = r#"
+        Product { id: Id, sku: text, name: text, price: int }
+        shape ProductRow from Product { sku, name, price }
+        query product_for_update(id) -> ProductRow {
+            get Product where (id = $id) for update;
+        }
+        "#;
+    let maria = gen(src);
+    assert!(maria.trim_end().ends_with("FOR UPDATE;"), "\n{maria}");
+    let pg = gen_pg(src);
+    assert!(pg.trim_end().ends_with("FOR UPDATE;"), "\n{pg}");
+    let sqlite = gen_for(src, Dialect::Sqlite);
+    assert!(!sqlite.contains("FOR UPDATE"), "\n{sqlite}");
+    // The lock rides after the WHERE, not before it.
+    assert!(
+        pg.contains("WHERE \"product\".\"id\" = :id\nFOR UPDATE;"),
+        "\n{pg}"
+    );
+}
+
+#[test]
+fn for_update_list_lock_follows_order_and_limit() {
+    // On a `list … for update` the lock clause comes strictly last — after ORDER BY and LIMIT.
+    let src = r#"
+        Product { id: Id, sku: text, price: int }
+        shape ProductRow from Product { sku, price }
+        query cheap_for_update(max) -> ProductRow[] {
+            list Product where (price <= $max) order (price) page (20) offset for update;
+        }
+        "#;
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains("ORDER BY \"product\".\"price\" ASC\nLIMIT 20 OFFSET :offset\nFOR UPDATE;"),
+        "\n{pg}"
+    );
+    assert!(!gen_for(src, Dialect::Sqlite).contains("FOR UPDATE"));
+}
+
+#[test]
 fn sqlite_nested_to_many_orders_inside_json_group_array() {
     // SQLite's aggregate ORDER BY form (≥ 3.44): the sort rides inside
     // `json_group_array`, same cascade as the other dialects.

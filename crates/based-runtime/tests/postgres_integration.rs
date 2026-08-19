@@ -1026,6 +1026,85 @@ async fn cross_lock(
     Ok(())
 }
 
+/// `for update` holds a real row lock across a transaction, live against Postgres
+/// (transactions.md slice 2). Two concurrent transactions run the **same** `product_for_update`
+/// locking read on the **same** row: A acquires the lock and holds it (updating the row before
+/// commit); B's identical locking read **blocks** until A commits, then proceeds and observes
+/// A's committed value. The blocking is proven by a timeout — B's future stays pending while A
+/// holds the lock — and the post-unblock value proves B waited for A's committed state, not a
+/// stale snapshot. (SQLite has no row-level `FOR UPDATE`; its whole-database transaction lock
+/// serializes writers instead, so this per-row hand-off is a Postgres/MySQL-family semantic.)
+#[tokio::test]
+async fn for_update_lock_is_held_across_a_transaction_live_postgres() {
+    use based_runtime::{Engine, TxOptions};
+
+    let Some((c, router, container)) = live_schema(
+        r#"
+        Product { id: text, sku: text, stock: int }
+        shape ProductRow from Product { sku, stock }
+        query product_for_update(id) -> ProductRow {
+            get Product where (id = $id) for update;
+        }
+        mutation set_stock(id, stock) -> ProductRow {
+            update Product where (id = $id) { stock = $stock }
+        }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    container
+        .exec_batch("INSERT INTO product (id, sku, stock) VALUES ('p1', 'widget', 0);")
+        .await;
+
+    let engine = Engine::new(c, router, UuidGen);
+    let lock = json!({ "id": "p1" });
+
+    // A: open a transaction and take the row lock via the `for update` read.
+    let txn_a = engine.begin(TxOptions::default()).await.expect("begin A");
+    let a_read = txn_a
+        .transport()
+        .dispatch("/q/product_for_update", lock.clone(), json!({}))
+        .await;
+    assert_eq!(a_read.status, 200, "A locks the row: {:?}", a_read.body);
+
+    // B: open a second transaction and issue the same locking read — it must block on A's lock.
+    let txn_b = engine.begin(TxOptions::default()).await.expect("begin B");
+    let tx_b = txn_b.transport();
+    let b_read = tx_b.dispatch("/q/product_for_update", lock.clone(), json!({}));
+    tokio::pin!(b_read);
+    let while_held = tokio::time::timeout(Duration::from_millis(750), &mut b_read).await;
+    assert!(
+        while_held.is_err(),
+        "B's `for update` read must block while A holds the lock, not return: {while_held:?}"
+    );
+
+    // A writes the row and commits, releasing the lock.
+    let a_write = txn_a
+        .transport()
+        .dispatch(
+            "/m/set_stock",
+            json!({ "id": "p1", "stock": 99 }),
+            json!({}),
+        )
+        .await;
+    assert_eq!(a_write.status, 200, "A updates the row: {:?}", a_write.body);
+    txn_a.commit().await.expect("commit A");
+
+    // B now unblocks and observes A's committed value (proving it waited, not read a stale row).
+    let b_resp = tokio::time::timeout(Duration::from_secs(5), &mut b_read)
+        .await
+        .expect("B unblocks once A releases the lock");
+    assert_eq!(b_resp.status, 200, "B proceeds: {:?}", b_resp.body);
+    assert_eq!(
+        b_resp.body["stock"], 99,
+        "B reads A's committed update, so it blocked until A released: {:?}",
+        b_resp.body
+    );
+    txn_b.commit().await.expect("commit B");
+}
+
 // ---- streaming reads over the live wire -------------------------------------
 
 /// Start the real `based serve` listener over a live router on a free loopback port

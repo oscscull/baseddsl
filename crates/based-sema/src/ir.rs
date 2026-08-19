@@ -199,6 +199,13 @@ pub mod code {
     pub const DISTINCT_ORDER_UNPROJECTED: &str = "E0312"; // an `order` column under `distinct` is not projected (invalid `SELECT DISTINCT … ORDER BY` on Postgres)
     pub const DISTINCT_NOOP: &str = "W0111"; // `distinct` on a query that projects the primary key — every row is already unique
 
+    // `for update` pessimistic locking read (E031x, transactions.md slice 2): a
+    // `SELECT … FOR UPDATE` — legal only where the locked row set is well-defined.
+    pub const FOR_UPDATE_DISTINCT: &str = "E0315"; // `for update` with `distinct` — a deduped projection has no single row to lock (illegal SQL)
+    pub const FOR_UPDATE_AGGREGATE: &str = "E0316"; // `for update` on an aggregate query — a `group by` locks no base row (illegal SQL)
+    pub const FOR_UPDATE_TOMANY: &str = "E0317"; // `for update` on a query projecting a to-many nest — the json-agg subquery has no lockable row semantics
+    pub const FOR_UPDATE_STREAM: &str = "E0318"; // `for update` on a `-> stream` query — a lock held across a long-lived stream is a footgun
+
     // `time` and `bytes` scalar types (D117): a time-of-day and a binary blob.
     pub const TIME_DEFAULT: &str = "E0313"; // a `time` column's `default` must be a time string literal (e.g. "14:30:00")
     pub const BYTES_DEFAULT: &str = "E0314"; // a `bytes` column cannot carry a literal default — set it from a raw migration or a DB default

@@ -1650,6 +1650,7 @@ const KEYWORDS: &[&str] = &[
     "offset",
     "with",
     "count",
+    "for",
     "and",
     "or",
     "not",

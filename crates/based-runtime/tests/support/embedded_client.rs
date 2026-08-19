@@ -516,6 +516,13 @@ pub struct OrderByIdInput {
 pub const ORDER_BY_ID_ROUTE: &str = "/q/order_by_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderForUpdateInput {
+    pub id: Id<entity::Order>,
+}
+/// Wire route for `order_for_update`.
+pub const ORDER_FOR_UPDATE_ROUTE: &str = "/q/order_for_update";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrdersInOrgInput {
     pub org: Id<entity::Org>,
 }
@@ -630,6 +637,21 @@ impl<T: Transport> Client<T> {
     ) -> Result<(), ClientError> {
         let _: Ack = self.transport.call_with_key(PURGE_ORDER_ROUTE, &input, &ctx, key).await?;
         Ok(())
+    }
+}
+
+// ---------- locking reads: transaction-confined (`for update`) ----------
+
+/// Marker for a transport a `for update` locking read may run on — a transaction-bound
+/// transport, where a `SELECT … FOR UPDATE` holds the lock to the transaction boundary.
+/// Implemented only by `TxTransport`; the auto-commit `Embedded`/wire transports do not
+/// carry it, so a locking method is a compile error on their client.
+pub trait TxBound {}
+
+impl<T: Transport + TxBound> Client<T> {
+    /// `POST /q/order_for_update`
+    pub async fn order_for_update(&self, input: OrderForUpdateInput, ctx: ()) -> Result<Option<OrderCard>, ClientError> {
+        self.transport.call(ORDER_FOR_UPDATE_ROUTE, &input, &ctx).await
     }
 }
 
@@ -1006,3 +1028,5 @@ async fn tx_retry_backoff(attempt: u32) {
     let step = std::cmp::min(2u64.saturating_pow(attempt).saturating_mul(2), 100);
     tokio::time::sleep(std::time::Duration::from_millis(step)).await;
 }
+
+impl TxBound for based_runtime::TxTransport {}

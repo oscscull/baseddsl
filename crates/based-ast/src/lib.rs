@@ -538,6 +538,11 @@ pub struct Statement {
     /// modifier (a `get` reads one row); the automatic sort cascade is suppressed so an
     /// injected key column can't defeat the dedup.
     pub distinct: bool,
+    /// `get|list … for update` — a pessimistic locking read (`SELECT … FOR UPDATE`). A
+    /// trailing modifier after the clause list; compile-time-confined to transaction
+    /// clients (a lock outside a transaction releases immediately). No-op on SQLite,
+    /// which locks the whole database on its transaction already.
+    pub for_update: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

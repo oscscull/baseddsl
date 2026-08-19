@@ -275,9 +275,17 @@ impl Printer {
             .push(format!("{INDENT}{} {}", verb_head(stmt), stmt.model.node));
         let last = stmt.clauses.len() - 1;
         for (i, c) in stmt.clauses.iter().enumerate() {
-            let semi = if i == last { ";" } else { "" };
+            // The trailing `for update` (if any) takes the `;`, so the last clause doesn't.
+            let semi = if i == last && !stmt.for_update {
+                ";"
+            } else {
+                ""
+            };
             self.out
                 .push(format!("{INDENT}{INDENT}{}{semi}", clause(c)));
+        }
+        if stmt.for_update {
+            self.out.push(format!("{INDENT}{INDENT}for update;"));
         }
     }
 
@@ -631,6 +639,9 @@ fn statement_inline(stmt: &Statement) -> String {
     for c in &stmt.clauses {
         s.push(' ');
         s.push_str(&clause(c));
+    }
+    if stmt.for_update {
+        s.push_str(" for update");
     }
     s.push(';');
     s

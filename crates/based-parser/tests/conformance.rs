@@ -109,11 +109,21 @@ fn summarize_decl(decl: &Decl) -> String {
             s.body.len()
         ),
         Decl::Query(q) => {
-            let body = match q.body {
-                QueryBody::Bare => "bare",
-                QueryBody::Inline(_) => "inline",
-                QueryBody::Block(_) => "block",
-                QueryBody::Raw(_) => "raw",
+            let body = match &q.body {
+                QueryBody::Bare => "bare".to_string(),
+                QueryBody::Inline(_) => "inline".to_string(),
+                QueryBody::Block(s) => {
+                    // Surface the block modifiers so a parse golden captures them.
+                    let mut b = "block".to_string();
+                    if s.distinct {
+                        b.push_str("+distinct");
+                    }
+                    if s.for_update {
+                        b.push_str("+for_update");
+                    }
+                    b
+                }
+                QueryBody::Raw(_) => "raw".to_string(),
             };
             format!(
                 "query {}  params={}  ret={}{}{}  body={body}",

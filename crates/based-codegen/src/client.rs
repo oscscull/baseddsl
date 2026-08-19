@@ -103,6 +103,11 @@ struct Callable<'a> {
     /// how this callable paginates, so the input struct carries the right page
     /// control: a keyset page a `cursor`, an offset page an `offset`.
     page: PageInput,
+    /// a `get|list … for update` locking read: its method is emitted in the confined
+    /// `impl<T: Transport + TxBound>` block, so it is callable only on a transaction-bound
+    /// client (a lock outside a transaction releases immediately) — a compile error on the
+    /// auto-commit `Client<Embedded>`.
+    for_update: bool,
     /// Params that resolve to an **entity id** → the model they identify (a Forward FK's
     /// target, or the model's own `id`). Drives the `Id<entity::M>` param type; a param
     /// absent here (and not model-annotated) is a plain scalar.
@@ -230,13 +235,15 @@ mod rust {
             ));
         }
 
-        // The client: one typed method per callable, each posting to its route.
+        // The client: one typed method per callable, each posting to its route. A
+        // `for update` locking read is held back for the transaction-confined block.
         out.push_str("\n// ---------- client ----------\n\n");
         out.push_str("impl<T: Transport> Client<T> {\n");
-        for c in &callables {
+        for c in callables.iter().filter(|c| !c.for_update) {
             out.push_str(&render_method(c));
         }
         out.push_str("}\n");
+        out.push_str(&locking_client_block(&callables));
 
         // Opt-in in-process bridge over `based_runtime::Engine`: a working client with no
         // hand-written `Transport` impl. Gated so the wire client stays free of a
@@ -265,6 +272,11 @@ mod rust {
                 out.push_str(TX_TRANSPORT_STREAM_CALL);
             }
             out.push_str(TX_SURFACE_TAIL);
+            // `TxTransport` is the one transport that carries `TxBound`, so the locking
+            // reads are callable through it (via `txn.client()` / `transaction`).
+            if callables.iter().any(|c| c.for_update) {
+                out.push_str(TX_BOUND_IMPL);
+            }
         }
         out
     }
@@ -310,6 +322,7 @@ mod rust {
                         } else {
                             query_param_entities(root, &q.params)
                         },
+                        for_update: matches!(&q.body, QueryBody::Block(s) if s.for_update),
                     });
                 }
                 Decl::Mutation(m) => {
@@ -361,6 +374,7 @@ mod rust {
                         ctx_requires: &rm.ctx_requires,
                         page: PageInput::None,
                         param_entities: mutation_param_entities(schema, m),
+                        for_update: false,
                     });
                 }
                 _ => {}
@@ -1225,6 +1239,24 @@ mod rust {
     /// `<Name>Ctx`; one with none takes `ctx: ()` (the engine reads no context).
     /// A `-> stream` query keeps the same name but goes through the transport's
     /// streaming door and hands back the live `RowStream`.
+    /// The transaction-confined client block: the `TxBound` marker trait + an
+    /// `impl<T: Transport + TxBound> Client<T>` carrying the `for update` locking methods, so
+    /// they are callable only on a transaction-bound transport (a compile error on the
+    /// auto-commit/wire client). Empty when the schema has no `for update` query — the surface a
+    /// schema can't use is not emitted.
+    fn locking_client_block(callables: &[Callable]) -> String {
+        if !callables.iter().any(|c| c.for_update) {
+            return String::new();
+        }
+        let mut s = String::from(TXBOUND_TRAIT);
+        s.push_str("impl<T: Transport + TxBound> Client<T> {\n");
+        for c in callables.iter().filter(|c| c.for_update) {
+            s.push_str(&render_method(c));
+        }
+        s.push_str("}\n");
+        s
+    }
+
     fn render_method(c: &Callable) -> String {
         let ctx_ty = if c.ctx_requires.is_empty() {
             "()".to_string()
@@ -2060,6 +2092,30 @@ impl<O: serde::de::DeserializeOwned> futures_core::Stream for EngineRows<O> {
         }
     }
 }
+"#;
+
+    /// The `TxBound` marker trait + the header of the transaction-confined client impl block.
+    /// A locking read (`for update`) is emitted in `impl<T: Transport + TxBound> Client<T>`, so
+    /// it is callable only on a transport that carries `TxBound` — only `TxTransport` does (the
+    /// [`TX_BOUND_IMPL`] under the embedded bridge). Declared unconditionally with the block so a
+    /// pure-wire build (no `based_runtime`, no `TxTransport`) still compiles — the locking methods
+    /// are simply uncallable there, no transport implementing `TxBound` exists.
+    const TXBOUND_TRAIT: &str = r#"
+// ---------- locking reads: transaction-confined (`for update`) ----------
+
+/// Marker for a transport a `for update` locking read may run on — a transaction-bound
+/// transport, where a `SELECT … FOR UPDATE` holds the lock to the transaction boundary.
+/// Implemented only by `TxTransport`; the auto-commit `Embedded`/wire transports do not
+/// carry it, so a locking method is a compile error on their client.
+pub trait TxBound {}
+
+"#;
+
+    /// `TxTransport` is the transaction-bound transport, so it carries `TxBound` — the one
+    /// transport a locking read may run through. Emitted under the embedded gate (where
+    /// `TxTransport` exists) when the schema has a `for update` query.
+    const TX_BOUND_IMPL: &str = r#"
+impl TxBound for based_runtime::TxTransport {}
 "#;
 
     /// The transaction seam's head, appended after the embedded bridge (embedded gate): the

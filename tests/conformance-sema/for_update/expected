@@ -1,0 +1,26 @@
+DIAGNOSTICS
+  E0260: query `nest_lock` joins `LineItem` through `product` with no covering index — the join will scan
+  E0315: `for update` on `distinct` query `distinct_lock`
+  E0316: `for update` on aggregate query `agg_lock`
+  E0317: `for update` on query `nest_lock` projecting a to-many nest
+  E0318: `for update` on stream query `stream_lock`
+SCHEMA
+model Product  table=product
+  id: Id
+  sku: text  unique
+  name: text
+  price: int
+  items: <- LineItem via product
+model LineItem  table=line_item
+  id: Id
+  product: -> Product  fk=product_id
+  qty: int
+shape ProductRow from Product
+shape SkuCount from Product
+shape ProductWithItems from Product
+query product_for_update  target=Product verb=get  shape=ProductRow
+query products_for_update  target=Product verb=list many  shape=ProductRow
+query distinct_lock  target=Product verb=list many  shape=ProductRow
+query agg_lock  target=Product verb=list many  shape=SkuCount
+query nest_lock  target=Product verb=get  shape=ProductWithItems
+query stream_lock  target=Product verb=list many stream  shape=ProductRow

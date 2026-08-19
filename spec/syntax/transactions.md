@@ -92,20 +92,47 @@ For interop with app code that already opened a transaction on the same driver:
 owns (the caller commits). This needs per-driver adapters (one per sqlx driver), so it is a
 documented follow-on, **not yet implemented**.
 
-## `for update` row locking — NOT YET BUILT (slice 2)
+## `for update` row locking — BUILT (slice 2, D119)
 
-A `.bsl` query may request pessimistic row locks with a `for update` modifier:
+A `.bsl` `get`/`list` query requests pessimistic row locks with a **trailing `for update`
+modifier**, after the clause list in a **block** query body:
 
 ```
 query order_for_update(id) -> OrderRow { get Order where (id = $id) for update; }
 ```
 
-`for update` is **compile-time-confined to transaction clients**: `SELECT … FOR UPDATE` outside a
-transaction locks nothing useful, so a `for update` query is only callable on a `Client<TxTransport>`,
-enforced by a `TxBound` marker trait (`impl<T: TxBound> Client<T>` carries the locking methods) —
-a locking query on a plain client is a **compile error**, not a silent no-op. Per dialect:
-`FOR UPDATE` (Postgres/MySQL/MariaDB), a no-op on SQLite (whole-database locking already serializes
-writers). This is a documented follow-on, **not yet implemented**.
+`for update` is one compound keyword (like `group by` / `on conflict` / `hard delete`), so there is
+no bare-token adjacency (principle 3). It sits after any `where`/`order`/`page`, before the `;` — the
+block form is where the verb (`get`/`list`) and `where` are explicit, so a dangerous locking read is
+written visibly (principle 1). Inline/bare query bodies do not carry it.
+
+**Per-dialect lowering** (over the `Dialect::for_update_clause` seam, so the spelling can't drift from
+the compile target): `FOR UPDATE`, appended last (after `ORDER BY`/`LIMIT`), on Postgres and the
+MySQL/MariaDB family; **a no-op on SQLite** — SQLite has no row-level lock, but its transaction locks
+the whole database (`BEGIN IMMEDIATE`/`EXCLUSIVE`, slice 1) and already serializes writers, so the lock
+intent is honored at the transaction boundary rather than per row. The no-op is documented, never
+silently misleading (principle 9).
+
+**SQL-legal boundaries, enforced uniformly at compile time** (never a Postgres-only runtime failure —
+the same discipline `distinct`'s E0312 uses): `FOR UPDATE` is rejected with `distinct` (**E0315** — a
+deduped projection has no single base row to lock), on an aggregate/`group by` query (**E0316** — a
+group locks no base row), on a query projecting a to-many nest (**E0317** — the json-agg subquery has
+no lockable row), and on a `-> stream` query (**E0318** — a lock held across a long-lived stream is a
+footgun).
+
+**Compile-time confinement to transaction clients.** `SELECT … FOR UPDATE` outside a transaction locks
+nothing useful (it releases immediately), so a `for update` query's generated method is **callable only
+on a transaction-bound client**. A `TxBound` marker trait carries this: the locking methods are emitted
+in `impl<T: Transport + TxBound> Client<T>`, and **only `TxTransport` implements `TxBound`** — the
+auto-commit `Client<Embedded>` (and any wire client) does not, so calling `order_for_update` on it is a
+**compile error**, not a silent no-op. Ordinary non-locking methods stay on `impl<T: Transport>` and
+work in and out of a transaction. In a pure-wire build (no `based_runtime`, no `TxTransport`) the trait
+is still declared but has no implementor, so the locking methods are simply uncallable — the module
+compiles unchanged.
+
+Deferred as clean micro-follow-ons (transactions.md): `for update nowait` / `for update skip locked`
+(Postgres both; MariaDB 10.6+ both; SQLite none) — the MariaDB-version gating makes honest emission a
+follow-up, not part of this slice.
 
 ## What shipped (slice 1)
 
@@ -116,5 +143,15 @@ client runs on. The central runtime refactor factors dispatch so a request runs 
 **provided open transaction** (`dispatch_on` / `run_mutation_on`) instead of a fresh
 auto-committing checkout; the auto-commit path is unchanged. Implementation: D118.
 
-Slices 2 (`for update` + `TxBound`) and 3 (BYO `adopt` adapters, plus the flagship
-axum-helpdesk read-decide-write use case) are the documented follow-ons above.
+## What shipped (slice 2)
+
+The `for update` locking-read modifier + its `TxBound` compile-time confinement (the built section
+above): parser (trailing `for update` in the block query body) → AST (`Statement.for_update`) → sema
+(the four E-codes E0315–E0318) → codegen (`Dialect::for_update_clause` seam + `SELECT … FOR UPDATE`
+emission; the `TxBound` marker trait + confined `impl<T: Transport + TxBound> Client<T>` block, with
+`impl TxBound for TxTransport` under the embedded bridge) → fmt round-trip → LSP keyword completion.
+Proven live on Postgres (two concurrent transactions: B's `for update` read blocks until A commits, then
+observes A's committed write). Implementation: D119.
+
+Slice 3 (BYO `adopt` adapters, plus the flagship axum-helpdesk read-decide-write use case) remains the
+documented follow-on above.

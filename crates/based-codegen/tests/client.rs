@@ -518,6 +518,72 @@ fn embedded_bridge_is_gated_on_the_option() {
 }
 
 #[test]
+fn for_update_method_is_confined_to_txbound_transports() {
+    let src = r#"
+        Product { id: Id, sku: text, name: text, price: int }
+        shape ProductRow from Product { sku, name, price }
+        query product(id) -> ProductRow;
+        query product_for_update(id) -> ProductRow {
+            get Product where (id = $id) for update;
+        }
+        "#;
+    // Wire client: `TxBound` is declared, and the locking method lives in the confined
+    // `impl<T: Transport + TxBound> Client<T>` block — NOT the open `impl<T: Transport>`.
+    // With no `TxTransport` in a pure-wire build, the method is simply uncallable there.
+    let wire = gen(src);
+    assert!(wire.contains("pub trait TxBound {}"), "\n{wire}");
+    assert!(
+        wire.contains("impl<T: Transport + TxBound> Client<T> {"),
+        "\n{wire}"
+    );
+    // The ordinary method stays on the open impl; the locking method is not on it. Locate the
+    // open block and the confined block and check which carries each method.
+    let open = wire.find("impl<T: Transport> Client<T> {").unwrap();
+    let confined = wire
+        .find("impl<T: Transport + TxBound> Client<T> {")
+        .unwrap();
+    let open_block = &wire[open..confined];
+    let confined_block = &wire[confined..];
+    assert!(
+        open_block.contains("pub async fn product("),
+        "\n{open_block}"
+    );
+    assert!(
+        !open_block.contains("pub async fn product_for_update("),
+        "locking method leaked onto the open impl\n{open_block}"
+    );
+    assert!(
+        confined_block.contains("pub async fn product_for_update("),
+        "\n{confined_block}"
+    );
+
+    // Embedded build: `TxTransport` is the one transport carrying `TxBound`; `Embedded` is not,
+    // so `Client<Embedded>::product_for_update` does not exist (a compile error, proven in the
+    // runtime tests). The marker impl is emitted only for the transaction transport.
+    let embed = gen_opts(src, ClientOptions { embedded: true });
+    assert!(
+        embed.contains("impl TxBound for based_runtime::TxTransport {}"),
+        "\n{embed}"
+    );
+    assert!(
+        !embed.contains("impl TxBound for Embedded"),
+        "Embedded must NOT carry TxBound\n{embed}"
+    );
+}
+
+#[test]
+fn for_update_absent_schema_emits_no_txbound() {
+    // A schema with no `for update` query carries no `TxBound` trait or confined impl block —
+    // the surface a schema can't use isn't emitted.
+    let out = gen(r#"
+        Product { id: Id, sku: text }
+        shape ProductRow from Product { sku }
+        query product(id) -> ProductRow;
+        "#);
+    assert!(!out.contains("TxBound"), "\n{out}");
+}
+
+#[test]
 fn typed_ids_are_phantom_newtypes_per_entity() {
     let out = gen(r#"
         @soft_delete(deleted_at)

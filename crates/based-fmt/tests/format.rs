@@ -292,6 +292,26 @@ fn distinct_list_reprints_after_verb() {
 }
 
 #[test]
+fn for_update_reprints_after_clauses() {
+    // `for update` is a trailing modifier after the clause list. A one-clause block stays
+    // inline (the modifier rides before the `;`); a multi-clause block breaks one clause per
+    // line with `for update` on its own final line taking the `;`.
+    let inline =
+        fmt("query lock(id) -> ProductRow {  get Product where (id = $id)  for  update ; }");
+    assert_eq!(
+        inline,
+        "query lock(id) -> ProductRow { get Product where (id = $id) for update; }\n"
+    );
+    let block = fmt("query lock(max) -> ProductRow[] { list Product where (price <= $max) order (price) page (20) offset for update; }");
+    assert_eq!(
+        block,
+        "query lock(max) -> ProductRow[] {\n  list Product\n    where (price <= $max)\n    order (price)\n    page (20) offset\n    for update;\n}\n"
+    );
+    assert!(based_parser::parse_file(&block, FileId(0)).is_ok());
+    assert_eq!(fmt(&block), block);
+}
+
+#[test]
 fn aggregate_shape_and_group_by_render_canonically() {
     let src = "shape BuyerStats from Order {\n who = buyer\n orders = count()\n revenue = sum(total)\n}\nquery buyer_stats() -> BuyerStats[] {\n list Order group by (buyer) having (revenue > 100) order (revenue desc);\n}\n";
     let out = fmt(src);

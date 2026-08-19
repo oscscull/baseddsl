@@ -72,6 +72,17 @@ fn generated_client_is_current() {
         ClientTarget::Rust,
         ClientOptions { embedded: true },
     );
+    if std::env::var_os("BLESS").is_some() {
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/embedded_client.rs"
+            ),
+            &generated,
+        )
+        .expect("write mirror");
+        return;
+    }
     assert_eq!(
         generated,
         include_str!("support/embedded_client.rs"),
@@ -1019,4 +1030,86 @@ async fn explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite() {
         2,
         "the rolled-back write is not visible"
     );
+}
+
+/// `for update` is **compile-time-confined to transaction clients** (transactions.md slice 2):
+/// the generated `order_for_update` method lives in `impl<T: Transport + TxBound> Client<T>`, and
+/// only `TxTransport` carries `TxBound`. This test is the positive half — it **compiles and runs**
+/// the locking method on the transaction-bound client (`txn.client()` / the `transaction` closure).
+///
+/// The negative half is proven by construction, not a runtime call: `Embedded` does **not**
+/// implement `TxBound`, so
+///
+/// ```ignore
+/// let api = client::embedded(&engine);            // Client<Embedded>
+/// api.order_for_update(input, ()).await;          // ← compile error: `Embedded: TxBound` unsatisfied
+/// ```
+///
+/// does not compile — the auto-commit client has no such method. (trybuild is not a project
+/// dependency, so the compile-failure is asserted by the `TxBound` bound, not a build fixture.)
+/// On SQLite the emitted SQL carries no `FOR UPDATE` (a no-op — the transaction locks the whole
+/// database already); the row still reads back, which is what this test checks. The real
+/// lock-is-held proof runs against live Postgres (`for_update_lock_is_held_across_a_transaction_live_postgres`).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn for_update_method_runs_on_the_transaction_client_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::{SqliteBackend, TxOptions};
+    use client::TransactionExt;
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES ('o-1', 'org-1', 'paid', 100);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+
+    // The locking method compiles + runs on the transaction-bound client (via `txn.client()`).
+    let txn = engine
+        .begin(TxOptions::default())
+        .await
+        .expect("open a transaction");
+    let locked = {
+        let tx = txn.client();
+        tx.order_for_update(
+            client::OrderForUpdateInput {
+                id: client::Id::from_raw("o-1"),
+            },
+            (),
+        )
+        .await
+        .expect("locking read runs on the tx client")
+    };
+    txn.commit().await.expect("commit");
+    let card = locked.expect("the seeded row");
+    assert_eq!(card.total, 100);
+
+    // It also works through the managed `transaction` closure (rung 1).
+    let total = client::transaction(&engine, TxOptions::default(), |tx| async move {
+        let row = tx
+            .order_for_update(
+                client::OrderForUpdateInput {
+                    id: client::Id::from_raw("o-1"),
+                },
+                (),
+            )
+            .await?
+            .ok_or_else(|| client::TxError::app("row missing"))?;
+        Ok::<_, client::TxError>(row.total)
+    })
+    .await
+    .expect("closure commits");
+    assert_eq!(total, 100);
 }

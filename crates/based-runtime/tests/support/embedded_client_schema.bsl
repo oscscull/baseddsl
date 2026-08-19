@@ -14,6 +14,7 @@ Order {
 shape OrderCard from Order { status, total }
 
 query order_by_id(id) -> OrderCard;
+query order_for_update(id) -> OrderCard { get Order where (id = $id) for update; }
 query orders_in_org(org) -> OrderCard[];
 query export_orders(org) -> stream OrderCard;
 query my_org_orders() -> OrderCard[] { list Order where (org = $ctx.org); }
