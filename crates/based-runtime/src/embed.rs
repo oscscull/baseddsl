@@ -240,20 +240,24 @@ impl Engine {
         Ok(crate::tx::Transaction::new(self.clone(), tx))
     }
 
-    /// Run one callable against a **provided open transaction** instead of a fresh
-    /// auto-committing checkout — the entry point [`crate::TxTransport`] calls. Queries
-    /// read on the transaction; mutations run their writes on it, committing nothing (the
-    /// transaction handle owns the boundary). Guards still run.
-    pub async fn dispatch_on_tx(
+    /// Run one callable against a **provided open connection/transaction** instead of a
+    /// fresh auto-committing checkout — the entry point the transaction-bound transports
+    /// call ([`crate::TxTransport`] over an engine-owned [`crate::Transaction`];
+    /// [`crate::AdoptedTransport`] over a caller-owned adopted transaction). Queries read on
+    /// it; mutations run their writes on it, committing nothing (the boundary is owned by
+    /// the transaction handle or the caller). Guards still run. Generic over
+    /// [`crate::run::DbRead`], so an engine-owned `Tx` and a borrowed adopted transaction
+    /// take the identical path.
+    pub async fn dispatch_on<D: crate::run::DbRead + ?Sized>(
         &self,
-        tx: &mut dyn crate::run::Tx,
+        db: &mut D,
         route: &str,
         args: serde_json::Value,
         ctx: serde_json::Value,
     ) -> WireResponse {
         crate::serve::dispatch_on(
             &self.inner.compiled,
-            tx,
+            db,
             self.inner.id_gen.as_ref(),
             &self.inner.guards,
             Some(self),

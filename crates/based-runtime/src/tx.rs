@@ -1,15 +1,18 @@
-//! The host-language read-decide-write transaction seam (transactions.md, slice 1).
+//! The host-language read-decide-write transaction seam (transactions.md).
 //!
 //! The DSL stays non-Turing-complete: read-decide-write logic lives in host Rust, run
-//! against an engine-owned transaction. A transaction is the *same generated client* over
-//! a transaction-bound transport — every existing callable works inside a transaction with
+//! against a transaction. A transaction is the *same generated client* over a
+//! transaction-bound transport — every existing callable works inside a transaction with
 //! no per-callable codegen, because the client is already generic over a `Transport`.
 //!
-//! This module is the runtime half: [`TxOptions`] (isolation + access mode), the
-//! [`Transaction`] handle ([`Engine::begin`](crate::Engine::begin) opens one), and the
-//! [`TxTransport`] the generated `Transport` impl runs callables through. The generated
-//! half (the `Transport` impl, `client::transaction` / `transaction_retrying`, and the
-//! `Transaction::client()` accessor) is emitted with the embedded bridge.
+//! This module is the runtime half of all three rungs: [`TxOptions`] (isolation + access
+//! mode), the engine-owned [`Transaction`] handle ([`Engine::begin`](crate::Engine::begin)
+//! opens one) and the [`TxTransport`] it runs callables through (rungs 1–2), and the
+//! [`AdoptedTransport`] that runs callables on a **caller-owned** transaction adopted from
+//! the caller's own driver (rung 3, BYO `adopt` — the caller commits, `adopt` never does).
+//! The generated half (the `Transport` impls, `client::transaction` /
+//! `transaction_retrying`, `Transaction::client()`, and the per-driver `adopt_*`
+//! constructors) is emitted with the embedded bridge.
 
 use std::sync::Arc;
 
@@ -17,7 +20,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::embed::Engine;
-use crate::run::{DbError, Tx};
+use crate::run::{DbError, DbRead, Tx};
 use crate::serve::WireResponse;
 
 pub use based_codegen::{AccessMode, Isolation};
@@ -141,16 +144,56 @@ impl TxTransport {
     pub async fn dispatch(&self, route: &str, args: Value, ctx: Value) -> WireResponse {
         let mut guard = self.slot.lock().await;
         match guard.as_mut() {
-            Some(tx) => {
-                self.engine
-                    .dispatch_on_tx(&mut **tx, route, args, ctx)
-                    .await
-            }
+            Some(tx) => self.engine.dispatch_on(&mut **tx, route, args, ctx).await,
             None => WireResponse::error(
                 500,
                 "internal",
                 "the transaction is already committed or rolled back".to_string(),
             ),
         }
+    }
+}
+
+/// A `Transport` bound to a **caller-owned** open transaction the caller adopted from its
+/// own driver — the bring-your-own (`adopt`) rung of the seam (transactions.md rung 3). It
+/// holds a per-driver adapter (`D: DbRead`) over the caller's *borrowed* native
+/// `sqlx::Transaction`, and every callable runs on it through the engine's dispatch core.
+///
+/// The defining property: **`adopt` never begins, commits, or rolls back** — the caller
+/// owns the boundary, so dropping the adopted client leaves the caller's transaction
+/// untouched (unlike [`TxTransport`], whose [`Transaction`] drop-rolls-back). The adopter
+/// runs its raw writes and its baseddsl work on one transaction and commits it itself, so
+/// both land atomically. `for update` locking reads work through it (the generated
+/// `AdoptedTransport` carries the client's `TxBound` marker). There is no auto-retry
+/// (`transaction_retrying`) here: retrying a whole transaction requires owning its boundary,
+/// which the caller does.
+///
+/// Not cloned: the adopted [`crate::Engine`]-generated `Client` owns one transport by value,
+/// holding the borrow for the transport's lifetime. The adapter sits behind a
+/// [`tokio::sync::Mutex`] because `Transport::call` takes `&self` while running a statement
+/// needs `&mut` — calls are sequential/awaited, so there is no real contention, and the
+/// `Mutex` keeps the transport `Send` for axum.
+pub struct AdoptedTransport<D> {
+    engine: Engine,
+    db: Mutex<D>,
+}
+
+impl<D: DbRead> AdoptedTransport<D> {
+    /// Wrap an engine handle and a driver adapter over the caller's borrowed transaction.
+    /// The per-driver `adopt_*` constructor the generated client emits builds the adapter
+    /// (e.g. `AdoptedPg::new(&mut pg_tx)`) and hands it here.
+    pub fn new(engine: Engine, db: D) -> Self {
+        Self {
+            engine,
+            db: Mutex::new(db),
+        }
+    }
+
+    /// Run one callable on the adopted transaction and return the wire response — the
+    /// adopted twin of [`TxTransport::dispatch`]. Runs through the same
+    /// [`Engine::dispatch_on`] core, which commits nothing (the caller owns the boundary).
+    pub async fn dispatch(&self, route: &str, args: Value, ctx: Value) -> WireResponse {
+        let mut guard = self.db.lock().await;
+        self.engine.dispatch_on(&mut *guard, route, args, ctx).await
     }
 }

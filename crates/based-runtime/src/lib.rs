@@ -109,8 +109,15 @@ pub use run::{
 pub use serve::{
     dispatch, dispatch_on, dispatch_stream, preflight, resolve_shard_key, WireResponse,
 };
-pub use tx::{AccessMode, Isolation, Transaction, TxOptions, TxTransport};
+pub use tx::{AccessMode, AdoptedTransport, Isolation, Transaction, TxOptions, TxTransport};
 pub use value::SqlValue;
+
+// Re-export sqlx (present whenever a concrete driver is on) so the generated per-driver
+// `adopt_*` constructors can name `based_runtime::sqlx::Transaction<'_, …>` without the
+// consumer pinning a matching sqlx version themselves — the adopted transaction and the
+// engine then speak the identical `sqlx` types.
+#[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
+pub use sqlx;
 
 #[cfg(feature = "serve")]
 pub use http::{
@@ -119,7 +126,10 @@ pub use http::{
 };
 
 #[cfg(feature = "sqlite")]
-pub use sqlite::{SqliteBackend, SqliteDb};
+pub use sqlite::{AdoptedSqlite, SqliteBackend, SqliteDb};
 
 #[cfg(feature = "postgres")]
-pub use postgres::{PgRouter, PostgresDb};
+pub use postgres::{AdoptedPg, PgRouter, PostgresDb};
+
+#[cfg(feature = "mariadb")]
+pub use driver::AdoptedMaria;

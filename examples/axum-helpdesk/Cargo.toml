@@ -9,6 +9,13 @@ publish = false
 # `cargo run` boots the service; `--bin seed` / `--bin smoke` are the setup + gate.
 default-run = "axum-helpdesk"
 
+# The generated `client::adopt_postgres` (bring-your-own transaction) is `#[cfg(feature =
+# "postgres")]`, so a consumer forwards its own driver feature to `based-runtime/postgres`.
+# On by default — this desk is Postgres-only.
+[features]
+default = ["postgres"]
+postgres = ["based-runtime/postgres"]
+
 [dependencies]
 # The engine: in-process `Engine`, the `PgRouter`/`PostgresDb` driver, and the
 # production uuid id generator (`serve` pulls in `UuidGen` — Postgres's native

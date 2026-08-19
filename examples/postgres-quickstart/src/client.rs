@@ -813,3 +813,72 @@ async fn tx_retry_backoff(attempt: u32) {
     let step = std::cmp::min(2u64.saturating_pow(attempt).saturating_mul(2), 100);
     tokio::time::sleep(std::time::Duration::from_millis(step)).await;
 }
+
+// ---------- transactions: bring-your-own (`adopt`) ----------
+
+/// A `Transport` bound to a **caller-owned** transaction adopted from the caller's own
+/// driver: every callable runs on that transaction (committing nothing — the caller owns the
+/// boundary). Generic over the per-driver adapter `D`, so one impl serves every driver.
+impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> {
+    async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned,
+    {
+        let args = serde_json::to_value(input).map_err(ClientError::decode)?;
+        // `&()` → JSON `null`; the engine treats a non-object context as empty.
+        let ctx = serde_json::to_value(ctx)
+            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map_err(ClientError::decode)?;
+        let resp = self.dispatch(route, args, ctx).await;
+        if resp.status == 200 {
+            serde_json::from_value(resp.body).map_err(ClientError::decode)
+        } else {
+            let code = resp.body["error"]["code"].as_str().unwrap_or("error");
+            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            Err(ClientError::api(resp.status, code, message))
+        }
+    }
+
+    /// A keyed mutation on an adopted transaction: the caller's transaction is the boundary,
+    /// so the write runs on it directly and the key is not separately consulted.
+    async fn call_with_key<I, C, O>(
+        &self,
+        route: &str,
+        input: &I,
+        ctx: &C,
+        _key: &str,
+    ) -> Result<O, ClientError>
+    where
+        I: Serialize + Sync,
+        C: Serialize + Sync,
+        O: serde::de::DeserializeOwned,
+    {
+        self.call(route, input, ctx).await
+    }
+}
+
+/// Adopt a **caller-owned** open Postgres transaction — the bring-your-own (`adopt`)
+/// rung of the transaction seam. Route this client's callables (including `for update`
+/// locking reads — the adopted client is `TxBound`) through a transaction the caller already
+/// opened on its own `sqlx` pool, so the baseddsl work commits atomically with the caller's
+/// own raw writes on that transaction.
+///
+/// **`adopt` never begins, commits, or rolls back** — the caller owns the boundary; dropping
+/// the returned client leaves the transaction untouched, and the caller commits (or rolls
+/// back) it itself. There is no auto-retry (`transaction_retrying` needs an engine-owned
+/// boundary). Feature-gated so a build without the Postgres driver simply omits it;
+/// forward the feature to `based-runtime/postgres`.
+#[cfg(feature = "postgres")]
+pub fn adopt_postgres<'a>(
+    engine: &based_runtime::Engine,
+    tx: &'a mut based_runtime::sqlx::Transaction<'_, based_runtime::sqlx::Postgres>,
+) -> Client<based_runtime::AdoptedTransport<based_runtime::AdoptedPg<'a>>> {
+    Client {
+        transport: based_runtime::AdoptedTransport::new(
+            engine.clone(),
+            based_runtime::AdoptedPg::new(tx),
+        ),
+    }
+}

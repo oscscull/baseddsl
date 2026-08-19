@@ -30,6 +30,12 @@ mutation open_ticket(subject: text, body: text, priority: Priority = normal) -> 
 
 query ticket(id) -> TicketDetail scoped Tenant;
 
+# Pessimistic lock: `for update` locks the row for the caller's transaction, so a
+# read-decide-write can't race a concurrent writer. Callable only on a transaction-bound
+# client — the flagship uses it through `adopt` (src/app.rs `resolve_with_audit`), locking
+# the ticket before it flips the status in the caller's own transaction.
+query ticket_for_update(id) -> TicketRow scoped Tenant { get Ticket where (id = $id) for update; }
+
 # Per-param bindings: `agent -> assignee` binds via the named edge, `since`
 # binds with an explicit column + operator (`created_at > $since`).
 query tickets_for(agent -> assignee, since: timestamp > created_at) -> TicketRow[] scoped Tenant;

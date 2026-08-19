@@ -502,7 +502,13 @@ fn embedded_bridge_is_gated_on_the_option() {
 
     // With the option on, the embedded bridge is appended: the `Embedded` transport over
     // `based_runtime::Engine` and the one-call `embedded(&engine)` constructor.
-    let embed = gen_opts(src, ClientOptions { embedded: true });
+    let embed = gen_opts(
+        src,
+        ClientOptions {
+            embedded: true,
+            dialect: None,
+        },
+    );
     assert!(
         embed.contains("pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>>"),
         "\n{embed}"
@@ -560,7 +566,13 @@ fn for_update_method_is_confined_to_txbound_transports() {
     // Embedded build: `TxTransport` is the one transport carrying `TxBound`; `Embedded` is not,
     // so `Client<Embedded>::product_for_update` does not exist (a compile error, proven in the
     // runtime tests). The marker impl is emitted only for the transaction transport.
-    let embed = gen_opts(src, ClientOptions { embedded: true });
+    let embed = gen_opts(
+        src,
+        ClientOptions {
+            embedded: true,
+            dialect: None,
+        },
+    );
     assert!(
         embed.contains("impl TxBound for based_runtime::TxTransport {}"),
         "\n{embed}"
@@ -568,6 +580,93 @@ fn for_update_method_is_confined_to_txbound_transports() {
     assert!(
         !embed.contains("impl TxBound for Embedded"),
         "Embedded must NOT carry TxBound\n{embed}"
+    );
+}
+
+#[test]
+fn adopt_constructor_is_per_dialect_and_txbound() {
+    use based_codegen::Dialect;
+    let src = r#"
+        Widget { id: text, name: text, stock: int }
+        shape WidgetRow from Widget { name, stock }
+        query widget_for_update(id) -> WidgetRow {
+            get Widget where (id = $id) for update;
+        }
+        mutation restock(id, stock) -> WidgetRow {
+            update Widget where (id = $id) { stock = $stock }
+        }
+        "#;
+    let gen_dialect = |d: Dialect| {
+        gen_opts(
+            src,
+            ClientOptions {
+                embedded: true,
+                dialect: Some(d),
+            },
+        )
+    };
+
+    // The adopted transport (BYO `adopt`) is one impl generic over the driver adapter, and it
+    // carries `TxBound` so `for update` locking reads work through a caller-owned tx.
+    let pg = gen_dialect(Dialect::Postgres);
+    assert!(
+        pg.contains(
+            "impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D>"
+        ),
+        "\n{pg}"
+    );
+    assert!(
+        pg.contains(
+            "impl<D: based_runtime::DbRead> TxBound for based_runtime::AdoptedTransport<D> {}"
+        ),
+        "\n{pg}"
+    );
+    // Postgres emits exactly `adopt_postgres`, cfg-gated on the `postgres` feature, naming the
+    // Postgres `sqlx::Transaction` and the `AdoptedPg` adapter.
+    assert!(pg.contains("#[cfg(feature = \"postgres\")]"), "\n{pg}");
+    assert!(pg.contains("pub fn adopt_postgres<'a>("), "\n{pg}");
+    assert!(
+        pg.contains("based_runtime::sqlx::Transaction<'_, based_runtime::sqlx::Postgres>"),
+        "\n{pg}"
+    );
+    assert!(pg.contains("based_runtime::AdoptedPg::new(tx)"), "\n{pg}");
+    assert!(!pg.contains("adopt_sqlite"), "one per driver: {pg}");
+    assert!(!pg.contains("adopt_mariadb"), "one per driver: {pg}");
+
+    // SQLite → `adopt_sqlite`; the MySQL/MariaDB family shares one driver → `adopt_mariadb`.
+    let sq = gen_dialect(Dialect::Sqlite);
+    assert!(sq.contains("#[cfg(feature = \"sqlite\")]"), "\n{sq}");
+    assert!(sq.contains("pub fn adopt_sqlite<'a>("), "\n{sq}");
+    assert!(
+        sq.contains("based_runtime::AdoptedSqlite::new(tx)"),
+        "\n{sq}"
+    );
+    let my = gen_dialect(Dialect::MySql);
+    assert!(my.contains("#[cfg(feature = \"mariadb\")]"), "\n{my}");
+    assert!(my.contains("pub fn adopt_mariadb<'a>("), "\n{my}");
+    assert_eq!(
+        gen_dialect(Dialect::MariaDb)
+            .matches("pub fn adopt_mariadb")
+            .count(),
+        1,
+        "MariaDb dialect also emits adopt_mariadb"
+    );
+
+    // No dialect (a wire-only or unspecified client) emits the adopted impl but no constructor.
+    let none = gen_opts(
+        src,
+        ClientOptions {
+            embedded: true,
+            dialect: None,
+        },
+    );
+    assert!(
+        none.contains("Transport for based_runtime::AdoptedTransport<D>"),
+        "\n{none}"
+    );
+    assert!(
+        !none.contains("pub fn adopt_"),
+        "no constructor without a dialect: {none}"
     );
 }
 
@@ -683,7 +782,13 @@ fn schema_without_stream_emits_no_streaming_surface() {
 fn embedded_bridge_streams_the_engine_rows() {
     // With the embedded option on, the bridge also implements the streaming door over
     // `Engine::call_stream`, decoding the engine's shaped rows in-process.
-    let out = gen_opts(STREAM_SRC, ClientOptions { embedded: true });
+    let out = gen_opts(
+        STREAM_SRC,
+        ClientOptions {
+            embedded: true,
+            dialect: None,
+        },
+    );
     assert!(
         out.contains("self.engine.call_stream(route, args, ctx)"),
         "\n{out}"
@@ -851,7 +956,13 @@ fn schema_without_mutations_emits_no_keyed_surface() {
 fn embedded_bridge_keys_through_engine_call_with_key() {
     // With the embedded option on, the bridge implements the keyed door over
     // `Engine::call_with_key` — the in-process twin of the `Idempotency-Key` header.
-    let out = gen_opts(KEYED_SRC, ClientOptions { embedded: true });
+    let out = gen_opts(
+        KEYED_SRC,
+        ClientOptions {
+            embedded: true,
+            dialect: None,
+        },
+    );
     assert!(
         out.contains(".call_with_key(route, args, ctx, Some(key.to_string()))"),
         "\n{out}"

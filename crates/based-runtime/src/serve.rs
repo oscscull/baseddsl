@@ -115,18 +115,22 @@ pub async fn dispatch(
     run_result_to_response(result)
 }
 
-/// Route + run one request against a **caller-owned open transaction** — the
-/// read-decide-write seam ([`crate::Engine::dispatch_on_tx`], driven by
-/// [`crate::TxTransport`]). Unlike [`dispatch`], this checks out no connection and opens no
-/// transaction: a query reads on the held [`crate::run::Tx`], a mutation runs its writes on
-/// it (`run_mutation_on`) — **committing nothing** (the transaction handle owns the
-/// boundary). No idempotency store and no shard routing apply — the connection is already
-/// chosen. A declared guard still runs, so a mutation inside a transaction enforces the
-/// same authorization as one over the wire.
+/// Route + run one request against a **caller-provided open connection/transaction** — the
+/// read-decide-write seam ([`crate::Engine::dispatch_on`], driven by [`crate::TxTransport`]
+/// for an engine-owned transaction and [`crate::AdoptedTransport`] for a caller-owned one).
+/// Unlike [`dispatch`], this checks out no connection and opens no transaction: a query
+/// reads on the provided [`crate::run::DbRead`], a mutation runs its writes on it
+/// (`run_mutation_on`) — **committing nothing** (the boundary is owned elsewhere: by the
+/// engine's [`crate::Transaction`] typestate, or by the caller's own adopted transaction).
+/// Because it takes any `DbRead` and never calls begin/commit/rollback, it drives an
+/// engine-owned `Tx` and a *borrowed* adopted transaction through the identical path. No
+/// idempotency store and no shard routing apply — the connection is already chosen. A
+/// declared guard still runs, so a mutation inside a transaction enforces the same
+/// authorization as one over the wire.
 #[allow(clippy::too_many_arguments)]
-pub async fn dispatch_on(
+pub async fn dispatch_on<D: crate::run::DbRead + ?Sized>(
     compiled: &Compiled,
-    tx: &mut dyn crate::run::Tx,
+    db: &mut D,
     id_gen: &dyn IdGen,
     guards: &Guards,
     engine: Option<&crate::Engine>,
@@ -140,12 +144,12 @@ pub async fn dispatch_on(
     }
     let (kind, name) = parse_route(path).expect("preflight guaranteed a routable path");
     let result = match kind {
-        Kind::Query => run_query(compiled, tx, &Request::new(name, args, ctx)).await,
+        Kind::Query => run_query(compiled, db, &Request::new(name, args, ctx)).await,
         Kind::Mutation => {
             if let Some(resp) = check_guard(compiled, guards, engine, name, &args, &ctx).await {
                 return resp;
             }
-            crate::run::run_mutation_on(compiled, tx, id_gen, &Request::new(name, args, ctx)).await
+            crate::run::run_mutation_on(compiled, db, id_gen, &Request::new(name, args, ctx)).await
         }
     };
     run_result_to_response(result)

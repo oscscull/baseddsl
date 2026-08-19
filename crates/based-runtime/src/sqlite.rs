@@ -209,6 +209,46 @@ impl Tx for SqliteTx {
     }
 }
 
+// ---------- bring-your-own transaction (`adopt`) ----------------------------
+
+/// A borrowed adapter over a **caller-owned** open SQLite transaction — the BYO (`adopt`)
+/// rung (transactions.md rung 3). It runs baseddsl reads/writes on the transaction's
+/// underlying connection, so they execute inside the caller's transaction and commit
+/// atomically with the caller's own writes. It implements only the read/execute seam
+/// ([`DbRead`]), never the owning [`Tx`] boundary: **`adopt` never begins, commits, or rolls
+/// back** — the caller owns that. The generated `client::adopt_sqlite` wraps this in a
+/// [`crate::AdoptedTransport`] + `Client`.
+pub struct AdoptedSqlite<'a> {
+    conn: &'a mut sqlx::SqliteConnection,
+}
+
+impl<'a> AdoptedSqlite<'a> {
+    /// Adopt a caller-owned open transaction. The adapter borrows it for its lifetime; the
+    /// caller commits (or rolls back) its own transaction afterward.
+    pub fn new(tx: &'a mut sqlx::Transaction<'_, Sqlite>) -> Self {
+        Self { conn: &mut **tx }
+    }
+}
+
+#[async_trait]
+impl DbRead for AdoptedSqlite<'_> {
+    fn fetch<'a>(&'a mut self, sql: &'a str, params: &[SqlValue]) -> RowStream<'a> {
+        let q = bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params);
+        Box::pin(
+            q.fetch(&mut *self.conn)
+                .map(|r| r.map_err(map_sqlite_err).and_then(|row| row_to_json(&row))),
+        )
+    }
+
+    async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        bind_all(sqlx::query(sqlx::AssertSqlSafe(sql)), params)
+            .execute(&mut *self.conn)
+            .await
+            .map(|d| d.rows_affected())
+            .map_err(map_sqlite_err)
+    }
+}
+
 /// The SQLite [`Backend`]: one bounded pool over one database, no shards (the shard key
 /// is ignored). An in-memory backend pins the pool to a single never-expiring connection
 /// so writes persist across checkouts — the property that makes it a real

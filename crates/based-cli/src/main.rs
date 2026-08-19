@@ -345,7 +345,11 @@ fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> Result<(),
     use based_codegen::client::ClientOptions;
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let target = ClientTarget::parse(&project.manifest.client);
-    let opts = ClientOptions { embedded };
+    // The compile-target dialect gates the one per-driver `adopt_*` bring-your-own
+    // transaction constructor the embedded bridge emits (each names a concrete
+    // `sqlx::Transaction<DB>`); a wire-only client never touches it.
+    let dialect = embedded.then(|| Dialect::parse(&project.manifest.dialect));
+    let opts = ClientOptions { embedded, dialect };
     let code = based_codegen::client::client_with(&schema, &decls, target, opts);
     match out {
         Some(path) => {

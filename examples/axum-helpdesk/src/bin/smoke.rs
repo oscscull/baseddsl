@@ -241,21 +241,46 @@ async fn main() {
         .await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "guard_denied");
+    // Resolve t1 through the bring-your-own-transaction (`adopt`) interop route: the app
+    // opens its *own* Postgres transaction, writes an app-owned `audit_log` row raw, then
+    // adopts that transaction into the engine to run a `for update` locking read + the status
+    // update — all committing atomically. The audit row proves the raw + baseddsl writes
+    // landed together.
     let (status, row) = desk
-        .post(
-            Some(mara),
-            &format!("/tickets/{t1}/status"),
-            json!({ "status": "resolved" }),
-            None,
-        )
+        .post(Some(mara), &format!("/tickets/{t1}/resolve"), json!({}), None)
         .await;
     assert_eq!(status, 200, "{row}");
+    assert_eq!(row["status"], "resolved");
+    let (_, audit) = desk.get(Some(mara), &format!("/tickets/{t1}/audit")).await;
+    assert_eq!(audit["count"], 1, "the adopted tx committed its audit row: {audit}");
     let (status, row) = desk
         .post(Some(mara), &format!("/tickets/{t1}/close"), json!({}), None)
         .await;
     assert_eq!(status, 200, "{row}");
     assert_eq!(row["status"], "closed");
     println!("ok - close guard: 403 guard_denied while unresolved, allowed once resolved");
+
+    // ---- adopt interop: the abort path rolls BOTH writes back together ----------
+    // Same flow with `{"abort": true}`: after the raw audit write and the baseddsl status
+    // update run on the app's own transaction, the app rolls it back. Both writes vanish —
+    // t4 stays open (its later assertions rely on it) and its audit count stays 0. This is
+    // the payoff of `adopt` never owning the boundary: the caller's rollback is atomic over
+    // its raw write and baseddsl's alike.
+    let (status, body) = desk
+        .post(
+            Some(mara),
+            &format!("/tickets/{t4}/resolve"),
+            json!({ "abort": true }),
+            None,
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "aborted");
+    let (_, audit) = desk.get(Some(mara), &format!("/tickets/{t4}/audit")).await;
+    assert_eq!(audit["count"], 0, "rolled-back audit row did not persist: {audit}");
+    let (_, t4_now) = desk.get(Some(mara), &format!("/tickets/{t4}")).await;
+    assert_eq!(t4_now["status"], "open", "rolled-back status update did not persist");
+    println!("ok - adopt interop: commit lands raw+baseddsl atomically; abort rolls both back");
 
     // ---- archive / restore (soft delete round trip) -----------------------------
     let (status, _) = desk.delete(Some(mara), &format!("/tickets/{t2}")).await;

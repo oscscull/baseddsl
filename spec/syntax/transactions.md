@@ -85,12 +85,38 @@ txn.commit().await?;                                    // or txn.rollback().awa
 handle, or a panic, never leaks a half-written transaction). `commit`/`rollback` are the explicit,
 awaited forms.
 
-### Rung 3 — bring-your-own transaction (`adopt`) — NOT YET BUILT (slice 3)
+### Rung 3 — bring-your-own transaction (`adopt`) — BUILT (slice 3, D120)
 
-For interop with app code that already opened a transaction on the same driver:
-`client::adopt(&mut caller_sqlx_tx)` will bind the generated calls to a transaction the caller
-owns (the caller commits). This needs per-driver adapters (one per sqlx driver), so it is a
-documented follow-on, **not yet implemented**.
+For interop with app code that already opened a transaction on the same driver: a per-driver
+`client::adopt_<driver>(&engine, &mut caller_sqlx_tx)` binds the generated calls to a transaction
+the **caller** owns, so baseddsl's writes commit atomically with the caller's own raw writes on
+that transaction.
+
+```rust
+let mut tx = pool.begin().await?;                       // caller's own sqlx transaction
+sqlx::query("INSERT INTO audit_log …").execute(&mut *tx).await?;   // a raw app write
+{
+    let api = client::adopt_postgres(&engine, &mut tx); // adopt it (borrowed)
+    api.order_for_update(input, ctx).await?;            // a `for update` locking read works
+    api.place_shipment(input, ctx).await?;              // a baseddsl write, on the same tx
+}                                                       // the adopted client drops — tx untouched
+tx.commit().await?;                                     // the caller commits BOTH writes atomically
+```
+
+**`adopt` never begins, commits, or rolls back — the caller owns the boundary.** Dropping the
+adopted client leaves the caller's transaction untouched (unlike rung 2's `Transaction`, which
+drop-rolls-back); the caller commits or rolls back it itself, and the raw + baseddsl writes land
+(or vanish) together. There is no `transaction_retrying` here — auto-retry needs an engine-owned
+boundary. The adopted client is `TxBound`, so `for update` reads work through it (the lock is held
+to the caller's boundary).
+
+**One constructor per driver, for the compile target.** `sqlx`'s `Transaction<'_, DB>` types don't
+unify across drivers, so there is one constructor per driver — `adopt_postgres` / `adopt_sqlite` /
+`adopt_mariadb` (the MySQL/MariaDB family shares one `sqlx::MySql` driver) — each `#[cfg]`-gated on
+the consumer's matching driver feature (forward it to `based-runtime/<driver>`). The generated
+client emits exactly the one for its compile-target dialect. Under the hood each wraps the caller's
+*borrowed* `sqlx::Transaction` in a per-driver adapter implementing baseddsl's `DbRead` read+execute
+seam (never the owning `Tx`), run through the same dispatch core as the engine-owned rungs.
 
 ## `for update` row locking — BUILT (slice 2, D119)
 
@@ -153,5 +179,18 @@ emission; the `TxBound` marker trait + confined `impl<T: Transport + TxBound> Cl
 Proven live on Postgres (two concurrent transactions: B's `for update` read blocks until A commits, then
 observes A's committed write). Implementation: D119.
 
-Slice 3 (BYO `adopt` adapters, plus the flagship axum-helpdesk read-decide-write use case) remains the
-documented follow-on above.
+## What shipped (slice 3) — the feature is COMPLETE
+
+The BYO `adopt` interop rung (the built section above): per-driver borrowed `DbRead` adapters
+(`AdoptedPg` / `AdoptedSqlite` / `AdoptedMaria`) over a caller-owned `sqlx::Transaction`, wrapped in the
+`AdoptedTransport<D>` transport and run through the same dispatch core (`dispatch_on` generalized from a
+`Tx` to any `DbRead`, so an engine-owned transaction and a borrowed adopted one take the identical path);
+the generic adopted `Transport` + `TxBound` impls and the one per-dialect `#[cfg]`-gated `adopt_*`
+constructor in codegen; `based_runtime` re-exports `sqlx` so a consumer names the same driver types.
+Proven live (raw app write + baseddsl `for update` read + mutation on one caller-owned transaction, atomic
+on commit, discarded together on rollback) on Postgres and SQLite, and demonstrated end-to-end in the
+flagship axum-helpdesk (`resolve_with_audit` → `POST /tickets/{id}/resolve`, in the smoke). Implementation:
+D120. With this the three-rung transaction seam (D118–D120) is complete.
+
+The only remaining transaction micro-follow-on is `for update nowait` / `skip locked` (deferred above for
+MariaDB-version gating).

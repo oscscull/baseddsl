@@ -1105,6 +1105,140 @@ async fn for_update_lock_is_held_across_a_transaction_live_postgres() {
     txn_b.commit().await.expect("commit B");
 }
 
+/// Bring-your-own transaction (`adopt`) live against Postgres (transactions.md rung 3): a
+/// caller opens a transaction on **its own** `sqlx` pool, does a **raw non-baseddsl write**
+/// on it, then runs baseddsl work (a `for update` locking read + a mutation) through
+/// [`AdoptedTransport`] **on that same transaction** — and both the raw write and the
+/// baseddsl write land atomically when the caller commits, and are discarded together when
+/// the caller rolls back. This is the existential interop case: baseddsl is just one more
+/// writer on the caller's transaction. `adopt` itself never begins/commits/rolls back — the
+/// caller owns the boundary (proven: dropping the adopted transport, then the transaction,
+/// leaves nothing committed).
+#[tokio::test]
+async fn adopt_commits_raw_and_baseddsl_writes_atomically_live_postgres() {
+    use based_runtime::{AdoptedPg, AdoptedTransport, Engine, TxOptions};
+    use sqlx::postgres::PgPoolOptions;
+
+    let Some((c, router, container)) = live_schema(
+        r#"
+        Widget { id: text, name: text, stock: int }
+        shape WidgetRow from Widget { name, stock }
+        query widget_for_update(id) -> WidgetRow {
+            get Widget where (id = $id) for update;
+        }
+        mutation restock(id, stock) -> WidgetRow {
+            update Widget where (id = $id) { stock = $stock }
+        }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    // Seed a widget, and an **app-owned** audit table that baseddsl knows nothing about —
+    // the raw writes below land there.
+    container
+        .exec_batch(
+            "INSERT INTO widget (id, name, stock) VALUES ('w1', 'Widget', 0);\
+             CREATE TABLE audit (id text primary key, widget_id text not null, note text not null);",
+        )
+        .await;
+
+    let engine = Engine::new(c, router, UuidGen);
+    // The caller's *own* pool — the app's connections, not the engine's backend (which
+    // `adopt` never touches: the baseddsl work runs on the caller's transaction).
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&container.url())
+        .await
+        .expect("caller pool");
+
+    // ---- commit path: raw audit write + baseddsl restock, one caller-owned tx ----------
+    {
+        let mut tx = pool.begin().await.expect("caller begins its own tx");
+        // (1) a raw, non-baseddsl write on the caller's transaction.
+        sqlx::query("INSERT INTO audit (id, widget_id, note) VALUES ($1, $2, $3)")
+            .bind("a1")
+            .bind("w1")
+            .bind("restocked to 50")
+            .execute(&mut *tx)
+            .await
+            .expect("raw audit insert");
+        // (2) baseddsl work through `adopt` on the *same* transaction.
+        {
+            let api = AdoptedTransport::new(engine.clone(), AdoptedPg::new(&mut tx));
+            // `for update` locking read works through the adopted (TxBound) client.
+            let locked = api
+                .dispatch("/q/widget_for_update", json!({ "id": "w1" }), json!({}))
+                .await;
+            assert_eq!(
+                locked.status, 200,
+                "adopted for-update read: {:?}",
+                locked.body
+            );
+            let wrote = api
+                .dispatch("/m/restock", json!({ "id": "w1", "stock": 50 }), json!({}))
+                .await;
+            assert_eq!(wrote.status, 200, "adopted mutation: {:?}", wrote.body);
+            assert_eq!(wrote.body["stock"], 50);
+        } // the adopted transport drops here, releasing its borrow of `tx`
+        tx.commit().await.expect("caller commits its own tx");
+    }
+    // Both writes are visible after the caller's commit.
+    let (stock, audits) = audit_and_stock(&pool).await;
+    assert_eq!(stock, 50, "baseddsl restock committed with the caller's tx");
+    assert_eq!(audits, 1, "the raw audit row committed atomically with it");
+
+    // ---- rollback path: the same two writes, but the caller does NOT commit ------------
+    {
+        let mut tx = pool.begin().await.expect("caller begins its own tx");
+        sqlx::query("INSERT INTO audit (id, widget_id, note) VALUES ($1, $2, $3)")
+            .bind("a2")
+            .bind("w1")
+            .bind("should be discarded")
+            .execute(&mut *tx)
+            .await
+            .expect("raw audit insert");
+        {
+            let api = AdoptedTransport::new(engine.clone(), AdoptedPg::new(&mut tx));
+            let wrote = api
+                .dispatch("/m/restock", json!({ "id": "w1", "stock": 999 }), json!({}))
+                .await;
+            assert_eq!(wrote.status, 200, "adopted mutation: {:?}", wrote.body);
+        }
+        // Drop the transaction without committing — `adopt` never committed anything, so the
+        // caller's rollback discards BOTH the raw write and the baseddsl write together.
+        drop(tx);
+    }
+    let (stock, audits) = audit_and_stock(&pool).await;
+    assert_eq!(
+        stock, 50,
+        "the rolled-back baseddsl write did not persist (still 50, not 999)"
+    );
+    assert_eq!(
+        audits, 1,
+        "the rolled-back raw write did not persist (still just a1)"
+    );
+
+    // A default-options adopt (isolation is the caller's transaction's) round-trips too — the
+    // adopted path is unaffected by `TxOptions`, which only the engine-owned rungs apply.
+    let _ = TxOptions::default();
+}
+
+/// The widget's stock and the count of audit rows — read straight off the caller's pool, so
+/// the assertions see committed state, not anything the adopted transport held.
+async fn audit_and_stock(pool: &sqlx::PgPool) -> (i64, i64) {
+    let stock: (i64,) = sqlx::query_as("SELECT stock FROM widget WHERE id = 'w1'")
+        .fetch_one(pool)
+        .await
+        .expect("read stock");
+    let audits: (i64,) = sqlx::query_as("SELECT count(*) FROM audit")
+        .fetch_one(pool)
+        .await
+        .expect("count audit");
+    (stock.0, audits.0)
+}
+
 // ---- streaming reads over the live wire -------------------------------------
 
 /// Start the real `based serve` listener over a live router on a free loopback port

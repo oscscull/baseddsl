@@ -70,7 +70,12 @@ fn generated_client_is_current() {
         &schema,
         &sf.decls,
         ClientTarget::Rust,
-        ClientOptions { embedded: true },
+        // MariaDb to match `compiled()` — so the mirror carries `adopt_mariadb`, exercised
+        // (cfg `mariadb`) under the workspace `--all-features` test build.
+        ClientOptions {
+            embedded: true,
+            dialect: Some(based_codegen::Dialect::MariaDb),
+        },
     );
     if std::env::var_os("BLESS").is_some() {
         std::fs::write(

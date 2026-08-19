@@ -62,7 +62,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
   refactor; `TxTransport` the tx-bound transport; slices 2 `for update`+`TxBound` / 3 BYO `adopt`
   documented + deferred), D119 (slice 2 of 3: the `for update` pessimistic locking read — a trailing
   block-body modifier lowering to `SELECT … FOR UPDATE` per dialect (no-op on SQLite), compile-time
-  confined to transaction clients via the `TxBound` marker trait; E0315–E0318)
+  confined to transaction clients via the `TxBound` marker trait; E0315–E0318), D120 (slice 3 of 3,
+  feature COMPLETE: BYO `adopt` — per-driver borrowed adapters over a caller-owned `sqlx::Transaction`
+  wrapped in `AdoptedTransport`, run through the same `dispatch_on`/`DbRead` path; `adopt` never
+  begins/commits/rolls back; `TxBound` so `for update` works; per-dialect `adopt_*` constructor gated on
+  the driver feature)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
@@ -5726,3 +5730,85 @@ byte-gated embedded mirror (`embedded_client_schema.bsl` gained an `order_for_up
 
 **Not built: slice 3** (BYO `adopt` per-driver adapters + the flagship axum-helpdesk read-decide-write
 example) remains the documented follow-on.
+
+## D120 — bring-your-own transaction (`adopt`): the interop rung (transaction seam, slice 3 of 3 — COMPLETE)
+
+The last rung of the transaction seam (transactions.md; slices 1–2 = D118/D119): a host app holding an
+**open `sqlx::Transaction` from the same driver** routes baseddsl queries/mutations — including `for
+update` locking reads — through **that** transaction, so the baseddsl writes commit atomically with the
+app's own raw writes on the same transaction. Owner-scoped feature (no syntax fork); built this session.
+With it the whole 3-slice feature is complete.
+
+**The defining property — `adopt` never owns the boundary.** Unlike rung 2's engine-owned `Transaction`
+(whose typestate drop-rolls-back), `adopt` **never begins, commits, or rolls back** — the caller owns the
+boundary. Dropping the adopted client leaves the caller's transaction untouched; the caller commits (or
+rolls back) it itself, and the raw + baseddsl writes land (or vanish) together. No `transaction_retrying`
+on `adopt` — auto-retrying a whole transaction requires owning its boundary, which the caller does.
+
+**Runtime — one borrowed adapter per driver + one transport, reusing the existing dispatch core.** Each
+driver gets a borrowed adapter over the caller's transaction — `AdoptedPg<'a>`/`AdoptedSqlite<'a>`/
+`AdoptedMaria<'a>` — holding `&'a mut sqlx::<Driver>Connection` (obtained via the `Transaction`'s deref,
+so only the one borrow lifetime surfaces and the transaction's own connection lifetime is erased, keeping
+the generated `Client` type clean). Each implements **only** the `DbRead` read+execute seam — never the
+owning `Tx` boundary — so there is structurally no begin/commit/rollback to call. `AdoptedTransport<D>`
+(a `Mutex<D>` over the adapter + an `Engine` handle) is the transport, running every callable through the
+same `Engine::dispatch_on` core the engine-owned `TxTransport` uses. To make one path serve both,
+`dispatch_on` / `serve::dispatch_on` were generalized from `&mut dyn Tx` to `&mut D` where
+`D: DbRead + ?Sized` (the engine-owned `Tx` is a `DbRead`, and the borrowed adapter is a `DbRead`, so
+they take the identical route + run path; the tx-dispatch entry never calls begin/commit on the borrowed
+adapter). `dispatch_on_tx` folded into `dispatch_on`. `execute_returning_id` uses the `DbRead` default
+(RETURNING read-back) for Postgres/SQLite; `AdoptedMaria` overrides it to read `LAST_INSERT_ID()`.
+
+**`based_runtime` re-exports `sqlx`** (gated on any concrete-driver feature) so the generated per-driver
+`adopt_*` constructor can name `based_runtime::sqlx::Transaction<'_, DB>` and the adopted transaction +
+the engine speak the identical `sqlx` types without the consumer pinning a matching sqlx version.
+
+**Codegen — one generic transport impl + `TxBound` + a per-dialect constructor.** The embedded bridge
+emits `impl<D: DbRead> Transport for AdoptedTransport<D>` (one impl covers every driver; the keyed door
+runs on the transaction directly — the caller's tx is the atomicity boundary, so the idempotency key is
+not separately consulted; the streaming door is rejected loudly — a stream would hold the connection the
+transaction owns). It also emits `impl<D: DbRead> TxBound for AdoptedTransport<D>` (only when the schema
+has a `for update` query), so locking reads work through an adopted client, held to the caller's boundary.
+Exactly one `adopt_*` constructor is emitted, for the **compile-target dialect** (`ClientOptions.dialect`,
+which `based gen client` fills from the manifest): Postgres → `adopt_postgres`, SQLite → `adopt_sqlite`,
+MySQL/MariaDB (one shared `sqlx::MySql` driver) → `adopt_mariadb`. Each names that driver's concrete
+`sqlx::Transaction<DB>` (the types don't unify, so one per driver) and is `#[cfg(feature = "<driver>")]`
+so a build without that driver simply omits it; a wire-only / no-dialect client emits the generic impl but
+no constructor. Public API, e.g.:
+
+```rust
+pub fn adopt_postgres<'a>(
+    engine: &based_runtime::Engine,
+    tx: &'a mut based_runtime::sqlx::Transaction<'_, based_runtime::sqlx::Postgres>,
+) -> Client<based_runtime::AdoptedTransport<based_runtime::AdoptedPg<'a>>>
+```
+
+**No public-API fork.** The borrowed-lifetime model fit the existing seam without an owner-ratified change:
+the constructor takes `&mut sqlx::Transaction` and hands back a `Client` over a borrowed adapter; the
+generic `AdoptedTransport<D>` reuses the `Transport`/`DbRead` seams unchanged.
+
+**Live interop proof (the payoff).** `adopt_commits_raw_and_baseddsl_writes_atomically_live_postgres`
+(Postgres) and `…_on_sqlite` (real SQLite): a caller opens a transaction on its **own** pool, does a raw
+non-baseddsl `INSERT` into an app-owned `audit` table, then runs baseddsl work (a `for update` read + a
+mutation) through `AdoptedTransport` on the **same** transaction. Commit path — both the raw row and the
+baseddsl write are visible after the caller's commit; rollback path — dropping the transaction without
+commit discards **both** together (stock unchanged, no audit row). `adopt` committed nothing itself.
+
+**Flagship interop demo — axum-helpdesk.** `App::resolve_with_audit` opens the app's own `sqlx::PgPool`
+transaction, writes an app-owned `audit_log` row raw, then `client::adopt_postgres`-adopts that
+transaction to run a `for update` locking read + the ticket status update — committing atomically (or, on
+`{"abort": true}`, rolling both back). Wired at `POST /tickets/{id}/resolve` (+ `GET /tickets/{id}/audit`),
+proven in the helpdesk smoke: the commit path resolves the ticket and lands one audit row; the abort path
+returns 409 and leaves the ticket open with zero audit rows.
+
+**Deferred micro-follow-on:** `for update nowait` / `skip locked` (MariaDB-version gating), unchanged from
+D119.
+
+**Blast radius.** `based-runtime`: `AdoptedPg`/`AdoptedSqlite`/`AdoptedMaria` `DbRead` adapters
+(postgres.rs/sqlite.rs/driver.rs), `AdoptedTransport` (tx.rs), `dispatch_on` generalized to `DbRead`
+(embed.rs/serve.rs; `dispatch_on_tx` folded in), the `sqlx` re-export + `Adopted*` exports (lib.rs).
+`based-codegen`: `ClientOptions.dialect`, the generic adopted `Transport`/`TxBound` impls + per-dialect
+`adopt_constructor` (client.rs). `based-cli`: passes the manifest dialect for `--embedded`. Tests: codegen
+`adopt_constructor_is_per_dialect_and_txbound`; runtime live interop (postgres + sqlite). Examples: the
+helpdesk `adopt` flow + smoke, and all three quickstart embedded clients + the byte-gated embedded mirror
+(`generated_client_is_current`, now generated for MariaDb so it carries `adopt_mariadb`) regenerated.

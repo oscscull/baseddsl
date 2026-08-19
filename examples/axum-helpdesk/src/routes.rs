@@ -35,6 +35,8 @@ pub fn router(app: App) -> Router {
         .route("/tickets/{id}/tags", post(tag_ticket))
         .route("/tickets/{id}/duplicate", post(mark_duplicate))
         .route("/tickets/{id}/close", post(close_ticket))
+        .route("/tickets/{id}/resolve", post(resolve_ticket))
+        .route("/tickets/{id}/audit", get(ticket_audit))
         .route("/tickets/{id}/restore", post(restore_ticket))
         .route("/tickets/{id}/time", post(log_time))
         .route("/tickets/{id}/drafts", get(my_drafts).post(save_draft))
@@ -378,6 +380,43 @@ async fn close_ticket(
     Ok(Json(row))
 }
 
+#[derive(Deserialize)]
+struct ResolveBody {
+    /// Roll the interop transaction back after both writes, to demonstrate atomic discard.
+    #[serde(default)]
+    abort: bool,
+}
+
+/// **Interop demo — bring-your-own transaction (`adopt`).** Resolve the ticket AND write an
+/// app-owned `audit_log` row in one transaction the *app* owns (see `App::resolve_with_audit`,
+/// which adopts that transaction into the engine): both land atomically, or — with
+/// `{"abort": true}` — roll back together. The one handler that doesn't go through the
+/// embedded `api()` client, because the app, not the engine, opens the transaction.
+async fn resolve_ticket(
+    State(app): State<App>,
+    Extension(s): Extension<SessionCtx>,
+    Path(id): Path<Id<entity::Ticket>>,
+    Json(b): Json<ResolveBody>,
+) -> Result<Json<client::TicketRow>, ApiError> {
+    require_agent(&s)?;
+    let row = app.resolve_with_audit(id, s.org, b.abort).await?;
+    Ok(Json(row))
+}
+
+/// Read the app-owned audit rows for a ticket — a raw read on the app's own pool, so a caller
+/// (the smoke) can confirm the interop write committed (or, after an abort, did not).
+async fn ticket_audit(
+    State(app): State<App>,
+    Extension(s): Extension<SessionCtx>,
+    Path(id): Path<Id<entity::Ticket>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_agent(&s)?;
+    let count = app.audit_count(id.as_str()).await.map_err(|e| {
+        ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "database", e.to_string())
+    })?;
+    Ok(Json(json!({ "count": count })))
+}
+
 async fn archive_ticket(
     State(app): State<App>,
     Extension(s): Extension<SessionCtx>,
@@ -640,6 +679,25 @@ impl From<client::ClientError> for ApiError {
             ),
             // A transport/decode failure: the in-process call itself broke.
             None => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.code(), e.message()),
+        }
+    }
+}
+
+impl From<crate::app::InteropError> for ApiError {
+    fn from(e: crate::app::InteropError) -> ApiError {
+        use crate::app::InteropError::{Aborted, Client, Db, NotFound};
+        match e {
+            // A baseddsl call inside the adopted transaction failed — its own verdict passes
+            // through (guard 403, bad args 400, database 503) exactly as elsewhere.
+            Client(e) => ApiError::from(e),
+            Db(e) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "database", e.to_string()),
+            NotFound => ApiError::not_found("ticket"),
+            // The deliberate demo abort: both the raw and the baseddsl write were rolled back.
+            Aborted => ApiError::new(
+                StatusCode::CONFLICT,
+                "aborted",
+                "interop transaction aborted (demo); both writes rolled back",
+            ),
         }
     }
 }
