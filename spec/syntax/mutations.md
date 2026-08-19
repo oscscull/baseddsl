@@ -151,4 +151,4 @@ The two forms never mix (one way to say each thing):
 - `-> ok` on a query is an error (`E0222`) — a query returns data.
 
 ## Read-decide-write
-Not in the DSL. Use the host-language `transaction(closure)` seam: engine owns the boundary (commit on Ok, rollback on Err/panic, always release); caller writes logic; inside, queries are the same safe queries bound to the tx. See architecture docs.
+Not in the DSL. Use the host-language `transaction(closure)` seam: engine owns the boundary (commit on Ok, rollback on Err/panic, always release); caller writes logic; inside, queries are the same safe queries bound to the tx. Full design — the three rungs (managed closure, explicit handle, BYO `adopt`), isolation levels, and `for update` locking — in **syntax/transactions.md** (D118).

@@ -222,6 +222,49 @@ impl Engine {
         .await
     }
 
+    /// Open a caller-owned transaction at `opts` (isolation + access mode) — the
+    /// read-decide-write seam (transactions.md). The returned [`Transaction`] borrows a
+    /// connection for its whole lifetime; run callables on it through a transaction-bound
+    /// client, then `commit`/`rollback` (dropping it rolls back). Single-shard: the
+    /// transaction opens on the empty shard key.
+    ///
+    /// This is the open-ended **explicit-handle** rung. The safe managed-closure rung —
+    /// `client::transaction(&engine, opts, |tx| …)`, which commits on `Ok` and rolls back
+    /// on `Err`/panic — is emitted with the generated client (embedded bridge).
+    pub async fn begin(
+        &self,
+        opts: crate::tx::TxOptions,
+    ) -> Result<crate::tx::Transaction, crate::run::DbError> {
+        let db = self.inner.backend.checkout("").await?;
+        let tx = db.begin_tx(opts).await?;
+        Ok(crate::tx::Transaction::new(self.clone(), tx))
+    }
+
+    /// Run one callable against a **provided open transaction** instead of a fresh
+    /// auto-committing checkout — the entry point [`crate::TxTransport`] calls. Queries
+    /// read on the transaction; mutations run their writes on it, committing nothing (the
+    /// transaction handle owns the boundary). Guards still run.
+    pub async fn dispatch_on_tx(
+        &self,
+        tx: &mut dyn crate::run::Tx,
+        route: &str,
+        args: serde_json::Value,
+        ctx: serde_json::Value,
+    ) -> WireResponse {
+        crate::serve::dispatch_on(
+            &self.inner.compiled,
+            tx,
+            self.inner.id_gen.as_ref(),
+            &self.inner.guards,
+            Some(self),
+            "POST",
+            route,
+            args,
+            ctx,
+        )
+        .await
+    }
+
     /// The compiled schema this engine serves (its lowered queries/mutations + resolved
     /// schema), for callers that want to introspect what routes exist.
     pub fn compiled(&self) -> &Compiled {

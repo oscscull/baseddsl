@@ -72,6 +72,7 @@ pub mod run;
 pub mod scan;
 pub mod serve;
 pub mod shard;
+pub mod tx;
 pub mod value;
 
 #[cfg(feature = "mariadb")]
@@ -102,10 +103,13 @@ pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
 };
 pub use run::{
-    fetch_all, run_mutation, run_query, run_query_stream, Backend, Db, DbError, DbErrorKind,
-    DbRead, MockDb, Row, RowStream, RunError, ShapedStream, Tx,
+    fetch_all, run_mutation, run_mutation_on, run_query, run_query_stream, Backend, Db, DbError,
+    DbErrorKind, DbRead, MockDb, Row, RowStream, RunError, ShapedStream, Tx,
 };
-pub use serve::{dispatch, dispatch_stream, preflight, resolve_shard_key, WireResponse};
+pub use serve::{
+    dispatch, dispatch_on, dispatch_stream, preflight, resolve_shard_key, WireResponse,
+};
+pub use tx::{AccessMode, Isolation, Transaction, TxOptions, TxTransport};
 pub use value::SqlValue;
 
 #[cfg(feature = "serve")]

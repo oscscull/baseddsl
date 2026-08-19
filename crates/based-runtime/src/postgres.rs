@@ -508,6 +508,21 @@ impl Db for PostgresDb {
             .map_err(map_pg_err)?;
         Ok(Box::new(PgTx { tx }))
     }
+
+    async fn begin_tx(self: Box<Self>, opts: crate::tx::TxOptions) -> Result<Box<dyn Tx>, DbError> {
+        // Postgres opens the transaction and sets isolation + access in one `BEGIN
+        // ISOLATION LEVEL … READ WRITE|READ ONLY`.
+        let plan =
+            based_codegen::Dialect::Postgres.begin_transaction_sql(opts.isolation, opts.access);
+        let tx = sqlx::Transaction::begin(
+            self.conn,
+            plan.begin
+                .map(|s| sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(s))),
+        )
+        .await
+        .map_err(map_pg_err)?;
+        Ok(Box::new(PgTx { tx }))
+    }
 }
 
 /// An open Postgres transaction (sqlx's guard over the same pooled connection).
@@ -541,6 +556,10 @@ impl DbRead for PgTx {
 impl Tx for PgTx {
     async fn commit(self: Box<Self>) -> Result<(), DbError> {
         self.tx.commit().await.map_err(map_pg_err)
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), DbError> {
+        self.tx.rollback().await.map_err(map_pg_err)
     }
 }
 

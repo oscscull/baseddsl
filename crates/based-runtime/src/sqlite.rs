@@ -149,6 +149,29 @@ impl Db for SqliteDb {
             .map_err(map_sqlite_err)?;
         Ok(Box::new(SqliteTx { tx }))
     }
+
+    async fn begin_tx(
+        mut self: Box<Self>,
+        opts: crate::tx::TxOptions,
+    ) -> Result<Box<dyn Tx>, DbError> {
+        // SQLite has no SQL-standard isolation; the intent maps to the `BEGIN` locking mode.
+        let plan =
+            based_codegen::Dialect::Sqlite.begin_transaction_sql(opts.isolation, opts.access);
+        if let Some(pre) = plan.pre {
+            sqlx::query(sqlx::AssertSqlSafe(pre))
+                .execute(&mut *self.conn)
+                .await
+                .map_err(map_sqlite_err)?;
+        }
+        let tx = sqlx::Transaction::begin(
+            self.conn,
+            plan.begin
+                .map(|s| sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(s))),
+        )
+        .await
+        .map_err(map_sqlite_err)?;
+        Ok(Box::new(SqliteTx { tx }))
+    }
 }
 
 /// An open SQLite transaction (sqlx's guard over the same pooled connection).
@@ -179,6 +202,10 @@ impl DbRead for SqliteTx {
 impl Tx for SqliteTx {
     async fn commit(self: Box<Self>) -> Result<(), DbError> {
         self.tx.commit().await.map_err(map_sqlite_err)
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), DbError> {
+        self.tx.rollback().await.map_err(map_sqlite_err)
     }
 }
 

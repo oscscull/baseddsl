@@ -162,10 +162,176 @@ impl Dialect {
             Self::Postgres => format!("COALESCE(json_agg({ordered}), '[]'::json)"),
         }
     }
+
+    /// The SQL that opens a transaction at the requested [`Isolation`] + [`AccessMode`],
+    /// per dialect. Routed through this seam so the isolation spelling can never drift
+    /// from the compile target. The runtime driver issues [`TxBegin::pre`] (if any) on the
+    /// connection, then opens the transaction with [`TxBegin::begin`] (a custom `BEGIN …`)
+    /// or its default `BEGIN` when `begin` is `None`.
+    ///
+    /// - **Postgres** — one `BEGIN ISOLATION LEVEL <level> READ WRITE|READ ONLY`.
+    /// - **MySQL/MariaDB** — no `BEGIN ISOLATION LEVEL` form, so a
+    ///   `SET TRANSACTION ISOLATION LEVEL <level>, READ WRITE|READ ONLY` (which applies to
+    ///   the very next transaction) runs first, then the default `BEGIN`.
+    /// - **SQLite** — no SQL-standard levels; the access/serializability intent maps to the
+    ///   locking mode of `BEGIN`: `SERIALIZABLE` → `BEGIN EXCLUSIVE`, else read-only →
+    ///   `BEGIN DEFERRED`, else (read-write) → `BEGIN IMMEDIATE`.
+    pub fn begin_transaction_sql(self, isolation: Isolation, access: AccessMode) -> TxBegin {
+        match self {
+            Self::Postgres => TxBegin {
+                pre: None,
+                begin: Some(format!(
+                    "BEGIN ISOLATION LEVEL {} {}",
+                    isolation.sql_level(),
+                    access.sql_mode()
+                )),
+            },
+            Self::MariaDb | Self::MySql => TxBegin {
+                pre: Some(format!(
+                    "SET TRANSACTION ISOLATION LEVEL {}, {}",
+                    isolation.sql_level(),
+                    access.sql_mode()
+                )),
+                begin: None,
+            },
+            Self::Sqlite => {
+                let mode = if isolation == Isolation::Serializable {
+                    "EXCLUSIVE"
+                } else if access == AccessMode::ReadOnly {
+                    "DEFERRED"
+                } else {
+                    "IMMEDIATE"
+                };
+                TxBegin {
+                    pre: None,
+                    begin: Some(format!("BEGIN {mode}")),
+                }
+            }
+        }
+    }
+}
+
+/// A transaction isolation level, a parameter on every transaction entry point. The
+/// levels are the SQL-standard set the three targets share; SQLite (which has no standard
+/// levels) maps them onto its `BEGIN` locking modes ([`Dialect::begin_transaction_sql`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Isolation {
+    /// Each statement sees rows committed before it began — the default, and the weakest
+    /// level all three engines agree on.
+    #[default]
+    ReadCommitted,
+    /// Every read in the transaction sees the same snapshot taken at first read.
+    RepeatableRead,
+    /// The transaction runs as if transactions were serial; the engine may abort it with a
+    /// serialization failure the caller retries (the optimistic-concurrency payoff).
+    Serializable,
+}
+
+impl Isolation {
+    /// The SQL-standard level name (`READ COMMITTED`, …) — Postgres/MySQL/MariaDB spelling.
+    pub fn sql_level(self) -> &'static str {
+        match self {
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+/// Whether a transaction may write. `ReadOnly` lets the engine reject writes and optimize;
+/// on SQLite it selects the lighter `BEGIN DEFERRED` lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccessMode {
+    /// The default: reads and writes.
+    #[default]
+    ReadWrite,
+    /// Reads only — a write is a database error.
+    ReadOnly,
+}
+
+impl AccessMode {
+    /// The SQL access-mode clause (`READ WRITE` / `READ ONLY`).
+    pub fn sql_mode(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "READ WRITE",
+            Self::ReadOnly => "READ ONLY",
+        }
+    }
+}
+
+/// The per-dialect SQL that opens a transaction ([`Dialect::begin_transaction_sql`]): an
+/// optional statement to run on the connection *before* opening the transaction, and an
+/// optional custom `BEGIN …` (`None` = the driver's default `BEGIN`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxBegin {
+    pub pre: Option<String>,
+    pub begin: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{AccessMode, Dialect, Isolation};
+
+    #[test]
+    fn begin_transaction_sql_per_dialect() {
+        // Postgres: one BEGIN ISOLATION LEVEL … with the access mode.
+        let pg =
+            Dialect::Postgres.begin_transaction_sql(Isolation::Serializable, AccessMode::ReadWrite);
+        assert_eq!(pg.pre, None);
+        assert_eq!(
+            pg.begin.as_deref(),
+            Some("BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE")
+        );
+        let pg_ro = Dialect::Postgres
+            .begin_transaction_sql(Isolation::RepeatableRead, AccessMode::ReadOnly);
+        assert_eq!(
+            pg_ro.begin.as_deref(),
+            Some("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        );
+
+        // MySQL/MariaDB: a SET TRANSACTION pre-statement, then the default BEGIN.
+        let maria =
+            Dialect::MariaDb.begin_transaction_sql(Isolation::ReadCommitted, AccessMode::ReadWrite);
+        assert_eq!(
+            maria.pre.as_deref(),
+            Some("SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
+        );
+        assert_eq!(maria.begin, None);
+        assert_eq!(
+            Dialect::MySql
+                .begin_transaction_sql(Isolation::Serializable, AccessMode::ReadOnly)
+                .pre
+                .as_deref(),
+            Some("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY")
+        );
+
+        // SQLite: the locking mode of BEGIN carries the intent.
+        assert_eq!(
+            Dialect::Sqlite
+                .begin_transaction_sql(Isolation::Serializable, AccessMode::ReadWrite)
+                .begin
+                .as_deref(),
+            Some("BEGIN EXCLUSIVE")
+        );
+        assert_eq!(
+            Dialect::Sqlite
+                .begin_transaction_sql(Isolation::ReadCommitted, AccessMode::ReadOnly)
+                .begin
+                .as_deref(),
+            Some("BEGIN DEFERRED")
+        );
+        assert_eq!(
+            Dialect::Sqlite
+                .begin_transaction_sql(Isolation::ReadCommitted, AccessMode::ReadWrite)
+                .begin
+                .as_deref(),
+            Some("BEGIN IMMEDIATE")
+        );
+    }
+}
+
+#[cfg(test)]
+mod dialect_tests {
     use super::Dialect;
 
     #[test]

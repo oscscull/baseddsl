@@ -254,6 +254,30 @@ impl Db for MariaDb {
             .map_err(map_mysql_err)?;
         Ok(Box::new(MariaTx { tx }))
     }
+
+    async fn begin_tx(
+        mut self: Box<Self>,
+        opts: crate::tx::TxOptions,
+    ) -> Result<Box<dyn Tx>, DbError> {
+        // MariaDB has no `BEGIN ISOLATION LEVEL` form: a `SET TRANSACTION ISOLATION LEVEL …`
+        // applies to the very next transaction, so it runs on the connection first.
+        let plan =
+            based_codegen::Dialect::MariaDb.begin_transaction_sql(opts.isolation, opts.access);
+        if let Some(pre) = plan.pre {
+            sqlx::query(sqlx::AssertSqlSafe(pre))
+                .execute(&mut *self.conn)
+                .await
+                .map_err(map_mysql_err)?;
+        }
+        let tx = sqlx::Transaction::begin(
+            self.conn,
+            plan.begin
+                .map(|s| sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(s))),
+        )
+        .await
+        .map_err(map_mysql_err)?;
+        Ok(Box::new(MariaTx { tx }))
+    }
 }
 
 /// An open MariaDB transaction (sqlx's guard over the same pooled connection).
@@ -296,6 +320,10 @@ impl DbRead for MariaTx {
 impl Tx for MariaTx {
     async fn commit(self: Box<Self>) -> Result<(), DbError> {
         self.tx.commit().await.map_err(map_mysql_err)
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), DbError> {
+        self.tx.rollback().await.map_err(map_mysql_err)
     }
 }
 

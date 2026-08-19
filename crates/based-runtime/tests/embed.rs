@@ -743,3 +743,280 @@ async fn ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite() {
     assert_eq!(err.status(), Some(404), "{err}");
     assert_eq!(err.code(), "not_found");
 }
+
+// ---------- transactions: read-decide-write seam (transactions.md) ----------
+
+/// `transaction_retrying` re-runs the whole closure on a classified serialization/deadlock
+/// abort: the first attempt's write hits an injected `Deadlock`, the retry succeeds, and the
+/// closure runs exactly twice — the optimistic-concurrency payoff. The aborted attempt
+/// rolled back, the retry committed.
+#[tokio::test]
+async fn transaction_retrying_reruns_on_a_serialization_failure() {
+    use based_runtime::TxOptions;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The readback batch the successful attempt's re-select pops; the first `execute`
+    // deadlocks before any fetch, so nothing is consumed on attempt one.
+    let db = MockDb::new(vec![vec![row(json!({ "status": "open", "total": 7 }))]]).deadlocking(1);
+    let engine = Engine::new(compiled(), db.clone(), SeqIdGen::default());
+
+    let runs = std::sync::Arc::new(AtomicUsize::new(0));
+    let runs_in = runs.clone();
+    let out = client::transaction_retrying(
+        &engine,
+        TxOptions::default(),
+        client::Retry::on_serialization(3),
+        move |tx| {
+            let runs = runs_in.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                let card = tx
+                    .place_order(
+                        client::PlaceOrderInput {
+                            org: client::Id::from_raw("o-1"),
+                            status: "open".into(),
+                            total: 7,
+                        },
+                        (),
+                    )
+                    .await?;
+                Ok::<_, client::TxError>(card.total)
+            }
+        },
+    )
+    .await
+    .expect("the retry succeeds");
+    assert_eq!(out, 7);
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "the closure ran, deadlocked, and re-ran once"
+    );
+    assert_eq!(
+        db.tx_log(),
+        vec!["begin", "rollback", "begin", "commit"],
+        "the aborted attempt rolled back; the retry committed"
+    );
+}
+
+/// A managed closure **commits on `Ok`**, read-decide-write proven live: read an existing
+/// row, decide the write from its value, write a derived row — and after commit the write is
+/// visible on a fresh connection.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn managed_transaction_commits_read_decide_write_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::{SqliteBackend, TxOptions};
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES ('o-1', 'org-1', 'paid', 100);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    // Read the seeded order, decide the new total from it, write — all in one committed tx.
+    let placed_total = client::transaction(&engine, TxOptions::default(), |tx| async move {
+        let existing = tx
+            .order_by_id(
+                client::OrderByIdInput {
+                    id: client::Id::from_raw("o-1"),
+                },
+                (),
+            )
+            .await?
+            .ok_or_else(|| client::TxError::app("seed order missing"))?;
+        let card = tx
+            .place_order(
+                client::PlaceOrderInput {
+                    org: client::Id::from_raw("org-1"),
+                    status: "open".into(),
+                    total: existing.total + 1,
+                },
+                (),
+            )
+            .await?;
+        Ok::<_, client::TxError>(card.total)
+    })
+    .await
+    .expect("the transaction commits");
+    assert_eq!(placed_total, 101);
+
+    // After commit, both orders are visible on a fresh (non-transaction) connection.
+    let rows = api
+        .orders_in_org(
+            client::OrdersInOrgInput {
+                org: client::Id::from_raw("org-1"),
+            },
+            (),
+        )
+        .await
+        .expect("list runs");
+    assert_eq!(rows.len(), 2, "the committed write is visible");
+}
+
+/// A managed closure **rolls back on `Err`**: a write runs, then the closure returns an
+/// application error, and the write leaves no trace — the seeded order is all that remains.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn managed_transaction_rolls_back_on_err_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::{SqliteBackend, TxOptions};
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES ('o-1', 'org-1', 'paid', 100);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    let result: Result<(), client::TxError> =
+        client::transaction(&engine, TxOptions::default(), |tx| async move {
+            tx.place_order(
+                client::PlaceOrderInput {
+                    org: client::Id::from_raw("org-1"),
+                    status: "doomed".into(),
+                    total: 5,
+                },
+                (),
+            )
+            .await?;
+            // Decide, after the write, to abort — the engine rolls the write back.
+            Err(client::TxError::app("business rule rejected the write"))
+        })
+        .await;
+    assert!(result.is_err(), "the closure's Err surfaces");
+
+    let rows = api
+        .orders_in_org(
+            client::OrdersInOrgInput {
+                org: client::Id::from_raw("org-1"),
+            },
+            (),
+        )
+        .await
+        .expect("list runs");
+    assert_eq!(rows.len(), 1, "the rolled-back write left no row");
+}
+
+/// The explicit-handle rung (`engine.begin` → `txn.client()` → `commit`/`rollback`): a
+/// committed write persists, a rolled-back write does not — the caller owns the boundary.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::{SqliteBackend, TxOptions};
+    use client::TransactionExt;
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES ('o-1', 'org-1', 'paid', 100);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    // Commit path: the write is visible after commit.
+    let txn = engine
+        .begin(TxOptions::default())
+        .await
+        .expect("open a transaction");
+    {
+        let tx = txn.client();
+        tx.place_order(
+            client::PlaceOrderInput {
+                org: client::Id::from_raw("org-1"),
+                status: "committed".into(),
+                total: 10,
+            },
+            (),
+        )
+        .await
+        .expect("write on the handle");
+    }
+    txn.commit().await.expect("commit");
+    assert_eq!(
+        api.orders_in_org(
+            client::OrdersInOrgInput {
+                org: client::Id::from_raw("org-1")
+            },
+            ()
+        )
+        .await
+        .expect("list")
+        .len(),
+        2,
+        "the committed write is visible"
+    );
+
+    // Rollback path: the write is discarded.
+    let txn = engine
+        .begin(TxOptions::default())
+        .await
+        .expect("open a transaction");
+    {
+        let tx = txn.client();
+        tx.place_order(
+            client::PlaceOrderInput {
+                org: client::Id::from_raw("org-1"),
+                status: "discarded".into(),
+                total: 20,
+            },
+            (),
+        )
+        .await
+        .expect("write on the handle");
+    }
+    txn.rollback().await.expect("rollback");
+    assert_eq!(
+        api.orders_in_org(
+            client::OrdersInOrgInput {
+                org: client::Id::from_raw("org-1")
+            },
+            ()
+        )
+        .await
+        .expect("list")
+        .len(),
+        2,
+        "the rolled-back write is not visible"
+    );
+}

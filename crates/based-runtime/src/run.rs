@@ -254,8 +254,19 @@ pub trait DbRead: Send {
 /// typestate that makes an open transaction impossible to leak back to the pool.
 #[async_trait]
 pub trait Db: DbRead {
-    /// Open the transaction a mutation body runs in, consuming the connection.
+    /// Open the transaction a mutation body runs in, consuming the connection. Uses the
+    /// driver's default isolation — the auto-committing mutation path takes this.
     async fn begin(self: Box<Self>) -> Result<Box<dyn Tx>, DbError>;
+
+    /// Open a transaction at the requested isolation + access mode — the explicit
+    /// read-decide-write seam ([`crate::Engine::begin`]). A driver applies the per-dialect
+    /// isolation SQL ([`based_codegen::Dialect::begin_transaction_sql`]); the default
+    /// ignores `opts` (the mock, and any driver with no isolation control) and opens a
+    /// plain transaction.
+    async fn begin_tx(self: Box<Self>, opts: crate::tx::TxOptions) -> Result<Box<dyn Tx>, DbError> {
+        let _ = opts;
+        self.begin().await
+    }
 }
 
 /// An open transaction. [`commit`](Tx::commit) consumes it; dropping it without
@@ -265,6 +276,14 @@ pub trait Db: DbRead {
 #[async_trait]
 pub trait Tx: DbRead {
     async fn commit(self: Box<Self>) -> Result<(), DbError>;
+
+    /// Roll the transaction back explicitly, consuming it. The default drops `self` — the
+    /// same rollback the typestate already guarantees on drop; a driver with an awaitable
+    /// rollback (all three real drivers) overrides this so the rollback completes before
+    /// the connection returns to the pool.
+    async fn rollback(self: Box<Self>) -> Result<(), DbError> {
+        Ok(())
+    }
 }
 
 /// A source of per-request database connections, keyed by shard. Given a request's
@@ -544,7 +563,6 @@ async fn apply_once(
     plan: &MutationPlan,
     claim: Option<&TxClaimCtx<'_>>,
 ) -> Result<TxOutcome, DbError> {
-    use serde_json::Value as J;
     let mut tx = db.begin().await?;
 
     // Strong-form idempotency: claim the key on the mutation's own connection, inside this
@@ -563,28 +581,56 @@ async fn apply_once(
         }
     }
 
+    let response = match run_writes(&mut *tx, plan).await? {
+        TxOutcome::Done(r) => r,
+        // A matched-no-row miss drops `tx` (rollback), nothing written.
+        other => return Ok(other),
+    };
+    // Record the response inside the same transaction, before commit, so the key, the
+    // writes, and the response commit atomically (or roll back together).
+    if let Some(c) = claim {
+        c.participant
+            .record(&mut *tx, c.callable, c.key, &response)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(TxOutcome::Done(response))
+}
+
+/// Run a mutation plan's writes in order on an already-open connection/transaction, then
+/// assemble the declared-shape read-back — the write core shared by the auto-committing
+/// [`apply_once`] (which brackets it with begin/commit + the idempotency claim) and the
+/// host-transaction [`run_mutation_on`] (which runs it on a caller-owned [`Tx`], committing
+/// nothing). Takes any [`DbRead`], so a `&mut dyn Tx` passes straight in. Returns
+/// [`TxOutcome::Done`] with the response, or [`TxOutcome::NotFound`] when the write's
+/// `where` (with its scope/soft-delete guards) matched no row — the caller decides the
+/// rollback.
+async fn run_writes<D: DbRead + ?Sized>(
+    db: &mut D,
+    plan: &MutationPlan,
+) -> Result<TxOutcome, DbError> {
+    use serde_json::Value as J;
     // A `serial` (DB-generated PK) create yields its id only when it runs; capture it so
     // the deferred re-select can key on it.
     let serial_insert = plan.serial.as_ref().map(|s| s.insert_idx);
     let mut serial_id: Option<i64> = None;
     for (i, stmt) in plan.stmts.iter().enumerate() {
-        // An error propagates and drops `tx` → rollback (never a pooled open tx).
         if serial_insert == Some(i) {
-            serial_id = Some(tx.execute_returning_id(&stmt.sql, &stmt.params).await?);
+            serial_id = Some(db.execute_returning_id(&stmt.sql, &stmt.params).await?);
             continue;
         }
-        let affected = tx.execute(&stmt.sql, &stmt.params).await?;
+        let affected = db.execute(&stmt.sql, &stmt.params).await?;
         if plan.ack_check == Some(i) && affected == 0 {
             return Ok(TxOutcome::NotFound);
         }
     }
-    // Read the written row back in its declared shape, still inside the transaction. A
-    // serial mutation binds its re-select late, from the captured DB-generated id.
+    // Read the written row back in its declared shape. A serial mutation binds its
+    // re-select late, from the captured DB-generated id.
     let response = if let Some(readback) = &plan.serial {
         let id = serial_id.expect("serial INSERT ran and returned an id");
         match readback.bind(id).map_err(|e| DbError::new(e.to_string()))? {
             Some(stmt) => {
-                let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
+                let rows = fetch_all(db.fetch(&stmt.sql, &stmt.params)).await?;
                 match rows.into_iter().next() {
                     Some(row) => nest_row(row),
                     None => return Ok(TxOutcome::NotFound),
@@ -595,7 +641,7 @@ async fn apply_once(
     } else {
         match &plan.ret_select {
             Some(stmt) => {
-                let rows = fetch_all(tx.fetch(&stmt.sql, &stmt.params)).await?;
+                let rows = fetch_all(db.fetch(&stmt.sql, &stmt.params)).await?;
                 match rows.into_iter().next() {
                     Some(row) => nest_row(row),
                     None => return Ok(TxOutcome::NotFound),
@@ -613,15 +659,29 @@ async fn apply_once(
             },
         }
     };
-    // Record the response inside the same transaction, before commit, so the key, the
-    // writes, and the response commit atomically (or roll back together).
-    if let Some(c) = claim {
-        c.participant
-            .record(&mut *tx, c.callable, c.key, &response)
-            .await?;
-    }
-    tx.commit().await?;
     Ok(TxOutcome::Done(response))
+}
+
+/// Plan and run a mutation on a caller-owned open transaction — the host-language
+/// read-decide-write seam (transactions.md). The writes run on `db` (a `&mut dyn Tx`) with
+/// **no** begin/commit and **no** idempotency claim: the caller owns the transaction
+/// boundary (the managed closure commits on `Ok` / rolls back on `Err`, or the explicit
+/// handle's `commit`/`rollback` does). A matched-no-row write is a [`RunError::NotFound`]
+/// the caller surfaces (and rolls the whole transaction back on).
+pub async fn run_mutation_on<D: DbRead + ?Sized>(
+    compiled: &Compiled,
+    db: &mut D,
+    id_gen: &dyn IdGen,
+    req: &Request,
+) -> Result<serde_json::Value, RunError> {
+    let plan = plan_mutation(compiled, req, id_gen)?;
+    match run_writes(db, &plan).await? {
+        TxOutcome::Done(r) => Ok(r),
+        TxOutcome::NotFound => Err(RunError::NotFound(req.callable.clone())),
+        TxOutcome::Replayed(_) | TxOutcome::Mismatch => {
+            unreachable!("the in-transaction write path carries no idempotency claim")
+        }
+    }
 }
 
 /// Reassemble a flat result row into the response object, nesting sub-objects/arrays.
@@ -790,6 +850,9 @@ struct MockState {
     fail_mid_stream: Option<String>,
     /// What every `execute` reports as rows affected (default 0).
     affected: u64,
+    /// The next this-many `execute` calls fail with a [`DbErrorKind::Deadlock`] (then
+    /// succeed) — the injected serialization abort the transaction-retry path re-runs on.
+    deadlock_writes: usize,
 }
 
 /// A test double for the whole driver stack: it is a [`Backend`] (checkout clones the
@@ -843,6 +906,14 @@ impl MockDb {
         self
     }
 
+    /// Make the next `n` `execute` calls fail with a [`DbErrorKind::Deadlock`] before
+    /// succeeding — an injected serialization/deadlock abort the transaction-retry path
+    /// (`transaction_retrying`) re-runs the whole transaction on.
+    pub fn deadlocking(self, n: usize) -> Self {
+        self.state.lock().unwrap().deadlock_writes = n;
+        self
+    }
+
     /// Every executed statement so far, in order — `fetch` and `execute` alike.
     pub fn calls(&self) -> Vec<(String, Vec<SqlValue>)> {
         self.state.lock().unwrap().calls.clone()
@@ -891,6 +962,16 @@ impl DbRead for MockDb {
 
     async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
         self.record(sql, params)?;
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.deadlock_writes > 0 {
+                st.deadlock_writes -= 1;
+                return Err(DbError::of(
+                    DbErrorKind::Deadlock,
+                    "mock serialization failure",
+                ));
+            }
+        }
         Ok(self.state.lock().unwrap().affected)
     }
 }

@@ -55,6 +55,12 @@ relevant entries instead of scanning. A decision may appear under more than one 
   results survive, W0102 lints the soft-delete gap, un-composable combinations rejected E0210–E0214),
   D96 (raw marker renamed `sql` → `raw` — one spelling with the feature name and the `.mig`
   `raw(dialect)` step; no alias)
+- **Transactions (read-decide-write seam)** — D118 (host-language `transaction(closure)` seam,
+  embedded-only, slice 1 of 3: `TxOptions`/`Isolation`/`AccessMode` applied per dialect via the
+  `Dialect` seam, rung 1 managed closure `client::transaction`/`transaction_retrying` + rung 2
+  explicit handle `engine.begin`→`Transaction`; the `dispatch_on`/`run_mutation_on` provided-tx
+  refactor; `TxTransport` the tx-bound transport; slices 2 `for update`+`TxBound` / 3 BYO `adopt`
+  documented + deferred)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
@@ -5548,3 +5554,93 @@ unit tests; **live SQLite** (`time_and_bytes_round_trip_end_to_end`: raw-seeded 
 engine-bound create round-trips time + base64 bytes, ordered `time` filter) plus **live Postgres +
 MariaDB** (`time_and_bytes_columns_round_trip_live`: binary `TIME`/`BYTEA` decode + native bind, raw-seed
 + engine create). `make check` green.
+
+## D118 — host-language read-decide-write transaction seam (embedded, slice 1 of 3)
+
+The read-decide-write seam mutations.md promised ("host-language `transaction(closure)` seam …
+see architecture docs") — now spec'd in full (`spec/syntax/transactions.md`) and **slice 1 of 3
+shipped**. An **embedded-only** (in-process) transaction ladder over the same `Engine` an app
+already holds; the DSL stays non-Turing-complete (read-decide-write logic is host Rust, run
+against an engine-owned transaction — principle 5). Owner-approved this session; the whole design
+is recorded here, only slice 1 is built.
+
+**The key enabler.** The generated client is already `Client<T: Transport>` (D62/calling.md), so a
+transaction is the **same client over a transaction-bound transport** — every existing generated
+method works inside a transaction with **no per-callable codegen**.
+
+**Isolation (shared by every rung).** `TxOptions { isolation, access }` (Default = `ReadCommitted`
++ `ReadWrite`); `Isolation { ReadCommitted, RepeatableRead, Serializable }`; `AccessMode
+{ ReadWrite, ReadOnly }`. Applied per dialect through the `Dialect` seam
+(`based_codegen::Dialect::begin_transaction_sql`, so the spelling can't drift): Postgres
+`BEGIN ISOLATION LEVEL <level> READ WRITE|READ ONLY`; MySQL/MariaDB a `SET TRANSACTION ISOLATION
+LEVEL <level>, …` pre-statement (applies to the next tx) then the default `BEGIN`; SQLite maps to
+the `BEGIN` locking mode (`Serializable` → `EXCLUSIVE`, else read-only → `DEFERRED`, else read-write
+→ `IMMEDIATE`). `Isolation`/`AccessMode` live in based-codegen next to `Dialect`; based-runtime
+re-exports them and owns `TxOptions`.
+
+**The three rungs.**
+- **Rung 1 — managed closure (safe default, SHIPPED):** `client::transaction(&engine, opts,
+  |tx| async move { … }) -> Result<R, TxError>` — the closure gets a `Client<TxTransport>`; the
+  engine **commits on `Ok`, rolls back on `Err`/panic, always releases** (panic/drop rollback via
+  the `Tx` typestate). A retry variant `client::transaction_retrying(&engine, opts,
+  Retry::on_serialization(max), |tx| …)` re-runs the whole closure when the failure is classified
+  `DbErrorKind::Deadlock` (D65) — the optimistic-concurrency payoff of `Serializable`; only the
+  engine-owned form can auto-retry. `TxError` (`From<ClientError>`/`From<DbError>`, `TxError::app`
+  for an application abort) is the closure's error; `is_retryable()` gates the re-run.
+- **Rung 2 — explicit handle (SHIPPED):** `engine.begin(opts).await? -> Transaction`;
+  `txn.client()` yields a `Client<TxTransport>` bound to it; `txn.commit()` / `txn.rollback()`;
+  **drop-without-commit rolls back**. Single-shard (opens on the empty shard key).
+- **Rung 3 — BYO `adopt` (NOT built — slice 3):** `client::adopt(&mut caller_sqlx_tx)` binds the
+  generated calls to a transaction the caller already opened on the same driver (caller commits);
+  needs per-driver adapters. Documented in transactions.md, deferred.
+
+**`for update` row locking (NOT built — slice 2):** a static `.bsl` query modifier lowering to
+`SELECT … FOR UPDATE`, **compile-time-confined to transaction clients** via a `TxBound` marker
+trait (`impl<T: TxBound> Client<T>`), a no-op on SQLite. Documented, deferred.
+
+**The central refactor (how a request runs on a provided transaction).** `dispatch` / the mutation
+path are factored so a request can run **against a caller-owned open `Tx`** instead of a fresh
+auto-committing checkout: `run_writes` (the write/serial/readback core) is extracted from
+`apply_once` and reused by a new `run_mutation_on<D: DbRead>(…, db, id_gen, req)` that commits
+nothing; `serve::dispatch_on(compiled, tx: &mut dyn Tx, id_gen, guards, engine, …)` routes a query
+to `run_query` on the tx and a mutation (guard first) to `run_mutation_on` on the tx, sharing the
+result→`WireResponse` mapping (`run_result_to_response`) with `dispatch`. The auto-commit path is
+untouched (no `SET ISOLATION` on the ordinary mutation transaction — `Db::begin` unchanged;
+isolation rides a new `Db::begin_tx(opts)` used only by `Engine::begin`). `Tx` gains an awaitable
+`rollback` (default drops = the typestate rollback; the three real drivers override with
+sqlx's `rollback().await`).
+
+**The transaction-bound transport (interior mutability + `Send`).** `Transport::call` takes `&self`
+but running a statement needs `&mut` the connection, so the runtime `Transaction`/`TxTransport`
+wrap the `Box<dyn Tx>` in `Arc<tokio::sync::Mutex<Option<Box<dyn Tx>>>>` — `Send` for axum, and
+since calls are sequential/awaited there is no real contention. `Transaction::commit`/`rollback`
+take the tx out of the slot; `TxTransport::dispatch` locks it and calls `engine.dispatch_on_tx`.
+The generated module (embedded gate) emits `impl Transport for based_runtime::TxTransport` (the
+trait is local to the module, so the impl is legal for a foreign type — like `Embedded`), the
+`transaction`/`transaction_retrying` functions, `TxError`/`Retry`, and a `TransactionExt` trait
+giving `txn.client()`. The keyed door runs the write on the transaction (the tx is the exactly-once
+boundary; the idempotency key is not separately consulted); the streaming door is rejected inside a
+transaction in this slice (a stream holds the connection for its whole life). Backoff between
+retries is `tokio::time::sleep` (referenced by path; every embedded consumer already pulls tokio
+`time` transitively via based-runtime).
+
+**Blast radius.** based-codegen: `Isolation`/`AccessMode`/`TxBegin` + `Dialect::begin_transaction_sql`
+(lib.rs), the transaction surface constants + emission in `client.rs` (embedded gate). based-runtime:
+new `tx.rs` (`TxOptions`, `Transaction`, `TxTransport`), `Db::begin_tx` + `Tx::rollback` on the
+traits + the three drivers (sqlite/driver/postgres) + `MockDb` (`deadlocking(n)` injection),
+`run.rs` (`run_writes`/`run_mutation_on` refactor), `serve.rs` (`dispatch_on` +
+`run_result_to_response`), `embed.rs` (`Engine::begin` + `Engine::dispatch_on_tx`), lib.rs exports.
+The embedded mirror (`tests/support/embedded_client.rs`, byte-gated by `generated_client_is_current`)
+and all four `--embedded` example clients regenerated.
+
+**Tested.** Unit: isolation SQL per dialect (`begin_transaction_sql_per_dialect`, based-codegen);
+`transaction_retrying` re-runs on an injected serialization failure and the closure runs exactly
+twice (`MockDb::deadlocking`, based-runtime). **Live SQLite** (in-memory): a managed closure
+commits a read-decide-write (write visible after commit) and rolls back on `Err` (write leaves no
+row); the explicit handle commits and rolls back. **Live Postgres** (docker): the isolation SET is
+actually issued (a `Serializable`, `ReadOnly` `begin_tx` — the server reports both back via `SHOW`)
+and the explicit-handle rung round-trips (commit visible, rollback not). `make check` green.
+
+**Slices 2–3 are the documented follow-ons:** slice 2 = `for update` + the `TxBound` compile-time
+confinement; slice 3 = the BYO `adopt` per-driver adapters and the flagship axum-helpdesk
+read-decide-write example.

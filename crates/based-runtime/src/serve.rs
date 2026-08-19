@@ -112,6 +112,49 @@ pub async fn dispatch(
             run_mutation(compiled, backend, shard_key, id_gen, store, &req).await
         }
     };
+    run_result_to_response(result)
+}
+
+/// Route + run one request against a **caller-owned open transaction** — the
+/// read-decide-write seam ([`crate::Engine::dispatch_on_tx`], driven by
+/// [`crate::TxTransport`]). Unlike [`dispatch`], this checks out no connection and opens no
+/// transaction: a query reads on the held [`crate::run::Tx`], a mutation runs its writes on
+/// it (`run_mutation_on`) — **committing nothing** (the transaction handle owns the
+/// boundary). No idempotency store and no shard routing apply — the connection is already
+/// chosen. A declared guard still runs, so a mutation inside a transaction enforces the
+/// same authorization as one over the wire.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_on(
+    compiled: &Compiled,
+    tx: &mut dyn crate::run::Tx,
+    id_gen: &dyn IdGen,
+    guards: &Guards,
+    engine: Option<&crate::Engine>,
+    method: &str,
+    path: &str,
+    args: serde_json::Value,
+    ctx: serde_json::Value,
+) -> WireResponse {
+    if let Some(resp) = preflight(method, path) {
+        return resp;
+    }
+    let (kind, name) = parse_route(path).expect("preflight guaranteed a routable path");
+    let result = match kind {
+        Kind::Query => run_query(compiled, tx, &Request::new(name, args, ctx)).await,
+        Kind::Mutation => {
+            if let Some(resp) = check_guard(compiled, guards, engine, name, &args, &ctx).await {
+                return resp;
+            }
+            crate::run::run_mutation_on(compiled, tx, id_gen, &Request::new(name, args, ctx)).await
+        }
+    };
+    run_result_to_response(result)
+}
+
+/// Map a run result to the wire response — the shared tail of [`dispatch`] and
+/// [`dispatch_on`], so the auto-commit edge and the host-transaction edge answer a success
+/// or failure identically.
+fn run_result_to_response(result: Result<serde_json::Value, RunError>) -> WireResponse {
     match result {
         Ok(body) => WireResponse::ok(body),
         Err(RunError::Plan(e)) => plan_error_response(e),
