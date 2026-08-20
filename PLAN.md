@@ -1057,12 +1057,43 @@ resume context so a fresh subagent can pick it up.
   read-back planner + structured-id client emission, snapshot (`pk` already `Vec`), a live create→read-back
   test on Postgres + MariaDB. Leaf/junction rows that never read back the serial are the easy first slice.
 
+- **OP3. Idempotency store: basic DbStore GC + a production Redis path in the flagship (owner-approved
+  2026-08-20).** *Framing (owner): the built-in `DbStore` should **not** be heavily used — keep it basic,
+  just don't let it blow up (unbounded row growth); put the **bulk of the energy into making a superior,
+  pluggable store easy to use**, proven in the production-ready flagship (axum-helpdesk).* Three parts:
+  - **(A) DbStore GC — basic, don't-blow-up.** A **lazy amortized bounded sweep**: on a small fraction of
+    claims (or every N seconds tracked per-instance), run `DELETE FROM _based_idempotency WHERE created_at
+    < :cutoff` (per-dialect via the Dialect seam, optionally `LIMIT`-bounded to cap lock duration) on its
+    **own short connection — never the mutation's transaction**, respecting the D65 statement-timeout/pool
+    discipline. `DbStore::with_ttl(Duration)` default **24h** (mirrors `MemStore`, D114), plus an explicit
+    **retain-forever** escape for operators managing retention externally. Anchor on `created_at` (claim
+    time), fixed window — a key must stop deduping after its retry window regardless of replays. Orthogonal
+    to D115's block-and-replay strong form (GC only touches committed, old rows; in-flight claims are
+    recent). Deliberately dumb — no background task, no partitioning (that would be overdoing a tier we
+    don't want leaned on).
+  - **(B) `RedisStore` in the axum-helpdesk (NOT the core runtime).** A production distributed store
+    implemented **inside the flagship example** against the public `IdempotencyStore` seam, plugged in via
+    `Engine::with_store(...)` from a `REDIS_URL` — so the core crates gain **no redis dep** and the seam is
+    *proven* ergonomic by a real app using it. Uses the base before/after path (claim `SET key … NX PX
+    <ttl>`, record the response, replay on hit, **409 on a concurrent unfinished attempt** — Redis can't
+    join the SQL tx, so it does not implement `tx_participant`). Redis's native key-expiry means **no GC at
+    all** — that is why it is the *superior* store. Newest-stable `redis` crate (deps memory), in the
+    helpdesk's own Cargo.toml.
+  - **(C) Guarantee-tradeoff docs + gate.** A short "choosing an idempotency store" note: `MemStore` =
+    single-process dev (D114); `DbStore` = basic durable, dumb GC, strongest guarantee (in-tx exactly-once,
+    D115) but not recommended at scale; **`RedisStore` = recommended production** (fast/scalable, native
+    expiry, before/after + 409). The helpdesk smoke's idempotency assertions now run **through Redis live**;
+    the `ci-example-helpdesk` Makefile lane + CI start a throwaway `redis:7` and wire `REDIS_URL`. README
+    documents the `Engine::with_store` production pattern. Blast radius: `based-runtime` idempotency
+    `DbStore` (GC only — trait unchanged), `examples/axum-helpdesk` (new store module + wiring + smoke +
+    README), `Makefile`/`ci` (redis service in the helpdesk lane), a store-choice doc. No `D#` unless the
+    GC touches a runtime contract (the sweep is additive to `DbStore` — likely no decision entry, like PR2's
+    seam work rode D114).
+
 Not promoted (stay deferred): `bytes`-in-to-many-array on SQLite, `BINARY(16)` uuid storage,
 `for update nowait`/`skip locked`, standalone structured-id param, inbound-FK column-map override,
 composite m2m endpoints, `@view`/charset/legacy-enum representability niceties, `^^` multi-level tx
-back-refs, shutdown grace deadline, incremental LSP sync. The **idempotency-table GC** (DbStore
-age-reclaim) is under active design discussion (owner 2026-08-20) — see the URGENT/PR3 note; mechanism
-fork (lazy amortized sweep vs. background task) needs sign-off before it's built.
+back-refs, shutdown grace deadline, incremental LSP sync.
 
 ## Track T tier-2 — host-language transaction seam (read-decide-write), owner-approved 2026-08
 
