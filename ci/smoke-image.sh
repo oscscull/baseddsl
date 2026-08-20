@@ -10,7 +10,9 @@ PORT="${SMOKE_PORT:-8099}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NAME="based-serve-smoke-$$"
 
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+# `-v` also drops the container's anonymous volumes (the bundled bind mount is untouched),
+# so a smoke run leaves no leaked volume behind.
+cleanup() { docker rm -fv "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # SQLite is bundled (no service). The project is read-only; the DB file lives in the

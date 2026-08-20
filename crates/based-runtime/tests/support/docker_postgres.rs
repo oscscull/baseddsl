@@ -47,6 +47,11 @@ const URL_ENV: &str = "TEST_POSTGRES_URL";
 /// giving up (Postgres's first boot initializes the data dir + creates the database).
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Per-attempt connect cap. A socket that accepts but never completes the handshake (a
+/// container that died while OrbStack still forwards its port) must not wedge a single
+/// connect past the overall deadline — bounding each attempt keeps the poll honoring it.
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A live Postgres the suite runs against. Either a **self-spun** ephemeral container (owned:
 /// [`Drop`] force-`docker rm`s it, so a panicking test still cleans up) or an **external**
 /// server named by `TEST_POSTGRES_URL` (unowned: `Drop` leaves it alone). Hand [`url`] to the
@@ -74,13 +79,14 @@ impl PostgresContainer {
             let url = url.trim().to_string();
             if !url.is_empty() {
                 eprintln!("[docker-postgres] using external {URL_ENV}={url}");
-                if !wait_ready(&url).await {
-                    eprintln!(
-                        "[docker-postgres] SKIP: external server at {URL_ENV} not ready within {}s",
-                        READY_TIMEOUT.as_secs()
-                    );
-                    return None;
-                }
+                // An externally-provided server is expected to be up: if it never answers,
+                // fail loudly (don't skip) so a dead CI/`make check` container is a red build
+                // with a clear cause, not a green skip.
+                assert!(
+                    wait_ready(&url).await,
+                    "[docker-postgres] DB at {url} not ready after {}s — is the container running?",
+                    READY_TIMEOUT.as_secs()
+                );
                 return Some(Self {
                     kind: Kind::External { url },
                 });
@@ -180,17 +186,42 @@ impl PostgresContainer {
 /// retry rather than sleeping a fixed amount so a ready server starts the suite promptly. This
 /// is the portable readiness-wait — the same poll for a self-spun and a CI service container,
 /// so `based migrate apply` / the live suite never races a booting DB.
+/// Bounded: returns `false` once [`READY_TIMEOUT`] elapses (each attempt is itself capped so a
+/// dead-but-still-forwarding socket can't hang it), so a dead DB is caught, not waited on forever.
 async fn wait_ready(url: &str) -> bool {
-    let deadline = Instant::now() + READY_TIMEOUT;
+    wait_ready_within(url, READY_TIMEOUT).await
+}
+
+async fn wait_ready_within(url: &str, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
-        if let Ok(mut conn) = sqlx::postgres::PgConnection::connect(url).await {
-            if sqlx::raw_sql("SELECT 1").execute(&mut conn).await.is_ok() {
-                return true;
-            }
+        let probe = tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, async {
+            let mut conn = sqlx::postgres::PgConnection::connect(url).await.ok()?;
+            sqlx::raw_sql("SELECT 1").execute(&mut conn).await.ok()
+        })
+        .await;
+        if matches!(probe, Ok(Some(_))) {
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     false
+}
+
+#[tokio::test]
+async fn wait_ready_is_bounded_for_a_dead_server() {
+    // Nothing listens here: the poll must give up at its (tiny) deadline, never spin forever.
+    let start = Instant::now();
+    let ready = wait_ready_within(
+        "postgres://postgres:pw@127.0.0.1:1/nope",
+        Duration::from_millis(300),
+    )
+    .await;
+    assert!(!ready, "an unreachable server is never 'ready'");
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "wait_ready must honor its deadline, not hang"
+    );
 }
 
 impl Drop for PostgresContainer {

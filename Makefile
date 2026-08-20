@@ -161,12 +161,15 @@ ci-example-helpdesk: based-cli
 
 ## Local convenience: throwaway mariadb:11.4 + postgres:16 matching the default URLs above.
 ## CI provisions these as service containers instead (see .github/workflows/ci.yml).
+## `docker rm -fv` (not `-f`): the `-v` removes the container's anonymous volumes too, so a
+## fresh DB each run doesn't leak one data-dir volume per run (mariadb/postgres images declare
+## a VOLUME). The `docker run`s below create only such anonymous volumes — no named ones to survive.
 dev-db-up:
-	-docker rm -f based-ci-maria based-ci-pg 2>/dev/null
+	-docker rm -fv based-ci-maria based-ci-pg 2>/dev/null
 	docker run --rm -d --name based-ci-maria -p 13306:3306 \
 	  -e MARIADB_ROOT_PASSWORD=based_test_pw -e MARIADB_DATABASE=based_test mariadb:11.4
 	docker run --rm -d --name based-ci-pg -p 15432:5432 \
 	  -e POSTGRES_PASSWORD=based_test_pw -e POSTGRES_DB=based_test postgres:16
 
 dev-db-down:
-	-docker rm -f based-ci-maria based-ci-pg 2>/dev/null
+	-docker rm -fv based-ci-maria based-ci-pg 2>/dev/null

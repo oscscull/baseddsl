@@ -1195,16 +1195,21 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   through `include!`), `mod client` just `include!`s it, and a new `generated_client_is_current` test
   regenerates from `SCHEMA` via `based_codegen::client::client_with` and asserts byte-equality — the
   real gate, so the mirror can never silently rot again.
-- **H10. CI-infra hardening (surfaced 2026-07-16: the Docker VM disk filled — 5,943 anonymous
-  volumes / 658GB leaked across historical CI runs — and the mariadb CI container died instantly
-  on start while `make check` hung or failed opaquely).** Three fixes:
-  (a) Makefile teardown must use `docker rm -fv` (not `-f`) so each run's anonymous DB volumes
-  are removed with the container instead of leaking one per run;
-  (b) the runtime test suites' in-process `wait_ready` poll retries forever — give it a deadline
-  so a dead DB fails the suite fast with a clear message instead of hanging it;
-  (c) `ci/wait-for-db.sh`'s TCP-accept readiness check can pass spuriously right after a container
-  dies (observed with OrbStack port forwarding) — verify the container is still running (or use a
-  protocol-level ping) before declaring ready.
+- **H10. ✅ DONE. CI-infra hardening (surfaced 2026-07-16: the Docker VM disk filled — 5,943
+  anonymous volumes / 658GB leaked across historical CI runs — and the mariadb CI container died
+  instantly on start while `make check` hung or failed opaquely).** Three fixes, all landed:
+  (a) Makefile + `ci/smoke-image.sh` teardown now `docker rm -fv` (not `-f`), so each run's
+  anonymous DB volumes are removed with the container instead of leaking one per run (the
+  `docker run`s create only anonymous volumes; the smoke bind mount is untouched by `-v`);
+  (b) the runtime suites' in-process `wait_ready` poll is bounded — each attempt is capped by
+  `CONNECT_ATTEMPT_TIMEOUT` (so an accept-then-stall socket can't wedge a connect past the
+  deadline) and an unreachable externally-provided (`TEST_*_URL`) server now fails the suite
+  loudly ("DB at <url> not ready after Ns — is the container running?") instead of skipping;
+  a hermetic unit test asserts the poll returns within its deadline for a dead server;
+  (c) `ci/wait-for-db.sh` no longer declares ready on a bare TCP accept — the accept is confirmed
+  with a protocol ping (`pg_isready`/`mysqladmin ping`) when a client is present and with `docker`
+  liveness of the container publishing the port when a daemon is reachable, neither of which can
+  pass for a dead server; the TCP accept stands only as a last-resort fallback.
 
 ## Pipeline (data flow)
 
