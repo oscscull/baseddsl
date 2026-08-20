@@ -579,6 +579,27 @@ fn walk_shape_join(body: &[ShapeField], model: usize, cx: &Cx, out: &mut Vec<usi
     walk_shape_join_in(body, model, cx, &mut Vec::new(), out);
 }
 
+/// Walk every reach in a computed shape field so a scoped/soft-deleted model reached
+/// through the computation is *touched* — its column operands and its CASE `when`
+/// comparisons each lower to the same join a `Path` reach would.
+fn walk_computed_join(expr: &ShapeExpr, model: usize, cx: &Cx, out: &mut Vec<usize>) {
+    match expr {
+        ShapeExpr::Value(Value::Path(p)) => walk_path_join(p, model, cx, out),
+        ShapeExpr::Value(_) => {}
+        ShapeExpr::Arith { lhs, rhs, .. } | ShapeExpr::Concat { lhs, rhs, .. } => {
+            walk_computed_join(lhs, model, cx, out);
+            walk_computed_join(rhs, model, cx, out);
+        }
+        ShapeExpr::Case { arms, else_, .. } => {
+            for arm in arms {
+                walk_pred_join(&arm.when, model, cx, out);
+                walk_computed_join(&arm.then, model, cx, out);
+            }
+            walk_computed_join(else_, model, cx, out);
+        }
+    }
+}
+
 /// A nested sub-object (`field { … }` or `field -> Shape`) lowers to a real join
 /// (to-one) or correlated subquery (to-many) that carries the child model's `@scope`,
 /// so a nest-reached scoped child is *touched* — it must be walked, in the child model
@@ -597,6 +618,15 @@ fn walk_shape_join_in(
                 value: ShapeValue::Path(p),
                 ..
             } => walk_path_join(p, model, cx, out),
+            // A computed field reaches columns exactly like a `Path` projection — every
+            // reached path (and CASE `when` comparison) lowers to a real join carrying the
+            // reached model's `@scope`, so each such model is *touched* and must be walked
+            // (or a scoped/soft-deleted child leaks through the computation, the D81 class
+            // of bug).
+            ShapeField::Rename {
+                value: ShapeValue::Computed(expr),
+                ..
+            } => walk_computed_join(expr, model, cx, out),
             ShapeField::Nest { field, body } => {
                 if let Some(ti) = nest_target(model, &field.node, cx) {
                     if is_scoped(cx, ti) {

@@ -446,6 +446,66 @@ pub enum ShapeValue {
     /// column's numeric type, `avg` → `float`, `min`/`max` → the column's type; all but
     /// `count()` are nullable.
     Agg(AggCall),
+    /// `out = <expr>` — a per-row derived scalar: arithmetic (`price - discount`), string
+    /// concatenation (`first || " " || last`), or a conditional (`case when … then … else
+    /// … end`) over the row's own reachable columns and literals. Projection-only; its type
+    /// is inferred from the expression (numeric family / text / the unified CASE branch
+    /// type). Not an aggregate — it composes in ordinary (non-group) shapes.
+    Computed(ShapeExpr),
+}
+
+/// A per-row scalar expression projected by a computed shape field (`out = <expr>`). The
+/// leaves are reachable columns (a dotted reach like `address.city.name`), literals, and
+/// enum variants (in a CASE comparison); the tree encodes operator precedence and
+/// associativity, so lowering and reprinting read it in evaluation order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShapeExpr {
+    /// A leaf operand — a reached column path, a literal, or (in a CASE comparison) an
+    /// enum variant. A shape carries no parameters, so a `$…` operand is a sema error.
+    Value(Value),
+    /// `lhs op rhs` arithmetic (`+ - * /`) over the numeric family. `*`/`/` bind tighter
+    /// than `+`/`-`; the tree already encodes precedence and associativity.
+    Arith {
+        lhs: Box<Self>,
+        op: ArithOp,
+        rhs: Box<Self>,
+        span: Span,
+    },
+    /// `lhs || rhs` — string concatenation producing text. Lowered per dialect (`||` on
+    /// SQLite/Postgres, `CONCAT(…)` on the MySQL/MariaDB family).
+    Concat {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+        span: Span,
+    },
+    /// `case when <pred> then <expr> [when …] else <expr> end` — a conditional. Each arm's
+    /// `when` is a boolean predicate (the same grammar `where`/`having` use); the `then`
+    /// and `else` branches are themselves computed expressions. The result type is the
+    /// unified type of every branch.
+    Case {
+        arms: Vec<CaseArm>,
+        else_: Box<Self>,
+        span: Span,
+    },
+}
+
+/// One `when <pred> then <expr>` arm of a CASE expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseArm {
+    pub when: Predicate,
+    pub then: ShapeExpr,
+}
+
+impl ShapeExpr {
+    /// The lone reached path when this expression is a single bare column reach (no
+    /// operators, no CASE) — the shape of a plain `out = path` reach or a `out = path { … }`
+    /// flatten, so the parser can keep those as their existing AST forms.
+    pub fn lone_path(&self) -> Option<&Path> {
+        match self {
+            Self::Value(Value::Path(p)) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 /// One aggregate call in a shape value. `func` is the (contextual) function name —

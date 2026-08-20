@@ -1,0 +1,16 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model City  table=city
+  id: Id
+  name: text
+model Product  table=product
+  id: Id
+  name: text
+  brand: text
+  price: int
+  discount: int
+  rate: decimal(12, 2)
+  made_in: -> City  fk=made_in_id
+shape ProductCard from Product
+query product_card  target=Product verb=get  shape=ProductCard

@@ -246,6 +246,212 @@ pub fn agg_operand_reason(func: &str, term: &Terminal, is_enum: bool) -> Option<
     }
 }
 
+/// Type-check a computed shape-field expression (`out = price - discount` / `a || b` /
+/// `case …`) against its shape's model, emitting the E032x diagnostics. Operands must be
+/// reachable scalar columns or literals: an arithmetic operand must be numeric (E0320), a
+/// concat operand text (E0321), a CASE's branches must unify (E0322); a `$…` operand is an
+/// error because a shape carries no parameters (E0323). The CASE `when` reuses the shared
+/// predicate checker (comparison-type errors included).
+pub fn check_shape_expr(expr: &ShapeExpr, mi: usize, cx: &Cx, sink: &mut Sink) {
+    infer_shape_expr(expr, mi, cx, sink);
+}
+
+/// Infer a computed expression's coarse value family while type-checking it. `None` = a
+/// `null` literal or an unmodelled leaf (function / rejected operand) — compatible with any
+/// context, so it never triggers a mismatch on its own.
+fn infer_shape_expr(expr: &ShapeExpr, mi: usize, cx: &Cx, sink: &mut Sink) -> Option<Family> {
+    match expr {
+        ShapeExpr::Value(v) => infer_operand(v, mi, cx, sink),
+        ShapeExpr::Arith { lhs, rhs, span, .. } => {
+            require_family(
+                lhs,
+                Family::Numeric,
+                code::CFIELD_ARITH_OPERAND,
+                *span,
+                mi,
+                cx,
+                sink,
+            );
+            require_family(
+                rhs,
+                Family::Numeric,
+                code::CFIELD_ARITH_OPERAND,
+                *span,
+                mi,
+                cx,
+                sink,
+            );
+            Some(Family::Numeric)
+        }
+        ShapeExpr::Concat { lhs, rhs, span } => {
+            require_family(
+                lhs,
+                Family::Textual,
+                code::CFIELD_CONCAT_OPERAND,
+                *span,
+                mi,
+                cx,
+                sink,
+            );
+            require_family(
+                rhs,
+                Family::Textual,
+                code::CFIELD_CONCAT_OPERAND,
+                *span,
+                mi,
+                cx,
+                sink,
+            );
+            Some(Family::Textual)
+        }
+        ShapeExpr::Case { arms, else_, span } => {
+            for arm in arms {
+                check_case_when(&arm.when, mi, cx, sink);
+            }
+            let mut result: Option<Family> = None;
+            let mut mismatch = false;
+            for branch in arms
+                .iter()
+                .map(|a| &a.then)
+                .chain(std::iter::once(&**else_))
+            {
+                if let Some(f) = infer_shape_expr(branch, mi, cx, sink) {
+                    match result {
+                        None => result = Some(f),
+                        Some(r) if r == f => {}
+                        Some(_) => mismatch = true,
+                    }
+                }
+            }
+            if mismatch {
+                sink.error_note(
+                    code::CFIELD_CASE_MISMATCH,
+                    *span,
+                    "a `case`'s branches have different types",
+                    "every `then`/`else` branch must produce the same kind of value",
+                );
+            }
+            result
+        }
+    }
+}
+
+/// A CASE arm's `when` predicate. A shape has no parameters, so a `$…` in the condition is
+/// an error (E0323); otherwise reuse the shared predicate checker for column resolution and
+/// comparison-type checks.
+fn check_case_when(pred: &Predicate, mi: usize, cx: &Cx, sink: &mut Sink) {
+    if reject_pred_params(pred, sink) {
+        return;
+    }
+    check_predicate(pred, Some(mi), cx, &[], sink);
+}
+
+/// Emit E0323 for every `$…` operand in a predicate (a shape carries no parameters).
+/// Returns whether any was found, so the caller can skip the ordinary param-aware check.
+fn reject_pred_params(pred: &Predicate, sink: &mut Sink) -> bool {
+    let mut found = false;
+    let mut check = |v: &Value| {
+        if let Value::Param(pr) = v {
+            sink.error_note(
+                code::CFIELD_NO_PARAMS,
+                pr.name.span,
+                format!(
+                    "`${}` — a computed shape field has no parameters",
+                    pr.name.node
+                ),
+                "computed-field operands are the row's own columns and literals",
+            );
+            found = true;
+        }
+    };
+    walk_pred_values(pred, &mut check);
+    found
+}
+
+/// Visit every `Value` leaf of a predicate.
+fn walk_pred_values(pred: &Predicate, f: &mut impl FnMut(&Value)) {
+    match pred {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            walk_pred_values(a, f);
+            walk_pred_values(b, f);
+        }
+        Predicate::Not(inner) => walk_pred_values(inner, f),
+        Predicate::Cmp { value, .. } => f(value),
+        Predicate::InList { values, .. } => values.iter().for_each(f),
+        Predicate::FilterCall { args, .. } => args.iter().for_each(f),
+        Predicate::Bare(_) | Predicate::Raw(_) => {}
+    }
+}
+
+/// Require a computed operand to be of `want`'s family, emitting `code` at `span` otherwise.
+/// A `null` literal / unmodelled leaf (`None`) and the Json catch-all are exempt (they
+/// never mismatch); a nested sub-expression's family is checked recursively first.
+fn require_family(
+    e: &ShapeExpr,
+    want: Family,
+    code: &'static str,
+    span: Span,
+    mi: usize,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let Some(fam) = infer_shape_expr(e, mi, cx, sink) else {
+        return;
+    };
+    if fam != want && fam != Family::Json {
+        let at = operand_span(e).unwrap_or(span);
+        let msg = if want == Family::Numeric {
+            "an arithmetic operand must be numeric (int/float/decimal)"
+        } else {
+            "a `||` concatenation operand must be text"
+        };
+        sink.error(code, at, msg.to_string());
+    }
+}
+
+/// The tightest span for a computed operand: a reached path's last segment, or a
+/// sub-expression's own span. A bare literal has no span, so `None` falls back to the
+/// enclosing operator's span.
+fn operand_span(e: &ShapeExpr) -> Option<Span> {
+    match e {
+        ShapeExpr::Value(Value::Path(p)) => p.segments.last().map(|s| s.span),
+        ShapeExpr::Value(Value::Param(pr)) => Some(pr.name.span),
+        ShapeExpr::Arith { span, .. }
+        | ShapeExpr::Concat { span, .. }
+        | ShapeExpr::Case { span, .. } => Some(*span),
+        ShapeExpr::Value(_) => None,
+    }
+}
+
+/// Infer (and name-check) a single computed leaf operand's family.
+fn infer_operand(v: &Value, mi: usize, cx: &Cx, sink: &mut Sink) -> Option<Family> {
+    match v {
+        Value::Param(pr) => {
+            sink.error_note(
+                code::CFIELD_NO_PARAMS,
+                pr.name.span,
+                format!(
+                    "`${}` — a computed shape field has no parameters",
+                    pr.name.node
+                ),
+                "computed-field operands are the row's own columns and literals",
+            );
+            None
+        }
+        Value::Lit(l) => lit_family(l),
+        Value::Path(p) => {
+            let term = resolve_path(p, mi, cx, sink)?;
+            if reject_opaque(&term, p, "computed field", sink) {
+                return None;
+            }
+            // An enum column reached as an operand rides with text (its wire string).
+            Some(terminal_family(&term))
+        }
+        // A function's return type is unmodelled — treat as unknown (Json), never a mismatch.
+        Value::Func(_) => None,
+    }
+}
+
 /// Resolve a path for its type only, without reporting — name errors are already
 /// surfaced by the caller's `resolve_path`, so the type pass stays silent to avoid
 /// double-reporting.

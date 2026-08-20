@@ -106,7 +106,12 @@ relevant entries instead of scanning. A decision may appear under more than one 
   distinct far side; reuses D57's json-agg + `field[]` marker, runtime unchanged; E0300–E0302),
   D116 (`list distinct <Model>` — deduped projected rows via `SELECT DISTINCT`; a `list`-only
   modifier that suppresses the auto sort cascade; E0310 keyset / E0311 aggregate / E0312
-  order-not-projected / W0111 projects-primary-key-no-op; runtime/client/OpenAPI unchanged)
+  order-not-projected / W0111 projects-primary-key-no-op; runtime/client/OpenAPI unchanged),
+  D121 (computed shape fields — per-row derived scalars `out = <expr>`: arithmetic over the
+  numeric family, `||` concatenation (per-dialect `Dialect::concat`), `case when … then …
+  else … end`; `ShapeExpr` AST + `ShapeValue::Computed`; type inferred (numeric promotion /
+  text / unified CASE branch); reaches governed like a `Path` (scope/soft-delete walked);
+  projection-only, param-free; E0320–E0324; runtime unchanged)
 - **Pagination** — D56 (keyset-cursor pagination: lexicographic `WHERE`, hidden cursor-basis columns,
   opaque validated cursor), D59 (keyset + offset proven live on MariaDB/Postgres), D85 (streaming is
   the non-paginating full pass; `page` on a stream query is E0201), D97 (`Page<T>.total: Option<i64>`
@@ -5812,3 +5817,85 @@ D119.
 `adopt_constructor_is_per_dialect_and_txbound`; runtime live interop (postgres + sqlite). Examples: the
 helpdesk `adopt` flow + smoke, and all three quickstart embedded clients + the byte-gated embedded mirror
 (`generated_client_is_current`, now generated for MariaDb so it carries `adopt_mariadb`) regenerated.
+
+## D121 — computed shape fields: per-row derived scalars (arith / concat / case) (tier-2)
+
+**Decision.** A `=`-valued shape field may project a **per-row scalar expression** over the
+row's own reachable columns and literals — `net = price - discount`, `label = brand || " "
+|| name`, `tier = case when price > 100 then "premium" else "standard" end`. It is the last
+tier-2 language feature; after it, tier-2 has no remaining language items (the SQLite
+incremental-FK rebuild and a `bytes` field inside a to-many array on SQLite stay deferred).
+
+**Surface (readable > terse).** Three expression forms, composing with parentheses:
+- **Arithmetic** `+ - * /` over the numeric family (`int`/`float`/`decimal`, D83); `*`/`/`
+  bind tighter than `+`/`-`, left-associative. Result promotes decimal > float > int.
+- **Concatenation** `a || b` → `text`, lowered per dialect through a new `Dialect::concat`
+  seam: `||` on SQLite/Postgres, `CONCAT(…)` on the MySQL/MariaDB family (which has no
+  string `||`). A left-associative chain flattens to one call.
+- **Conditional** `case when <predicate> then <expr> else <expr> end` — one or more
+  `when`/`then` arms then a mandatory `else` (total: every row takes a branch). The `when`
+  reuses the shared predicate grammar/lowering (`where`/`having` — comparisons + `and`/`or`/
+  `not`); the branches recurse. Result type = the unified branch type.
+
+The keyword surface (`case`/`when`/`then`/`else`/`end`) is contextual, consistent with the
+other block keywords. `||` is a new lexer token (`PipePipe`, longest-match before any `|`;
+a lone `|` stays a lex error — the grammar has no single pipe).
+
+**AST.** A dedicated `ShapeExpr` (`Value` | `Arith` | `Concat` | `Case { arms, else_ }`,
+`CaseArm { when: Predicate, then }`) rather than reusing D100's mutation-SET `AssignRhs`
+(that is `Value`-leaf arithmetic only; a shape expr also needs concat, CASE, and reached-path
+operands). `ShapeValue` gains `Computed(ShapeExpr)`. D100's mutation arith is untouched. The
+parser keeps a lone `out = path` reach as `ShapeValue::Path` and `out = path { … }` as a
+flatten (via `ShapeExpr::lone_path`), so every existing shape AST + golden is byte-identical.
+
+**Operands = the row's own values.** A local column, a cross-relation **reached path**
+(`made_in.name` — the same reach a `Path` projection uses), an enum variant (in a CASE
+comparison), and literals. A computed field carries **no parameters** — a shape declaration
+has none (like `raw` in a shape) — so a `$…` operand is `E0323`, and CASE `when` predicates
+are checked param-free. (Shape-level params were considered and cut: there is no binding site
+for them; a future shape-param mechanism could add them.)
+
+**Scope / soft-delete confinement (avoids the D81 leak class).** Every reached path (and CASE
+`when` comparison) lowers to a real join carrying the reached model's `@scope`/soft-delete, so
+`scope.rs`'s `walk_shape_join_in` now recurses into a `Computed` field (`walk_computed_join` +
+`walk_pred_join`): a scoped/soft-deleting model reached through the computation is *touched*
+and governed exactly like a `Path` reach — no cross-tenant read through an arithmetic operand.
+
+**Type inference.** Inferred from the expression: arithmetic → the promoted numeric primitive,
+concat → `text`, CASE → the unified branch type (numeric branches promote), nullable iff a
+branch is a `null` literal. Client + OpenAPI type the field accordingly, both reading the one
+shared `computed_result` inference (so they can't drift). The runtime is **unchanged** — a
+computed field is just another projected SELECT column, decoded through the existing path
+(decimal-as-text per D83, enums, etc.).
+
+**Not an aggregate.** A computed field is per-row and composes in ordinary (non-group) shapes;
+it also lowers inside a to-many nest element body. A computed field alongside an aggregate
+field in the same shape is `E0324` (a group is not a row — split them into two shapes).
+Projection-only: the shape "no filtering/sorting inside a shape" rule is unchanged.
+
+**Diagnostics:** `E0320` (non-numeric arithmetic operand), `E0321` (non-text concat operand),
+`E0322` (CASE branch-type mismatch), `E0323` (a `$…` operand — a shape has no params),
+`E0324` (a computed field mixed with an aggregate shape). A comparison-type mismatch in a CASE
+`when` reuses the existing predicate checker (`E0151`/`E0152`).
+
+**Editor / fmt.** fmt reprints a computed expression with minimal parentheses by precedence
+(concat < `+`/`-` < `*`/`/` < leaf), idempotent + reparses. `case`/`when`/`then`/`else`/`end`
+join the LSP completion vocabulary + the TextMate keyword set; every operand column and CASE
+`when` comparison column is a go-to-def / find-refs / rename site (rooted at the shape `from`,
+matching the field-reference precedent).
+
+**Verified.** Sema +/− (a clean arith/concat/case shape + one negative per E0320–E0324);
+codegen SQL asserted per dialect (parenthesized arithmetic, `||` vs `CONCAT`, `CASE WHEN`);
+client field typing (int→i64, int*decimal→decimal, concat→String, CASE-text→String, null
+branch→Option); OpenAPI schemas + required-set; fmt round-trip; parser + sema conformance
+golden `computed_fields`; and **live SQLite** `computed_integration.rs` — seeded rows whose
+`net`/`gross` (arithmetic), `label` (concat) and `tier` (CASE, branch diverging per row) come
+back computed server-side. `make check` green end-to-end.
+
+**Blast radius.** `based-ast` (`ShapeExpr`/`CaseArm`/`ShapeValue::Computed`), `based-parser`
+(lexer `PipePipe`; `shape_expr` precedence climb + `shape_case`), `based-sema` (resolve
+`check_shape_expr`/`infer_shape_expr`; check `Computed` arm + E0324; scope `walk_computed_join`;
+codes E0320–E0324), `based-codegen` (`Dialect::concat`; dml `Select::shape_expr` + project/json
+arms + `computed_result`/`promote_numeric`; client `rename_type`/`computed_type`; openapi arm),
+`based-fmt` (`shape_expr` renderer), `based-lsp` (keywords + `computed_paths`/`pred_column_paths`),
+`editors/vscode` TextMate keywords, `spec/grammar.ebnf` + `spec/syntax/shapes.md`.

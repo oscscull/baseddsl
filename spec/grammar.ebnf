@@ -149,12 +149,27 @@ shape_body  = '{' { shape_field sep } [ shape_field ] '}' ;
 (* equal the relation's target; the reference is a pure body expansion (`full` is  *)
 (* per-model, so it is never referenced this way).                                 *)
 shape_field = bare_field                       (* local, same-name             *)
-            | out_name '=' shape_value          (* reach-and-rename / raw / agg *)
+            | out_name '=' shape_value          (* reach/raw/agg/computed       *)
+            | out_name '=' path shape_body      (* far-side flatten (m2m, D109) *)
             | bare_field shape_body             (* nest a relation into subobj  *)
             | bare_field '->' upper_ident ;     (* nest via a named shape (D79) *)
 bare_field  = lower_ident ;
 out_name    = lower_ident ;
-shape_value = path | raw_sql | aggregate ;     (* dotted traversal, raw, or agg *)
+(* A lone `path` reaches-and-renames; `raw_sql` / `aggregate` are the escape hatch and  *)
+(* the grouped aggregate; `shape_expr` is a per-row derived scalar. A bare `path` that   *)
+(* is followed by a `shape_body` is the far-side flatten above, not `shape_expr`.        *)
+shape_value = path | raw_sql | aggregate | shape_expr ;
+
+(* A computed shape field: a per-row scalar over the row's reachable columns + literals.  *)
+(* Concatenation is the lowest-precedence binary level, then +/-, then * // ; a `case`    *)
+(* is a leaf. The result type is inferred (numeric family / text / unified CASE branch).  *)
+shape_expr   = concat_expr ;
+concat_expr  = add_expr { '||' add_expr } ;             (* string concat -> text        *)
+add_expr     = mul_expr { ( '+' | '-' ) mul_expr } ;
+mul_expr     = primary_expr { ( '*' | '/' ) primary_expr } ;
+primary_expr = value | '(' shape_expr ')' | case_expr ;
+case_expr    = 'case' ( 'when' predicate 'then' shape_expr )+
+               'else' shape_expr 'end' ;   (* keywords contextual, one+ arms, `else` req *)
 
 (* An aggregate over the shape's grouped rows (queries.md group by / having). A shape *)
 (* carrying any of these is an *aggregate shape*: a projection over groups, not rows.  *)

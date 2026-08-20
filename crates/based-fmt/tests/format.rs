@@ -379,3 +379,21 @@ fn fk_annotations_round_trip() {
         assert_eq!(fmt(&out), out, "not idempotent");
     }
 }
+
+#[test]
+fn computed_shape_field_reprints_with_minimal_parens() {
+    // Arithmetic keeps precedence with the fewest parens; concat spaces its `||`; a
+    // `case` reprints its keywords canonically. Idempotent + reparses (see the sweep test).
+    assert_eq!(
+        fmt("shape S from P { net=price-discount, g = (price+tax)*qty }"),
+        "shape S from P {\n  net = price - discount\n  g   = (price + tax) * qty\n}\n"
+    );
+    assert_eq!(
+        fmt(r#"shape S from P { label = brand||" "||name }"#),
+        "shape S from P {\n  label = brand || \" \" || name\n}\n"
+    );
+    assert_eq!(
+        fmt(r#"shape S from P { tier = case when price>100 then "hi" else "lo" end }"#),
+        "shape S from P {\n  tier = case when price > 100 then \"hi\" else \"lo\" end\n}\n"
+    );
+}

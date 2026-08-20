@@ -1122,3 +1122,35 @@ fn composite_key_emits_a_structured_id_struct() {
     // An inbound FK to the composite-key model carries the structured id, not a scalar.
     assert!(out.contains("pub enrollment: EnrollmentId,"), "\n{out}");
 }
+
+#[test]
+fn computed_shape_fields_type_by_inferred_expression() {
+    let out = gen(r#"
+        Product {
+          id:       Id
+          name:     text
+          brand:    text
+          price:    int
+          rate:     decimal(12, 2)
+        }
+        shape ProductCard from Product {
+          name
+          net    = price * 2
+          amount = price * rate
+          label  = brand || " " || name
+          tier   = case when price > 100 then "premium" else "standard" end
+          maybe  = case when price > 0 then name else null end
+        }
+        query product_card(id) -> ProductCard;
+        "#);
+    // int arithmetic -> i64; int*decimal promotes to decimal; concat -> String; a CASE of
+    // text branches -> String; a CASE with a `null` branch is nullable.
+    assert!(out.contains("pub net: i64,"), "\n{out}");
+    assert!(
+        out.contains("pub amount: rust_decimal::Decimal,"),
+        "\n{out}"
+    );
+    assert!(out.contains("pub label: String,"), "\n{out}");
+    assert!(out.contains("pub tier: String,"), "\n{out}");
+    assert!(out.contains("pub maybe: Option<String>,"), "\n{out}");
+}

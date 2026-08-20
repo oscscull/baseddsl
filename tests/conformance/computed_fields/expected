@@ -1,0 +1,5 @@
+OK
+model City  decorators=[]  fields=2  indexes=0
+model Product  decorators=[]  fields=7  indexes=0
+shape ProductCard from Product  fields=6
+query product_card  params=1  ret=ProductCard  body=bare

@@ -24,7 +24,8 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
     let mut stack = vec![s.name.node.clone()];
     check_shape_body(&s.body, mi, cx, &mut stack, sink);
     // An aggregate shape projects groups, not rows: it must be flat (no relation nest or
-    // reference — a group has no sub-objects).
+    // reference — a group has no sub-objects), and a per-row computed field has no place in
+    // it (a group is not a row — E0324).
     if is_agg_shape(&s.body) {
         for f in &s.body {
             if let ShapeField::Nest { field, .. }
@@ -36,6 +37,21 @@ pub fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape> {
                     field.span,
                     format!("aggregate shape `{}` nests `{}`", s.name.node, field.node),
                     "an aggregate shape is flat — project columns and aggregates, not sub-objects",
+                );
+            }
+            if let ShapeField::Rename {
+                out,
+                value: ShapeValue::Computed(_),
+            } = f
+            {
+                sink.error_note(
+                    code::CFIELD_IN_AGG,
+                    out.span,
+                    format!(
+                        "aggregate shape `{}` also computes the per-row field `{}`",
+                        s.name.node, out.node
+                    ),
+                    "a computed field is per-row; an aggregate shape is over groups — split them into separate shapes",
                 );
             }
         }
@@ -91,6 +107,9 @@ fn check_shape_body(
                 }
                 ShapeValue::Raw(_) => {}
                 ShapeValue::Agg(agg) => check_agg_call(agg, mi, cx, sink),
+                // A per-row derived scalar (`out = price - discount` / `a || b` / `case …`):
+                // type-check the expression against this model.
+                ShapeValue::Computed(expr) => resolve::check_shape_expr(expr, mi, cx, sink),
             },
             ShapeField::Nest { field, body } => {
                 if let Some(ti) = nest_target(field, mi, cx, sink).and_then(|t| cx.find(t)) {

@@ -210,6 +210,17 @@ impl Dialect {
         }
     }
 
+    /// String concatenation of `parts` (a computed shape field's `a || b`). SQLite and
+    /// Postgres take the SQL-standard `||` operator; the MySQL/MariaDB family has no string
+    /// `||` (there it is a logical OR), so it uses `CONCAT(…)`. Routed through this seam so
+    /// the spelling can never drift from the compile target.
+    pub fn concat(self, parts: &[String]) -> String {
+        match self {
+            Self::Sqlite | Self::Postgres => format!("({})", parts.join(" || ")),
+            Self::MariaDb | Self::MySql => format!("CONCAT({})", parts.join(", ")),
+        }
+    }
+
     /// The row-locking clause a `get|list … for update` query appends after `ORDER BY`/`LIMIT`
     /// (transactions.md). Postgres and the MySQL/MariaDB family take `FOR UPDATE`. SQLite has no
     /// row-level lock, so it returns the empty string (a no-op): its transaction locks the whole

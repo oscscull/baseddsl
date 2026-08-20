@@ -704,3 +704,31 @@ fn opaque_column_is_a_string_schema() {
     let props = &doc["components"]["schemas"]["PlaceRow"]["properties"];
     assert_eq!(props["location"]["type"], "string", "\n{doc:#}");
 }
+
+#[test]
+fn computed_shape_fields_carry_inferred_schemas() {
+    let doc = gen(r#"
+        Product { id: Id, name: text, brand: text, price: int }
+        shape ProductCard from Product {
+          name
+          net   = price * 2
+          label = brand || " " || name
+          maybe = case when price > 0 then name else null end
+        }
+        query product_card(id) -> ProductCard;
+        "#);
+    let row = &doc["components"]["schemas"]["ProductCard"];
+    assert_eq!(row["properties"]["net"]["type"], "integer");
+    assert_eq!(row["properties"]["label"]["type"], "string");
+    assert_eq!(row["properties"]["maybe"]["type"], "string");
+    // `net`/`label` are always present; the nullable CASE `maybe` is not required.
+    let required: Vec<&str> = row["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"net"), "{required:?}");
+    assert!(required.contains(&"label"), "{required:?}");
+    assert!(!required.contains(&"maybe"), "{required:?}");
+}

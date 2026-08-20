@@ -15,8 +15,8 @@
 use based_ast::{
     AggCall, Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member,
     Model, Modifier, Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate,
-    Primitive, Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeField, ShapeValue, Span,
-    TypeExpr, Value, VariantValue, WriteStmt,
+    Primitive, Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeExpr, ShapeField,
+    ShapeValue, Span, TypeExpr, Value, VariantValue, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -1006,6 +1006,12 @@ impl Snapshot {
                     value: ShapeValue::Agg(AggCall { arg: Some(p), .. }),
                     ..
                 } => out.push((from, &p.segments)),
+                // A computed field's operand columns (and CASE `when` comparisons) are all
+                // navigable / renamable field references, rooted at `from`.
+                ShapeField::Rename {
+                    value: ShapeValue::Computed(expr),
+                    ..
+                } => computed_paths(expr, from, out),
                 ShapeField::Rename { .. } => {}
                 ShapeField::Nest { field, body } => {
                     out.push((from, std::slice::from_ref(field)));
@@ -1663,6 +1669,12 @@ const KEYWORDS: &[&str] = &[
     "read",
     "max_rows",
     "unsafe",
+    // computed shape-field conditional (`out = case when … then … else … end`)
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
 ];
 
 /// Primitive type spellings (the `Primitive` variants), offered in type position.
@@ -1897,6 +1909,42 @@ fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
         }
     }
     out
+}
+
+/// Collect every navigable column path in a computed shape field (`out = price - discount`
+/// / `a || b` / `case …`), rooted at the shape's model `from` — its arithmetic/concat
+/// operands and its CASE `when` comparison columns, so each is a go-to-def / rename site.
+fn computed_paths<'a>(expr: &'a ShapeExpr, from: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    match expr {
+        ShapeExpr::Value(Value::Path(p)) => out.push((from, &p.segments)),
+        ShapeExpr::Value(_) => {}
+        ShapeExpr::Arith { lhs, rhs, .. } | ShapeExpr::Concat { lhs, rhs, .. } => {
+            computed_paths(lhs, from, out);
+            computed_paths(rhs, from, out);
+        }
+        ShapeExpr::Case { arms, else_, .. } => {
+            for arm in arms {
+                pred_column_paths(&arm.when, from, out);
+                computed_paths(&arm.then, from, out);
+            }
+            computed_paths(else_, from, out);
+        }
+    }
+}
+
+/// The column paths a predicate compares on (a CASE `when` condition), rooted at `from`.
+fn pred_column_paths<'a>(p: &'a Predicate, from: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+    match p {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            pred_column_paths(a, from, out);
+            pred_column_paths(b, from, out);
+        }
+        Predicate::Not(inner) => pred_column_paths(inner, from, out),
+        Predicate::Cmp { path, .. } | Predicate::InList { path, .. } | Predicate::Bare(path) => {
+            out.push((from, &path.segments));
+        }
+        Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
+    }
 }
 
 /// The `field -> Shape` references in a shape body (recursing through inline nests) —

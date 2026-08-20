@@ -622,6 +622,52 @@ fn shape_value(v: &ShapeValue) -> String {
         ShapeValue::Path(p) => path(p),
         ShapeValue::Raw(r) => raw_sql(r),
         ShapeValue::Agg(a) => aggregate(a),
+        ShapeValue::Computed(e) => shape_expr(e, 0),
+    }
+}
+
+/// Reprint a computed shape expression with minimal parentheses. Precedence, tightest
+/// last: concat (1) < `+`/`-` (2) < `*`/`/` (3) < a value / `case` leaf (4). A node is
+/// wrapped only when it binds looser than the position it sits in (`min`).
+fn shape_expr(e: &ShapeExpr, min: u8) -> String {
+    let (prec, body) = match e {
+        ShapeExpr::Value(v) => (4, value(v)),
+        ShapeExpr::Case { arms, else_, .. } => {
+            let mut s = String::from("case");
+            for arm in arms {
+                s.push_str(&format!(
+                    " when {} then {}",
+                    predicate(&arm.when, 0),
+                    shape_expr(&arm.then, 0)
+                ));
+            }
+            s.push_str(&format!(" else {} end", shape_expr(else_, 0)));
+            (4, s)
+        }
+        ShapeExpr::Arith { lhs, op, rhs, .. } => {
+            let prec = match op {
+                ArithOp::Add | ArithOp::Sub => 2,
+                ArithOp::Mul | ArithOp::Div => 3,
+            };
+            (
+                prec,
+                format!(
+                    "{} {} {}",
+                    shape_expr(lhs, prec),
+                    arith_op(*op),
+                    shape_expr(rhs, prec + 1)
+                ),
+            )
+        }
+        ShapeExpr::Concat { lhs, rhs, .. } => (
+            1,
+            format!("{} || {}", shape_expr(lhs, 1), shape_expr(rhs, 2)),
+        ),
+    };
+    if prec < min {
+        format!("({body})")
+    } else {
+        body
     }
 }
 

@@ -399,6 +399,12 @@ fn lower_agg_query<'a>(
                     let e = format!("({})", render_raw(dialect, raw, &root_alias, &root.table));
                     (out.node.clone(), e.clone(), e)
                 }
+                // A computed field never co-occurs with an aggregate (sema `E0324`); lower
+                // it defensively so the branch is total.
+                ShapeValue::Computed(expr) => {
+                    let e = sel.shape_expr(expr, &root_alias, "", root);
+                    (out.node.clone(), e.clone(), e)
+                }
             },
             // Aggregate shapes are flat (sema `E0245`); a stray nest/flatten is ignored.
             ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. } => {
@@ -736,6 +742,15 @@ fn project_body<'a>(
                         sel.q(&out_alias(out_prefix, &out.node))
                     ));
                 }
+                // A per-row derived scalar (`out = price - discount` / `a || b` / `case …`):
+                // lower the expression to one SELECT-list column.
+                ShapeValue::Computed(expr) => {
+                    let sql = sel.shape_expr(expr, alias, prefix, model);
+                    cols.push(format!(
+                        "{sql} AS {}",
+                        sel.q(&out_alias(out_prefix, &out.node))
+                    ));
+                }
             },
             // A to-**one** relation nests the target's columns under a `field.`-prefixed
             // alias (reassembled by the runtime). A to-**many** relation aggregates the
@@ -999,6 +1014,116 @@ fn path_primitive(schema: &CheckedSchema, root: &RModel, path: &Path) -> Primiti
         }
     }
     Primitive::Text
+}
+
+/// The primitive a dotted path lands on, walking relations, or `None` when it doesn't
+/// terminate on a scalar. Shared by the computed-field type inference below.
+fn path_scalar_primitive(
+    schema: &CheckedSchema,
+    model: Option<&RModel>,
+    path: &Path,
+) -> Option<Primitive> {
+    let mut cur = model?;
+    let n = path.segments.len();
+    for (i, seg) in path.segments.iter().enumerate() {
+        let last = i + 1 == n;
+        match cur.member(&seg.node).map(|m| &m.kind)? {
+            MemberKind::Scalar { ty, .. } if last => return Some(*ty),
+            MemberKind::Scalar { .. } => return None,
+            MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. } => {
+                if last {
+                    return None;
+                }
+                cur = schema.model(target)?;
+            }
+        }
+    }
+    None
+}
+
+/// The Rust/OpenAPI result type of a computed shape-field expression: the terminating
+/// primitive (or `None` for an unknown/opaque leaf → `Json`) and whether it is nullable.
+/// Arithmetic promotes over the numeric family (decimal > float > int); concat is text; a
+/// CASE unifies its branches (numeric branches promote) and is nullable if any branch is a
+/// `null` literal. Both the client and the OpenAPI emitters read the field's type from here
+/// so the two can't drift.
+pub(crate) fn computed_result(
+    schema: &CheckedSchema,
+    model: Option<&RModel>,
+    expr: &ShapeExpr,
+) -> (Option<Primitive>, bool) {
+    match expr {
+        ShapeExpr::Value(v) => match v {
+            Value::Path(p) => (path_scalar_primitive(schema, model, p), false),
+            Value::Lit(Literal::Int(_)) => (Some(Primitive::Int), false),
+            Value::Lit(Literal::Decimal(_)) => (
+                Some(Primitive::Decimal {
+                    precision: 38,
+                    scale: 9,
+                }),
+                false,
+            ),
+            Value::Lit(Literal::Str(_)) => (Some(Primitive::Text), false),
+            Value::Lit(Literal::Bool(_)) => (Some(Primitive::Bool), false),
+            Value::Lit(Literal::Null) => (None, true),
+            // Params are rejected in a shape (sema E0323); a function's type is unmodelled.
+            Value::Param(_) | Value::Func(_) => (None, false),
+        },
+        ShapeExpr::Arith { lhs, rhs, .. } => {
+            let (a, ao) = computed_result(schema, model, lhs);
+            let (b, bo) = computed_result(schema, model, rhs);
+            (promote_numeric(a, b), ao || bo)
+        }
+        ShapeExpr::Concat { .. } => (Some(Primitive::Text), false),
+        ShapeExpr::Case { arms, else_, .. } => {
+            let mut prim = None;
+            let mut optional = false;
+            for branch in arms
+                .iter()
+                .map(|a| &a.then)
+                .chain(std::iter::once(&**else_))
+            {
+                let (p, o) = computed_result(schema, model, branch);
+                optional |= o;
+                prim = match (prim, p) {
+                    (None, p) => p,
+                    (Some(x), Some(y)) if x == y => Some(x),
+                    (Some(x), Some(y)) => promote_numeric(Some(x), Some(y)),
+                    (acc, None) => acc,
+                };
+            }
+            (prim, optional)
+        }
+    }
+}
+
+/// Promote two numeric operands to their common type: decimal beats float beats int; an
+/// unknown operand (`None`) or a non-numeric leaves the result unknown.
+fn promote_numeric(a: Option<Primitive>, b: Option<Primitive>) -> Option<Primitive> {
+    let (a, b) = (a?, b?);
+    let rank = |p: Primitive| match p {
+        Primitive::Decimal { .. } => Some(3),
+        Primitive::Float => Some(2),
+        Primitive::Int | Primitive::Serial => Some(1),
+        _ => None,
+    };
+    match (rank(a), rank(b)) {
+        (Some(ra), Some(rb)) => Some(if ra >= rb { widen(a) } else { widen(b) }),
+        _ => None,
+    }
+}
+
+/// The canonical primitive for a promoted numeric result (a bare `decimal(38, 9)`, or the
+/// operand's own type).
+fn widen(p: Primitive) -> Primitive {
+    match p {
+        Primitive::Serial => Primitive::Int,
+        Primitive::Decimal { .. } => Primitive::Decimal {
+            precision: 38,
+            scale: 9,
+        },
+        other => other,
+    }
 }
 
 // ---------- the join-accumulating resolver --------------------------------
@@ -1606,6 +1731,11 @@ impl<'a> Select<'a> {
                         let expr = agg_sql(self, model, alias, prefix, agg, d, true);
                         pairs.push(format!("'{}', {expr}", out.node));
                     }
+                    // A per-row derived scalar inside a to-many element body.
+                    ShapeValue::Computed(expr) => {
+                        let sql = self.shape_expr(expr, alias, prefix, model);
+                        pairs.push(format!("'{}', {sql}", out.node));
+                    }
                 },
                 ShapeField::Nest { field, body } => {
                     self.json_nest_pair(field, body, model, alias, prefix, &mut pairs);
@@ -2102,6 +2232,74 @@ impl<'a> Select<'a> {
                 arith_op_sql(*op),
                 self.assign_rhs(rhs, model, col_field)
             ),
+        }
+    }
+
+    /// Lower a computed shape-field expression to a per-row SQL scalar: arithmetic to a
+    /// parenthesized `(a op b)`, concatenation through the dialect's `concat` seam, and a
+    /// conditional to `CASE WHEN … THEN … ELSE … END` (its `when` reusing the shared
+    /// predicate lowering, its branches recursing). Operands resolve like any reach, so a
+    /// dotted path materializes the same join a `Path` projection would.
+    pub(crate) fn shape_expr(
+        &mut self,
+        expr: &'a ShapeExpr,
+        alias: &str,
+        prefix: &str,
+        model: &'a RModel,
+    ) -> String {
+        match expr {
+            ShapeExpr::Value(Value::Path(p)) => {
+                let (a, col) = self.resolve_from(p, alias, prefix, model);
+                self.qcol(&a, &col)
+            }
+            ShapeExpr::Value(v) => self.value(v, model),
+            ShapeExpr::Arith { lhs, op, rhs, .. } => format!(
+                "({} {} {})",
+                self.shape_expr(lhs, alias, prefix, model),
+                arith_op_sql(*op),
+                self.shape_expr(rhs, alias, prefix, model)
+            ),
+            ShapeExpr::Concat { .. } => {
+                // Flatten a left-associative concat chain into one `a || b || c` /
+                // `CONCAT(a, b, c)` rather than nesting a call per operator.
+                let mut parts = Vec::new();
+                self.collect_concat(expr, alias, prefix, model, &mut parts);
+                self.dialect.concat(&parts)
+            }
+            ShapeExpr::Case { arms, else_, .. } => {
+                let mut s = String::from("CASE");
+                for arm in arms {
+                    s.push_str(&format!(
+                        " WHEN {} THEN {}",
+                        self.predicate(&arm.when, model),
+                        self.shape_expr(&arm.then, alias, prefix, model)
+                    ));
+                }
+                s.push_str(&format!(
+                    " ELSE {} END",
+                    self.shape_expr(else_, alias, prefix, model)
+                ));
+                s
+            }
+        }
+    }
+
+    /// Flatten a concat chain (`a || b || c`) into its ordered operand SQL, so the whole
+    /// chain lowers to one `CONCAT(…)` / `… || … || …` instead of nesting per operator.
+    fn collect_concat(
+        &mut self,
+        expr: &'a ShapeExpr,
+        alias: &str,
+        prefix: &str,
+        model: &'a RModel,
+        parts: &mut Vec<String>,
+    ) {
+        match expr {
+            ShapeExpr::Concat { lhs, rhs, .. } => {
+                self.collect_concat(lhs, alias, prefix, model, parts);
+                self.collect_concat(rhs, alias, prefix, model, parts);
+            }
+            other => parts.push(self.shape_expr(other, alias, prefix, model)),
         }
     }
 

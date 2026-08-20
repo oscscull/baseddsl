@@ -65,6 +65,39 @@ subquery, so tombstoned/out-of-scope rows are excluded. The body composes (furth
 flattens). A keyless (`@no_id`) far model is a compile error. See relations.md (Many-to-many)
 for the full contract; implicit-junction sugar stays rejected.
 
+## Computed projections
+A `=` value may be a **per-row derived scalar** — an expression over the row's own
+reachable columns and literals, projected as one column:
+```
+shape ProductCard from Product {
+  name
+  net    = price - discount              # arithmetic (numeric family)
+  label  = brand || " " || name          # string concatenation -> text
+  tier   = case when price > 100 then "premium" else "standard" end
+  origin = case when price > 0 then made_in.name else "unknown" end
+}
+```
+Three expression forms, composing freely with parentheses:
+- **Arithmetic** `+ - * /` over the numeric family (`int`/`float`/`decimal`). `*`/`/`
+  bind tighter than `+`/`-`; the result promotes (decimal > float > int).
+- **Concatenation** `a || b` producing `text` (lowered per dialect — `||` on
+  SQLite/Postgres, `CONCAT(…)` on the MySQL/MariaDB family).
+- **Conditional** `case when <predicate> then <expr> else <expr> end` — one or more
+  `when`/`then` arms then a mandatory `else`. The `when` is the same predicate language
+  `where`/`having` use (comparisons, `and`/`or`/`not`); the branches are themselves
+  computed expressions. The result type is the unified type of the branches.
+
+Operands may be a local column, a **reached path** (`made_in.name` — the same cross-relation
+reach a `Path` value uses, governed by the reached model's `@scope`/soft-delete exactly as a
+`Path` reach is), an enum variant (in a comparison), and literals. A computed field carries
+**no parameters** (a shape has none) — its operands are the row's own values. The field's
+type is inferred from the expression and typed accordingly in the client + OpenAPI.
+
+A computed field is **projection-only** (the shape filtering/sorting rule below still
+holds — you cannot filter or sort *by* it inside the shape) and is **not** an aggregate: it
+composes in ordinary (non-group) shapes, and a computed field alongside an aggregate field
+in the same shape is a compile error (a group is not a row — split them into two shapes).
+
 ## Aggregate projections
 A `=` value may be an **aggregate** over the shape's rows instead of a reach:
 `count()`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`. A shape with any

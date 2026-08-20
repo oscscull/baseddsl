@@ -747,20 +747,9 @@ pub fn adopt_{suffix}<'a>(
                 ShapeField::Bare(id) => {
                     fields.push((id.node.clone(), reach_type(schema, model, &[&id.node])));
                 }
-                ShapeField::Rename { out, value } => match value {
-                    ShapeValue::Path(p) => {
-                        let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
-                        fields.push((out.node.clone(), reach_type(schema, model, &segs)));
-                    }
-                    // A raw SQL expression has no statically known type -> `Json`.
-                    ShapeValue::Raw(_) => fields.push((out.node.clone(), "Json".to_string())),
-                    // An aggregate: `count()` → `i64`, `avg` → `Option<f64>`, `sum`/`min`/
-                    // `max` → `Option<column-type>` (an empty/all-null group aggregates to
-                    // null).
-                    ShapeValue::Agg(agg) => {
-                        fields.push((out.node.clone(), agg_type(schema, model, agg)));
-                    }
-                },
+                ShapeField::Rename { out, value } => {
+                    fields.push((out.node.clone(), rename_type(schema, model, value)));
+                }
                 ShapeField::Nest { field, body } => {
                     if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {
                         let sub_name = format!("{name}{}", pascal(&field.node));
@@ -1135,6 +1124,39 @@ pub fn adopt_{suffix}<'a>(
                     .map_or("Json", primitive);
                 format!("Option<{base}>")
             }
+        }
+    }
+
+    /// The Rust type of an `out = value` shape field: a reach path's column type, `Json`
+    /// for a raw expression, an aggregate's type, or a computed expression's inferred type.
+    fn rename_type(schema: &CheckedSchema, model: Option<&RModel>, value: &ShapeValue) -> String {
+        match value {
+            ShapeValue::Path(p) => {
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                reach_type(schema, model, &segs)
+            }
+            // A raw SQL expression has no statically known type -> `Json`.
+            ShapeValue::Raw(_) => "Json".to_string(),
+            // An aggregate: `count()` → `i64`, `avg` → `Option<f64>`, `sum`/`min`/`max` →
+            // `Option<column-type>` (an empty/all-null group aggregates to null).
+            ShapeValue::Agg(agg) => agg_type(schema, model, agg),
+            // A per-row derived scalar: type inferred from the expression (numeric family /
+            // text / the unified CASE branch type).
+            ShapeValue::Computed(expr) => computed_type(schema, model, expr),
+        }
+    }
+
+    /// The Rust type of a computed shape field (`out = <expr>`), inferred from the
+    /// expression via the shared [`crate::sql::dml::computed_result`]. An unknown/opaque
+    /// leaf falls back to `Json`; a nullable result (a CASE with a `null` branch) is
+    /// `Option<…>`.
+    fn computed_type(schema: &CheckedSchema, model: Option<&RModel>, expr: &ShapeExpr) -> String {
+        let (prim, optional) = crate::sql::dml::computed_result(schema, model, expr);
+        let base = prim.map_or_else(|| "Json".to_string(), |p| primitive(p).to_string());
+        if optional {
+            format!("Option<{base}>")
+        } else {
+            base
         }
     }
 

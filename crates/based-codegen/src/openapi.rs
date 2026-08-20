@@ -564,6 +564,14 @@ fn shape_fields(
                     };
                     fields.push((out.node.clone(), ty, req));
                 }
+                // A per-row derived scalar: its schema is inferred from the expression
+                // (numeric family / text / the unified CASE branch type); `required` unless
+                // it can be null (a CASE with a `null` branch).
+                ShapeValue::Computed(expr) => {
+                    let (prim, optional) = crate::sql::dml::computed_result(schema, model, expr);
+                    let ty = prim.map_or_else(json_schema, primitive_schema);
+                    fields.push((out.node.clone(), ty, !optional));
+                }
             },
             ShapeField::Nest { field, body } => {
                 if let Some((target, optional)) = to_one_relation(schema, model, &field.node) {

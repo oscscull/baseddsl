@@ -209,6 +209,14 @@ pub mod code {
     // `time` and `bytes` scalar types (D117): a time-of-day and a binary blob.
     pub const TIME_DEFAULT: &str = "E0313"; // a `time` column's `default` must be a time string literal (e.g. "14:30:00")
     pub const BYTES_DEFAULT: &str = "E0314"; // a `bytes` column cannot carry a literal default — set it from a raw migration or a DB default
+
+    // Computed shape fields (E032x): a per-row derived scalar `out = <expr>`
+    // (arithmetic / concat / case) projected in an ordinary (non-group) shape.
+    pub const CFIELD_ARITH_OPERAND: &str = "E0320"; // an arithmetic (`+ - * /`) operand is not numeric (int/float/decimal)
+    pub const CFIELD_CONCAT_OPERAND: &str = "E0321"; // a `||` concatenation operand is not text
+    pub const CFIELD_CASE_MISMATCH: &str = "E0322"; // a `case`'s branches (`then`/`else`) don't share a common type
+    pub const CFIELD_NO_PARAMS: &str = "E0323"; // a `$…` operand in a computed field — a shape declaration has no parameters
+    pub const CFIELD_IN_AGG: &str = "E0324"; // a computed field alongside an aggregate field — a group is not a row
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

@@ -86,7 +86,11 @@ pub enum Tok {
     #[token("~")]
     Tilde,
 
-    // --- arithmetic (atomic update expressions) ---
+    // --- arithmetic (atomic update expressions, computed shape fields) ---
+    // `||` first so it wins the longest match over two comparisons — but the grammar
+    // has no single `|`, so a lone pipe stays an unclassified byte (a lex error).
+    #[token("||")]
+    PipePipe,
     #[token("+")]
     Plus,
     #[token("-")]
