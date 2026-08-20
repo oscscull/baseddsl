@@ -36,6 +36,9 @@ IMAGE ?= based-serve:ci
 MARIADB_URL  ?= mysql://root:based_test_pw@127.0.0.1:13306/based_test
 POSTGRES_URL ?= postgres://postgres:based_test_pw@127.0.0.1:15432/based_test
 SQLITE_DB    ?= quickstart.db
+# The helpdesk's production idempotency store (its `RedisStore`). Default matches the
+# throwaway `redis:7` in dev-db-up; a CI service container overrides it.
+REDIS_URL    ?= redis://127.0.0.1:16379
 
 .PHONY: ci check check-fast ci-workspace ci-coloring ci-extension ci-image ci-live \
         ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
@@ -151,13 +154,16 @@ ci-example-postgres: based-cli
 ## The flagship axum service, end to end over real HTTP: reset the database (drop +
 ## recreate `public`, so a shared throwaway server is fine), migrate, seed, then boot
 ## the service and drive every route (auth, scoping, guard, idempotency, NDJSON export).
+## The service's idempotency runs through its production `RedisStore` (REDIS_URL), so the
+## keyed-open gate is proven against a live Redis, not just the in-process MemStore.
 ci-example-helpdesk: based-cli
 	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
+	$(ROOT)ci/wait-for-db.sh "$(REDIS_URL)"
 	cd examples/axum-helpdesk && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke -- reset && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(BASED) migrate apply --database-url "$(POSTGRES_URL)" && \
-	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin seed && \
-	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke
+	  DATABASE_URL="$(POSTGRES_URL)" REDIS_URL="$(REDIS_URL)" $(CARGO) run --bin seed && \
+	  DATABASE_URL="$(POSTGRES_URL)" REDIS_URL="$(REDIS_URL)" $(CARGO) run --bin smoke
 
 ## Local convenience: throwaway mariadb:11.4 + postgres:16 matching the default URLs above.
 ## CI provisions these as service containers instead (see .github/workflows/ci.yml).
@@ -165,11 +171,12 @@ ci-example-helpdesk: based-cli
 ## fresh DB each run doesn't leak one data-dir volume per run (mariadb/postgres images declare
 ## a VOLUME). The `docker run`s below create only such anonymous volumes — no named ones to survive.
 dev-db-up:
-	-docker rm -fv based-ci-maria based-ci-pg 2>/dev/null
+	-docker rm -fv based-ci-maria based-ci-pg based-ci-redis 2>/dev/null
 	docker run --rm -d --name based-ci-maria -p 13306:3306 \
 	  -e MARIADB_ROOT_PASSWORD=based_test_pw -e MARIADB_DATABASE=based_test mariadb:11.4
 	docker run --rm -d --name based-ci-pg -p 15432:5432 \
 	  -e POSTGRES_PASSWORD=based_test_pw -e POSTGRES_DB=based_test postgres:16
+	docker run --rm -d --name based-ci-redis -p 16379:6379 redis:7-alpine
 
 dev-db-down:
-	-docker rm -fv based-ci-maria based-ci-pg 2>/dev/null
+	-docker rm -fv based-ci-maria based-ci-pg based-ci-redis 2>/dev/null

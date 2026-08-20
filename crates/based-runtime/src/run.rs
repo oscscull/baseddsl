@@ -408,7 +408,7 @@ pub async fn run_mutation(
     // An out-of-band store (in-process `MemStore`, a Redis store): fingerprint the request
     // payload (args + `$ctx`) so the store can tell a genuine retry (same payload) from one
     // key reused for a different request, then bracket the mutation with begin/record.
-    match store.begin(&req.callable, key, req.fingerprint()) {
+    match store.begin(&req.callable, key, req.fingerprint()).await {
         // A prior attempt with the same payload already committed: replay it, run no writes.
         KeyState::Done(response) => Ok(response),
         // A concurrent attempt (same payload) is still running: don't run a second write.
@@ -430,7 +430,7 @@ pub async fn run_mutation(
             let response =
                 plain_outcome(apply(backend, shard_key, &plan, None).await?, &req.callable)?;
             claim.armed = false;
-            store.record(&req.callable, key, response.clone());
+            store.record(&req.callable, key, response.clone()).await;
             Ok(response)
         }
     }

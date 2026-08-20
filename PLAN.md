@@ -1021,9 +1021,9 @@ distinct` D116, `time`/`bytes` D117). The SQLite incremental-rebuild engine was 
 
 ## Owner-promoted deferrals (2026-08-20) — active queue
 
-The owner promoted two previously-deferred items to the active critical path. Both are structural-DDL /
-representability work, not polish. Worked hardest-value-first like any active item; each carries full
-resume context so a fresh subagent can pick it up.
+The owner promoted three previously-deferred items to the active critical path (OP1/OP2 structural-DDL /
+representability; OP3 the idempotency store — ✅ **done**). Worked hardest-value-first like any active item;
+each carries full resume context so a fresh subagent can pick it up.
 
 - **OP1. SQLite incremental-rebuild engine (was T6 follow-up + `alter column` + namespaced-ALTER-on-SQLite).**
   *Rationale (owner): SQLite is a first-class use case, so a schema you can create but not evolve is a
@@ -1057,10 +1057,22 @@ resume context so a fresh subagent can pick it up.
   read-back planner + structured-id client emission, snapshot (`pk` already `Vec`), a live create→read-back
   test on Postgres + MariaDB. Leaf/junction rows that never read back the serial are the easy first slice.
 
-- **OP3. Idempotency store: basic DbStore GC + a production Redis path in the flagship (owner-approved
-  2026-08-20).** *Framing (owner): the built-in `DbStore` should **not** be heavily used — keep it basic,
+- **OP3. Idempotency store: basic DbStore GC + a production Redis path in the flagship. ✅ DONE
+  (2026-08-20).** *Framing (owner): the built-in `DbStore` should **not** be heavily used — keep it basic,
   just don't let it blow up (unbounded row growth); put the **bulk of the energy into making a superior,
-  pluggable store easy to use**, proven in the production-ready flagship (axum-helpdesk).* Three parts:
+  pluggable store easy to use**, proven in the production-ready flagship (axum-helpdesk).*
+  **What shipped** (all live-gated — SQLite/MariaDB/Postgres GC tests + the helpdesk keyed-open gate through
+  a live Redis): **(A)** `DbStore::with_gc(backend, dialect, ttl)` — a **detached, best-effort, amortized**
+  per-dialect age-based `DELETE` on the store's *own* connection (never the mutation tx, never blocks/fails
+  the mutation), once per TTL window; `create`/`new` stay retain-forever. **(B)** `RedisStore` **inside
+  axum-helpdesk** (no redis dep on `based-runtime`) against the public seam via `Engine::with_store` when
+  `REDIS_URL` is set — ConnectionManager + `SET NX EX` claim/classify/fire-and-forget DEL, native expiry so
+  no GC, fails open if Redis is down. **(C)** throwaway `redis:7-alpine` in `dev-db-up` + `ci-example-helpdesk`
+  + GitHub Actions; README "choosing a store" table. **Seam change (owner sign-off):** the out-of-band
+  `IdempotencyStore` trait is now **async** — `begin`/`record` are `async fn` (networked store, no
+  `block_in_place`); `abandon` stays sync **by necessity** (it is the cancellation `Drop`-guard release hook,
+  and `Drop` can't `.await`; networked stores fire-and-forget it). No `D#` (additive to the seam + `DbStore`).
+  Original spec below (now historical):
   - **(A) DbStore GC — basic, don't-blow-up.** A **lazy amortized bounded sweep**: on a small fraction of
     claims (or every N seconds tracked per-instance), run `DELETE FROM _based_idempotency WHERE created_at
     < :cutoff` (per-dialect via the Dialect seam, optionally `LIMIT`-bounded to cap lock duration) on its

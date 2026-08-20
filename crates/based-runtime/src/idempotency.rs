@@ -40,8 +40,10 @@
 //! [`serve_with_store`](crate::http::serve_with_store) for the standalone listener.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::run::Backend;
 
 /// How long a [`MemStore`] key is retained before it expires. A retried mutation arrives
 /// within seconds of the first attempt, so a day is ample for dedupe while bounding how
@@ -83,6 +85,14 @@ pub enum KeyState {
 /// then [`record`](Self::record)s the response (success) or [`abandon`](Self::abandon)s
 /// the claim (failure — a later retry may re-try). An implementation must make `begin`
 /// atomic (claim-or-report) so two concurrent retries can never both run the write.
+///
+/// [`begin`](Self::begin)/[`record`](Self::record) are `async` — a networked store (Redis,
+/// …) does its round-trip on the request's own task with no blocking bridge.
+/// [`abandon`](Self::abandon) is the lone sync method **by necessity**: it is the release
+/// hook the mutation's cancellation `Drop` guard fires, and `Drop` cannot `.await`. A store
+/// that needs I/O to release implements it as fire-and-forget through its own owned handle
+/// (see [`MemStore`] — an immediate in-memory removal — for the trivial case).
+#[async_trait::async_trait]
 pub trait IdempotencyStore: Send + Sync {
     /// Atomically claim `(callable, key)` for this attempt, or report its existing
     /// state. On [`KeyState::Fresh`] the key is now marked in-flight (subsequent
@@ -94,14 +104,16 @@ pub trait IdempotencyStore: Send + Sync {
     /// **different** request — is [`KeyState::Mismatch`] (reject, don't replay the wrong
     /// result). An implementation must make `begin` atomic (claim-or-report) so two
     /// concurrent retries can never both run the write.
-    fn begin(&self, callable: &str, key: &str, fingerprint: Fingerprint) -> KeyState;
+    async fn begin(&self, callable: &str, key: &str, fingerprint: Fingerprint) -> KeyState;
 
     /// Record the successful response for a claimed key: future `begin`s replay it
     /// ([`KeyState::Done`]).
-    fn record(&self, callable: &str, key: &str, response: serde_json::Value);
+    async fn record(&self, callable: &str, key: &str, response: serde_json::Value);
 
-    /// Release a claimed key without recording a response (the attempt failed): a later
-    /// retry may re-run the write. Called on the mutation-error path.
+    /// Release a claimed key without recording a response (the attempt failed or was
+    /// cancelled): a later retry may re-run the write. Fired from the mutation's `Drop`
+    /// guard, so it is sync and must not block — a store that needs I/O to release
+    /// dispatches it fire-and-forget through its own owned handle.
     fn abandon(&self, callable: &str, key: &str);
 
     /// A store that commits the key **inside the mutation's own transaction** (atomic
@@ -254,8 +266,9 @@ impl Default for MemStore {
     }
 }
 
+#[async_trait::async_trait]
 impl IdempotencyStore for MemStore {
-    fn begin(&self, callable: &str, key: &str, fingerprint: Fingerprint) -> KeyState {
+    async fn begin(&self, callable: &str, key: &str, fingerprint: Fingerprint) -> KeyState {
         let now = Instant::now();
         let mut st = self.state.lock().expect("idempotency store poisoned");
         st.sweep_if_due(now, self.ttl);
@@ -285,7 +298,7 @@ impl IdempotencyStore for MemStore {
         })
     }
 
-    fn record(&self, callable: &str, key: &str, response: serde_json::Value) {
+    async fn record(&self, callable: &str, key: &str, response: serde_json::Value) {
         let now = Instant::now();
         let mut st = self.state.lock().expect("idempotency store poisoned");
         let k = (callable.to_string(), key.to_string());
@@ -321,11 +334,12 @@ impl IdempotencyStore for MemStore {
 #[derive(Default)]
 pub struct NoStore;
 
+#[async_trait::async_trait]
 impl IdempotencyStore for NoStore {
-    fn begin(&self, _callable: &str, _key: &str, _fingerprint: Fingerprint) -> KeyState {
+    async fn begin(&self, _callable: &str, _key: &str, _fingerprint: Fingerprint) -> KeyState {
         KeyState::Fresh
     }
-    fn record(&self, _callable: &str, _key: &str, _response: serde_json::Value) {}
+    async fn record(&self, _callable: &str, _key: &str, _response: serde_json::Value) {}
     fn abandon(&self, _callable: &str, _key: &str) {}
 }
 
@@ -343,13 +357,33 @@ impl IdempotencyStore for NoStore {
 /// [`serve_with_store`](crate::http::serve_with_store) — after
 /// [`create`](Self::create)ing the key table. Concurrency is block-and-replay (see
 /// [`TxIdempotency`]): this store never returns a 409.
+///
+/// ## Growth
+/// Every keyed mutation leaves a row. Left unbounded that table only grows, so the store
+/// is intended as a *basic* durable option, not a high-volume one — reach for an
+/// out-of-band store with native expiry (a Redis [`IdempotencyStore`]) at scale. To keep
+/// the table bounded here, build it with [`with_gc`](Self::with_gc): a **dumb, amortized,
+/// age-based sweep** deletes rows past a TTL, on the store's *own* connection (never a
+/// mutation's transaction), at most once per TTL window. [`create`](Self::create) /
+/// [`new`](Self::new) keep every key forever (the retain-forever escape).
 pub struct DbStore {
     dialect: based_codegen::Dialect,
+    gc: Option<Gc>,
+}
+
+/// The age-based reclaim a [`DbStore::with_gc`] store runs: the connection source to sweep
+/// on (its own, so a sweep never touches a mutation's transaction), the max key age, and
+/// the next instant a sweep is due (amortized to one pass per TTL window).
+struct Gc {
+    backend: Arc<dyn Backend>,
+    ttl: Duration,
+    next_sweep: Mutex<Instant>,
 }
 
 impl DbStore {
     /// Build the store and ensure its key table exists (idempotent DDL, per dialect through
-    /// the codegen seam). Run once at startup with the engine's backend + dialect.
+    /// the codegen seam). Run once at startup with the engine's backend + dialect. Keys are
+    /// kept forever — use [`with_gc`](Self::with_gc) to bound the table by age.
     pub async fn create(
         backend: &dyn crate::run::Backend,
         dialect: based_codegen::Dialect,
@@ -357,13 +391,93 @@ impl DbStore {
         let mut db = backend.checkout("").await?;
         db.execute(&based_codegen::sql::idempotency_table_ddl(dialect), &[])
             .await?;
-        Ok(Self { dialect })
+        Ok(Self { dialect, gc: None })
     }
 
     /// Build the store assuming the key table already exists (e.g. created by a migration
-    /// or a prior [`create`](Self::create)).
+    /// or a prior [`create`](Self::create)). Keys are kept forever (no sweep).
     pub fn new(dialect: based_codegen::Dialect) -> Self {
-        Self { dialect }
+        Self { dialect, gc: None }
+    }
+
+    /// Build the store with an **age-based sweep** so the key table stays bounded: it
+    /// ensures the table exists, then deletes rows older than `ttl` on its own connection,
+    /// at most once per `ttl` window (a dumb amortized reclaim, no background task). Retain
+    /// the `backend` for the sweeps; a keyed mutation runs the reclaim inline when one is
+    /// due, so the cost is one bulk `DELETE` per window and never touches a mutation's
+    /// transaction. A day is a typical `ttl` (the idempotency-key retry window). For
+    /// retain-forever, use [`create`](Self::create) instead.
+    ///
+    /// Single-shard: the sweep runs on the empty shard key, so under a sharded backend it
+    /// reclaims only that shard's table (each database keeps its own key rows).
+    pub async fn with_gc(
+        backend: impl Backend + 'static,
+        dialect: based_codegen::Dialect,
+        ttl: Duration,
+    ) -> Result<Self, crate::run::DbError> {
+        let backend: Arc<dyn Backend> = Arc::new(backend);
+        let mut db = backend.checkout("").await?;
+        db.execute(&based_codegen::sql::idempotency_table_ddl(dialect), &[])
+            .await?;
+        Ok(Self {
+            dialect,
+            gc: Some(Gc {
+                backend,
+                ttl,
+                next_sweep: Mutex::new(Instant::now() + ttl),
+            }),
+        })
+    }
+
+    /// When a sweep is due, spawn a **detached** age-based reclaim on the store's own
+    /// connection — so it never blocks, stalls, or fails the mutation that triggered it
+    /// (GC is pure best-effort). Amortized to one pass per TTL window. A no-op unless the
+    /// store was built with [`with_gc`](Self::with_gc), or if called outside a runtime.
+    fn maybe_sweep(&self) {
+        let Some(gc) = self.gc.as_ref() else {
+            return;
+        };
+        let now = Instant::now();
+        {
+            let mut next = gc
+                .next_sweep
+                .lock()
+                .expect("idempotency sweep clock poisoned");
+            if now < *next {
+                return;
+            }
+            *next = now + gc.ttl;
+        }
+        let backend = gc.backend.clone();
+        let sql = self.delete_expired_sql(gc.ttl);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Ok(mut db) = backend.checkout("").await {
+                    let _ = db.execute(&sql, &[]).await;
+                }
+            });
+        }
+    }
+
+    /// `DELETE` of every key row older than `ttl`, measured against the database clock so a
+    /// client/DB skew can't spare or over-reap rows. The interval is the store's own
+    /// [`Duration`] (never caller input), so its seconds inline safely.
+    fn delete_expired_sql(&self, ttl: Duration) -> String {
+        use based_codegen::Dialect as D;
+        let secs = ttl.as_secs();
+        let tbl = self.dialect.quote(based_codegen::sql::IDEMPOTENCY_TABLE);
+        let created = self.dialect.quote("created_at");
+        match self.dialect {
+            D::Postgres => format!(
+                "DELETE FROM {tbl} WHERE {created} < CURRENT_TIMESTAMP - INTERVAL '{secs} seconds'"
+            ),
+            D::MariaDb | D::MySql => {
+                format!("DELETE FROM {tbl} WHERE {created} < CURRENT_TIMESTAMP - INTERVAL {secs} SECOND")
+            }
+            D::Sqlite => format!(
+                "DELETE FROM {tbl} WHERE {created} < datetime(CURRENT_TIMESTAMP, '-{secs} seconds')"
+            ),
+        }
     }
 
     /// `?` for MySQL/MariaDB/SQLite, `$n` for Postgres — the driver's positional bind form.
@@ -434,14 +548,15 @@ impl DbStore {
     }
 }
 
+#[async_trait::async_trait]
 impl IdempotencyStore for DbStore {
     // Unused: a tx-participant store deduplicates inside the mutation's transaction (see
     // `tx_participant`), so `run_mutation` never takes the out-of-band path for it. These
     // exist only to satisfy the one injection trait.
-    fn begin(&self, _callable: &str, _key: &str, _fingerprint: Fingerprint) -> KeyState {
+    async fn begin(&self, _callable: &str, _key: &str, _fingerprint: Fingerprint) -> KeyState {
         KeyState::Fresh
     }
-    fn record(&self, _callable: &str, _key: &str, _response: serde_json::Value) {}
+    async fn record(&self, _callable: &str, _key: &str, _response: serde_json::Value) {}
     fn abandon(&self, _callable: &str, _key: &str) {}
 
     fn tx_participant(&self) -> Option<&dyn TxIdempotency> {
@@ -460,6 +575,9 @@ impl TxIdempotency for DbStore {
     ) -> Result<TxClaim, crate::run::DbError> {
         use crate::run::DbError;
         use crate::value::SqlValue;
+        // Amortized age-based reclaim (a no-op unless built with `with_gc`): fire-and-forget
+        // on its own connection, so it never disturbs this mutation's transaction below.
+        self.maybe_sweep();
         let fp = fingerprint.to_string();
         let affected = db
             .execute(
@@ -540,86 +658,95 @@ mod tests {
     // value is opaque — only equality matters).
     const FP: Fingerprint = 1;
 
-    #[test]
-    fn fresh_then_done_replays() {
+    #[tokio::test]
+    async fn fresh_then_done_replays() {
         let s = MemStore::new();
-        assert_eq!(s.begin("m", "k1", FP), KeyState::Fresh);
+        assert_eq!(s.begin("m", "k1", FP).await, KeyState::Fresh);
         // While in flight a concurrent begin (same fingerprint) is blocked.
-        assert_eq!(s.begin("m", "k1", FP), KeyState::InFlight);
-        s.record("m", "k1", json!({ "id": "a" }));
+        assert_eq!(s.begin("m", "k1", FP).await, KeyState::InFlight);
+        s.record("m", "k1", json!({ "id": "a" })).await;
         // Once recorded, replay the stored response for the same fingerprint.
-        assert_eq!(s.begin("m", "k1", FP), KeyState::Done(json!({ "id": "a" })));
+        assert_eq!(
+            s.begin("m", "k1", FP).await,
+            KeyState::Done(json!({ "id": "a" }))
+        );
     }
 
-    #[test]
-    fn abandon_frees_the_key_for_retry() {
+    #[tokio::test]
+    async fn abandon_frees_the_key_for_retry() {
         let s = MemStore::new();
-        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
+        assert_eq!(s.begin("m", "k", FP).await, KeyState::Fresh);
         s.abandon("m", "k");
         // Abandoned → a retry sees it fresh again.
-        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
+        assert_eq!(s.begin("m", "k", FP).await, KeyState::Fresh);
     }
 
-    #[test]
-    fn key_is_scoped_to_the_callable() {
+    #[tokio::test]
+    async fn key_is_scoped_to_the_callable() {
         let s = MemStore::new();
-        s.begin("m1", "shared", FP);
-        s.record("m1", "shared", json!(1));
+        s.begin("m1", "shared", FP).await;
+        s.record("m1", "shared", json!(1)).await;
         // The same key on a *different* mutation is independent.
-        assert_eq!(s.begin("m2", "shared", FP), KeyState::Fresh);
+        assert_eq!(s.begin("m2", "shared", FP).await, KeyState::Fresh);
     }
 
-    #[test]
-    fn different_fingerprint_on_a_done_key_is_a_mismatch() {
+    #[tokio::test]
+    async fn different_fingerprint_on_a_done_key_is_a_mismatch() {
         let s = MemStore::new();
-        s.begin("m", "k", FP);
-        s.record("m", "k", json!({ "id": "a" }));
+        s.begin("m", "k", FP).await;
+        s.record("m", "k", json!({ "id": "a" })).await;
         // Same key, *different* request payload → reject rather than replay the wrong result.
-        assert_eq!(s.begin("m", "k", FP + 1), KeyState::Mismatch);
+        assert_eq!(s.begin("m", "k", FP + 1).await, KeyState::Mismatch);
         // The original fingerprint still replays — the mismatch didn't corrupt the entry.
-        assert_eq!(s.begin("m", "k", FP), KeyState::Done(json!({ "id": "a" })));
+        assert_eq!(
+            s.begin("m", "k", FP).await,
+            KeyState::Done(json!({ "id": "a" }))
+        );
     }
 
-    #[test]
-    fn different_fingerprint_on_an_in_flight_key_is_a_mismatch() {
+    #[tokio::test]
+    async fn different_fingerprint_on_an_in_flight_key_is_a_mismatch() {
         let s = MemStore::new();
-        s.begin("m", "k", FP);
+        s.begin("m", "k", FP).await;
         // A concurrent claim under the same key but a different payload is a mismatch, not
         // an in-flight block (a genuine retry would carry the same fingerprint).
-        assert_eq!(s.begin("m", "k", FP + 1), KeyState::Mismatch);
+        assert_eq!(s.begin("m", "k", FP + 1).await, KeyState::Mismatch);
     }
 
-    #[test]
-    fn an_expired_key_reads_as_fresh() {
+    #[tokio::test]
+    async fn an_expired_key_reads_as_fresh() {
         let s = MemStore::with_ttl(Duration::from_millis(30));
-        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
-        s.record("m", "k", json!({ "id": "a" }));
+        assert_eq!(s.begin("m", "k", FP).await, KeyState::Fresh);
+        s.record("m", "k", json!({ "id": "a" })).await;
         // Within the TTL the recorded response still replays.
-        assert_eq!(s.begin("m", "k", FP), KeyState::Done(json!({ "id": "a" })));
+        assert_eq!(
+            s.begin("m", "k", FP).await,
+            KeyState::Done(json!({ "id": "a" }))
+        );
         std::thread::sleep(Duration::from_millis(60));
         // Past the TTL the key is gone → a retry runs fresh, not a stale replay.
-        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
+        assert_eq!(s.begin("m", "k", FP).await, KeyState::Fresh);
     }
 
-    #[test]
-    fn the_sweep_reclaims_keys_that_are_never_revisited() {
+    #[tokio::test]
+    async fn the_sweep_reclaims_keys_that_are_never_revisited() {
         let s = MemStore::with_ttl(Duration::from_millis(30));
-        s.begin("m", "k1", FP);
-        s.begin("m", "k2", FP);
+        s.begin("m", "k1", FP).await;
+        s.begin("m", "k2", FP).await;
         assert_eq!(s.entry_count(), 2);
         std::thread::sleep(Duration::from_millis(60));
         // A later begin (past the sweep interval) evicts the two expired keys it never
         // touches, so memory doesn't accumulate on a long-lived store.
-        s.begin("m", "k3", FP);
+        s.begin("m", "k3", FP).await;
         assert_eq!(s.entry_count(), 1);
     }
 
-    #[test]
-    fn no_store_is_always_fresh() {
+    #[tokio::test]
+    async fn no_store_is_always_fresh() {
         let s = NoStore;
-        assert_eq!(s.begin("m", "k", FP), KeyState::Fresh);
-        s.record("m", "k", json!(1));
+        assert_eq!(s.begin("m", "k", FP).await, KeyState::Fresh);
+        s.record("m", "k", json!(1)).await;
         // Nothing retained: still fresh (even under a different fingerprint).
-        assert_eq!(s.begin("m", "k", FP + 1), KeyState::Fresh);
+        assert_eq!(s.begin("m", "k", FP + 1).await, KeyState::Fresh);
     }
 }

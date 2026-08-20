@@ -223,7 +223,14 @@ async fn main() {
         .await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"]["code"], "idempotency_key_reuse");
-    println!("ok - Idempotency-Key: replayed open, one row, reuse -> 422");
+    // Same gate, whichever store `App::connect` wired: the production `RedisStore` when
+    // `REDIS_URL` is set (CI runs it against a live Redis), else the in-process `MemStore`.
+    let store_kind = if std::env::var("REDIS_URL").is_ok() {
+        "Redis"
+    } else {
+        "MemStore"
+    };
+    println!("ok - Idempotency-Key via {store_kind}: replayed open, one row, reuse -> 422");
 
     // ---- the close guard: deny while unresolved, allow once resolved ----------
     let (status, body) = desk
@@ -247,12 +254,20 @@ async fn main() {
     // update — all committing atomically. The audit row proves the raw + baseddsl writes
     // landed together.
     let (status, row) = desk
-        .post(Some(mara), &format!("/tickets/{t1}/resolve"), json!({}), None)
+        .post(
+            Some(mara),
+            &format!("/tickets/{t1}/resolve"),
+            json!({}),
+            None,
+        )
         .await;
     assert_eq!(status, 200, "{row}");
     assert_eq!(row["status"], "resolved");
     let (_, audit) = desk.get(Some(mara), &format!("/tickets/{t1}/audit")).await;
-    assert_eq!(audit["count"], 1, "the adopted tx committed its audit row: {audit}");
+    assert_eq!(
+        audit["count"], 1,
+        "the adopted tx committed its audit row: {audit}"
+    );
     let (status, row) = desk
         .post(Some(mara), &format!("/tickets/{t1}/close"), json!({}), None)
         .await;
@@ -277,9 +292,15 @@ async fn main() {
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"]["code"], "aborted");
     let (_, audit) = desk.get(Some(mara), &format!("/tickets/{t4}/audit")).await;
-    assert_eq!(audit["count"], 0, "rolled-back audit row did not persist: {audit}");
+    assert_eq!(
+        audit["count"], 0,
+        "rolled-back audit row did not persist: {audit}"
+    );
     let (_, t4_now) = desk.get(Some(mara), &format!("/tickets/{t4}")).await;
-    assert_eq!(t4_now["status"], "open", "rolled-back status update did not persist");
+    assert_eq!(
+        t4_now["status"], "open",
+        "rolled-back status update did not persist"
+    );
     println!("ok - adopt interop: commit lands raw+baseddsl atomically; abort rolls both back");
 
     // ---- archive / restore (soft delete round trip) -----------------------------

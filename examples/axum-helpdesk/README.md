@@ -18,7 +18,8 @@ streaming NDJSON export, raw-SQL leaves, migrations with a data-preserving renam
 | `schema/` | the whole desk in `.bsl`, by domain — `ticket/model.bsl` + `ticket/queries.bsl`, etc. |
 | `migrations/` | checked-in artifacts of `based migrate gen` — `0002` renames a column via `@was`, preserving data |
 | `src/client.rs` | **verbatim** output of `based gen client -o src/client.rs --embedded`; regenerate after a schema change, never edit |
-| `src/app.rs` | the wiring: the app's `PgPool` → `PgRouter::from_pool` → `Engine`, plus the close-policy guard |
+| `src/app.rs` | the wiring: the app's `PgPool` → `PgRouter::from_pool` → `Engine`, plus the close-policy guard and the idempotency store |
+| `src/redis_store.rs` | the production idempotency store: `RedisStore` against the engine's `IdempotencyStore` seam (see below) |
 | `src/auth.rs` | bearer middleware: the token resolves to a session **through the client itself** |
 | `src/routes.rs` | the HTTP surface — one typed call per handler; `POST /sessions` is the public login |
 | `src/bin/seed.rs` | demo **content** (tickets/comments) through the client's own mutations; prints the demo login emails |
@@ -48,6 +49,8 @@ based migrate apply --database-url "$DATABASE_URL"
 cargo run --bin seed
 
 # 4. The desk, on http://127.0.0.1:8000.
+#    Set REDIS_URL (see .env) to run idempotency through the production Redis store;
+#    without it the engine's in-process MemStore is used (fine for a single instance).
 cargo run
 ```
 
@@ -176,6 +179,25 @@ never identities. On every later request `src/auth.rs` trades `Authorization: Be
 <token>` for that session by calling `session_by_token` — another query in the same schema
 — so everything handlers pass as `$ctx` is **derived server-side**, never read from a
 request body.
+
+## Choosing an idempotency store
+
+A keyed mutation (`Idempotency-Key`) runs **at most once** per key: the engine consults an
+`IdempotencyStore` before the write and replays the first response on a retry. The store is
+a **seam** — one trait, injected at construction with `Engine::with_store` (`src/app.rs`) —
+so which store you run is a deployment choice, not a code change:
+
+| store | where it lives | dedupes across instances? | bounding | use it for |
+|---|---|---|---|---|
+| `MemStore` (default) | in `based-runtime` | no — per process | TTL + in-memory sweep | a single instance, local dev |
+| `DbStore` | in `based-runtime` | **yes** (keys in your DB, committed *in the mutation's own transaction* → exactly-once) | `DbStore::with_gc(…, ttl)` — an amortized age-based `DELETE`; else keys are kept forever | a durable option with no new infra — but every key is a row, so keep it modest |
+| **`RedisStore`** (this example) | **your app** (`src/redis_store.rs`) | **yes** — shared Redis | Redis-native key expiry (`EX`) — nothing to sweep | **the recommended production store at scale** |
+
+`RedisStore` is ~120 lines in the app, not the engine: `based-runtime` carries no `redis`
+dependency. It shows what plugging in *any* superior store looks like — implement the
+`IdempotencyStore` trait (`begin`/`record` async; `abandon` sync, fired from the mutation's
+cancellation `Drop` guard) and pass it to `Engine::with_store`. `App::connect` uses it when
+`REDIS_URL` is set, and the smoke's keyed-open gate then runs against a live Redis.
 
 ## Where each idea is specified
 

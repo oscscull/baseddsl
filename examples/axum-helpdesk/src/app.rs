@@ -8,8 +8,13 @@ use based_runtime::id::UuidGen;
 use based_runtime::{Compiled, Engine, PgRouter};
 
 use crate::client;
+use crate::redis_store;
 
 use crate::client::{entity, Id};
+
+/// How long a keyed mutation is deduped — the industry-standard idempotency-key window.
+/// Redis expires the key after this, so the store needs no sweeping.
+const IDEMPOTENCY_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Shared service state: the engine every handler's typed client runs through, plus the
 /// app's own `sqlx` pool — the one the interop demo (`resolve_with_audit`) opens its own
@@ -55,8 +60,27 @@ impl App {
         // The engine runs over a router on the app's pool; the app keeps the pool too, so
         // `resolve_with_audit` can open its *own* transactions on the same connections and
         // adopt them into the engine.
-        let engine = Engine::with_guards(compiled, PgRouter::from_pool(pool.clone()), UuidGen, guards)
-            .expect("every declared guard is registered");
+        let engine =
+            Engine::with_guards(compiled, PgRouter::from_pool(pool.clone()), UuidGen, guards)
+                .expect("every declared guard is registered");
+
+        // Idempotency store (keyed-mutation retries, e.g. `POST /tickets` with
+        // `Idempotency-Key`). With `REDIS_URL` set, use the production Redis store so a
+        // retry that lands on *any* instance dedupes and keys evict themselves; without it,
+        // the engine's default in-process `MemStore` (fine for one instance / local dev).
+        let engine = match std::env::var("REDIS_URL") {
+            Ok(url) => {
+                let store = redis_store::RedisStore::connect(&url, IDEMPOTENCY_TTL)
+                    .await
+                    .unwrap_or_else(|e| panic!("connect to Redis at {url}: {e}"));
+                println!("idempotency: Redis store ({url})");
+                engine.with_store(Box::new(store))
+            }
+            Err(_) => {
+                println!("idempotency: in-process MemStore (set REDIS_URL for the production Redis store)");
+                engine
+            }
+        };
         App { engine, pool }
     }
 

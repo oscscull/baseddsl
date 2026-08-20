@@ -105,6 +105,15 @@ jobs:
         options: >-
           --health-cmd="pg_isready -U postgres"
           --health-interval=10s --health-timeout=5s --health-retries=12
+      # The helpdesk's production idempotency store — its keyed-open gate runs against
+      # this live Redis (not just the in-process MemStore).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=12
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -112,3 +121,4 @@ jobs:
           make ci-examples
           MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test
           POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
+          REDIS_URL=redis://127.0.0.1:6379

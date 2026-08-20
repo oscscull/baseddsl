@@ -253,6 +253,10 @@ impl DbRead for AdoptedSqlite<'_> {
 /// is ignored). An in-memory backend pins the pool to a single never-expiring connection
 /// so writes persist across checkouts — the property that makes it a real
 /// integration-test engine.
+///
+/// `Clone` is a cheap pool-handle clone (the pool is an `Arc` internally): two clones share
+/// one database, so a caller can hand one to the engine and keep one for its own use.
+#[derive(Clone)]
 pub struct SqliteBackend {
     pool: SqlitePool,
 }

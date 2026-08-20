@@ -41,6 +41,7 @@ if [[ -z "$port" ]]; then
   case "$scheme" in
     mysql|mariadb) port=3306 ;;
     postgres|postgresql) port=5432 ;;
+    redis) port=6379 ;;
     *) echo "wait-for-db: no port in '$url' and unknown scheme" >&2; exit 1 ;;
   esac
 fi
@@ -75,6 +76,10 @@ protocol_ready() {
           "$ping" --protocol=tcp -h "$host" -P "$port" ping >/dev/null 2>&1 && return 0 || return 1
         fi
       done ;;
+    redis)
+      if command -v redis-cli >/dev/null 2>&1; then
+        [[ "$(redis-cli -h "$host" -p "$port" ping 2>/dev/null)" == "PONG" ]] && return 0 || return 1
+      fi ;;
   esac
   # No protocol client available: fall back to container liveness (docker) or the TCP accept.
   container_live

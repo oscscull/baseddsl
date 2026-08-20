@@ -142,3 +142,65 @@ async fn keyed_retry_on_a_second_instance_dedupes_via_the_shared_table() {
     let _ = std::fs::remove_file(format!("{p}-wal"));
     let _ = std::fs::remove_file(format!("{p}-shm"));
 }
+
+/// The `with_gc` age-based sweep bounds the key table: a key older than the TTL is
+/// reclaimed on the store's own connection when the next keyed mutation triggers a sweep,
+/// while a fresh key and the application rows are untouched.
+#[tokio::test]
+async fn with_gc_sweeps_keys_older_than_the_ttl() {
+    use std::time::Duration;
+
+    let c = compiled();
+    let ids = SeqIdGen::default();
+    let backend = SqliteBackend::in_memory().unwrap();
+    backend
+        .execute_batch(&sql::ddl(&c.schema, Dialect::Sqlite))
+        .await
+        .unwrap();
+
+    // A one-second key TTL: a key becomes reclaimable a second after it is written, and a
+    // sweep is due one second after the store is built.
+    let store = DbStore::with_gc(backend.clone(), Dialect::Sqlite, Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    // First keyed mutation writes key `k1`.
+    let first = make_widget(&c, &backend, &store, &ids, "alpha", "k1").await;
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    assert_eq!(
+        count(&backend, "SELECT COUNT(*) FROM `_based_idempotency`").await,
+        1
+    );
+
+    // Let `k1` age past the TTL (and the store's first sweep fall due).
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // The next keyed mutation triggers the amortized sweep (a detached best-effort task):
+    // `k1` is now older than the TTL and is reclaimed; `k2` is written fresh.
+    let second = make_widget(&c, &backend, &store, &ids, "beta", "k2").await;
+    assert_eq!(second.status, 200, "{:?}", second.body);
+
+    // The sweep runs off the mutation path, so give the detached task a moment to land.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert_eq!(
+        count(
+            &backend,
+            "SELECT COUNT(*) FROM `_based_idempotency` WHERE `key` = 'k1'"
+        )
+        .await,
+        0,
+        "the aged key was swept"
+    );
+    assert_eq!(
+        count(
+            &backend,
+            "SELECT COUNT(*) FROM `_based_idempotency` WHERE `key` = 'k2'"
+        )
+        .await,
+        1,
+        "the fresh key survives"
+    );
+    // GC touches only the key table — both widgets are still there.
+    assert_eq!(count(&backend, "SELECT COUNT(*) FROM `widget`").await, 2);
+}
