@@ -1111,10 +1111,13 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   `status()` — so it teaches handling the typed surface rather than unwrapping; scenario invariants stay
   asserts (a demo doubles as a smoke test); ran green via `based migrate apply` → `cargo run` (exit 0).
   (Sub-item (iii), a structured migration error type, is subsumed — `based migrate apply` now surfaces
-  the typed `MigrateError` through the `CliError` chain, no longer re-stringified.) **Follow-up:** the
-  MariaDB/Postgres quickstarts still use `.expect(...)`; the identical pattern transfers verbatim but
-  needs a live server to re-verify. **H7 is now complete** across its four sub-items (client/runtime D71,
-  CLI D72, edge D75, example D76).
+  the typed `MigrateError` through the `CliError` chain, no longer re-stringified.) **Follow-up ✅ done:**
+  the MariaDB/Postgres quickstarts are now converted to the same D76 `?`-based `Result` flow (identical
+  `main -> Result` + `?`-threaded calls + `Result<_, ClientError>` helpers + the **step 6** typed-error
+  match), so all three quickstarts are byte-for-byte the same reference bar the driver/id-gen lines; each
+  keeps only the two legitimate `Option` asserts. Re-verified live green against fresh `mariadb:11.4` +
+  `postgres:16` (Docker) via `make ci-example-mariadb ci-example-postgres`. Example-only, no `D#`.
+  **H7 is now complete** across its four sub-items (client/runtime D71, CLI D72, edge D75, example D76).
 - **H2. ✅ done (D78). `based fmt` formatter + `formatting` LSP directive.** New front-end crate
   `based-fmt` (`format_source(&str) -> Result<String, Vec<Diagnostic>>`): parse → AST pretty-print, a
   pure function of the AST except comments (lexer-discarded), which it recovers from source and re-emits

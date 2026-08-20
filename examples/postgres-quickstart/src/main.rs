@@ -15,6 +15,14 @@
 //! that differ from the SQLite slice are the *driver* (a pooled `PgRouter`/`PostgresDb` over
 //! a live URL) and the *id generator* (`UuidGen` — Postgres's native `uuid` id columns reject
 //! non-uuid ids). The schema, the client, and the scenario are identical.
+//!
+//! ## Error handling — the reference this file doubles as
+//!
+//! Every client call returns `Result<_, ClientError>`, so the whole flow threads `?` and
+//! `main` returns a `Result`. A `ClientError` is a `std::error::Error` you branch on by
+//! class: `kind()` (`Transport` / `Decode` / `Api`), a stable machine `code()`, and, for a
+//! server-side failure, the HTTP `status()`. Step 6 shows the pattern — a deliberately
+//! malformed cursor is rejected and matched on `kind()`.
 
 use based_runtime::id::UuidGen;
 use based_runtime::shard::PoolConfig;
@@ -32,21 +40,21 @@ mod client;
 use client::{entity, Id};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `.env` supplies `DATABASE_URL` (dotenvy, the 12-factor convention) — no hard-coded URL.
     dotenvy::dotenv().ok();
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL (see .env)");
+    let url = std::env::var("DATABASE_URL").map_err(|_| "set DATABASE_URL (see .env)")?;
 
     // Load the schema into the engine — the same front end `based check`/`based serve` run.
     // The tables already exist: `based migrate apply` created them (README step 2), so this
     // program never issues DDL.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let compiled = Compiled::load(&manifest).expect("schema checks clean");
+    let compiled = Compiled::load(&manifest).map_err(|e| format!("load schema: {e:?}"))?;
 
     // The `PgRouter` is the production `Backend` (a bounded pool per physical shard);
     // a single-server deploy is `single`. The engine checks a connection out of it per call.
     let router = PgRouter::single(&url, PoolConfig::default())
-        .unwrap_or_else(|e| panic!("connect to Postgres at {url}: {e:?}"));
+        .map_err(|e| format!("connect to Postgres at {url}: {e:?}"))?;
 
     // The `Engine` is the library twin of `based serve`, minus the socket: it owns the
     // schema, the `Backend`, and an id generator, and runs each call through the same async
@@ -68,8 +76,7 @@ async fn main() {
             },
             (),
         )
-        .await
-        .expect("create_org")
+        .await?
         .id;
     let other = api
         .create_org(
@@ -79,8 +86,7 @@ async fn main() {
             },
             (),
         )
-        .await
-        .expect("create_org (other)")
+        .await?
         .id;
     let ada = api
         .create_user(
@@ -90,8 +96,7 @@ async fn main() {
             },
             (),
         )
-        .await
-        .expect("create_user")
+        .await?
         .id;
 
     // `$ctx` is the per-request context the *app* derives from its auth layer, never the
@@ -107,8 +112,7 @@ async fn main() {
             },
             acme_ctx(),
         )
-        .await
-        .expect("place_order");
+        .await?;
     assert_eq!(placed.status, "pending", "status defaults on create");
     assert_eq!(placed.total, money(100));
     // The nested to-one sub-object (`placed_by { name, email }`) comes back as a real
@@ -118,11 +122,13 @@ async fn main() {
     println!("created order {} for {}", placed.id, placed.placed_by.name);
 
     // Two more, so there is a set to paginate.
-    let second = place(&api, &acme, &ada, 200).await;
-    let third = place(&api, &acme, &ada, 300).await;
+    let second = place(&api, &acme, &ada, 200).await?;
+    let third = place(&api, &acme, &ada, 300).await?;
 
     // --- 2. read one back by id ---
-    let got = get(&api, &acme, &placed.id).await.expect("the order exists");
+    let got = get(&api, &acme, &placed.id)
+        .await?
+        .expect("the order exists");
     assert_eq!(got.id, placed.id);
     assert_eq!(got.total, money(100));
 
@@ -132,8 +138,7 @@ async fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() },
         )
-        .await
-        .expect("my_orders");
+        .await?;
     assert_eq!(mine.len(), 3, "all three orders are visible to their org");
     // A different org sees none of them — the injected scope predicate is real.
     let others = api
@@ -141,8 +146,7 @@ async fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: other.clone() },
         )
-        .await
-        .expect("my_orders (other org)");
+        .await?;
     assert!(others.is_empty(), "cross-org rows are invisible");
 
     // --- 4. keyset pagination: walk all three orders two at a time ---
@@ -151,8 +155,7 @@ async fn main() {
             client::RecentOrdersInput { cursor: None },
             client::RecentOrdersCtx { org: acme.clone() },
         )
-        .await
-        .expect("recent_orders page 1");
+        .await?;
     assert_eq!(p1.rows.len(), 2, "a full first page");
     let cursor = p1.cursor.clone().expect("more pages → a cursor");
     let p2 = api
@@ -162,8 +165,7 @@ async fn main() {
             },
             client::RecentOrdersCtx { org: acme.clone() },
         )
-        .await
-        .expect("recent_orders page 2");
+        .await?;
     assert_eq!(p2.rows.len(), 1, "a short final page");
     assert!(p2.cursor.is_none(), "the last page carries no cursor");
     // Every order appeared exactly once across the two pages.
@@ -189,12 +191,11 @@ async fn main() {
             },
             client::CancelOrderCtx { org: acme.clone() },
         )
-        .await
-        .expect("cancel_order");
+        .await?;
     assert_eq!(cancelled.id, placed.id);
     // It is now hidden from ordinary reads (the soft-delete live predicate).
     assert!(
-        get(&api, &acme, &placed.id).await.is_none(),
+        get(&api, &acme, &placed.id).await?.is_none(),
         "a cancelled order is hidden from a get"
     );
     assert_eq!(
@@ -202,8 +203,7 @@ async fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() }
         )
-        .await
-        .expect("my_orders")
+        .await?
         .len(),
         2,
         "and from the list"
@@ -217,11 +217,10 @@ async fn main() {
             },
             client::RestoreOrderCtx { org: acme.clone() },
         )
-        .await
-        .expect("restore_order");
+        .await?;
     assert_eq!(restored.id, placed.id);
     assert!(
-        get(&api, &acme, &placed.id).await.is_some(),
+        get(&api, &acme, &placed.id).await?.is_some(),
         "restored order is readable"
     );
     assert_eq!(
@@ -229,15 +228,43 @@ async fn main() {
             client::MyOrdersInput,
             client::MyOrdersCtx { org: acme.clone() }
         )
-        .await
-        .expect("my_orders")
+        .await?
         .len(),
         3,
         "back to all three"
     );
     println!("soft-deleted then restored order {}", placed.id);
 
+    // --- 6. handling a typed error ---
+    // A malformed cursor is rejected by the engine, and the client surfaces it as a
+    // structured `ClientError`. Branch on `kind()` to tell a server-side `Api` failure
+    // from a `Transport` / `Decode` one, then read its stable `code()` and HTTP `status()`
+    // — this is the pattern a caller uses to handle failures without matching on text.
+    let bad_cursor = client::Cursor::from_raw("not-a-real-cursor");
+    match api
+        .recent_orders(
+            client::RecentOrdersInput {
+                cursor: Some(bad_cursor),
+            },
+            client::RecentOrdersCtx { org: acme.clone() },
+        )
+        .await
+    {
+        Ok(_) => return Err("a malformed cursor should have been rejected".into()),
+        Err(e) => match e.kind() {
+            client::ClientErrorKind::Api { status, code } => {
+                assert_eq!(*status, 400);
+                assert_eq!(code, "bad_cursor");
+                assert_eq!(e.code(), "bad_cursor");
+                assert_eq!(e.status(), Some(400));
+                println!("rejected a malformed cursor: {e}");
+            }
+            other => return Err(format!("expected a server error, got {other:?}").into()),
+        },
+    }
+
     println!("\nend-to-end scenario passed");
+    Ok(())
 }
 
 /// A whole-dollar amount as a money `Decimal` (scale 2, e.g. `100` -> `100.00`). The
@@ -253,17 +280,17 @@ async fn place(
     org: &Id<entity::Org>,
     buyer: &Id<entity::User>,
     total: i64,
-) -> Id<entity::Order> {
-    api.place_order(
-        client::PlaceOrderInput {
-            buyer: buyer.clone(),
-            total: money(total),
-        },
-        client::PlaceOrderCtx { org: org.clone() },
-    )
-    .await
-    .expect("place_order")
-    .id
+) -> Result<Id<entity::Order>, client::ClientError> {
+    Ok(api
+        .place_order(
+            client::PlaceOrderInput {
+                buyer: buyer.clone(),
+                total: money(total),
+            },
+            client::PlaceOrderCtx { org: org.clone() },
+        )
+        .await?
+        .id)
 }
 
 /// Read an order back by id, acting as `org`.
@@ -271,11 +298,10 @@ async fn get(
     api: &client::Client<client::Embedded<'_>>,
     org: &Id<entity::Org>,
     id: &Id<entity::Order>,
-) -> Option<client::OrderCard> {
+) -> Result<Option<client::OrderCard>, client::ClientError> {
     api.order_by_id(
         client::OrderByIdInput { id: id.clone() },
         client::OrderByIdCtx { org: org.clone() },
     )
     .await
-    .expect("order_by_id")
 }
