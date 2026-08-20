@@ -236,9 +236,12 @@ now **done** — the last item, a cheap standalone example fix. **Nothing remain
     read-back, get-by-composite-key, inbound multi-column FK write, to-many nest correlated on the parent's
     composite key, and a bare composite-FK projected as the structured id object). Sema conformance golden
     `composite_key`; DDL/client/migrate goldens.
-  - **Deferred (own follow-ups, clean):** a **serial part inside a composite key** (Postgres/MariaDB
-    per-dialect + the non-leading `INDEX(seq)` helper; SQLite raw hatch) — the leaf/junction case needs no
-    read-back, so this was cut cleanly; a **standalone structured-id param** at the runtime binding layer
+  - **⬆ PROMOTED (owner 2026-08-20): a serial part inside a composite key is required** (a
+    `(device_id, bigserial seq)` time-series/junction key is not exotic — a representability-floor case, not
+    ergonomics-for-ugly). Postgres/MariaDB per-dialect + the non-leading `INDEX(seq)` helper; SQLite raw
+    hatch (or the promoted rebuild engine). Now an active queue item — see **Owner-promoted deferrals
+    (2026-08-20)** below.
+  - **Deferred (own follow-ups, clean):** a **standalone structured-id param** at the runtime binding layer
     (create/get taking a pre-existing composite id as one JSON-object param — the `tx` whole-row path +
     per-column get sidestep it today); a **column-map override** for inbound-FK legacy names (auto-expansion
     `<field>_<part>` ships; a rename map is additive); **composite m2m endpoints** (single-column m2m
@@ -886,7 +889,9 @@ aggregations+group-by+having D101, upsert + m2m-via-explicit-junction D102 + **f
 projection D109**, FK referential actions D108).** One slice remains deferred: the T6 SQLite
 incremental-FK table rebuild (from-scratch FKs already work on SQLite). **Tier-2 is now
 feature-complete** (for-update locking D119, computed shape fields D121, `distinct` D116, time/bytes
-types D117); the only remaining deferrals are the SQLite incremental-FK rebuild and a `bytes` field
+types D117). Two deferrals were **promoted to active by the owner (2026-08-20)** — the SQLite
+incremental-rebuild engine (SQLite is first-class) and a serial part in a composite key (representability
+floor); see **Owner-promoted deferrals (2026-08-20)** below. The remaining true deferral is a `bytes` field
 inside a to-many array on SQLite. Worked in order; each iteration marks its item + D#.
 
 - **T1. ✅ done (D82). Enum type — string + numeric kinds.** `enum Name { … }` first-class scalar; a field
@@ -970,10 +975,12 @@ inside a to-many array on SQLite. Worked in order; each iteration marks its item
   raw(sqlite)-rebuild marker, not a silent skip** — full rebuild engine deferred, see follow-up). Tests:
   parser +/−, sema +/− both toml directions incl. both redundancy lints, DDL golden ×3, snapshot
   round-trip + diff, fmt round-trip, conformance golden `fk_referential`, live cascade. `make check` green.
-  - **T6 follow-up (deferred):** SQLite in-place FK add/drop needs the 12-step table-rebuild engine
-    (same gap as SQLite `alter column`); today it emits a loud `raw(sqlite)` rebuild marker. From-scratch
-    `create table` already carries FKs inline on SQLite, so init + `based gen sql` work — only an
-    *incremental* FK change on an existing SQLite table needs the rebuild.
+  - **T6 follow-up — ⬆ PROMOTED (owner 2026-08-20): SQLite is a first-class use case, so this is
+    required, not deferred.** SQLite in-place FK add/drop needs the 12-step table-rebuild engine
+    (same gap as SQLite `alter column`, and the SQLite half of the namespaced-ALTER follow-up); today it
+    emits a loud `raw(sqlite)` rebuild marker. From-scratch `create table` already carries FKs inline on
+    SQLite, so init + `based gen sql` work — only an *incremental* FK change on an existing SQLite table
+    needs the rebuild. Now an active queue item — see **Owner-promoted deferrals (2026-08-20)** below.
 
 - **Tier-2. `distinct` ✅ done (D116).** `list distinct <Model>` dedups the projected rows
   (`SELECT DISTINCT`) — a `list`-only modifier written between the verb and the model. It
@@ -1009,8 +1016,53 @@ inside a to-many array on SQLite. Worked in order; each iteration marks its item
   concat / CASE computed server-side). `make check` green.
 
 Tier-2 language items: **all done** (`for update` D119, computed shape fields D121, `list
-distinct` D116, `time`/`bytes` D117). Only the SQLite incremental-FK rebuild + a `bytes` field
-inside a to-many array on SQLite remain deferred.
+distinct` D116, `time`/`bytes` D117). The SQLite incremental-rebuild engine was **promoted to active**
+(owner 2026-08-20, below); a `bytes` field inside a to-many array on SQLite remains deferred.
+
+## Owner-promoted deferrals (2026-08-20) — active queue
+
+The owner promoted two previously-deferred items to the active critical path. Both are structural-DDL /
+representability work, not polish. Worked hardest-value-first like any active item; each carries full
+resume context so a fresh subagent can pick it up.
+
+- **OP1. SQLite incremental-rebuild engine (was T6 follow-up + `alter column` + namespaced-ALTER-on-SQLite).**
+  *Rationale (owner): SQLite is a first-class use case, so a schema you can create but not evolve is a
+  real gap, not a demo edge.* SQLite supports almost no `ALTER TABLE`, so incremental changes need the
+  standard **12-step table rebuild**: `CREATE TABLE <new>` at the target shape → `INSERT … SELECT` copy →
+  drop the old → `ALTER TABLE … RENAME` the new into place → recreate indexes/triggers; with the
+  `PRAGMA foreign_keys` OFF/ON dance around it and FK re-pointing. This one engine closes **three** gaps
+  at once, all SQLite-only and all today emitting a loud `raw(sqlite)` rebuild marker: incremental **FK
+  add/drop** (T6/D108), **`alter column`**, and the **SQLite half of the namespaced-table incremental
+  ALTER** (PR9/D113). From-scratch `create table` already carries everything inline, so only the
+  *incremental* path on an existing SQLite DB is affected. Blast radius: `based-codegen::migrate` SQLite
+  renderer (the rebuild is a multi-statement expansion of the neutral `Step`s), snapshot unchanged (the
+  neutral step list already carries the intent), `based migrate apply` live path, migrate goldens
+  (SQLite rebuild expansions), and a live SQLite migrate test proving data survives an FK-add + a column
+  alter. Deliverable done = the `raw(sqlite)` markers are replaced by real rebuild SQL and a live test
+  evolves a populated SQLite DB across an FK change without data loss.
+
+- **OP2. Serial part inside a composite key (was PR6/D111 deferral).** *Rationale (owner): a
+  `(device_id, bigserial seq)` time-series or junction key is a representability-floor case — must be
+  expressible by a feature or raw, per principle 9 — not ergonomics-for-ugly.* Today `@key(f1, f2, …)`
+  composite keys ship, but a **DB-generated `serial` part** inside one is cut. What's needed: allow a
+  `serial`-typed member as a non-leading part of a `@key(…)`; per-dialect DDL (Postgres `GENERATED …
+  AS IDENTITY` / MariaDB `AUTO_INCREMENT`, which on MariaDB requires the auto-inc column be *indexed* —
+  hence the **non-leading `INDEX(seq)` helper**; SQLite via the OP1 rebuild path or the raw hatch), the
+  read-back planner (D110's `RETURNING`/`LAST_INSERT_ID` path) extended so a composite-create whose
+  serial part is DB-assigned reads the row back on the full assembled tuple, and the structured client id
+  carrying the generated part. Confirm first whether the raw hatch can already express this structurally
+  (PR5 left structural composite/serial coverage as the open question) — if raw covers it, OP2 is a
+  first-class-ergonomics item; if not, it's the representability bug principle 9 says to file. Blast
+  radius: sema (`@key` part validity — a serial part is legal, D111's checks), codegen DDL + the
+  read-back planner + structured-id client emission, snapshot (`pk` already `Vec`), a live create→read-back
+  test on Postgres + MariaDB. Leaf/junction rows that never read back the serial are the easy first slice.
+
+Not promoted (stay deferred): `bytes`-in-to-many-array on SQLite, `BINARY(16)` uuid storage,
+`for update nowait`/`skip locked`, standalone structured-id param, inbound-FK column-map override,
+composite m2m endpoints, `@view`/charset/legacy-enum representability niceties, `^^` multi-level tx
+back-refs, shutdown grace deadline, incremental LSP sync. The **idempotency-table GC** (DbStore
+age-reclaim) is under active design discussion (owner 2026-08-20) — see the URGENT/PR3 note; mechanism
+fork (lazy amortized sweep vs. background task) needs sign-off before it's built.
 
 ## Track T tier-2 — host-language transaction seam (read-decide-write), owner-approved 2026-08
 
