@@ -1316,6 +1316,61 @@ async fn with_count_page_carries_total_end_to_end() {
     );
 }
 
+/// `list distinct … page (…) offset with count`: the `total` must be the number of
+/// **deduped** rows, not the raw pre-dedup row count. Five products across two categories
+/// under a `distinct` projection of `category` yield two result rows, so `total` is 2 —
+/// a `COUNT(*)` over the undeduped rows would wrongly report 5 and break page-count math.
+#[tokio::test]
+async fn distinct_with_count_totals_deduped_rows() {
+    let c = compile_sqlite(
+        r#"
+        Product { id: Id, name: text, category: text }
+        shape CategoryName from Product { category }
+        query distinct_paged() -> CategoryName[] {
+          list distinct Product order (category) page (10) offset with count;
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `product` (`id`, `name`, `category`) VALUES
+                ('p1', 'Widget', 'tools'), ('p2', 'Hammer', 'tools'),
+                ('p3', 'Apple', 'food'),   ('p4', 'Banana', 'food'),
+                ('p5', 'Nail', 'tools');
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    let p = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/distinct_paged",
+        json!({}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(p.status, 200, "{:?}", p.body);
+    assert_eq!(
+        p.body["rows"],
+        json!([{ "category": "food" }, { "category": "tools" }])
+    );
+    // The result set has two distinct rows — the count must match, not the five raw rows.
+    assert_eq!(
+        p.body["total"],
+        json!(2),
+        "distinct `with count` overcounted"
+    );
+}
+
 /// A to-**many** nested shape array (`items { … }`) returns a JSON array of
 /// sub-objects end-to-end: codegen aggregates the child rows into an `items[]` JSON-array
 /// column (correlated subquery + SQLite `json_group_array`), the live SELECT returns it as

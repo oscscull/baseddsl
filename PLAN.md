@@ -1285,6 +1285,21 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   built surface — codegen SQL edge cases, runtime binding/nesting, scope/soft-delete predicate
   composition — driven against a live DB, not just unit tests. Scope each sweep to one subsystem; file
   what it finds as its own item. Open-ended by nature; run when the higher-value H-items are quiet.
+  - **Sweep 2026-08-21 — projection/pagination composition (shapes × `list distinct` × `with count` ×
+    keyset × to-many/flatten × computed fields). Found + FIXED one real correctness bug:** `list distinct
+    … page (…) offset with count` overcounted `total`. The `with count` second query emitted a bare
+    `SELECT COUNT(*)` over the **undeduped** joined rows, ignoring the `DISTINCT` — so a `distinct`
+    projection of `category` over 5 products in 2 categories reported `total: 5` (should be 2), breaking a
+    client's page-count math. Root cause: the count-query builder in `sql/dml.rs::lower_query` never
+    branched on `query_distinct(q)`. Fix (contained, all three dialects): when the query is `distinct`, the
+    count wraps the `SELECT DISTINCT <projection>` (with its joins + wheres) in a derived table
+    (`SELECT COUNT(*) FROM (SELECT DISTINCT … ) AS "distinct_rows"`) — a portable `COUNT` over the deduped
+    set; the non-distinct path is byte-for-byte unchanged. Regression tests: live SQLite
+    `distinct_with_count_totals_deduped_rows` (sqlite_integration.rs) + codegen golden
+    `distinct_with_count_counts_deduped_rows_via_derived_table` (based-codegen/tests/dml.rs). No `D#` (a
+    plain bug fix, no new language decision). **Swept clean** (no bug found): computed shape fields reaching
+    through to-one joins + NULL handling in `case`/concat, to-many/flatten correlation, keyset tiebreaker
+    over composite keys, and scope/soft-delete riding the nest paths.
 - **H9. ✅ done (D81). `@scope` now confines a nest-only scoped child (correctness/security, from H6).**
   A scoped model reached **only** through a nested shape sub-object (`field { … }` to-one/to-many or
   `field -> Shape`, D79) was not confined by its `@scope` though soft-delete was — a cross-scope read

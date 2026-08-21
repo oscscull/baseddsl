@@ -1364,6 +1364,35 @@ fn distinct_list_with_offset_page_has_no_keyset_tiebreaker() {
     assert!(!ddl.contains("\"id\""), "\n{ddl}");
 }
 
+#[test]
+fn distinct_with_count_counts_deduped_rows_via_derived_table() {
+    // `with count` under `distinct` must total the *deduped* rows: the count wraps the
+    // `SELECT DISTINCT <projection>` in a derived table rather than `COUNT(*)`-ing the
+    // raw joined rows (which would overcount every duplicated projection).
+    let ddl = gen_pg(
+        r#"
+        City { id: Id, name: text, region: text }
+        shape RegionName from City { region }
+        query regions() -> RegionName[] {
+          list distinct City order (region desc) page (20) offset with count;
+        }
+        "#,
+    );
+    assert!(
+        ddl.contains("FROM (SELECT DISTINCT"),
+        "distinct count must wrap the deduped projection\n{ddl}"
+    );
+    assert!(
+        ddl.contains(r#"AS "distinct_rows""#),
+        "derived table needs an alias\n{ddl}"
+    );
+    // A bare `COUNT(*) FROM "city"` (undeduped) must NOT be the count query.
+    assert!(
+        !ddl.contains("SELECT COUNT(*) AS \"count\"\nFROM \"city\""),
+        "distinct count must not count raw rows\n{ddl}"
+    );
+}
+
 // ---------- computed shape fields (per-row derived scalars, D121) ----------
 
 const COMPUTED_SCHEMA: &str = r#"

@@ -319,7 +319,42 @@ fn lower_query(
 
     // `with count`: a second query for the live-row total (soft-delete applied, no
     // LIMIT). Meaningless for keyset, hence opt-in.
-    let count_sql = if query_page(q).is_some_and(|p| p.with_count) {
+    let count_sql = query_page(q)
+        .filter(|p| p.with_count)
+        .map(|_| count_query(&sel, root, &projection, &wheres, query_distinct(q)));
+
+    LoweredQuery {
+        name: q.name.node.clone(),
+        sql,
+        count_sql,
+        keyset,
+    }
+}
+
+/// The `with count` companion query: the live-row total (soft-delete/scope applied, no
+/// LIMIT). Under `distinct` the total must count the **deduped** projected rows, not the
+/// raw joined rows — so it wraps the `SELECT DISTINCT <projection>` in a derived table
+/// (a bare `COUNT(*)` would overcount and break the client's page-count math). The plain
+/// path counts rows directly.
+fn count_query(
+    sel: &Select,
+    root: &RModel,
+    projection: &str,
+    wheres: &[String],
+    distinct: bool,
+) -> String {
+    let mut cnt = if distinct {
+        let mut inner = format!("SELECT DISTINCT\n{projection}\nFROM {}", sel.qt(root));
+        push_joins(&mut inner, sel.dialect, &sel.joins);
+        if !wheres.is_empty() {
+            inner.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
+        }
+        format!(
+            "SELECT COUNT(*) AS {}\nFROM ({inner}) AS {}",
+            sel.q("count"),
+            sel.q("distinct_rows")
+        )
+    } else {
         let mut cnt = format!(
             "SELECT COUNT(*) AS {}\nFROM {}",
             sel.q("count"),
@@ -329,18 +364,10 @@ fn lower_query(
         if !wheres.is_empty() {
             cnt.push_str(&format!("\nWHERE {}", wheres.join(" AND ")));
         }
-        cnt.push_str(";\n");
-        Some(cnt)
-    } else {
-        None
+        cnt
     };
-
-    LoweredQuery {
-        name: q.name.node.clone(),
-        sql,
-        count_sql,
-        keyset,
-    }
+    cnt.push_str(";\n");
+    cnt
 }
 
 /// Whether a shape body carries a top-level aggregate field (`= count()` / `= sum(…)`),
