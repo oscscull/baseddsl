@@ -813,25 +813,29 @@ Each is one slice: symptom → seam → proposed fix. Detail/context in D89.
   2's elision test), so it remains a shown fact. Spec seam: principles.md, models.md,
   indexing.md; decisions entry when resolved.
 
-- **NF12. Inline raw SQL has no SQL highlighting in `.bsl` (owner-observed 2026-07-16).**
-  The tmLanguage `#raw` rule scopes backtick bodies as one string
-  (`string.quoted.other.raw.bsl`, editors/vscode/syntaxes/bsl.tmLanguage.json) — no embedded
-  grammar, so ``raw`concat(first, ' ', last)` `` renders as a flat string. **Requirement
-  (owner, 2026-07-16): the SQL highlighting dialect must match what the user defines as the
-  dialect in `based.toml`** — not a generic-SQL guess, no fallback layering. Mechanism
-  consequence: a tmLanguage grammar is static and cannot read project config, so the
-  grammar alone cannot satisfy this; the component that already knows the manifest dialect
-  is the LSP (it walks up to `based.toml` and compiles per-project — compile.rs
-  `find_manifest_root`/`compile_manifest`). Direction: **LSP semantic tokens** over the raw
-  backtick interiors — based-lsp tokenizes the embedded SQL with a per-dialect table
-  (keywords, string/identifier quoting — where dialects genuinely differ, e.g. MariaDB
-  backtick identifiers vs postgres double-quotes and `$$` strings — comments, numbers,
-  `${param}` interp as its own token) and the editor renders those over the TextMate
-  baseline; works in any LSP editor, keeps the extension a thin client. `.mig` raw lines:
-  same semantic-token treatment once NF8(c) gives `.mig` a language contribution — there
-  each line's `raw(dialect)` token names its dialect explicitly (agrees with the manifest
-  in a single-dialect project; the line token is the more specific signal if they ever
-  differ). The marker is `raw` (NF14, D96).
+- **NF12. ✅ done. Per-dialect SQL semantic-token highlighting in `.bsl` raw blocks.**
+  based-lsp now advertises `textDocument/semanticTokens/full` and paints the interior of
+  every ``raw`…` `` block, tokenized against the project's manifest `dialect` (resolved as the
+  rest of the front end already does via `compile_manifest`) so the highlighting matches the
+  SQL the engine will emit — the owner requirement that the dialect follow `based.toml`, not
+  a generic-SQL guess. A small per-dialect tokenizer (`crates/based-lsp/src/sqltok.rs`)
+  classifies keywords, strings, numbers, comments, quoted identifiers, `${param}` (its own
+  distinct token), and `{engine}` interpolation; the genuine dialect splits are encoded —
+  Postgres `"col"` identifiers + `$$…$$`/`$tag$…$tag$` strings, MySQL/MariaDB `#` line
+  comments (backtick identifiers can't occur inside a backtick-delimited block). `Snapshot`
+  gained a `dialect` field; a `collect_raw_in_decl` walk finds raw in all five positions —
+  shape value, `where`/`having` predicate, whole-query body, mutation write, soft-delete
+  override — and emits the LSP relative-encoded token stream, splitting any token that
+  crosses a line. The VS Code extension stays a thin client (vscode-languageclient negotiates
+  the capability automatically; layered over the TextMate baseline). Thorough unit tests
+  cover the tokenizer per dialect; two integration tests cover span extraction across every
+  raw position and the manifest-dialect divergence. **Scoped to `.bsl`** deliberately: the
+  `.mig` `raw(dialect)` follow-on (below) would require the LSP to parse a second file format
+  it does not own today — filed rather than bundled, to keep the slice coherent.
+  - **NF12-mig (deferred follow-on).** Apply the same per-line semantic-token treatment to
+    `.mig` `raw(<dialect>)` steps, where each line names its dialect explicitly. Needs the LSP
+    to read `.mig` documents (currently `based-mig` is TextMate-only; the LSP globs `**/*.bsl`),
+    so it is a standalone editor task, not part of NF12.
 
 - **NF14. ✅ done (D96). Raw marker renamed `sql` → `raw`.** The backtick escape hatch is
   spelled ``raw`…` `` everywhere — grammar.ebnf, parser keyword, fmt printer, LSP keyword

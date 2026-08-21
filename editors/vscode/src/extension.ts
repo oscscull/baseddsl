@@ -28,10 +28,12 @@ export function activate(context: vscode.ExtensionContext): void {
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.bsl"),
     },
-    // The server publishes diagnostics unprompted; inlay hints + hover are pulled
-    // via the capabilities it advertises at initialize. Nothing extra to enable
-    // client-side beyond registering for the language — vscode-languageclient
-    // negotiates the inlay-hint capability automatically when the server offers it.
+    // The server publishes diagnostics unprompted; inlay hints, hover, and the
+    // per-dialect SQL semantic tokens over `raw`…`` blocks are pulled via the
+    // capabilities it advertises at initialize. Nothing extra to enable client-side
+    // beyond registering for the language — vscode-languageclient negotiates the
+    // inlay-hint and semantic-tokens capabilities automatically when the server
+    // offers them (semantic highlighting layers over the TextMate grammar).
   };
 
   client = new LanguageClient(

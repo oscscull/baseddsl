@@ -12,6 +12,7 @@
 //! the LSP wire.
 
 mod compile;
+mod sqltok;
 
 use based_diagnostics::Severity;
 use compile::{canon, compile_loose, compile_manifest, find_manifest_root, Snapshot};
@@ -187,6 +188,23 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string(), "@".to_string()]),
                     ..Default::default()
                 }),
+                // Per-dialect SQL highlighting painted over `raw`…`` interiors.
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: sqltok::TOKEN_TYPES
+                                    .iter()
+                                    .map(|t| SemanticTokenType::new(t))
+                                    .collect(),
+                                token_modifiers: Vec::new(),
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: Some(false),
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
         })
@@ -581,6 +599,26 @@ impl LanguageServer for Backend {
             }),
             range: None,
         }))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let st = self.state.lock().unwrap();
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = st.snapshots.get(&project_key(&path)) else {
+            return Ok(None);
+        };
+        let Some(fid) = snapshot.file_id_of(&path) else {
+            return Ok(None);
+        };
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: snapshot.semantic_tokens(fid),
+        })))
     }
 }
 
