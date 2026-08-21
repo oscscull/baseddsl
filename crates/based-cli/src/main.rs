@@ -570,7 +570,7 @@ fn cmd_migrate_render(
         }
 
         println!("-- migrations/{}/up.mig", name.as_deref().unwrap_or("?"));
-        print!("{}", migrate::render_sql(&steps, dialect));
+        print!("{}", migrate::render_migration(&steps, dialect, &now));
         println!();
     }
     Ok(())

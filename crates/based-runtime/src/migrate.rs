@@ -202,7 +202,7 @@ pub fn load_migrations(
         let snap = Snapshot::parse(&snap_text)
             .map_err(|e| MigrateError::Artifact(format!("{name}/schema.snap: {e}")))?;
         let steps = migrate::diff_snapshots(&prev, &snap);
-        let mut up_sql = migrate::sql_statements(&steps, dialect)
+        let mut up_sql = migrate::migration_sql(&steps, dialect, &snap)
             .map_err(|e| MigrateError::Artifact(format!("{name}/up.mig: {e}")))?;
 
         let up_text = read_file(&path.join("up.mig"))?;

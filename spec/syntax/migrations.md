@@ -180,8 +180,8 @@ drop unique <name>
 # foreign-key constraints (opt-in — relations.md). A resolved FK is a `fk` snapshot line;
 # a change to it diffs into an add/drop step. On Postgres/MariaDB these render as
 # `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` / `DROP CONSTRAINT`/`DROP FOREIGN KEY`;
-# SQLite has no in-place FK ALTER (it needs a table rebuild), so an add/drop there is a
-# loud honest marker pointing at a hand-authored raw(sqlite) rebuild — never a silent skip.
+# SQLite has no in-place FK ALTER, so the migration render expands the step into a table
+# rebuild automatically (recreate at the target shape, copy the rows, swap it in — see below).
 # A from-scratch `create table` carries its FKs inline on every target (SQLite included).
 add foreign_key <table>.<col> -> <ref_table>.<ref_col> [on_delete=<a>] [on_update=<a>]
 drop foreign_key <table>.<col>
@@ -297,10 +297,25 @@ against real servers). An `alter column` step diverges more sharply, because the
 differ on in-place column change: **Postgres** emits one `ALTER COLUMN … TYPE/SET NOT
 NULL/DROP NOT NULL/SET DEFAULT/DROP DEFAULT` per change; **MariaDB** restates the whole
 column via `MODIFY COLUMN` (it has no piecemeal form); **SQLite** has *no* in-place
-`ALTER COLUMN` at all, so the renderer emits a loud comment pointing at a hand-authored
-`raw(sqlite)` table-rebuild rather than broken SQL (principle 6 — the escape is never
-silent). `0002`'s
+`ALTER COLUMN` at all, so the migration render expands the step into a **table rebuild**
+(below) — the same engine that carries a SQLite FK add/drop or schema move. `0002`'s
 `schema.snap` is `0001`'s snapshot plus the `barcode` column and `idx_product_barcode` index.
+
+### The SQLite table rebuild
+
+SQLite supports almost no `ALTER TABLE`, so any change with no in-place form — an
+`alter column`, a foreign-key add/drop, a schema (attached-database) move — is expanded at
+render time into SQLite's canonical rebuild: rename the old table aside, `CREATE TABLE` it
+anew at the target shape (the same DDL `based gen sql` builds from scratch, FKs and CHECKs
+inline), `INSERT … SELECT` the surviving rows across (a column added this migration takes its
+default; a `@was`-renamed column copies from its old name), drop the old, then recreate the
+target indexes. It runs inside the migration's transaction under `PRAGMA legacy_alter_table`
+(so the rename doesn't re-point other tables' FKs) and `PRAGMA defer_foreign_keys` (so the
+transient swap validates only at commit). A populated database evolves across the change
+without data loss. The neutral step list is unchanged — the rebuild is a SQLite-only lowering,
+not a new step — so the same migration renders as an ordinary `ALTER` on Postgres/MariaDB. A
+hand-authored `raw(sqlite)` block (below) is still available for anything the rebuild can't
+express (a data-shape backfill, say).
 
 ---
 

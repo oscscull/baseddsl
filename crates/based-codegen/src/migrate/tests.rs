@@ -619,6 +619,209 @@ fn sql_statements_errs_on_sqlite_alter_column() {
     assert!(err.contains("SQLite cannot ALTER COLUMN t.v"), "{err}");
 }
 
+// ---- SQLite table rebuild (migration_sql / render_migration) --------
+
+fn snap1(t: TableSnap) -> Snapshot {
+    Snapshot {
+        scopes: Vec::new(),
+        tables: vec![t],
+        renames: Vec::new(),
+    }
+}
+
+/// An `ALTER COLUMN` SQLite can't do in place becomes a full rebuild: rename the old table
+/// aside, recreate it at the target shape, copy the surviving columns, drop the old — all
+/// under `defer_foreign_keys` so the swap validates only at the (apply-owned) commit.
+#[test]
+fn sqlite_alter_column_rebuilds_the_table() {
+    let target = snap1(table("t", vec![col("v", "int", false)]));
+    let steps = vec![Step::AlterColumn {
+        table: "t".to_string(),
+        column: "v".to_string(),
+        changes: vec![ColumnChange::SetNotNull { has_default: false }],
+        after: col("v", "int", false),
+    }];
+
+    let stmts = migration_sql(&steps, Sqlite, &target).unwrap();
+    let joined = stmts.join("\n");
+    assert!(
+        joined.contains("PRAGMA legacy_alter_table = ON"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("PRAGMA defer_foreign_keys = ON"),
+        "{joined}"
+    );
+    assert!(
+        stmts
+            .iter()
+            .any(|s| s == "ALTER TABLE `t` RENAME TO `t__based_rebuild`"),
+        "{joined}"
+    );
+    assert!(
+        stmts.iter().any(|s| s.starts_with("CREATE TABLE `t` (")),
+        "{joined}"
+    );
+    // The synthesized `id` and the surviving `v` are both copied, by name.
+    assert!(
+        stmts
+            .iter()
+            .any(|s| s == "INSERT INTO `t` (`id`, `v`) SELECT `id`, `v` FROM `t__based_rebuild`"),
+        "{joined}"
+    );
+    assert!(
+        stmts.iter().any(|s| s == "DROP TABLE `t__based_rebuild`"),
+        "{joined}"
+    );
+    // Bare, one statement each — exactly what `apply` runs through `Db::execute`.
+    assert!(stmts.iter().all(|s| !s.ends_with(';')), "{joined}");
+    assert!(stmts.iter().all(|s| !s.contains("--")), "{joined}");
+}
+
+/// SQLite can't `ALTER TABLE … ADD CONSTRAINT`; a new FK becomes a rebuild whose recreated
+/// table carries the FK inline (the same clause `gen sql` emits from scratch).
+#[test]
+fn sqlite_add_foreign_key_rebuilds_with_the_constraint() {
+    let mut t = table("post", vec![col("author_id", "uuid", false)]);
+    t.foreign_keys.push(ForeignKeySnap {
+        columns: vec!["author_id".to_string()],
+        ref_table: "author".to_string(),
+        ref_columns: vec!["id".to_string()],
+        ref_schema: None,
+        on_delete: None,
+        on_update: None,
+    });
+    let target = snap1(t);
+    let steps = vec![Step::AddForeignKey {
+        table: "post".to_string(),
+        fk: ForeignKeySnap {
+            columns: vec!["author_id".to_string()],
+            ref_table: "author".to_string(),
+            ref_columns: vec!["id".to_string()],
+            ref_schema: None,
+            on_delete: None,
+            on_update: None,
+        },
+    }];
+
+    let stmts = migration_sql(&steps, Sqlite, &target).unwrap();
+    let create = stmts
+        .iter()
+        .find(|s| s.starts_with("CREATE TABLE `post` ("))
+        .expect("rebuild recreates post");
+    assert!(
+        create.contains("FOREIGN KEY (`author_id`) REFERENCES `author` (`id`)"),
+        "{create}"
+    );
+}
+
+/// A column added in the same migration has no source row data, so it is left out of the
+/// copy's SELECT (it takes its default); the surviving columns still copy by name.
+#[test]
+fn sqlite_rebuild_omits_columns_added_this_migration() {
+    let target = snap1(table(
+        "t",
+        vec![col("v", "int", false), col("note", "text", true)],
+    ));
+    let steps = vec![
+        Step::AlterColumn {
+            table: "t".to_string(),
+            column: "v".to_string(),
+            changes: vec![ColumnChange::SetNotNull { has_default: false }],
+            after: col("v", "int", false),
+        },
+        Step::AddColumn {
+            table: "t".to_string(),
+            column: col("note", "text", true),
+        },
+    ];
+    let stmts = migration_sql(&steps, Sqlite, &target).unwrap();
+    let insert = stmts
+        .iter()
+        .find(|s| s.starts_with("INSERT INTO"))
+        .expect("a copy statement");
+    assert!(insert.contains("`id`, `v`"), "{insert}");
+    assert!(
+        !insert.contains("note"),
+        "added column not copied: {insert}"
+    );
+    // One rebuild only — the add-column is folded into it, not a second statement.
+    assert_eq!(
+        stmts
+            .iter()
+            .filter(|s| s.starts_with("CREATE TABLE"))
+            .count(),
+        1,
+        "{stmts:#?}"
+    );
+}
+
+/// A `@was` column rename folded into a rebuild copies from the old column name.
+#[test]
+fn sqlite_rebuild_copies_renamed_column_from_its_old_name() {
+    let target = snap1(table("t", vec![col("barcode", "text", false)]));
+    let steps = vec![
+        Step::RenameColumn {
+            table: "t".to_string(),
+            from: "upc".to_string(),
+            to: "barcode".to_string(),
+        },
+        Step::AlterColumn {
+            table: "t".to_string(),
+            column: "barcode".to_string(),
+            changes: vec![ColumnChange::SetNotNull { has_default: false }],
+            after: col("barcode", "text", false),
+        },
+    ];
+    let stmts = migration_sql(&steps, Sqlite, &target).unwrap();
+    let insert = stmts
+        .iter()
+        .find(|s| s.starts_with("INSERT INTO"))
+        .expect("a copy statement");
+    assert!(
+        insert == "INSERT INTO `t` (`id`, `barcode`) SELECT `id`, `upc` FROM `t__based_rebuild`",
+        "{insert}"
+    );
+}
+
+/// Non-SQLite dialects are untouched by the migration wrapper — `migration_sql` is exactly
+/// `sql_statements` there (the rebuild is a SQLite-only lowering).
+#[test]
+fn migration_sql_matches_sql_statements_off_sqlite() {
+    let target = snap1(table("t", vec![col("v", "int", true)]));
+    let steps = vec![Step::AlterColumn {
+        table: "t".to_string(),
+        column: "v".to_string(),
+        changes: vec![ColumnChange::SetNotNull { has_default: true }],
+        after: col("v", "int", false),
+    }];
+    for d in [Postgres, MariaDb] {
+        assert_eq!(
+            migration_sql(&steps, d, &target).unwrap(),
+            sql_statements(&steps, d).unwrap(),
+            "dialect {d:?}"
+        );
+    }
+}
+
+/// The review text names the rebuild and its statements are `;`-terminated for a human.
+#[test]
+fn render_migration_labels_the_sqlite_rebuild() {
+    let target = snap1(table("t", vec![col("v", "int", false)]));
+    let steps = vec![Step::AlterColumn {
+        table: "t".to_string(),
+        column: "v".to_string(),
+        changes: vec![ColumnChange::SetNull],
+        after: col("v", "int", true),
+    }];
+    let text = render_migration(&steps, Sqlite, &target);
+    assert!(text.contains("-- SQLite table rebuild for `t`"), "{text}");
+    assert!(
+        text.contains("ALTER TABLE `t` RENAME TO `t__based_rebuild`;"),
+        "{text}"
+    );
+}
+
 // ---- @was renames + raw(dialect) escape -----------------------------
 
 /// A field `@was` (persisted as a `Rename::Column`) turns what would be a drop+add into a

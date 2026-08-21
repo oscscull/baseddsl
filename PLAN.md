@@ -1022,24 +1022,30 @@ distinct` D116, `time`/`bytes` D117). The SQLite incremental-rebuild engine was 
 ## Owner-promoted deferrals (2026-08-20) — active queue
 
 The owner promoted three previously-deferred items to the active critical path (OP1/OP2 structural-DDL /
-representability; OP3 the idempotency store — ✅ **done**). Worked hardest-value-first like any active item;
-each carries full resume context so a fresh subagent can pick it up.
+representability; OP3 the idempotency store). OP1 + OP3 are ✅ **done**; OP2 remains. Worked
+hardest-value-first like any active item; each carries full resume context so a fresh subagent can pick it up.
 
-- **OP1. SQLite incremental-rebuild engine (was T6 follow-up + `alter column` + namespaced-ALTER-on-SQLite).**
+- **OP1. SQLite incremental-rebuild engine. ✅ DONE (2026-08-21).**
   *Rationale (owner): SQLite is a first-class use case, so a schema you can create but not evolve is a
-  real gap, not a demo edge.* SQLite supports almost no `ALTER TABLE`, so incremental changes need the
-  standard **12-step table rebuild**: `CREATE TABLE <new>` at the target shape → `INSERT … SELECT` copy →
-  drop the old → `ALTER TABLE … RENAME` the new into place → recreate indexes/triggers; with the
-  `PRAGMA foreign_keys` OFF/ON dance around it and FK re-pointing. This one engine closes **three** gaps
-  at once, all SQLite-only and all today emitting a loud `raw(sqlite)` rebuild marker: incremental **FK
-  add/drop** (T6/D108), **`alter column`**, and the **SQLite half of the namespaced-table incremental
-  ALTER** (PR9/D113). From-scratch `create table` already carries everything inline, so only the
-  *incremental* path on an existing SQLite DB is affected. Blast radius: `based-codegen::migrate` SQLite
-  renderer (the rebuild is a multi-statement expansion of the neutral `Step`s), snapshot unchanged (the
-  neutral step list already carries the intent), `based migrate apply` live path, migrate goldens
-  (SQLite rebuild expansions), and a live SQLite migrate test proving data survives an FK-add + a column
-  alter. Deliverable done = the `raw(sqlite)` markers are replaced by real rebuild SQL and a live test
-  evolves a populated SQLite DB across an FK change without data loss.
+  real gap, not a demo edge.* **What shipped:** the SQLite migration render (`based-codegen::migrate`)
+  expands any change with no in-place `ALTER` — an `alter column`, a foreign-key add/drop, a schema move —
+  into SQLite's canonical **table rebuild**: rename the old table aside → `CREATE TABLE` anew at the target
+  shape (reusing `create_table_statements`, so FKs/CHECKs/indexes match `gen sql` byte-for-byte) →
+  `INSERT … SELECT` the surviving rows (a column added this migration takes its default; a `@was`-renamed
+  column copies from its old name) → drop the old → recreate the target indexes. It runs **inside the
+  migration's single transaction** under `PRAGMA legacy_alter_table` (the rename doesn't re-point other
+  tables' FKs) + `PRAGMA defer_foreign_keys` (the transient swap validates only at commit) — the classic
+  12-step's `foreign_keys=OFF` is a no-op inside a tx, so `defer_foreign_keys` is the right primitive. This
+  one engine closed **three** gaps at once (FK add/drop T6/D108, `alter column`, SQLite namespaced-ALTER
+  half PR9/D113), replacing the old loud `raw(sqlite)` markers. **Design invariant:** the neutral `Step`
+  list is unchanged — the rebuild is a render-time SQLite-only lowering (new `migration_sql`/`render_migration`
+  wrappers that take the target `Snapshot`; the per-step `sql_statements`/`render_sql` primitives are
+  untouched), so the same migration still renders as an ordinary `ALTER` on Postgres/MariaDB. Proven live:
+  `data_survives_a_sqlite_table_rebuild` (migrate_apply.rs) evolves a populated in-memory SQLite DB across a
+  combined FK-add + null→not_null alter and asserts rows intact (same PKs/values), the column now NOT NULL,
+  and the FK enforced. Unit coverage in migrate/tests.rs (copy mapping, added/renamed columns, FK inline,
+  off-SQLite no-op); migrations.md documents the rebuild. A hand-authored `raw(sqlite)` block stays available
+  for anything the rebuild can't express.
 
 - **OP2. Serial part inside a composite key (was PR6/D111 deferral).** *Rationale (owner): a
   `(device_id, bigserial seq)` time-series or junction key is a representability-floor case — must be

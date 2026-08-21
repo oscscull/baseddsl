@@ -300,6 +300,174 @@ async fn a_destructive_migration_needs_the_allow_flag() {
     assert!(!has_column(&backend, "name").await);
 }
 
+// ---- SQLite table rebuild: data survives an FK-add + column-alter ---------
+
+/// The SQLite rebuild engine (an `ALTER COLUMN` + a foreign-key add SQLite can't do in
+/// place) recreates the table under one transaction and copies every row: after applying it
+/// the existing rows are intact (same PKs, same values), the altered column is now
+/// `NOT NULL`, and the new foreign key is enforced. This is OP1's core promise — a populated
+/// SQLite database evolves across a structural change without data loss.
+#[tokio::test]
+async fn data_survives_a_sqlite_table_rebuild() {
+    use based_codegen::migrate::{
+        diff_snapshots, render_up, ColumnSnap, ForeignKeySnap, Snapshot, TableSnap,
+    };
+
+    let column = |name: &str, ty: &str, nullable: bool, default: Option<&str>| ColumnSnap {
+        name: name.to_string(),
+        ty: ty.to_string(),
+        nullable,
+        default: default.map(str::to_string),
+        unique: false,
+        fk: None,
+    };
+    let bare = |name: &str, columns: Vec<ColumnSnap>| TableSnap {
+        name: name.to_string(),
+        schema: None,
+        soft_delete: None,
+        created: None,
+        updated: None,
+        scope_alts: Vec::new(),
+        sort: Vec::new(),
+        no_id: false,
+        pk: Vec::new(),
+        columns,
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+    };
+    let post_cols = |views_notnull: bool| {
+        vec![
+            column("title", "text", false, None),
+            column(
+                "views",
+                "int",
+                !views_notnull,
+                if views_notnull { Some("0") } else { None },
+            ),
+            column("author_id", "uuid", false, None),
+        ]
+    };
+
+    // v1: author + post (post has no FK, `views` is nullable).
+    let v1 = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![bare("author", Vec::new()), bare("post", post_cols(false))],
+        renames: Vec::new(),
+    };
+    // v2: post.views becomes NOT NULL DEFAULT 0 and gains a FK to author — both need a
+    // rebuild, and both fold into one.
+    let mut post_v2 = bare("post", post_cols(true));
+    post_v2.foreign_keys.push(ForeignKeySnap {
+        columns: vec!["author_id".to_string()],
+        ref_table: "author".to_string(),
+        ref_schema: None,
+        ref_columns: vec!["id".to_string()],
+        on_delete: None,
+        on_update: None,
+    });
+    let v2 = Snapshot {
+        scopes: Vec::new(),
+        tables: vec![bare("author", Vec::new()), post_v2],
+        renames: Vec::new(),
+    };
+
+    let s = Scratch::new("rebuild");
+    s.migration(
+        "0001_init",
+        &render_up(&diff_snapshots(&Snapshot::default(), &v1)),
+        &v1.render(),
+        None,
+    );
+    let backend = SqliteBackend::in_memory().unwrap();
+
+    // Apply v1, then seed one author and two posts (both with non-null views).
+    let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    {
+        let mut db = backend.checkout("").await.unwrap();
+        db.execute(
+            "INSERT INTO `author` (`id`) VALUES (?)",
+            &[SqlValue::Text("a1".into())],
+        )
+        .await
+        .unwrap();
+        for (id, title, views) in [("p1", "hello", 5i64), ("p2", "world", 9)] {
+            db.execute(
+                "INSERT INTO `post` (`id`, `title`, `views`, `author_id`) VALUES (?, ?, ?, ?)",
+                &[
+                    SqlValue::Text(id.into()),
+                    SqlValue::Text(title.into()),
+                    SqlValue::Int(views),
+                    SqlValue::Text("a1".into()),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    // Apply v2 — the rebuild. 0001 is already in the ledger, so only 0002 runs.
+    s.migration(
+        "0002_rebuild",
+        &render_up(&diff_snapshots(&v1, &v2)),
+        &v2.render(),
+        None,
+    );
+    let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    let report = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(report.applied, vec!["0002_rebuild"]);
+
+    let mut db = backend.checkout("").await.unwrap();
+    // Every row survived with its PK and values intact.
+    let rows = fetch_all(db.fetch(
+        "SELECT id, title, views, author_id FROM post ORDER BY id",
+        &[],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "both posts survived the rebuild");
+    assert_eq!(rows[0]["id"].as_str(), Some("p1"));
+    assert_eq!(rows[0]["title"].as_str(), Some("hello"));
+    assert_eq!(rows[0]["views"].as_i64(), Some(5));
+    assert_eq!(rows[0]["author_id"].as_str(), Some("a1"));
+    assert_eq!(rows[1]["views"].as_i64(), Some(9));
+
+    // `views` is now NOT NULL (notnull=1 in the rebuilt table).
+    let info = fetch_all(db.fetch("SELECT name, `notnull` FROM pragma_table_info('post')", &[]))
+        .await
+        .unwrap();
+    let views = info
+        .iter()
+        .find(|r| r["name"].as_str() == Some("views"))
+        .expect("views column exists");
+    assert_eq!(views["notnull"].as_i64(), Some(1), "views is NOT NULL");
+
+    // The foreign key is real: it references `author`, and it is enforced.
+    let fks = fetch_all(db.fetch("SELECT \"table\" FROM pragma_foreign_key_list('post')", &[]))
+        .await
+        .unwrap();
+    assert!(
+        fks.iter().any(|r| r["table"].as_str() == Some("author")),
+        "post now has a FK to author: {fks:?}"
+    );
+    let bad_fk = db
+        .execute(
+            "INSERT INTO `post` (`id`, `title`, `views`, `author_id`) VALUES (?, ?, ?, ?)",
+            &[
+                SqlValue::Text("p3".into()),
+                SqlValue::Text("orphan".into()),
+                SqlValue::Int(1),
+                SqlValue::Text("nobody".into()),
+            ],
+        )
+        .await;
+    assert!(bad_fk.is_err(), "FK now rejects an orphan author_id");
+}
+
 #[test]
 fn missing_dir_number_is_an_order_error() {
     let s = Scratch::new("gap");

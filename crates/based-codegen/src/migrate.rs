@@ -61,7 +61,10 @@ pub use model::{
     fk_spec_text, foreign_key_snaps, snapshot, target_pk_column, ColumnSnap, ForeignKeySnap,
     IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot, TableSnap,
 };
-pub use sql::{content_hash, render_down, render_sql, sql_statements, up_mig_matches_snapshot};
+pub use sql::{
+    content_hash, migration_sql, render_down, render_migration, render_sql, sql_statements,
+    up_mig_matches_snapshot,
+};
 pub use up_mig::render_up;
 
 #[cfg(test)]

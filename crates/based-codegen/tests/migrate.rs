@@ -576,14 +576,22 @@ fn adding_an_fk_diffs_to_add_foreign_key() {
             .any(|s| matches!(s, migrate::Step::AddForeignKey { .. })),
         "{steps:#?}"
     );
-    // Renders to a real ALTER on Postgres, an honest rebuild marker on SQLite.
+    // Renders to a real ALTER on Postgres; SQLite has no in-place FK add, so the migration
+    // render rebuilds the table with the FK carried inline (the same clause `gen sql` emits).
     let pg = migrate::render_sql(&steps, Dialect::Postgres);
     assert!(
         pg.contains("ADD CONSTRAINT") && pg.contains("ON DELETE CASCADE"),
         "\n{pg}"
     );
-    let sqlite = migrate::render_sql(&steps, Dialect::Sqlite);
-    assert!(sqlite.contains("raw(sqlite) table-rebuild"), "\n{sqlite}");
+    let sqlite = migrate::render_migration(&steps, Dialect::Sqlite, &now);
+    assert!(
+        sqlite.contains("SQLite table rebuild for `order`"),
+        "\n{sqlite}"
+    );
+    assert!(
+        sqlite.contains("FOREIGN KEY (`org_id`) REFERENCES `org` (`id`) ON DELETE CASCADE"),
+        "\n{sqlite}"
+    );
 }
 
 #[test]

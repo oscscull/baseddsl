@@ -7,10 +7,11 @@
 //! migration's DDL can never drift from `based gen sql`.
 
 use super::diff::{strip_raw_steps, ColumnChange, Step};
-use super::model::{index_name, ColumnSnap, IndexSnap, TableSnap};
+use super::model::{index_name, ColumnSnap, IndexSnap, Snapshot, TableSnap};
 use super::up_mig::{render_up, scope_change_line};
 use crate::Dialect;
 use based_ast::Primitive;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 // ---------- per-dialect SQL rendering --------------------------------------
@@ -35,51 +36,58 @@ pub fn render_sql(steps: &[Step], dialect: Dialect) -> String {
     );
     for step in steps {
         out.push('\n');
-        // A scope change alters generated code, not the database — render it as a note.
-        if let Step::ScopeChange(sc) = step {
-            let _ = writeln!(
-                out,
-                "-- scope contract change (no DDL): {}",
-                scope_change_line(sc)
-            );
-            continue;
-        }
-        // A raw escape: emit its SQL only for the matching target, else a note (its
-        // per-dialect twin carries the change there). Always flagged not-verifiable.
-        if let Step::Raw { dialect: d, sql } = step {
-            if *d == dialect {
-                let _ = writeln!(out, "-- raw({}) escape — not offline-verifiable", d.name());
-                let _ = writeln!(out, "{sql};");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "-- raw({}) step — skipped for target {}",
-                    d.name(),
-                    dialect.name()
-                );
-            }
-            continue;
-        }
-        if step.destructive() {
-            out.push_str(
-                "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
-            );
-        }
-        match step_statements(step, dialect) {
-            // Each bare statement is written `;`-terminated for the reviewer/psql/mysql.
-            Ok(stmts) => {
-                for s in stmts {
-                    let _ = writeln!(out, "{s};");
-                }
-            }
-            // A step with no in-place rendering for this dialect (SQLite `ALTER COLUMN`):
-            // a loud, greppable comment, never broken SQL.
-            Err(msg) => {
-                let _ = writeln!(out, "-- {msg}");
-            }
-        }
+        render_step_into(&mut out, step, dialect);
     }
     out
+}
+
+/// Render one step into the review text (a scope note / raw escape / `-- DESTRUCTIVE`
+/// prefix / lowered statements / a loud comment for an in-place edit the dialect lacks).
+/// Shared by [`render_sql`] and [`render_migration`] so the two agree per step.
+fn render_step_into(out: &mut String, step: &Step, dialect: Dialect) {
+    // A scope change alters generated code, not the database — render it as a note.
+    if let Step::ScopeChange(sc) = step {
+        let _ = writeln!(
+            out,
+            "-- scope contract change (no DDL): {}",
+            scope_change_line(sc)
+        );
+        return;
+    }
+    // A raw escape: emit its SQL only for the matching target, else a note (its
+    // per-dialect twin carries the change there). Always flagged not-verifiable.
+    if let Step::Raw { dialect: d, sql } = step {
+        if *d == dialect {
+            let _ = writeln!(out, "-- raw({}) escape — not offline-verifiable", d.name());
+            let _ = writeln!(out, "{sql};");
+        } else {
+            let _ = writeln!(
+                out,
+                "-- raw({}) step — skipped for target {}",
+                d.name(),
+                dialect.name()
+            );
+        }
+        return;
+    }
+    if step.destructive() {
+        out.push_str(
+            "-- DESTRUCTIVE: needs --allow-destructive or an unsafe(\"reason\") ack to apply.\n",
+        );
+    }
+    match step_statements(step, dialect) {
+        // Each bare statement is written `;`-terminated for the reviewer/psql/mysql.
+        Ok(stmts) => {
+            for s in stmts {
+                let _ = writeln!(out, "{s};");
+            }
+        }
+        // A step with no in-place rendering for this dialect (SQLite `ALTER COLUMN`):
+        // a loud, greppable comment, never broken SQL.
+        Err(msg) => {
+            let _ = writeln!(out, "-- {msg}");
+        }
+    }
 }
 
 /// The executable statements for a step list, for `based migrate apply` — bare (no
@@ -94,6 +102,225 @@ pub fn sql_statements(steps: &[Step], dialect: Dialect) -> Result<Vec<String>, S
         out.extend(step_statements(step, dialect)?);
     }
     Ok(out)
+}
+
+// ---------- migration-level rendering (SQLite table rebuild) ---------------
+
+/// One unit of a SQLite-lowered migration: either a neutral step to lower per-step, or a
+/// pre-expanded table rebuild (a bundle of bare statements) that stands in for every
+/// in-place change SQLite can't make to one table.
+enum Emit<'a> {
+    Step(&'a Step),
+    Rebuild { table: String, stmts: Vec<String> },
+}
+
+/// The executable statements for a migration, `target` carrying its post-migration shape.
+/// The migration-level twin of [`sql_statements`]: identical on Postgres/MySQL, but on
+/// SQLite it expands any change that has no in-place `ALTER` (an `ALTER COLUMN`, a
+/// foreign-key add/drop, a schema move) into the canonical **table rebuild** — recreate the
+/// table at its target shape, copy the rows, swap it in — instead of failing loudly. This is
+/// what `based migrate apply` runs on SQLite.
+pub fn migration_sql(
+    steps: &[Step],
+    dialect: Dialect,
+    target: &Snapshot,
+) -> Result<Vec<String>, String> {
+    if dialect != Dialect::Sqlite {
+        return sql_statements(steps, dialect);
+    }
+    let mut out = Vec::new();
+    for emit in sqlite_plan(steps, target) {
+        match emit {
+            Emit::Step(s) => out.extend(step_statements(s, dialect)?),
+            Emit::Rebuild { stmts, .. } => out.extend(stmts),
+        }
+    }
+    Ok(out)
+}
+
+/// The review text for a migration, `target` carrying its post-migration shape. The
+/// migration-level twin of [`render_sql`]: on SQLite a rebuilt table renders as a labelled
+/// block of the rebuild statements (recreate → copy → swap), so the reviewed SQL is exactly
+/// what `apply` runs; other dialects delegate straight to [`render_sql`].
+pub fn render_migration(steps: &[Step], dialect: Dialect, target: &Snapshot) -> String {
+    if dialect != Dialect::Sqlite {
+        return render_sql(steps, dialect);
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "-- Rendered by `based migrate render` (dialect: {}). Review before apply.",
+        dialect.name()
+    );
+    for emit in sqlite_plan(steps, target) {
+        out.push('\n');
+        match emit {
+            Emit::Step(s) => render_step_into(&mut out, s, dialect),
+            Emit::Rebuild { table, stmts } => {
+                let _ = writeln!(
+                    out,
+                    "-- SQLite table rebuild for `{table}`: no in-place ALTER COLUMN / foreign-key\n\
+                     -- change exists, so the table is recreated at its target shape and rows copied.\n\
+                     -- Runs inside the migration transaction (apply wraps it); children re-bind by name.",
+                );
+                for s in stmts {
+                    let _ = writeln!(out, "{s};");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Lower a step list for SQLite: group every step touching a table that needs a rebuild
+/// into one [`Emit::Rebuild`] (emitted at the table's first touch, in step order), and pass
+/// every other step through as [`Emit::Step`]. A rebuild is triggered only when the target
+/// snapshot actually carries the table's post-migration shape — otherwise the step falls
+/// through to its per-step lowering (which surfaces the honest "can't in place" error).
+fn sqlite_plan<'a>(steps: &'a [Step], target: &Snapshot) -> Vec<Emit<'a>> {
+    let rebuild: Vec<&str> = steps
+        .iter()
+        .filter_map(rebuild_trigger_table)
+        .filter(|t| target.table(t).is_some())
+        .collect();
+    let mut plan = Vec::new();
+    let mut done: HashSet<&str> = HashSet::new();
+    for step in steps {
+        if let Some(t) = folded_table(step) {
+            if rebuild.contains(&t) {
+                if done.insert(t) {
+                    plan.push(Emit::Rebuild {
+                        table: t.to_string(),
+                        stmts: sqlite_rebuild_statements(t, target, steps),
+                    });
+                }
+                continue;
+            }
+        }
+        plan.push(Emit::Step(step));
+    }
+    plan
+}
+
+/// The table a step forces a SQLite rebuild of (an in-place edit SQLite lacks), else `None`.
+fn rebuild_trigger_table(step: &Step) -> Option<&str> {
+    match step {
+        Step::AlterColumn { table, .. }
+        | Step::AddForeignKey { table, .. }
+        | Step::DropForeignKey { table, .. }
+        | Step::AlterSchema { table, .. } => Some(table),
+        _ => None,
+    }
+}
+
+/// The existing table a step touches, i.e. one a rebuild of that table subsumes. `None` for
+/// steps that create/drop/rename a whole table or emit no DDL — those are never folded.
+fn folded_table(step: &Step) -> Option<&str> {
+    match step {
+        Step::AddColumn { table, .. }
+        | Step::DropColumn { table, .. }
+        | Step::AlterColumn { table, .. }
+        | Step::AddIndex { table, .. }
+        | Step::DropIndex { table, .. }
+        | Step::AddUnique { table, .. }
+        | Step::DropUnique { table, .. }
+        | Step::AddForeignKey { table, .. }
+        | Step::DropForeignKey { table, .. }
+        | Step::RenameColumn { table, .. }
+        | Step::AlterSchema { table, .. } => Some(table),
+        Step::CreateTable(_)
+        | Step::DropTable(_)
+        | Step::RenameTable { .. }
+        | Step::Raw { .. }
+        | Step::ScopeChange(_) => None,
+    }
+}
+
+/// The SQLite 12-step table rebuild for `table`, recreating it at its `target` shape and
+/// copying the surviving rows. Follows the procedure SQLite documents: `legacy_alter_table`
+/// keeps the rename from re-pointing other tables' FKs, `defer_foreign_keys` holds FK checks
+/// to the (apply-owned) commit so the transient swap doesn't trip them. Columns added in this
+/// migration have no source and are left to their default; a renamed column copies from its
+/// old name; a schema move copies out of the old namespace into the new.
+fn sqlite_rebuild_statements(table: &str, target: &Snapshot, steps: &[Step]) -> Vec<String> {
+    let Some(tt) = target.table(table) else {
+        return Vec::new();
+    };
+    let d = Dialect::Sqlite;
+
+    let added: HashSet<&str> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::AddColumn { table: t, column } if t == table => Some(column.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut old_name: HashMap<&str, &str> = HashMap::new();
+    let mut source_schema = tt.schema.clone();
+    for s in steps {
+        match s {
+            Step::RenameColumn { table: t, from, to } if t == table => {
+                old_name.insert(to.as_str(), from.as_str());
+            }
+            Step::AlterSchema { table: t, from, .. } if t == table => {
+                source_schema.clone_from(from);
+            }
+            _ => {}
+        }
+    }
+
+    // Copy the columns the target keeps (its synthesized `id` included), each from its old
+    // name; skip columns introduced this migration (no source data).
+    let (mut tcols, mut scols) = (Vec::new(), Vec::new());
+    for c in physical_columns(tt) {
+        if added.contains(c.as_str()) {
+            continue;
+        }
+        let src_col = old_name.get(c.as_str()).copied().unwrap_or(c.as_str());
+        tcols.push(d.quote(&c));
+        scols.push(d.quote(src_col));
+    }
+
+    // Reuse the from-scratch create so the rebuilt table is byte-identical to `gen sql`; its
+    // trailing `CREATE INDEX`es run after the swap (indexes die with the dropped old table).
+    let mut create = create_table_statements(tt, d);
+    let create_table = create.remove(0);
+
+    let tmp = format!("{table}__based_rebuild");
+    let source = d.quote_table(source_schema.as_deref(), table);
+    let tmp_q = d.quote_table(source_schema.as_deref(), &tmp);
+    let target_q = d.quote_table(tt.schema.as_deref(), table);
+
+    let mut stmts = vec![
+        "PRAGMA legacy_alter_table = ON".to_string(),
+        "PRAGMA defer_foreign_keys = ON".to_string(),
+        format!("ALTER TABLE {source} RENAME TO {}", d.quote(&tmp)),
+        create_table,
+    ];
+    if !tcols.is_empty() {
+        stmts.push(format!(
+            "INSERT INTO {target_q} ({}) SELECT {} FROM {tmp_q}",
+            tcols.join(", "),
+            scols.join(", "),
+        ));
+    }
+    stmts.push(format!("DROP TABLE {tmp_q}"));
+    stmts.extend(create);
+    stmts.push("PRAGMA legacy_alter_table = OFF".to_string());
+    stmts
+}
+
+/// The physical column names of a table in create order — the synthesized default `id`
+/// (elided from the snapshot) first when the model didn't nominate its own key, then the
+/// declared columns. Mirrors [`create_table_statements`]'s column set so a rebuild's copy
+/// list lines up with the recreated table.
+fn physical_columns(t: &TableSnap) -> Vec<String> {
+    let mut cols = Vec::new();
+    if !t.no_id && t.pk.is_empty() && t.column("id").is_none() {
+        cols.push("id".to_string());
+    }
+    cols.extend(t.columns.iter().map(|c| c.name.clone()));
+    cols
 }
 
 /// Bare executable statement(s) for one neutral step (no trailing `;`, no comment). A
