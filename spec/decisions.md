@@ -23,7 +23,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
   `serial`, DB-generated sequential ids + read-back planner, natural single-column keys; impl in PLAN
   PR4), D111 (nominated primary key `@key(f1, f2, …)` DONE — natural single-column + composite/multi-column
   PKs, structured `Id<M>` object surface, multi-column FK auto-expansion; serial-part-inside-composite
-  deferred), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
+  DONE in D122), D122 (a `serial` part inside a composite `@key` — DB-generated key column, Postgres+MariaDB), D112 (split real `mysql` dialect from `mariadb`; `CHAR(36)` portable id default for the
   family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8),
   D113 (schema/database namespace qualifier `@schema("name")` DONE — Postgres schema / MySQL
   database, `quote_table` per-part quoting across DDL/DML/FK/index/migration, `Step::AlterSchema`
@@ -5899,3 +5899,37 @@ codes E0320–E0324), `based-codegen` (`Dialect::concat`; dml `Select::shape_exp
 arms + `computed_result`/`promote_numeric`; client `rename_type`/`computed_type`; openapi arm),
 `based-fmt` (`shape_expr` renderer), `based-lsp` (keywords + `computed_paths`/`pred_column_paths`),
 `editors/vscode` TextMate keywords, `spec/grammar.ebnf` + `spec/syntax/shapes.md`.
+
+## D122 — a `serial` part inside a composite `@key` (DB-generated key column)
+
+**Decision.** A `serial`-typed member is legal as a part of a **composite** `@key(f1, f2, …)`
+(≥2 columns) — a DB-generated key column the engine omits on `create` and reads back to
+complete the tuple (`@key(device, seq)` with `seq: serial`, the time-series / junction
+pattern). It is a **representability-floor** case (principle 9): the raw hatch cannot express
+it (the read-back planner wouldn't know the part is DB-generated, and MariaDB needs the
+non-leading index), so it is a first-class feature. Completes the D111 deferral.
+
+**Where it's legal.** Only as a part of a *composite* key. A plain non-key `serial` stays
+`E0267`; a single-column `@key(seq)` with `seq: serial` stays `E0267` (use `id: serial`); two
+`serial` parts in one key is the new **E0282** (a table has at most one auto-increment
+column). The serial part is exempt from the create-required rule (DB-generated like `id`).
+
+**Per-dialect DDL.** The serial part carries `GENERATED ALWAYS AS IDENTITY` (Postgres) /
+`AUTO_INCREMENT` (MariaDB) on its column, with **no inline PRIMARY KEY** (the composite PK
+clause covers it). MariaDB requires an auto-increment column be the first column of some key,
+so when the serial part is **non-leading** the create adds a covering `KEY (seq)`. **SQLite**
+has no auto-increment for a non-sole-PK column, so the serial part emits a plain `INTEGER` and
+this pattern needs the raw hatch there (the pre-decided scope, alongside the D-OP1 rebuild).
+
+**Read-back.** `LoweredWrite.serial_col` generalizes the sole-`serial`-`id` path: the INSERT
+omits the serial part, the run stage recovers it via `RETURNING <col>` (Postgres) /
+`LAST_INSERT_ID()` (MariaDB), and the new `RetKey::CompositeSerial` re-selects the full tuple
+(`WHERE seq = :result_id AND <other parts>`). The runtime's existing deferred `SerialReadback`
+binds `:result_id` from the captured value and the other parts from the request env, so the
+plan/run stages needed no change. The structured client id (`ReadingId { device, seq: i64 }`)
+and the create input/output fall out of the existing composite-key + shape machinery.
+
+**Blast radius.** `based-sema` (`check_pk_types` relaxation + E0282, `RModel::serial_key_member`
+/`serial_key_column`, create-required exemption); `based-codegen` (`sql::column_lines` identity
+clause + the MariaDB `KEY` helper, `sql::mutations` `serial_return_col` + `RetKey::CompositeSerial`
++ `RETURNING` on the serial column); live `composite_serial_key_part_is_db_generated_live_{postgres,mariadb}`.

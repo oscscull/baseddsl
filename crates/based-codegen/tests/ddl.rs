@@ -947,6 +947,37 @@ fn serial_pk_is_auto_increment_per_dialect() {
 }
 
 #[test]
+fn serial_part_of_a_composite_key_is_db_generated_per_dialect() {
+    // `@key(device, seq)` with `seq: serial` — a DB-generated sequence inside a composite
+    // key (a time-series/junction pattern). The serial part carries the auto-increment /
+    // identity clause on its column (no inline PRIMARY KEY — the composite PK covers it).
+    let src = r#"
+        Device { id: Id  name: text }
+        @key(device, seq)
+        Reading { device: Device  seq: serial  value: int }
+    "#;
+    // MariaDB: AUTO_INCREMENT on the column, plus a covering KEY (seq) — an auto-increment
+    // column must be indexed, and here `seq` is not the leading PK column.
+    let m = gen(src);
+    assert!(m.contains("`seq` BIGINT NOT NULL AUTO_INCREMENT"), "\n{m}");
+    assert!(m.contains("PRIMARY KEY (`device_id`, `seq`)"), "\n{m}");
+    assert!(m.contains("KEY (`seq`)"), "\n{m}");
+    // Postgres: GENERATED ALWAYS AS IDENTITY on the column, composite PK. No extra index —
+    // only MariaDB requires the auto-increment column be keyed.
+    let p = gen_pg(src);
+    assert!(
+        p.contains(r#""seq" BIGINT GENERATED ALWAYS AS IDENTITY"#),
+        "\n{p}"
+    );
+    assert!(p.contains(r#"PRIMARY KEY ("device_id", "seq")"#), "\n{p}");
+    // SQLite has no auto-increment for a non-sole-PK column, so the serial part is a plain
+    // INTEGER (this pattern needs the raw hatch on SQLite).
+    let s = gen_sqlite(src);
+    assert!(s.contains("`seq` INTEGER NOT NULL"), "\n{s}");
+    assert!(!s.contains("AUTOINCREMENT"), "\n{s}");
+}
+
+#[test]
 fn fk_to_a_serial_model_is_a_plain_integer_column() {
     // A relation FK mirrors the target PK type — a serial parent gives a BIGINT/INTEGER FK,
     // never a uuid column.

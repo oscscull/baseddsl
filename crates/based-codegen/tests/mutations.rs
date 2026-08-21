@@ -831,3 +831,47 @@ fn keyless_create_reselects_by_the_unique_column_not_a_generated_id() {
     assert!(out.contains("`event`.`source` = :s"), "\n{out}");
     assert!(!out.contains(":result_id"), "\n{out}");
 }
+
+const COMPOSITE_SERIAL: &str = r#"
+    Device { id: Id  name: text }
+    @key(device, seq)
+    Reading { device: Device  seq: serial  value: int }
+    shape ReadingRow from Reading { seq, value }
+    mutation record(device: Device, value: int) -> ReadingRow {
+      create Reading { device = $device, value = $value };
+    }
+    "#;
+
+#[test]
+fn composite_serial_create_omits_the_serial_part_and_reads_back_the_full_tuple_mariadb() {
+    // A composite `@key(device, seq)` with a DB-generated `seq`: the INSERT omits `seq`
+    // (auto-increment) and the declared-shape re-select keys on the captured serial value
+    // (`:result_id`, bound late by the runtime) AND the app-supplied `device` part.
+    let out = gen(COMPOSITE_SERIAL);
+    // The INSERT column list is exactly (device_id, value) — `seq` is DB-generated, omitted.
+    assert!(
+        out.contains("INSERT INTO `reading` (`device_id`, `value`)"),
+        "\n{out}"
+    );
+    // MariaDB reads the auto-increment value via LAST_INSERT_ID(), so no RETURNING.
+    assert!(!out.contains("RETURNING"), "\n{out}");
+    assert!(
+        out.contains("`reading`.`seq` = :result_id AND `reading`.`device_id` = :device"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn composite_serial_create_uses_returning_on_postgres() {
+    // Postgres recovers the DB-generated `seq` via `RETURNING "seq"`, then re-selects the
+    // full composite tuple.
+    let out = gen_pg(COMPOSITE_SERIAL);
+    assert!(
+        out.contains(r#"VALUES (:device, :value) RETURNING "seq""#),
+        "\n{out}"
+    );
+    assert!(
+        out.contains(r#""reading"."seq" = :result_id AND "reading"."device_id" = :device"#),
+        "\n{out}"
+    );
+}

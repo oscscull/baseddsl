@@ -112,6 +112,12 @@ pub struct LoweredWrite {
     /// back — `RETURNING <id>` (Postgres/SQLite) rides the SQL here, MariaDB/MySQL use
     /// `LAST_INSERT_ID()` in the driver. `true` marks such an INSERT for the run stage.
     pub serial_return: bool,
+    /// The physical column whose DB-generated value the run stage recovers for a
+    /// `serial_return` create: the sole `serial` `id`, or a composite `@key`'s `serial`
+    /// part (Postgres/MariaDB). `None` when `serial_return` is false. For a composite key,
+    /// [`read_key`](Self::read_key) carries the *other* (app-supplied) key parts, so the
+    /// deferred re-select can rebuild the full tuple.
+    pub serial_col: Option<String>,
 }
 
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
@@ -211,19 +217,30 @@ fn lower_mutation<'a>(
             let upsert = stmts
                 .iter()
                 .find(|w| w.conflict_key.is_some() && w.model == rm.ret_model);
+            // A composite `@key` create with a DB-generated `serial` part keys the re-select
+            // on the captured serial value (`:result_id`) *and* its other app-supplied key
+            // parts. (Its `serial_col` is set and `read_key` carries the other parts.)
+            let composite_serial = stmts.iter().find(|w| {
+                w.serial_col.is_some() && w.read_key.is_some() && w.model == rm.ret_model
+            });
             // A keyless create reads back by the `(unique)` column it set, not a
             // generated id — the same `WHERE col = value` shape as a conflict key.
-            let keyless = stmts
-                .iter()
-                .find(|w| w.read_key.is_some() && w.model == rm.ret_model);
+            let keyless = stmts.iter().find(|w| {
+                w.read_key.is_some() && w.serial_col.is_none() && w.model == rm.ret_model
+            });
             // A create of the return row keys the re-select on that row's id — whether the
-            // id is app-minted (`gen_id`) or DB-generated (`serial_return`, bound late by
+            // id is app-minted (`gen_id`) or DB-generated (a sole `serial` id, bound late by
             // the runtime from the captured id). Both use `WHERE id = :result_id`.
             let creates_ret = stmts
                 .iter()
                 .any(|w| (w.gen_id.is_some() || w.serial_return) && w.model == rm.ret_model);
             let key = if let Some(w) = upsert {
                 RetKey::Conflict(w.conflict_key.clone().unwrap_or_default())
+            } else if let Some(w) = composite_serial {
+                RetKey::CompositeSerial {
+                    serial_col: w.serial_col.clone().unwrap_or_default(),
+                    others: w.read_key.clone().unwrap_or_default(),
+                }
             } else if let Some(w) = keyless {
                 RetKey::Conflict(w.read_key.clone().unwrap_or_default())
             } else if creates_ret {
@@ -265,6 +282,13 @@ enum RetKey<'a> {
     /// INSERT's generated id won't match it). Each pair is `(physical_col, value_sql)`. The
     /// row is live (upsert is disallowed on a soft-delete model).
     Conflict(Vec<(String, String)>),
+    /// The mutation created a composite-`@key` row with a DB-generated `serial` part — key
+    /// on the captured serial value (`serial_col = :result_id`, bound late by the runtime)
+    /// AND the other app-supplied key parts (`others`, each `(physical_col, value_sql)`).
+    CompositeSerial {
+        serial_col: String,
+        others: Vec<(String, String)>,
+    },
 }
 
 /// Build the declared-shape re-select for a mutation's written row: the same projection a
@@ -307,6 +331,18 @@ fn lower_ret_select(
                 .collect(),
             true,
         ),
+        RetKey::CompositeSerial { serial_col, others } => {
+            let mut wheres = vec![format!(
+                "{} = :result_id",
+                sel.qcol(&sel.root_alias, &serial_col)
+            )];
+            wheres.extend(
+                others
+                    .iter()
+                    .map(|(c, v)| format!("{} = {v}", sel.qcol(&sel.root_alias, c))),
+            );
+            (wheres, true)
+        }
     };
     if live {
         if let Some(sd) = &model.soft_delete {
@@ -496,6 +532,7 @@ fn lower_write<'a>(
             conflict_key: None,
             read_key: None,
             serial_return: false,
+            serial_col: None,
         }),
     }
 }
@@ -576,7 +613,8 @@ fn lower_create<'a>(
     // app-minted `id` (uuid/ulid, no SQL default) is bound as `:id[_step]` unless the
     // caller set it explicitly. A keyless (`@no_id`) model has no `id` column, and a
     // `@key(field)` model's key is a caller-supplied column set like any other assign.
-    let serial_return = model.pk_is_db_generated();
+    let serial_col = serial_return_col(model, dialect);
+    let serial_return = serial_col.is_some();
     let gen_id = if model.no_id || serial_return || !model.key.is_empty() {
         None
     } else if !assigned.iter().any(|c| c == "id") {
@@ -589,10 +627,15 @@ fn lower_create<'a>(
 
     // A create with no generated id reads its row back by column(s) it set: a keyless
     // (`@no_id`) model's `(unique)` column, a single `@key(field)`'s column, or the full
-    // composite `@key(f1, f2, …)` tuple. Sema guarantees a keyless declared-shape return
-    // sets a unique column (E0264); a `@key` model's key columns are required, always set.
-    // `None` when the model has a generated/serial id.
-    let read_key = if model.is_composite_key() {
+    // composite `@key(f1, f2, …)` tuple. A composite key with a `serial` part reads back on
+    // its *other* (app-supplied) parts — the serial part rides `:result_id` (the captured
+    // DB value). Sema guarantees a keyless declared-shape return sets a unique column
+    // (E0264); a `@key` model's non-serial key columns are required, always set.
+    let read_key = if let Some(sc) = &serial_col {
+        model
+            .is_composite_key()
+            .then(|| non_serial_key_pairs(model, sc, &assigned, &vals))
+    } else if model.is_composite_key() {
         composite_read_key(model, &assigned, &vals)
     } else if model.no_id || !model.key.is_empty() {
         model.unique_cols.iter().find_map(|u| {
@@ -634,12 +677,13 @@ fn lower_create<'a>(
 
     LoweredWrite {
         header: format!("-- create {}\n", model.name),
-        sql: insert_sql(dialect, model, &cols, &vals, &tail, serial_return),
+        sql: insert_sql(dialect, model, &cols, &vals, &tail, serial_col.as_deref()),
         model: model.name.clone(),
         gen_id,
         conflict_key,
         read_key,
         serial_return,
+        serial_col,
     }
 }
 
@@ -665,6 +709,47 @@ fn composite_read_key(
     (key.len() == model.key.len()).then_some(key)
 }
 
+/// The DB-generated PK column a `create` recovers from its INSERT (the deferred read-back
+/// keys on it): the sole `serial` `id`, or a composite `@key`'s `serial` part on
+/// Postgres/MariaDB. `None` otherwise — including a composite serial part on SQLite, which
+/// has no auto-increment for a non-sole-PK column, so it is app-supplied there.
+fn serial_return_col(model: &RModel, dialect: Dialect) -> Option<String> {
+    if model.pk_is_db_generated() {
+        return Some(physical_col(model, "id"));
+    }
+    model.serial_key_column().filter(|_| {
+        matches!(
+            dialect,
+            Dialect::Postgres | Dialect::MariaDb | Dialect::MySql
+        )
+    })
+}
+
+/// A composite key's app-supplied parts (every key column except the DB-generated `serial`
+/// one), each paired with the value SQL the create set — the parts that key the deferred
+/// re-select alongside the captured serial value (`:result_id`).
+fn non_serial_key_pairs(
+    model: &RModel,
+    serial_col: &str,
+    assigned: &[String],
+    vals: &[String],
+) -> Vec<(String, String)> {
+    model
+        .key
+        .iter()
+        .filter_map(|f| {
+            let col = physical_col(model, f);
+            if col == serial_col {
+                return None;
+            }
+            assigned
+                .iter()
+                .position(|c| c == &col)
+                .map(|i| (col.clone(), vals[i].clone()))
+        })
+        .collect()
+}
+
 /// Assemble the `INSERT` statement text. A `serial` create reads its DB-assigned id back —
 /// `RETURNING <id>` on Postgres/SQLite (the MariaDB/MySQL driver uses `LAST_INSERT_ID()`
 /// instead) — and a create that sets no columns uses the dialect's default-values form.
@@ -674,13 +759,14 @@ fn insert_sql(
     cols: &[String],
     vals: &[String],
     tail: &str,
-    serial_return: bool,
+    serial_col: Option<&str>,
 ) -> String {
     let table = dialect.quote_table(model.schema.as_deref(), &model.table);
-    let returning = if serial_return && matches!(dialect, Dialect::Postgres | Dialect::Sqlite) {
-        format!(" RETURNING {}", dialect.quote(&physical_col(model, "id")))
-    } else {
-        String::new()
+    let returning = match serial_col {
+        Some(col) if matches!(dialect, Dialect::Postgres | Dialect::Sqlite) => {
+            format!(" RETURNING {}", dialect.quote(col))
+        }
+        _ => String::new(),
     };
     if cols.is_empty() {
         return match dialect {
@@ -782,6 +868,7 @@ fn lower_update<'a>(
         conflict_key: None,
         read_key: None,
         serial_return: false,
+        serial_col: None,
     }
 }
 
@@ -818,6 +905,7 @@ fn lower_delete(
             conflict_key: None,
             read_key: None,
             serial_return: false,
+            serial_col: None,
         };
     }
 
@@ -837,6 +925,7 @@ fn lower_delete(
         conflict_key: None,
         read_key: None,
         serial_return: false,
+        serial_col: None,
     }
 }
 
@@ -876,6 +965,7 @@ fn lower_restore(
         conflict_key: None,
         read_key: None,
         serial_return: false,
+        serial_col: None,
     }
 }
 

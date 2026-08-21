@@ -2010,12 +2010,16 @@ fn check_create_required(
             .into_iter()
             .flat_map(|si| si.terms)
             .collect();
+    let serial_key_field = m.serial_key_member().map(|mem| mem.name.clone());
     let managed = |name: &str| {
         name == "id"
             || m.created.as_deref() == Some(name)
             || m.updated.as_deref() == Some(name)
             || m.soft_delete.as_ref().map(|s| s.field.as_str()) == Some(name)
             || scope_cols.iter().any(|(f, _)| f == name)
+            // A composite key's `serial` part is DB-generated (like `id`), so it is not a
+            // required create input.
+            || serial_key_field.as_deref() == Some(name)
     };
     // A required *opaque* column can never be supplied (E0273 forbids writing one), so a
     // create on this model is unwritable until the column is made nullable or defaulted.

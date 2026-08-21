@@ -73,6 +73,7 @@ pub mod code {
     // later step as `$name.field` (`$` unifies params + step bindings).
     pub const BINDING_SHADOW: &str = "E0280"; // a step binding shadows a param, or duplicates another binding
     pub const BINDING_UNBOUND: &str = "E0281"; // `$name` names no param or *prior* step binding (unbound / forward reference)
+    pub const PK_MULTIPLE_SERIAL: &str = "E0282"; // a composite `@key(…)` names more than one `serial` part — a table has at most one DB-generated (auto-increment) column
 
     // Named scope: a `scope` decl referenced by
     // `@scope Name` on a model + `scoped Name` on every callable that touches it.
@@ -669,6 +670,32 @@ impl RModel {
     /// column and the engine reads the assigned value back?
     pub fn pk_is_db_generated(&self) -> bool {
         self.pk_strategy().is_some_and(PkStrategy::is_db_generated)
+    }
+
+    /// The composite-`@key` member whose type is `serial` — a DB-generated key part
+    /// (`@key(device, seq)` with `seq: serial`), or `None`. Legal only inside a composite
+    /// key (E0267); a table has at most one such column (a single auto-increment), so this
+    /// returns the first. The engine omits it on `create` and reads its DB-assigned value
+    /// back to complete the key tuple.
+    pub fn serial_key_member(&self) -> Option<&RMember> {
+        if !self.is_composite_key() {
+            return None;
+        }
+        self.pk_members().into_iter().find(|m| {
+            matches!(
+                &m.kind,
+                MemberKind::Scalar {
+                    ty: Primitive::Serial,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// The physical column of the composite key's `serial` (DB-generated) part, if any.
+    pub fn serial_key_column(&self) -> Option<String> {
+        self.serial_key_member()
+            .map(|m| m.physical_col().to_string())
     }
 
     /// The resolved FK constraint for a forward-relation member under the project

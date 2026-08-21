@@ -48,14 +48,16 @@ pub fn skeleton(m: &Model, enums: &HashMap<String, EnumKind>, sink: &mut Sink) -
         });
     }
 
-    check_pk_types(m, sink);
-
     // `@no_id("reason")` opts a genuinely keyless legacy table out of the primary key
     // (the reason is mandatory, so the PR shows why — `E0262`).
     let no_id = model_no_id(m, sink);
 
     // `@key(field, …)` nominates a declared field as the primary key (no surrogate `id`).
     let key = resolve_key(m, &members, no_id, sink);
+
+    // PK generation-type check needs the resolved key (a `serial` part is legal only inside
+    // a composite `@key`).
+    check_pk_types(m, &key, sink);
 
     // `@no_fk` opts the whole table out of FK constraints (reason checked, if required,
     // in the manifest-dependent divergence pass).
@@ -241,15 +243,35 @@ fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> 
 /// rejected (`E0266`) — a DB-generated integer key must be spelled `serial` so its
 /// generation is visible (principles 1, 2, 8); an app-owned natural key stays a string
 /// (`text`/`uuid`). A `@no_id` model has no `id`, so neither rule fires on it.
-fn check_pk_types(m: &Model, sink: &mut Sink) {
+fn check_pk_types(m: &Model, key: &[String], sink: &mut Sink) {
+    // A `serial` part is legal only inside a *composite* `@key(f1, f2, …)` (≥2 columns) —
+    // there it is a DB-generated key column the engine omits on create and reads back.
+    let composite = key.len() >= 2;
+    let mut serial_parts = 0usize;
     for mem in &m.members {
         let Member::Field(f) = mem else { continue };
         let is_id = f.name.node == "id";
         let BaseType::Primitive(p) = &f.ty.base else {
             continue;
         };
+        let in_composite_key = composite && key.iter().any(|k| k == &f.name.node);
         match (is_id, p) {
-            // A PK strategy type on a non-`id` column — it is not an ordinary column type.
+            // A `serial` part of a composite key is DB-generated and legal (D111/OP2). A
+            // table has at most one auto-increment column, so a second serial part is an
+            // error.
+            (false, Primitive::Serial) if in_composite_key => {
+                serial_parts += 1;
+                if serial_parts > 1 {
+                    sink.error_note(
+                        code::PK_MULTIPLE_SERIAL,
+                        f.ty.span,
+                        format!("`{}` names more than one `serial` key part", m.name.node),
+                        "a table has at most one DB-generated (`serial`) column; make the extra key parts app-supplied",
+                    );
+                }
+            }
+            // A PK strategy type on a non-`id`, non-composite-key column — not an ordinary
+            // column type.
             (false, Primitive::Serial | Primitive::Ulid) => sink.error_note(
                 code::PK_STRATEGY_MISPLACED,
                 f.ty.span,
@@ -261,7 +283,11 @@ fn check_pk_types(m: &Model, sink: &mut Sink) {
                         "ulid"
                     }
                 ),
-                "`serial`/`ulid` are valid only as the `id` primary key's type",
+                if matches!(p, Primitive::Serial) {
+                    "`serial` is valid as the `id` primary key, or as a part of a composite `@key(f1, f2, …)`"
+                } else {
+                    "`ulid` is valid only as the `id` primary key's type"
+                },
             ),
             // A bare numeric `id` — its generation (app-set vs DB-owned) is invisible.
             (true, Primitive::Int | Primitive::Float | Primitive::Decimal { .. }) => sink

@@ -1221,3 +1221,67 @@ async fn time_and_bytes_columns_round_trip_live() {
         ])
     );
 }
+
+/// A composite `@key(device, seq)` with a DB-generated `serial` part (OP2), live against
+/// MariaDB: two creates on the same device get `seq` 1 then 2 (`AUTO_INCREMENT`, keyed by
+/// the covering `KEY (seq)` helper), the create response carries the DB-assigned `seq`
+/// (recovered via `LAST_INSERT_ID()`, then the full tuple re-selected), and each row reads
+/// back by its composite key.
+#[tokio::test]
+async fn composite_serial_key_part_is_db_generated_live_mariadb() {
+    let src = r#"
+        Device { id: Id  name: text }
+        @key(device, seq)
+        Reading { device: Device  seq: serial  value: int }
+        shape ReadingRow from Reading { seq, value }
+        query reading(device, seq) -> ReadingRow;
+        mutation record_reading(device -> device, value) -> ReadingRow {
+          create Reading { device = $device, value = $value };
+        }
+        "#;
+    let Some((c, router, container)) = live_schema(src).await else {
+        return;
+    };
+    let device = "00000000-0000-4000-8000-0000000000d1";
+    container
+        .exec_batch(&format!(
+            "INSERT INTO `device` (`id`, `name`) VALUES ('{device}', 'sensor');"
+        ))
+        .await;
+
+    let first = call(
+        &c,
+        &router,
+        "POST",
+        "/m/record_reading",
+        json!({ "device": device, "value": 10 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    assert_eq!(first.body, json!({ "seq": 1, "value": 10 }));
+
+    let second = call(
+        &c,
+        &router,
+        "POST",
+        "/m/record_reading",
+        json!({ "device": device, "value": 20 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(second.status, 200, "{:?}", second.body);
+    assert_eq!(second.body, json!({ "seq": 2, "value": 20 }));
+
+    let got = call(
+        &c,
+        &router,
+        "POST",
+        "/q/reading",
+        json!({ "device": device, "seq": 2 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    assert_eq!(got.body, json!({ "seq": 2, "value": 20 }));
+}

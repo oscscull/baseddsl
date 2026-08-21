@@ -1507,6 +1507,40 @@ fn serial_and_ulid_are_pk_only_types() {
 }
 
 #[test]
+fn serial_is_legal_as_a_composite_key_part() {
+    // A `serial` part inside a composite `@key(…)` is a DB-generated key column (OP2) —
+    // legal, unlike a plain non-key `serial` (E0267).
+    let src = r#"
+        Device { id: Id  name: text }
+        @key(device, seq)
+        Reading { device: Device  seq: serial  value: int }
+    "#;
+    let (_, d) = analyze(src);
+    assert!(errors(&d).is_empty(), "{:?}", errors(&d));
+}
+
+#[test]
+fn single_column_serial_key_is_rejected() {
+    // A `serial` is legal as the `id` or a composite key part — not a single-column
+    // `@key(seq)` (use `id: serial`).
+    let (_, d) = analyze("@key(seq)\nWidget { seq: serial  name: text }");
+    assert_eq!(errors(&d), ["E0267"]);
+}
+
+#[test]
+fn a_composite_key_allows_only_one_serial_part() {
+    // A table has at most one DB-generated (auto-increment) column, so two `serial` key
+    // parts is E0282.
+    let src = r#"
+        Device { id: Id }
+        @key(device, a, b)
+        Widget { device: Device  a: serial  b: serial  name: text }
+    "#;
+    let (_, d) = analyze(src);
+    assert!(errors(&d).contains(&"E0282"), "{:?}", errors(&d));
+}
+
+#[test]
 fn serial_id_cannot_be_reached_across_tx_steps() {
     // `$name.id` of a `serial` create is unknown until the row is written, so it can't
     // bind a sibling step — E0268. (An app-minted uuid parent is fine.)

@@ -1022,8 +1022,8 @@ distinct` D116, `time`/`bytes` D117). The SQLite incremental-rebuild engine was 
 ## Owner-promoted deferrals (2026-08-20) — active queue
 
 The owner promoted three previously-deferred items to the active critical path (OP1/OP2 structural-DDL /
-representability; OP3 the idempotency store). OP1 + OP3 are ✅ **done**; OP2 remains. Worked
-hardest-value-first like any active item; each carries full resume context so a fresh subagent can pick it up.
+representability; OP3 the idempotency store). **All three are ✅ done** (OP1 + OP2 + OP3). Worked
+hardest-value-first like any active item; each carries full resume context below.
 
 - **OP1. SQLite incremental-rebuild engine. ✅ DONE (2026-08-21).**
   *Rationale (owner): SQLite is a first-class use case, so a schema you can create but not evolve is a
@@ -1047,21 +1047,28 @@ hardest-value-first like any active item; each carries full resume context so a 
   off-SQLite no-op); migrations.md documents the rebuild. A hand-authored `raw(sqlite)` block stays available
   for anything the rebuild can't express.
 
-- **OP2. Serial part inside a composite key (was PR6/D111 deferral).** *Rationale (owner): a
+- **OP2. Serial part inside a composite key. ✅ DONE (2026-08-21).** *Rationale (owner): a
   `(device_id, bigserial seq)` time-series or junction key is a representability-floor case — must be
-  expressible by a feature or raw, per principle 9 — not ergonomics-for-ugly.* Today `@key(f1, f2, …)`
-  composite keys ship, but a **DB-generated `serial` part** inside one is cut. What's needed: allow a
-  `serial`-typed member as a non-leading part of a `@key(…)`; per-dialect DDL (Postgres `GENERATED …
-  AS IDENTITY` / MariaDB `AUTO_INCREMENT`, which on MariaDB requires the auto-inc column be *indexed* —
-  hence the **non-leading `INDEX(seq)` helper**; SQLite via the OP1 rebuild path or the raw hatch), the
-  read-back planner (D110's `RETURNING`/`LAST_INSERT_ID` path) extended so a composite-create whose
-  serial part is DB-assigned reads the row back on the full assembled tuple, and the structured client id
-  carrying the generated part. Confirm first whether the raw hatch can already express this structurally
-  (PR5 left structural composite/serial coverage as the open question) — if raw covers it, OP2 is a
-  first-class-ergonomics item; if not, it's the representability bug principle 9 says to file. Blast
-  radius: sema (`@key` part validity — a serial part is legal, D111's checks), codegen DDL + the
-  read-back planner + structured-id client emission, snapshot (`pk` already `Vec`), a live create→read-back
-  test on Postgres + MariaDB. Leaf/junction rows that never read back the serial are the easy first slice.
+  expressible by a feature or raw, per principle 9 — not ergonomics-for-ugly.* **Gating question resolved:**
+  raw does *not* cover it structurally (the read-back planner wouldn't know the part is DB-generated, and
+  MariaDB needs the non-leading index) → it was the representability bug, built first-class.
+  **What shipped** (Postgres + MariaDB; live create→read-back on both): **sema** — a `serial` member is
+  legal as a part of a *composite* `@key(…)` (E0267 relaxed), exempt from the create-required rule (DB-
+  generated like `id`), with `serial_key_member`/`serial_key_column` helpers; a single-column serial key is
+  still E0267 (use `id: serial`) and two serial parts is the new **E0282** (one auto-increment per table).
+  **DDL** — the serial part carries `GENERATED ALWAYS AS IDENTITY` (Postgres) / `AUTO_INCREMENT` (MariaDB)
+  on its column with no inline PRIMARY KEY (the composite PK covers it); MariaDB adds a covering `KEY(seq)`
+  when the serial part is **non-leading** (an auto-increment column must be keyed). **Read-back planner** —
+  `LoweredWrite.serial_col` generalizes the old sole-`serial`-`id` path: the INSERT omits the serial part,
+  recovers it via `RETURNING <col>` (Postgres) / `LAST_INSERT_ID()` (MariaDB), and the new
+  `RetKey::CompositeSerial` re-selects the full tuple (`WHERE seq = :result_id AND <other parts>` — the
+  runtime's existing deferred `SerialReadback` binds `:result_id` late and the other parts from `env`, so
+  `plan.rs`/`run.rs` needed no change). **Client** — the structured id (`ReadingId { device, seq: i64 }`)
+  and input/output fell out of the existing composite-key + shape machinery with no client-gen change.
+  **SQLite** — no auto-increment for a non-sole-PK column, so the serial part emits a plain `INTEGER`
+  (this pattern needs the raw hatch on SQLite, per the pre-decided scope). Coverage: DDL + mutation goldens
+  (`based-codegen/tests/{ddl,mutations}.rs`), sema tests (`based-sema/tests/check.rs`), live
+  `composite_serial_key_part_is_db_generated_live_{postgres,mariadb}`.
 
 - **OP3. Idempotency store: basic DbStore GC + a production Redis path in the flagship. ✅ DONE
   (2026-08-20).** *Framing (owner): the built-in `DbStore` should **not** be heavily used — keep it basic,

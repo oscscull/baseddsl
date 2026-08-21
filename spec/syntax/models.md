@@ -10,7 +10,7 @@ Uniform for columns and relations: `name: Type (modifiers)`
 
 ## Types
 - Primitives lowercase: `text int bool timestamp date time json uuid float decimal bytes`
-- Primary-key strategy types (valid only as `id`, see Defaults): `uuid ulid serial`
+- Primary-key strategy types (valid as `id`; `serial` also as a composite `@key` part, see Defaults): `uuid ulid serial`
 - Models capitalized: `User Order`
 - Casing is load-bearing + committed: capital = relation, lowercase = column. Never lowercase a model or capitalize a primitive.
 
@@ -153,6 +153,21 @@ sets the key column(s) like any other, and the row reads back keyed on the whole
 key field must exist (`E0275`) and be a required, single-valued scalar **or to-one relation**
 (its FK column carries the key — `E0276`); an empty `@key()` is `E0278`, a repeated field
 `E0279`, and `@key` + `@no_id` is contradictory (`E0277`).
+
+**A `serial` part (DB-generated).** One part of a **composite** key may be `serial` — a
+DB-generated sequence, the `(device, seq)` time-series / append pattern. That part is
+*engine-generated*: the `create` omits it (it is not a required input), and the engine reads
+the DB-assigned value back to complete the key tuple (Postgres `RETURNING`, MariaDB
+`LAST_INSERT_ID()`). The structured id carries it like any other part (`ReadingId { device,
+seq }`). A table has one auto-increment column, so two `serial` parts is `E0282`; a
+single-column `@key(seq)` with `seq: serial` stays `E0267` (write `id: serial`). On MariaDB a
+non-leading serial part gets a covering index automatically. SQLite has no auto-increment for
+a non-sole-PK column, so a `serial` composite part needs the `raw` hatch there.
+```
+@key(device, seq)
+Reading { device: Device  seq: serial  value: int }
+# → PRIMARY KEY (device_id, seq); `seq` is DB-assigned; create sets only device + value
+```
 
 **Single-column key** → the column is the entity's typed id everywhere (`Id<entity::M>` in
 the client; an inbound FK mirrors the key's own type, e.g. `TEXT`/`BIGINT`, not a uuid).

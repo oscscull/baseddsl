@@ -189,6 +189,17 @@ fn create_table(
             .join(", ");
         lines.push(format!("PRIMARY KEY ({cols})"));
     }
+
+    // MariaDB/MySQL require an `AUTO_INCREMENT` column be the first column of some key. When
+    // a composite key's `serial` part is *not* the leading PK column, the composite PRIMARY
+    // KEY doesn't satisfy that, so add a covering `KEY` on the serial column alone.
+    if dialect.is_mysql_family() {
+        if let Some(sc) = model.serial_key_column() {
+            if pk_cols.first() != Some(&sc) {
+                lines.push(format!("KEY ({})", dialect.quote(&sc)));
+            }
+        }
+    }
     lines.extend(constraint_lines(schema, model, dialect, fks));
 
     let specs = index_specs(schema, model, dialect);
@@ -224,12 +235,27 @@ fn create_table(
 /// The column definitions: scalars and forward-relation FKs. Inverse edges store nothing.
 fn column_lines(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec<String> {
     let serial_pk = model.pk_is_db_generated();
+    let serial_key_part = model.serial_key_member().map(|m| m.name.clone());
     let mut lines = Vec::new();
     for mem in &model.members {
         match &mem.kind {
             // A `serial` primary key: the DB owns the value, so its column carries the
             // dialect's auto-increment/identity clause instead of a plain type.
             MemberKind::Scalar { column, .. } if serial_pk && mem.name == "id" => {
+                lines.push(serial_pk_column(dialect, column));
+            }
+            // A composite `@key`'s `serial` part: DB-generated on Postgres/MariaDB — its
+            // column carries the identity/auto-increment clause (no inline PRIMARY KEY; the
+            // composite PK clause covers it). SQLite has no auto-increment for a non-sole-PK
+            // column, so it falls through to a plain `INTEGER` (this pattern needs the raw
+            // hatch on SQLite).
+            MemberKind::Scalar { column, .. }
+                if serial_key_part.as_deref() == Some(mem.name.as_str())
+                    && matches!(
+                        dialect,
+                        Dialect::Postgres | Dialect::MariaDb | Dialect::MySql
+                    ) =>
+            {
                 lines.push(serial_pk_column(dialect, column));
             }
             MemberKind::Scalar {
