@@ -1300,6 +1300,53 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
     plain bug fix, no new language decision). **Swept clean** (no bug found): computed shape fields reaching
     through to-one joins + NULL handling in `case`/concat, to-many/flatten correlation, keyset tiebreaker
     over composite keys, and scope/soft-delete riding the nest paths.
+  - **Sweep 2026-08-21 (2) — write/mutation/transaction path (named tx bindings D107 × serial read-back
+    OP2 × composite-FK writes D111 × zero-row 404 NF6/D92 × idempotency D114/D115 × atomic update D100 ×
+    upsert D102 × scope/soft-delete on writes). Found + FIXED one real correctness bug:** a `tx` step
+    reference to a bound `create`'s **engine-managed `@scope` column** (`create Project { … } as p; create
+    Task { owner_org = $p.org, … }`) silently lowered to `NULL` instead of the tenant's org. Root cause:
+    `Select::binding_field_value` (based-codegen `sql/dml.rs`) resolved a `$name.field` reference only from
+    (a) the bound create's explicit assigns or (b) `$name.id`; a scope column is *neither* an assign (sema
+    E0181 forbids assigning it) nor `id`, so it fell through to a `NULL /* …not set… */` marker — a silent
+    wrong write (an optional FK), or a spurious NOT-NULL failure (a required one). But its value **is**
+    knowable: the bound create engine-set it from `:ctx_<field>`, and the whole mutation runs under one
+    `$ctx`, so the reference is exactly that same `:ctx_<field>`. Fix (contained, all dialects): `BackCtx`
+    now carries the bound create's model name, and `binding_field_value` resolves a scope-column reference
+    to `:ctx_<ctx_field>` via `scope_terms_for` (this also fixes the composite-FK whole-row `$e` path, whose
+    key parts route through the same helper — a scoped key part no longer NULLs). Regression: live SQLite
+    `tx_binding_reuses_bound_steps_scope_column_end_to_end` (sqlite_integration.rs) + codegen golden
+    `tx_binding_reuses_bound_creates_scope_column` (based-codegen/tests/mutations.rs). No `D#` (plain bug
+    fix). **Filed as its own item (residual, needs an owner design call):** a `$name.field` reference to a
+    bound create's *other* engine-supplied-but-not-inline-knowable column — an `@created`/`@updated`
+    timestamp (`CURRENT_TIMESTAMP`, which re-evaluates per statement so it can't be reused inline) or a
+    DB-side column default — still lowers to the `NULL` marker; sema permits it (`check_binding_ref` only
+    checks the field is a member). See **H6-R1** below. **Swept clean** (no bug found, live SQLite + reading
+    the plan/run + codegen paths across all three dialects): a 3-step tx where step 3 reaches step 1
+    (`$user.id`, `three_step_tx_binding_reaches_the_first_step_end_to_end`); the serial read-back planner
+    (each captured id keys only its own re-select; E0268 blocks a serial `$name.id` sibling); composite-key
+    create + inbound multi-column FK whole-row binding + to-many nest on the composite key
+    (key_composite_integration.rs); zero-row update/`-> ok` delete → 404 with a full rollback (nothing
+    persists) and the idempotency claim released — including a **keyed 404 releases the claim and a later
+    retry runs fresh, never a phantom-success replay** (`keyed_404_releases_the_claim_then_a_retry_runs_fresh`,
+    MemStore `Fresh → NotFound → abandon`); atomic update expressions composing on the stored value; upsert
+    insert-vs-conflict read-back keyed on the conflict target; and soft-delete/restore re-select `live`-flag
+    correctness — a tombstone reads back (live predicate dropped), a live `get` misses it, and `restore`
+    reads it back live (`soft_delete_reads_back_tombstone_then_restore_reads_back_live`).
+- **H6-R1. `$name.<engine-managed-non-scope-column>` tx reference still lowers to a silent `NULL`.**
+  Symptom: a `tx` `$name.field` reference to a bound create's field that is neither explicitly assigned,
+  nor `id`, nor a `@scope` column (fixed in the 2026-08-21(2) sweep) — i.e. an `@created`/`@updated`
+  timestamp column or a scalar with a DB-side default — compiles clean (sema `check_binding_ref` only
+  checks `field` is a member of the bound model) and codegen emits `NULL /* $name.field not set by bound
+  create */`, a silent wrong value (nullable target) or a spurious NOT-NULL failure (required target).
+  Where: based-sema `check.rs::check_binding_ref`; based-codegen `sql/dml.rs::binding_field_value` (the
+  final fall-through). Why deferred (owner design call): the value genuinely is **not** inline-knowable —
+  `CURRENT_TIMESTAMP` re-evaluates per statement (reusing it would bind a *different* instant than the
+  bound row actually got), and a DB-side default isn't visible to codegen at all — so the two honest
+  fixes are (a) **reject** it at sema with a new E-code (safe, principle 6, but forbids a construct a
+  future re-select could serve) or (b) a **runtime re-select** that reads the bound row's committed value
+  back (bigger; the D111 deferred "standalone structured-id param" work is adjacent). Low frequency
+  (reusing a just-generated timestamp across steps is unusual), so it stays a marker until the fork is
+  decided. No behaviour is silently *unsafe* for the common scope case — that is now filled.
 - **H9. ✅ done (D81). `@scope` now confines a nest-only scoped child (correctness/security, from H6).**
   A scoped model reached **only** through a nested shape sub-object (`field { … }` to-one/to-many or
   `field -> Shape`, D79) was not confined by its `@scope` though soft-delete was — a cross-scope read

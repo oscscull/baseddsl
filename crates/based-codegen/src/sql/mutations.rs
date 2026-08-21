@@ -481,47 +481,9 @@ fn lower_write<'a>(
                 ));
             }
         }
-        WriteStmt::Tx(inner) => {
-            let start = out.len();
-            // Number creates so their generated ids get distinct binds (`:id_<step>`);
-            // a `create … as name` binding records that step's row so a later
-            // `$name.field` (reaching any prior step) resolves against it.
-            let mut binds = bindings.clone();
-            let mut step = 0usize;
-            for st in inner {
-                let idp = match st {
-                    WriteStmt::Create { .. } => format!("id_{step}"),
-                    _ => "id".to_string(),
-                };
-                lower_write(
-                    schema, decls, st, &idp, &binds, unscoped, inject, dialect, out,
-                );
-                if let WriteStmt::Create {
-                    assigns, binding, ..
-                } = st
-                {
-                    if let Some(name) = binding {
-                        binds.insert(
-                            name.node.as_str(),
-                            BackCtx {
-                                id_param: idp,
-                                assigns,
-                            },
-                        );
-                    }
-                    step += 1;
-                }
-            }
-            // The tx is one engine-owned transaction: the runtime wraps
-            // the whole body, so the flattened statements need no per-tx marker beyond
-            // this banner on the first write (text surface only).
-            if let Some(first) = out.get_mut(start) {
-                first.header = format!(
-                    "-- tx: one engine-owned transaction (principle 7); rolls back together\n{}",
-                    first.header
-                );
-            }
-        }
+        WriteStmt::Tx(inner) => lower_tx(
+            schema, decls, inner, bindings, unscoped, inject, dialect, out,
+        ),
         // A raw write is an escape hatch: text verbatim, `${param}` -> `:param`.
         // No model is attached, so `{table}`/`{id}` interpolation has no root to bind.
         WriteStmt::Raw(raw) => out.push(LoweredWrite {
@@ -534,6 +496,59 @@ fn lower_write<'a>(
             serial_return: false,
             serial_col: None,
         }),
+    }
+}
+
+/// Lower a `tx { … }` block: its inner writes inline in execution order (the engine, not
+/// this SQL, owns BEGIN/COMMIT). Sibling `create`s get distinct id binds (`:id_<step>`),
+/// and a `create … as name` binding records that step's row so a later `$name.field`
+/// (reaching any prior step) resolves against it. A tx banner is prepended to the block's
+/// first write (text surface only).
+#[allow(clippy::too_many_arguments)]
+fn lower_tx<'a>(
+    schema: &'a CheckedSchema,
+    decls: &'a [Decl],
+    inner: &'a [WriteStmt],
+    bindings: &HashMap<&'a str, BackCtx<'a>>,
+    unscoped: bool,
+    inject: &'a [ScopeInject],
+    dialect: Dialect,
+    out: &mut Vec<LoweredWrite>,
+) {
+    let start = out.len();
+    let mut binds = bindings.clone();
+    let mut step = 0usize;
+    for st in inner {
+        let idp = match st {
+            WriteStmt::Create { .. } => format!("id_{step}"),
+            _ => "id".to_string(),
+        };
+        lower_write(
+            schema, decls, st, &idp, &binds, unscoped, inject, dialect, out,
+        );
+        if let WriteStmt::Create {
+            model,
+            assigns,
+            binding,
+            ..
+        } = st
+        {
+            if let Some(name) = binding {
+                let ctx = BackCtx {
+                    id_param: idp,
+                    assigns,
+                    model: model.node.as_str(),
+                };
+                binds.insert(name.node.as_str(), ctx);
+            }
+            step += 1;
+        }
+    }
+    if let Some(first) = out.get_mut(start) {
+        first.header = format!(
+            "-- tx: one engine-owned transaction (principle 7); rolls back together\n{}",
+            first.header
+        );
     }
 }
 

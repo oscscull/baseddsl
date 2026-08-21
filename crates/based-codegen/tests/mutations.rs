@@ -875,3 +875,33 @@ fn composite_serial_create_uses_returning_on_postgres() {
         "\n{out}"
     );
 }
+
+#[test]
+fn tx_binding_reuses_bound_creates_scope_column() {
+    // A `$name.<scope-column>` tx reference resolves to the `:ctx_<field>` the bound create
+    // engine-set the column from (never a silent NULL): the whole mutation runs under one
+    // `$ctx`, so the value is knowable. Regression for the H6 write-path sweep.
+    let out = gen(r#"
+        Org { id: Id, name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Project { id: Id, org: Org, name: text }
+        Task { id: Id, project: Project, owner_org: Org?, title: text }
+        shape ProjectCard from Project { name }
+        mutation new_project(pn: text, tt: text) -> ProjectCard scoped Tenant {
+          tx {
+            create Project { name = $pn } as p;
+            create Task { project = $p.id, owner_org = $p.org, title = $tt };
+          }
+        }
+        "#);
+    // `$p.id` → the bound Project's `:id_0`; `$p.org` → the same `:ctx_org` the Project used.
+    assert!(
+        out.contains("VALUES (:id_1, :id_0, :ctx_org, :tt)"),
+        "$p.org must bind :ctx_org, not NULL:\n{out}"
+    );
+    assert!(
+        !out.contains("not set by bound create"),
+        "a knowable scope column must not degrade to the NULL marker:\n{out}"
+    );
+}

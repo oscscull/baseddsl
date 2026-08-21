@@ -1238,13 +1238,17 @@ pub(crate) struct Select<'a> {
 }
 
 /// What a `$name.field` tx step reference resolves to: the bound `create`'s app-generated
-/// `id` bind and its assigns (to reuse a caller-supplied value for a non-`id` field).
+/// `id` bind, its assigns (to reuse a caller-supplied value for a non-`id` field), and the
+/// model it created (to reach that model's engine-managed `@scope` columns).
 #[derive(Clone)]
 pub(crate) struct BackCtx<'a> {
     /// The bind name the bound create's app-generated `id` was emitted under
     /// (`id_<step>` inside a tx). `$name.id` lowers to this.
     pub(crate) id_param: String,
     pub(crate) assigns: &'a [Assign],
+    /// The bound create's model name, so a `$name.<scope-column>` reference resolves to
+    /// the `:ctx_<field>` the create engine-set it from (the mutation runs under one `$ctx`).
+    pub(crate) model: &'a str,
 }
 
 impl<'a> Select<'a> {
@@ -2377,13 +2381,23 @@ impl<'a> Select<'a> {
                 _ => format!("NULL /* ${name}.{field} unresolved */"),
             };
         }
-        // Otherwise: `$name.id` is the app-generated id the bound create binds under
-        // `:id_<step>`; any other unset field needs a re-select (runtime).
+        // `$name.id` is the app-generated id the bound create binds under `:id_<step>`.
         if field == "id" {
-            format!(":{}", ctx.id_param)
-        } else {
-            format!("NULL /* ${name}.{field} not set by bound create */")
+            return format!(":{}", ctx.id_param);
         }
+        // A `@scope` column is engine-set from `$ctx` on the bound create (never an
+        // assign — sema E0181), so its value is the same `:ctx_<field>` the create used;
+        // the whole mutation runs under one `$ctx`, so reusing that bind is exact.
+        if let Some((_, ctx_field)) = self
+            .scope_terms_for(ctx.model)
+            .iter()
+            .find(|(f, _)| f == field)
+        {
+            return format!(":ctx_{ctx_field}");
+        }
+        // Any other unset field (an engine timestamp, a DB-side default) has no value the
+        // engine can bind inline; leave a visible marker rather than a silent wrong write.
+        format!("NULL /* ${name}.{field} not set by bound create */")
     }
 
     /// The value SQL for one key part of a composite-FK assign (`enrollment = $rhs`). A tx
