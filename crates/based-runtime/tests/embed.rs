@@ -56,7 +56,7 @@ fn row(v: serde_json::Value) -> Row {
 /// can never drift into a stale hand-copy.
 #[test]
 fn generated_client_is_current() {
-    use based_codegen::client::{client_with, ClientOptions, ClientTarget};
+    use based_codegen::client::{client_with, format_rust, ClientOptions, ClientTarget};
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, diags) = based_sema::check(&sf.decls);
@@ -66,7 +66,9 @@ fn generated_client_is_current() {
             .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
         "schema should check clean"
     );
-    let generated = client_with(
+    // Format exactly as `based gen client` does when it writes the file, so the mirror is the
+    // rustfmt-clean artifact a consumer's `cargo fmt` also leaves untouched.
+    let generated = format_rust(&client_with(
         &schema,
         &sf.decls,
         ClientTarget::Rust,
@@ -76,7 +78,7 @@ fn generated_client_is_current() {
             embedded: true,
             dialect: Some(based_codegen::Dialect::MariaDb),
         },
-    );
+    ));
     if std::env::var_os("BLESS").is_some() {
         std::fs::write(
             concat!(

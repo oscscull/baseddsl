@@ -583,32 +583,64 @@ pub const PURGE_ORDER_ROUTE: &str = "/m/purge_order";
 
 impl<T: Transport> Client<T> {
     /// `POST /q/order_by_id`
-    pub async fn order_by_id(&self, input: OrderByIdInput, ctx: ()) -> Result<Option<OrderCard>, ClientError> {
+    pub async fn order_by_id(
+        &self,
+        input: OrderByIdInput,
+        ctx: (),
+    ) -> Result<Option<OrderCard>, ClientError> {
         self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx).await
     }
     /// `POST /q/orders_in_org`
-    pub async fn orders_in_org(&self, input: OrdersInOrgInput, ctx: ()) -> Result<Vec<OrderCard>, ClientError> {
+    pub async fn orders_in_org(
+        &self,
+        input: OrdersInOrgInput,
+        ctx: (),
+    ) -> Result<Vec<OrderCard>, ClientError> {
         self.transport.call(ORDERS_IN_ORG_ROUTE, &input, &ctx).await
     }
     /// `POST /q/export_orders` — a `-> stream` query: the rows arrive as a live typed
     /// stream; drop it to cancel the pass.
-    pub async fn export_orders(&self, input: ExportOrdersInput, ctx: ()) -> Result<RowStream<OrderCard>, ClientError> {
-        self.transport.call_stream(EXPORT_ORDERS_ROUTE, &input, &ctx).await
+    pub async fn export_orders(
+        &self,
+        input: ExportOrdersInput,
+        ctx: (),
+    ) -> Result<RowStream<OrderCard>, ClientError> {
+        self.transport
+            .call_stream(EXPORT_ORDERS_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /q/my_org_orders`
-    pub async fn my_org_orders(&self, input: MyOrgOrdersInput, ctx: MyOrgOrdersCtx) -> Result<Vec<OrderCard>, ClientError> {
+    pub async fn my_org_orders(
+        &self,
+        input: MyOrgOrdersInput,
+        ctx: MyOrgOrdersCtx,
+    ) -> Result<Vec<OrderCard>, ClientError> {
         self.transport.call(MY_ORG_ORDERS_ROUTE, &input, &ctx).await
     }
     /// `POST /q/order_page`
-    pub async fn order_page(&self, input: OrderPageInput, ctx: ()) -> Result<Page<OrderCard>, ClientError> {
+    pub async fn order_page(
+        &self,
+        input: OrderPageInput,
+        ctx: (),
+    ) -> Result<Page<OrderCard>, ClientError> {
         self.transport.call(ORDER_PAGE_ROUTE, &input, &ctx).await
     }
     /// `POST /q/counted_order_page`
-    pub async fn counted_order_page(&self, input: CountedOrderPageInput, ctx: ()) -> Result<Page<OrderCard>, ClientError> {
-        self.transport.call(COUNTED_ORDER_PAGE_ROUTE, &input, &ctx).await
+    pub async fn counted_order_page(
+        &self,
+        input: CountedOrderPageInput,
+        ctx: (),
+    ) -> Result<Page<OrderCard>, ClientError> {
+        self.transport
+            .call(COUNTED_ORDER_PAGE_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/place_order`
-    pub async fn place_order(&self, input: PlaceOrderInput, ctx: ()) -> Result<OrderCard, ClientError> {
+    pub async fn place_order(
+        &self,
+        input: PlaceOrderInput,
+        ctx: (),
+    ) -> Result<OrderCard, ClientError> {
         self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx).await
     }
     /// `POST /m/place_order` carrying `key` as the mutation **idempotency key**: a retry
@@ -619,7 +651,9 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<OrderCard, ClientError> {
-        self.transport.call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/purge_order` — a `-> ok` mutation: the delete ran (`Ok(())`), or the
     /// row was absent/out of scope (a `404 not_found` error).
@@ -635,7 +669,10 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<(), ClientError> {
-        let _: Ack = self.transport.call_with_key(PURGE_ORDER_ROUTE, &input, &ctx, key).await?;
+        let _: Ack = self
+            .transport
+            .call_with_key(PURGE_ORDER_ROUTE, &input, &ctx, key)
+            .await?;
         Ok(())
     }
 }
@@ -650,8 +687,14 @@ pub trait TxBound {}
 
 impl<T: Transport + TxBound> Client<T> {
     /// `POST /q/order_for_update`
-    pub async fn order_for_update(&self, input: OrderForUpdateInput, ctx: ()) -> Result<Option<OrderCard>, ClientError> {
-        self.transport.call(ORDER_FOR_UPDATE_ROUTE, &input, &ctx).await
+    pub async fn order_for_update(
+        &self,
+        input: OrderForUpdateInput,
+        ctx: (),
+    ) -> Result<Option<OrderCard>, ClientError> {
+        self.transport
+            .call(ORDER_FOR_UPDATE_ROUTE, &input, &ctx)
+            .await
     }
 }
 
@@ -673,7 +716,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx).await;
         if resp.status == 200 {
@@ -681,7 +730,9 @@ impl Transport for Embedded<'_> {
         } else {
             // Preserve the server's structured error: its status + stable code + message.
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -703,7 +754,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self
             .engine
@@ -714,7 +771,9 @@ impl Transport for Embedded<'_> {
         } else {
             // Preserve the server's structured error: its status + stable code + message.
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -737,7 +796,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         match self.engine.call_stream(route, args, ctx).await {
             Ok(rows) => Ok(Box::pin(EngineRows {
@@ -748,7 +813,9 @@ impl Transport for Embedded<'_> {
             // A pre-body rejection: the same status + stable code the wire would send.
             Err(resp) => {
                 let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-                let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+                let message = resp.body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("call failed");
                 Err(ClientError::api(resp.status, code, message))
             }
         }
@@ -824,14 +891,22 @@ impl Transport for based_runtime::TxTransport {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.dispatch(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -1046,14 +1121,22 @@ impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> 
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.dispatch(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }

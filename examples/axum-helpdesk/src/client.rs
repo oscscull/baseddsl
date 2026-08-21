@@ -530,7 +530,9 @@ impl<'de> serde::Deserialize<'de> for Priority {
             2 => Ok(Priority::Normal),
             3 => Ok(Priority::High),
             4 => Ok(Priority::Urgent),
-            other => Err(serde::de::Error::custom(format!("invalid Priority value: {other}"))),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid Priority value: {other}"
+            ))),
         }
     }
 }
@@ -976,7 +978,11 @@ pub const CREATE_USER_ROUTE: &str = "/m/create_user";
 
 impl<T: Transport> Client<T> {
     /// `POST /m/add_comment`
-    pub async fn add_comment(&self, input: AddCommentInput, ctx: AddCommentCtx) -> Result<CommentRow, ClientError> {
+    pub async fn add_comment(
+        &self,
+        input: AddCommentInput,
+        ctx: AddCommentCtx,
+    ) -> Result<CommentRow, ClientError> {
         self.transport.call(ADD_COMMENT_ROUTE, &input, &ctx).await
     }
     /// `POST /m/add_comment` carrying `key` as the mutation **idempotency key**: a retry
@@ -987,12 +993,21 @@ impl<T: Transport> Client<T> {
         ctx: AddCommentCtx,
         key: &str,
     ) -> Result<CommentRow, ClientError> {
-        self.transport.call_with_key(ADD_COMMENT_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(ADD_COMMENT_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/purge_comment` — a `-> ok` mutation: the delete ran (`Ok(())`), or the
     /// row was absent/out of scope (a `404 not_found` error).
-    pub async fn purge_comment(&self, input: PurgeCommentInput, ctx: PurgeCommentCtx) -> Result<(), ClientError> {
-        let _: Ack = self.transport.call(PURGE_COMMENT_ROUTE, &input, &ctx).await?;
+    pub async fn purge_comment(
+        &self,
+        input: PurgeCommentInput,
+        ctx: PurgeCommentCtx,
+    ) -> Result<(), ClientError> {
+        let _: Ack = self
+            .transport
+            .call(PURGE_COMMENT_ROUTE, &input, &ctx)
+            .await?;
         Ok(())
     }
     /// `POST /m/purge_comment` carrying `key` as the mutation **idempotency key**: a retry
@@ -1003,15 +1018,26 @@ impl<T: Transport> Client<T> {
         ctx: PurgeCommentCtx,
         key: &str,
     ) -> Result<(), ClientError> {
-        let _: Ack = self.transport.call_with_key(PURGE_COMMENT_ROUTE, &input, &ctx, key).await?;
+        let _: Ack = self
+            .transport
+            .call_with_key(PURGE_COMMENT_ROUTE, &input, &ctx, key)
+            .await?;
         Ok(())
     }
     /// `POST /q/my_drafts`
-    pub async fn my_drafts(&self, input: MyDraftsInput, ctx: MyDraftsCtx) -> Result<Vec<DraftRow>, ClientError> {
+    pub async fn my_drafts(
+        &self,
+        input: MyDraftsInput,
+        ctx: MyDraftsCtx,
+    ) -> Result<Vec<DraftRow>, ClientError> {
         self.transport.call(MY_DRAFTS_ROUTE, &input, &ctx).await
     }
     /// `POST /m/save_draft`
-    pub async fn save_draft(&self, input: SaveDraftInput, ctx: SaveDraftCtx) -> Result<DraftRow, ClientError> {
+    pub async fn save_draft(
+        &self,
+        input: SaveDraftInput,
+        ctx: SaveDraftCtx,
+    ) -> Result<DraftRow, ClientError> {
         self.transport.call(SAVE_DRAFT_ROUTE, &input, &ctx).await
     }
     /// `POST /m/save_draft` carrying `key` as the mutation **idempotency key**: a retry
@@ -1022,7 +1048,9 @@ impl<T: Transport> Client<T> {
         ctx: SaveDraftCtx,
         key: &str,
     ) -> Result<DraftRow, ClientError> {
-        self.transport.call_with_key(SAVE_DRAFT_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(SAVE_DRAFT_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/create_org`
     pub async fn create_org(&self, input: CreateOrgInput, ctx: ()) -> Result<OrgRow, ClientError> {
@@ -1036,18 +1064,36 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<OrgRow, ClientError> {
-        self.transport.call_with_key(CREATE_ORG_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(CREATE_ORG_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /q/session_by_token`
-    pub async fn session_by_token(&self, input: SessionByTokenInput, ctx: ()) -> Result<Option<SessionCtx>, ClientError> {
-        self.transport.call(SESSION_BY_TOKEN_ROUTE, &input, &ctx).await
+    pub async fn session_by_token(
+        &self,
+        input: SessionByTokenInput,
+        ctx: (),
+    ) -> Result<Option<SessionCtx>, ClientError> {
+        self.transport
+            .call(SESSION_BY_TOKEN_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /q/login_identity`
-    pub async fn login_identity(&self, input: LoginIdentityInput, ctx: ()) -> Result<Option<LoginIdentity>, ClientError> {
-        self.transport.call(LOGIN_IDENTITY_ROUTE, &input, &ctx).await
+    pub async fn login_identity(
+        &self,
+        input: LoginIdentityInput,
+        ctx: (),
+    ) -> Result<Option<LoginIdentity>, ClientError> {
+        self.transport
+            .call(LOGIN_IDENTITY_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/start_session`
-    pub async fn start_session(&self, input: StartSessionInput, ctx: ()) -> Result<SessionCtx, ClientError> {
+    pub async fn start_session(
+        &self,
+        input: StartSessionInput,
+        ctx: (),
+    ) -> Result<SessionCtx, ClientError> {
         self.transport.call(START_SESSION_ROUTE, &input, &ctx).await
     }
     /// `POST /m/start_session` carrying `key` as the mutation **idempotency key**: a retry
@@ -1058,14 +1104,24 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<SessionCtx, ClientError> {
-        self.transport.call_with_key(START_SESSION_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(START_SESSION_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /q/my_tickets`
-    pub async fn my_tickets(&self, input: MyTicketsInput, ctx: MyTicketsCtx) -> Result<Vec<TicketRow>, ClientError> {
+    pub async fn my_tickets(
+        &self,
+        input: MyTicketsInput,
+        ctx: MyTicketsCtx,
+    ) -> Result<Vec<TicketRow>, ClientError> {
         self.transport.call(MY_TICKETS_ROUTE, &input, &ctx).await
     }
     /// `POST /m/open_ticket`
-    pub async fn open_ticket(&self, input: OpenTicketInput, ctx: OpenTicketCtx) -> Result<TicketDetail, ClientError> {
+    pub async fn open_ticket(
+        &self,
+        input: OpenTicketInput,
+        ctx: OpenTicketCtx,
+    ) -> Result<TicketDetail, ClientError> {
         self.transport.call(OPEN_TICKET_ROUTE, &input, &ctx).await
     }
     /// `POST /m/open_ticket` carrying `key` as the mutation **idempotency key**: a retry
@@ -1076,30 +1132,60 @@ impl<T: Transport> Client<T> {
         ctx: OpenTicketCtx,
         key: &str,
     ) -> Result<TicketDetail, ClientError> {
-        self.transport.call_with_key(OPEN_TICKET_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(OPEN_TICKET_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /q/ticket`
-    pub async fn ticket(&self, input: TicketInput, ctx: TicketCtx) -> Result<Option<TicketDetail>, ClientError> {
+    pub async fn ticket(
+        &self,
+        input: TicketInput,
+        ctx: TicketCtx,
+    ) -> Result<Option<TicketDetail>, ClientError> {
         self.transport.call(TICKET_ROUTE, &input, &ctx).await
     }
     /// `POST /q/tickets_for`
-    pub async fn tickets_for(&self, input: TicketsForInput, ctx: TicketsForCtx) -> Result<Vec<TicketRow>, ClientError> {
+    pub async fn tickets_for(
+        &self,
+        input: TicketsForInput,
+        ctx: TicketsForCtx,
+    ) -> Result<Vec<TicketRow>, ClientError> {
         self.transport.call(TICKETS_FOR_ROUTE, &input, &ctx).await
     }
     /// `POST /q/search_tickets`
-    pub async fn search_tickets(&self, input: SearchTicketsInput, ctx: SearchTicketsCtx) -> Result<Page<TicketRow>, ClientError> {
-        self.transport.call(SEARCH_TICKETS_ROUTE, &input, &ctx).await
+    pub async fn search_tickets(
+        &self,
+        input: SearchTicketsInput,
+        ctx: SearchTicketsCtx,
+    ) -> Result<Page<TicketRow>, ClientError> {
+        self.transport
+            .call(SEARCH_TICKETS_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /q/queue`
-    pub async fn queue(&self, input: QueueInput, ctx: QueueCtx) -> Result<Vec<TicketRow>, ClientError> {
+    pub async fn queue(
+        &self,
+        input: QueueInput,
+        ctx: QueueCtx,
+    ) -> Result<Vec<TicketRow>, ClientError> {
         self.transport.call(QUEUE_ROUTE, &input, &ctx).await
     }
     /// `POST /q/tagged_tickets`
-    pub async fn tagged_tickets(&self, input: TaggedTicketsInput, ctx: TaggedTicketsCtx) -> Result<Vec<TicketRow>, ClientError> {
-        self.transport.call(TAGGED_TICKETS_ROUTE, &input, &ctx).await
+    pub async fn tagged_tickets(
+        &self,
+        input: TaggedTicketsInput,
+        ctx: TaggedTicketsCtx,
+    ) -> Result<Vec<TicketRow>, ClientError> {
+        self.transport
+            .call(TAGGED_TICKETS_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/assign_ticket`
-    pub async fn assign_ticket(&self, input: AssignTicketInput, ctx: AssignTicketCtx) -> Result<TicketRow, ClientError> {
+    pub async fn assign_ticket(
+        &self,
+        input: AssignTicketInput,
+        ctx: AssignTicketCtx,
+    ) -> Result<TicketRow, ClientError> {
         self.transport.call(ASSIGN_TICKET_ROUTE, &input, &ctx).await
     }
     /// `POST /m/assign_ticket` carrying `key` as the mutation **idempotency key**: a retry
@@ -1110,10 +1196,16 @@ impl<T: Transport> Client<T> {
         ctx: AssignTicketCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(ASSIGN_TICKET_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(ASSIGN_TICKET_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/set_status`
-    pub async fn set_status(&self, input: SetStatusInput, ctx: SetStatusCtx) -> Result<TicketRow, ClientError> {
+    pub async fn set_status(
+        &self,
+        input: SetStatusInput,
+        ctx: SetStatusCtx,
+    ) -> Result<TicketRow, ClientError> {
         self.transport.call(SET_STATUS_ROUTE, &input, &ctx).await
     }
     /// `POST /m/set_status` carrying `key` as the mutation **idempotency key**: a retry
@@ -1124,10 +1216,16 @@ impl<T: Transport> Client<T> {
         ctx: SetStatusCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(SET_STATUS_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(SET_STATUS_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/tag_ticket`
-    pub async fn tag_ticket(&self, input: TagTicketInput, ctx: TagTicketCtx) -> Result<TicketRow, ClientError> {
+    pub async fn tag_ticket(
+        &self,
+        input: TagTicketInput,
+        ctx: TagTicketCtx,
+    ) -> Result<TicketRow, ClientError> {
         self.transport.call(TAG_TICKET_ROUTE, &input, &ctx).await
     }
     /// `POST /m/tag_ticket` carrying `key` as the mutation **idempotency key**: a retry
@@ -1138,11 +1236,19 @@ impl<T: Transport> Client<T> {
         ctx: TagTicketCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(TAG_TICKET_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(TAG_TICKET_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/mark_duplicate`
-    pub async fn mark_duplicate(&self, input: MarkDuplicateInput, ctx: MarkDuplicateCtx) -> Result<TicketRow, ClientError> {
-        self.transport.call(MARK_DUPLICATE_ROUTE, &input, &ctx).await
+    pub async fn mark_duplicate(
+        &self,
+        input: MarkDuplicateInput,
+        ctx: MarkDuplicateCtx,
+    ) -> Result<TicketRow, ClientError> {
+        self.transport
+            .call(MARK_DUPLICATE_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/mark_duplicate` carrying `key` as the mutation **idempotency key**: a retry
     /// with the same key replays the first attempt's response instead of writing again.
@@ -1152,10 +1258,16 @@ impl<T: Transport> Client<T> {
         ctx: MarkDuplicateCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(MARK_DUPLICATE_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(MARK_DUPLICATE_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/close_ticket`
-    pub async fn close_ticket(&self, input: CloseTicketInput, ctx: CloseTicketCtx) -> Result<TicketRow, ClientError> {
+    pub async fn close_ticket(
+        &self,
+        input: CloseTicketInput,
+        ctx: CloseTicketCtx,
+    ) -> Result<TicketRow, ClientError> {
         self.transport.call(CLOSE_TICKET_ROUTE, &input, &ctx).await
     }
     /// `POST /m/close_ticket` carrying `key` as the mutation **idempotency key**: a retry
@@ -1166,11 +1278,19 @@ impl<T: Transport> Client<T> {
         ctx: CloseTicketCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(CLOSE_TICKET_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(CLOSE_TICKET_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/archive_ticket`
-    pub async fn archive_ticket(&self, input: ArchiveTicketInput, ctx: ArchiveTicketCtx) -> Result<TicketRow, ClientError> {
-        self.transport.call(ARCHIVE_TICKET_ROUTE, &input, &ctx).await
+    pub async fn archive_ticket(
+        &self,
+        input: ArchiveTicketInput,
+        ctx: ArchiveTicketCtx,
+    ) -> Result<TicketRow, ClientError> {
+        self.transport
+            .call(ARCHIVE_TICKET_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/archive_ticket` carrying `key` as the mutation **idempotency key**: a retry
     /// with the same key replays the first attempt's response instead of writing again.
@@ -1180,11 +1300,19 @@ impl<T: Transport> Client<T> {
         ctx: ArchiveTicketCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(ARCHIVE_TICKET_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(ARCHIVE_TICKET_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/restore_ticket`
-    pub async fn restore_ticket(&self, input: RestoreTicketInput, ctx: RestoreTicketCtx) -> Result<TicketRow, ClientError> {
-        self.transport.call(RESTORE_TICKET_ROUTE, &input, &ctx).await
+    pub async fn restore_ticket(
+        &self,
+        input: RestoreTicketInput,
+        ctx: RestoreTicketCtx,
+    ) -> Result<TicketRow, ClientError> {
+        self.transport
+            .call(RESTORE_TICKET_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/restore_ticket` carrying `key` as the mutation **idempotency key**: a retry
     /// with the same key replays the first attempt's response instead of writing again.
@@ -1194,19 +1322,35 @@ impl<T: Transport> Client<T> {
         ctx: RestoreTicketCtx,
         key: &str,
     ) -> Result<TicketRow, ClientError> {
-        self.transport.call_with_key(RESTORE_TICKET_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(RESTORE_TICKET_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /q/admin_tickets`
-    pub async fn admin_tickets(&self, input: AdminTicketsInput, ctx: ()) -> Result<Page<TicketRow>, ClientError> {
+    pub async fn admin_tickets(
+        &self,
+        input: AdminTicketsInput,
+        ctx: (),
+    ) -> Result<Page<TicketRow>, ClientError> {
         self.transport.call(ADMIN_TICKETS_ROUTE, &input, &ctx).await
     }
     /// `POST /q/export_tickets` — a `-> stream` query: the rows arrive as a live typed
     /// stream; drop it to cancel the pass.
-    pub async fn export_tickets(&self, input: ExportTicketsInput, ctx: ()) -> Result<RowStream<TicketExport>, ClientError> {
-        self.transport.call_stream(EXPORT_TICKETS_ROUTE, &input, &ctx).await
+    pub async fn export_tickets(
+        &self,
+        input: ExportTicketsInput,
+        ctx: (),
+    ) -> Result<RowStream<TicketExport>, ClientError> {
+        self.transport
+            .call_stream(EXPORT_TICKETS_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/log_time`
-    pub async fn log_time(&self, input: LogTimeInput, ctx: LogTimeCtx) -> Result<TimeEntryRow, ClientError> {
+    pub async fn log_time(
+        &self,
+        input: LogTimeInput,
+        ctx: LogTimeCtx,
+    ) -> Result<TimeEntryRow, ClientError> {
         self.transport.call(LOG_TIME_ROUTE, &input, &ctx).await
     }
     /// `POST /m/log_time` carrying `key` as the mutation **idempotency key**: a retry
@@ -1217,14 +1361,26 @@ impl<T: Transport> Client<T> {
         ctx: LogTimeCtx,
         key: &str,
     ) -> Result<TimeEntryRow, ClientError> {
-        self.transport.call_with_key(LOG_TIME_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(LOG_TIME_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /q/workload_report`
-    pub async fn workload_report(&self, input: WorkloadReportInput, ctx: ()) -> Result<Vec<AgentWorkload>, ClientError> {
-        self.transport.call(WORKLOAD_REPORT_ROUTE, &input, &ctx).await
+    pub async fn workload_report(
+        &self,
+        input: WorkloadReportInput,
+        ctx: (),
+    ) -> Result<Vec<AgentWorkload>, ClientError> {
+        self.transport
+            .call(WORKLOAD_REPORT_ROUTE, &input, &ctx)
+            .await
     }
     /// `POST /m/create_user`
-    pub async fn create_user(&self, input: CreateUserInput, ctx: ()) -> Result<UserRow, ClientError> {
+    pub async fn create_user(
+        &self,
+        input: CreateUserInput,
+        ctx: (),
+    ) -> Result<UserRow, ClientError> {
         self.transport.call(CREATE_USER_ROUTE, &input, &ctx).await
     }
     /// `POST /m/create_user` carrying `key` as the mutation **idempotency key**: a retry
@@ -1235,7 +1391,9 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<UserRow, ClientError> {
-        self.transport.call_with_key(CREATE_USER_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(CREATE_USER_ROUTE, &input, &ctx, key)
+            .await
     }
 }
 
@@ -1249,8 +1407,14 @@ pub trait TxBound {}
 
 impl<T: Transport + TxBound> Client<T> {
     /// `POST /q/ticket_for_update`
-    pub async fn ticket_for_update(&self, input: TicketForUpdateInput, ctx: TicketForUpdateCtx) -> Result<Option<TicketRow>, ClientError> {
-        self.transport.call(TICKET_FOR_UPDATE_ROUTE, &input, &ctx).await
+    pub async fn ticket_for_update(
+        &self,
+        input: TicketForUpdateInput,
+        ctx: TicketForUpdateCtx,
+    ) -> Result<Option<TicketRow>, ClientError> {
+        self.transport
+            .call(TICKET_FOR_UPDATE_ROUTE, &input, &ctx)
+            .await
     }
 }
 
@@ -1272,7 +1436,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx).await;
         if resp.status == 200 {
@@ -1280,7 +1450,9 @@ impl Transport for Embedded<'_> {
         } else {
             // Preserve the server's structured error: its status + stable code + message.
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -1302,7 +1474,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self
             .engine
@@ -1313,7 +1491,9 @@ impl Transport for Embedded<'_> {
         } else {
             // Preserve the server's structured error: its status + stable code + message.
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -1336,7 +1516,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         match self.engine.call_stream(route, args, ctx).await {
             Ok(rows) => Ok(Box::pin(EngineRows {
@@ -1347,7 +1533,9 @@ impl Transport for Embedded<'_> {
             // A pre-body rejection: the same status + stable code the wire would send.
             Err(resp) => {
                 let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-                let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+                let message = resp.body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("call failed");
                 Err(ClientError::api(resp.status, code, message))
             }
         }
@@ -1423,14 +1611,22 @@ impl Transport for based_runtime::TxTransport {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.dispatch(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -1645,14 +1841,22 @@ impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> 
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.dispatch(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }

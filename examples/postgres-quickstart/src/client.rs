@@ -467,22 +467,40 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<OrgRow, ClientError> {
-        self.transport.call_with_key(CREATE_ORG_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(CREATE_ORG_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /q/order_by_id`
-    pub async fn order_by_id(&self, input: OrderByIdInput, ctx: OrderByIdCtx) -> Result<Option<OrderCard>, ClientError> {
+    pub async fn order_by_id(
+        &self,
+        input: OrderByIdInput,
+        ctx: OrderByIdCtx,
+    ) -> Result<Option<OrderCard>, ClientError> {
         self.transport.call(ORDER_BY_ID_ROUTE, &input, &ctx).await
     }
     /// `POST /q/my_orders`
-    pub async fn my_orders(&self, input: MyOrdersInput, ctx: MyOrdersCtx) -> Result<Vec<OrderCard>, ClientError> {
+    pub async fn my_orders(
+        &self,
+        input: MyOrdersInput,
+        ctx: MyOrdersCtx,
+    ) -> Result<Vec<OrderCard>, ClientError> {
         self.transport.call(MY_ORDERS_ROUTE, &input, &ctx).await
     }
     /// `POST /q/recent_orders`
-    pub async fn recent_orders(&self, input: RecentOrdersInput, ctx: RecentOrdersCtx) -> Result<Page<OrderCard>, ClientError> {
+    pub async fn recent_orders(
+        &self,
+        input: RecentOrdersInput,
+        ctx: RecentOrdersCtx,
+    ) -> Result<Page<OrderCard>, ClientError> {
         self.transport.call(RECENT_ORDERS_ROUTE, &input, &ctx).await
     }
     /// `POST /m/place_order`
-    pub async fn place_order(&self, input: PlaceOrderInput, ctx: PlaceOrderCtx) -> Result<OrderCard, ClientError> {
+    pub async fn place_order(
+        &self,
+        input: PlaceOrderInput,
+        ctx: PlaceOrderCtx,
+    ) -> Result<OrderCard, ClientError> {
         self.transport.call(PLACE_ORDER_ROUTE, &input, &ctx).await
     }
     /// `POST /m/place_order` carrying `key` as the mutation **idempotency key**: a retry
@@ -493,10 +511,16 @@ impl<T: Transport> Client<T> {
         ctx: PlaceOrderCtx,
         key: &str,
     ) -> Result<OrderCard, ClientError> {
-        self.transport.call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(PLACE_ORDER_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/cancel_order`
-    pub async fn cancel_order(&self, input: CancelOrderInput, ctx: CancelOrderCtx) -> Result<OrderCard, ClientError> {
+    pub async fn cancel_order(
+        &self,
+        input: CancelOrderInput,
+        ctx: CancelOrderCtx,
+    ) -> Result<OrderCard, ClientError> {
         self.transport.call(CANCEL_ORDER_ROUTE, &input, &ctx).await
     }
     /// `POST /m/cancel_order` carrying `key` as the mutation **idempotency key**: a retry
@@ -507,10 +531,16 @@ impl<T: Transport> Client<T> {
         ctx: CancelOrderCtx,
         key: &str,
     ) -> Result<OrderCard, ClientError> {
-        self.transport.call_with_key(CANCEL_ORDER_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(CANCEL_ORDER_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/restore_order`
-    pub async fn restore_order(&self, input: RestoreOrderInput, ctx: RestoreOrderCtx) -> Result<OrderCard, ClientError> {
+    pub async fn restore_order(
+        &self,
+        input: RestoreOrderInput,
+        ctx: RestoreOrderCtx,
+    ) -> Result<OrderCard, ClientError> {
         self.transport.call(RESTORE_ORDER_ROUTE, &input, &ctx).await
     }
     /// `POST /m/restore_order` carrying `key` as the mutation **idempotency key**: a retry
@@ -521,10 +551,16 @@ impl<T: Transport> Client<T> {
         ctx: RestoreOrderCtx,
         key: &str,
     ) -> Result<OrderCard, ClientError> {
-        self.transport.call_with_key(RESTORE_ORDER_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(RESTORE_ORDER_ROUTE, &input, &ctx, key)
+            .await
     }
     /// `POST /m/create_user`
-    pub async fn create_user(&self, input: CreateUserInput, ctx: ()) -> Result<UserRow, ClientError> {
+    pub async fn create_user(
+        &self,
+        input: CreateUserInput,
+        ctx: (),
+    ) -> Result<UserRow, ClientError> {
         self.transport.call(CREATE_USER_ROUTE, &input, &ctx).await
     }
     /// `POST /m/create_user` carrying `key` as the mutation **idempotency key**: a retry
@@ -535,7 +571,9 @@ impl<T: Transport> Client<T> {
         ctx: (),
         key: &str,
     ) -> Result<UserRow, ClientError> {
-        self.transport.call_with_key(CREATE_USER_ROUTE, &input, &ctx, key).await
+        self.transport
+            .call_with_key(CREATE_USER_ROUTE, &input, &ctx, key)
+            .await
     }
 }
 
@@ -557,7 +595,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.engine.call(route, args, ctx).await;
         if resp.status == 200 {
@@ -565,7 +609,9 @@ impl Transport for Embedded<'_> {
         } else {
             // Preserve the server's structured error: its status + stable code + message.
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -587,7 +633,13 @@ impl Transport for Embedded<'_> {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self
             .engine
@@ -598,7 +650,9 @@ impl Transport for Embedded<'_> {
         } else {
             // Preserve the server's structured error: its status + stable code + message.
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -630,14 +684,22 @@ impl Transport for based_runtime::TxTransport {
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.dispatch(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
@@ -829,14 +891,22 @@ impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> 
         let args = serde_json::to_value(input).map_err(ClientError::decode)?;
         // `&()` → JSON `null`; the engine treats a non-object context as empty.
         let ctx = serde_json::to_value(ctx)
-            .map(|v| if v.is_object() { v } else { serde_json::json!({}) })
+            .map(|v| {
+                if v.is_object() {
+                    v
+                } else {
+                    serde_json::json!({})
+                }
+            })
             .map_err(ClientError::decode)?;
         let resp = self.dispatch(route, args, ctx).await;
         if resp.status == 200 {
             serde_json::from_value(resp.body).map_err(ClientError::decode)
         } else {
             let code = resp.body["error"]["code"].as_str().unwrap_or("error");
-            let message = resp.body["error"]["message"].as_str().unwrap_or("call failed");
+            let message = resp.body["error"]["message"]
+                .as_str()
+                .unwrap_or("call failed");
             Err(ClientError::api(resp.status, code, message))
         }
     }
