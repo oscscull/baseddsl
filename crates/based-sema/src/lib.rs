@@ -132,14 +132,11 @@ pub fn check_foreign_keys(schema: &CheckedSchema, fks: ForeignKeys) -> Vec<Diagn
             }
         }
         for mem in &m.members {
-            let MemberKind::Forward {
-                fk, custom_join, ..
-            } = &mem.kind
-            else {
+            let MemberKind::Forward { fk, custom_on, .. } = &mem.kind else {
                 continue;
             };
             // A custom-join edge owns no FK column — already `E0291`; nothing to weigh here.
-            if *custom_join {
+            if custom_on.is_some() {
                 continue;
             }
             if fk.fk {

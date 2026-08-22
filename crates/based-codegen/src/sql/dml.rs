@@ -1482,6 +1482,38 @@ impl<'a> Select<'a> {
         }
     }
 
+    /// The correlation predicate tying a to-many child row (at `child_alias`) to its
+    /// parent (at `outer_alias`): the child's back-FK column(s) equal the parent's
+    /// primary key, or — when the `via` forward carries a custom `on:` — that declared
+    /// condition (near = the FK-holding child, far = the parent).
+    fn to_many_correlation(
+        &self,
+        child: &'a RModel,
+        via_field: &str,
+        parent: &RModel,
+        child_alias: &str,
+        outer_alias: &str,
+    ) -> String {
+        if let Some(MemberKind::Forward {
+            custom_on: Some(pred),
+            ..
+        }) = child.member(via_field).map(|m| &m.kind)
+        {
+            return render_join_on(self.dialect, pred, &child.table, child_alias, outer_alias);
+        }
+        self.to_many_pairs(child, via_field, parent)
+            .iter()
+            .map(|(child_fk, parent_pk)| {
+                format!(
+                    "{} = {}",
+                    self.qcol(child_alias, child_fk),
+                    self.qcol(outer_alias, parent_pk)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    }
+
     /// Build the correlated-subquery expression that aggregates a to-many child edge into
     /// a JSON array of the projected element bodies (L1). The child gets a fresh
     /// `s<n>_<table>` root alias (distinct from `outer_alias`, so a self-referential edge
@@ -1542,17 +1574,13 @@ impl<'a> Select<'a> {
         let order = (!order_keys.is_empty()).then(|| order_keys.join(", "));
         self.sub_counter = sub.sub_counter;
 
-        let mut wheres: Vec<String> = self
-            .to_many_pairs(child, via_field, outer_model)
-            .iter()
-            .map(|(child_fk, parent_pk)| {
-                format!(
-                    "{} = {}",
-                    self.qcol(&child_alias, child_fk),
-                    self.qcol(outer_alias, parent_pk)
-                )
-            })
-            .collect();
+        let mut wheres: Vec<String> = vec![self.to_many_correlation(
+            child,
+            via_field,
+            outer_model,
+            &child_alias,
+            outer_alias,
+        )];
         if let Some(sd) = &child.soft_delete {
             wheres.push(soft_pred(self.dialect, &child_alias, child, sd));
         }
@@ -1665,17 +1693,8 @@ impl<'a> Select<'a> {
         let (far_fk, far_model) = (far_fk?, far_model?);
         self.sub_counter = inner.sub_counter;
 
-        let mut inner_wheres: Vec<String> = self
-            .to_many_pairs(junction, &near_via, root)
-            .iter()
-            .map(|(fk, pk)| {
-                format!(
-                    "{} = {}",
-                    self.qcol(&jx_alias, fk),
-                    self.qcol(outer_alias, pk)
-                )
-            })
-            .collect();
+        let mut inner_wheres: Vec<String> =
+            vec![self.to_many_correlation(junction, &near_via, root, &jx_alias, outer_alias)];
         if let Some(sd) = &junction.soft_delete {
             inner_wheres.push(soft_pred(self.dialect, &jx_alias, junction, sd));
         }
@@ -1939,12 +1958,22 @@ impl<'a> Select<'a> {
         }
         let alias = format!("j_{}", prefix.replace('.', "_"));
         let kind = if optional { "LEFT JOIN" } else { "JOIN" };
-        let pairs = self.fk_join_pairs(mem);
-        let mut on = pairs
-            .iter()
-            .map(|(fk, pk)| format!("{} = {}", self.qcol(&alias, pk), self.qcol(cur_alias, fk)))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        // A custom `on:` relation renders its declared condition (`cur` is the
+        // FK-holding near side, `tmodel` the far target); otherwise the conventional
+        // `<field>_id = pk` correlation, one part per composite key column.
+        let mut on = if let MemberKind::Forward {
+            custom_on: Some(pred),
+            ..
+        } = &mem.kind
+        {
+            render_join_on(self.dialect, pred, &cur_model.table, cur_alias, &alias)
+        } else {
+            self.fk_join_pairs(mem)
+                .iter()
+                .map(|(fk, pk)| format!("{} = {}", self.qcol(&alias, pk), self.qcol(cur_alias, fk)))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        };
         if let Some(sd) = &tmodel.soft_delete {
             on.push_str(&format!(
                 " AND {}",
@@ -1989,22 +2018,31 @@ impl<'a> Select<'a> {
         }
         let alias = format!("j_{}", prefix.replace('.', "_"));
         // The forward field `via` on the target carries the FK column(s) back to us, paired
-        // with our primary-key column(s) in key order.
-        let pairs: Vec<(String, String)> = match tmodel.member(via) {
-            Some(m) if matches!(m.kind, MemberKind::Forward { .. }) => self.fk_join_pairs(m),
-            _ => vec![(format!("{via}_id"), pk_col(cur_model))],
+        // with our primary-key column(s) in key order — or a custom `on:` condition, whose
+        // near side is the FK-holding `tmodel` and far side our `cur_model`.
+        let mut on = if let Some(MemberKind::Forward {
+            custom_on: Some(pred),
+            ..
+        }) = tmodel.member(via).map(|m| &m.kind)
+        {
+            render_join_on(self.dialect, pred, &tmodel.table, &alias, cur_alias)
+        } else {
+            let pairs: Vec<(String, String)> = match tmodel.member(via) {
+                Some(m) if matches!(m.kind, MemberKind::Forward { .. }) => self.fk_join_pairs(m),
+                _ => vec![(format!("{via}_id"), pk_col(cur_model))],
+            };
+            pairs
+                .iter()
+                .map(|(via_fk, cur_pk)| {
+                    format!(
+                        "{} = {}",
+                        self.qcol(&alias, via_fk),
+                        self.qcol(cur_alias, cur_pk)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ")
         };
-        let mut on = pairs
-            .iter()
-            .map(|(via_fk, cur_pk)| {
-                format!(
-                    "{} = {}",
-                    self.qcol(&alias, via_fk),
-                    self.qcol(cur_alias, cur_pk)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ");
         if let Some(sd) = &tmodel.soft_delete {
             on.push_str(&format!(
                 " AND {}",
@@ -2704,4 +2742,70 @@ pub(crate) fn render_raw(dialect: Dialect, raw: &RawSql, root_alias: &str, table
         }
     }
     s
+}
+
+/// Render a relation's custom `on:` join condition (`on: order.user_ref =
+/// user.legacy_id`) as the join `ON` SQL. Unlike a `where` predicate — resolved
+/// against one model's field paths — a join condition names both joined models
+/// explicitly by table (`<table>.<column>`): the FK-holding `near` model and its
+/// far target. A column qualified by `near_table` resolves to `near_alias`; any
+/// other qualifier is the far side, resolving to `far_alias`. Sema
+/// (`resolve::check_relation_on`) has already verified every path is
+/// `<table>.<column>` naming one of the two models with a real column, and that no
+/// `$param` / filter / function appears — so the value arm need only handle a
+/// column path or a literal.
+///
+/// A self-referential custom join (near and far are the same table) can't be
+/// disambiguated by table name, so sema rejects it up front (`E0127`); this
+/// renderer therefore only ever sees a two-model join.
+fn render_join_on(
+    dialect: Dialect,
+    pred: &Predicate,
+    near_table: &str,
+    near_alias: &str,
+    far_alias: &str,
+) -> String {
+    let col = |p: &Path| -> String {
+        let table = p.segments.first().map_or("", |s| s.node.as_str());
+        let column = p.segments.get(1).map_or("", |s| s.node.as_str());
+        let alias = if table == near_table {
+            near_alias
+        } else {
+            far_alias
+        };
+        dialect.qcol(alias, column)
+    };
+    let val = |v: &Value| -> String {
+        match v {
+            Value::Path(p) => col(p),
+            Value::Lit(l) => render_lit(dialect, l),
+            // Sema rejects params/functions in a join condition; guard defensively.
+            _ => "NULL".to_string(),
+        }
+    };
+    let recur = |p| render_join_on(dialect, p, near_table, near_alias, far_alias);
+    match pred {
+        Predicate::And(a, b) => format!("({} AND {})", recur(a), recur(b)),
+        Predicate::Or(a, b) => format!("({} OR {})", recur(a), recur(b)),
+        Predicate::Not(inner) => format!("NOT ({})", recur(inner)),
+        Predicate::Cmp { path, op, value } => {
+            let (lhs, rhs) = (col(path), val(value));
+            match op {
+                Op::In => format!("{lhs} IN ({rhs})"),
+                Op::Has => match dialect {
+                    Dialect::Postgres => format!("{lhs} @> {rhs}"),
+                    _ => format!("{rhs} MEMBER OF({lhs})"),
+                },
+                _ => format!("{lhs} {} {rhs}", sql_op(*op)),
+            }
+        }
+        Predicate::InList { path, values } => {
+            let items: Vec<String> = values.iter().map(&val).collect();
+            format!("{} IN ({})", col(path), items.join(", "))
+        }
+        Predicate::Bare(path) => format!("{} = {}", col(path), dialect.bool_lit(true)),
+        Predicate::Raw(raw) => format!("({})", render_raw(dialect, raw, near_alias, near_table)),
+        // Sema rejects a named-filter call in a join; lower to a harmless truth.
+        Predicate::FilterCall { .. } => "TRUE".to_string(),
+    }
 }

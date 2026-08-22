@@ -1407,6 +1407,48 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
     tolerated, a `raw(dialect)` line riding separately); `down.mig` reverse correctness (add⇄drop,
     rename⇄rename, create⇄drop) + the loud irreversible comment for a drop/alter; and `_based_migrations`
     ledger idempotency (re-apply is a no-op, the tamper hash catches a post-apply edit).
+  - **Sweep 2026-08-22 (3) — relations/joins (forward to-one × to-many inverse × far-side flatten × custom
+    `on:` join × `@scope`/soft-delete on every join site). Found + FIXED one real correctness bug:** a
+    relation with a **custom `on:` join condition** (`placed_by: User (on: order.user_ref = user.legacy_id)`,
+    the spec's legacy-key escape hatch) was **completely ignored by codegen** — the `on:` predicate was
+    dropped after sema (the resolved `MemberKind::Forward` carried only a `custom_join: bool`, never the
+    predicate), so every join fell back to the conventional `<field>_id = pk` correlation. On **all three
+    dialects** the forward join emitted `JOIN user ON j.id = order.placed_by_id` — against a `placed_by_id`
+    column **that doesn't exist** for a custom-join edge — instead of `ON order.user_ref = j.legacy_id`; the
+    to-many inverse and the flatten junction correlation were wrong the same way. And a **second facet of the
+    same defect:** DDL emitted a *phantom* `<field>_id` column (NOT NULL for a required edge) that no write
+    could meaningfully populate — a custom-join edge owns no conventional FK column. A hard miscompile of a
+    documented feature (the whole query references a nonexistent column and never executes). Root cause: the
+    `on:` predicate never reached the IR. Fix (contained, all dialects): carry the resolved predicate as
+    `MemberKind::Forward::custom_on: Option<Predicate>` (replacing the redundant `custom_join` bool);
+    `fk_columns` returns empty for a custom-join edge (no phantom DDL column, no conventional FK constraint);
+    a new `render_join_on` renders the `on:` predicate as the join `ON`, resolving each `<table>.<column>`
+    qualifier to the matching join alias (near = FK holder, far = target), mirroring the `where` predicate
+    lowering; used at all three join sites — `join_forward`, `join_inverse`, and the to-many correlation
+    (`to_many_correlation`, feeding both `json_array_subquery` and the flatten `json_flatten_subquery`).
+    Regression: codegen goldens `custom_join_renders_the_declared_on_condition_forward` +
+    `custom_join_correlates_a_to_many_inverse_via_the_condition` (based-codegen/tests/dml.rs, all three
+    dialects) + live SQLite `custom_join_condition_resolves_legacy_keys_end_to_end` (sqlite_integration.rs —
+    surrogate id `u1` but legacy id `42`; forward `buyer { name }` and inverse `orders { note }` both resolve
+    through `user_ref = legacy_id`, and the DDL emits no `buyer_id`). No `D#` (plain bug fix; the spec already
+    says a custom join "stays inside the guarantee — engine still understands the join"). **Filed as its own
+    item, RESOLVED same sweep):** a custom `on:` **self-join** (near table == far table) can't disambiguate
+    its two sides by table name — now rejected in sema (`E0127`), see **H6-R2**. **Swept clean** (no bug found, codegen +
+    live SQLite): forward/inverse joins inject the joined model's `@scope` + soft-delete into the `ON`; the
+    far-side flatten's junction and far model each ride their own scope/soft-delete; the sema scope/ctx walk
+    already recurses into `Nest`/`NestRef`/`Flatten` (H9), so a nest- or flatten-only scoped child is touched
+    at compile time; multi-hop flatten intermediates join with scope injected.
+- **H6-R2. ✅ RESOLVED (owner call, H6 sweep 3). A custom `on:` self-join is rejected in sema (`E0127`).**
+  A custom join whose near and far models are the **same table** (`parent: Node (on: node.parent_ref =
+  node.id)`) is unrenderable: both `node.…` qualifiers map to the same alias, so neither the source nor
+  codegen can tell the parent-row column from the joined-row column — the source syntax has no way to name
+  the two logical sides. Owner chose option (a): reject it at compile time (`E0127` in model.rs, at custom-join
+  resolution when `fi == mi`) with a message pointing at the `<field>_id` convention, which aliases the two
+  sides distinctly. So `render_join_on` only ever sees a genuine two-model join. Test:
+  `custom_join_self_ref_rejected` (based-sema/tests/check.rs). **Residual minor (not filed as an item):**
+  bare-projecting a custom-join relation (`shape { buyer }`, no body) emits `<field>_id` — now a hard "no
+  such column" at run time (was a silent NULL against the pre-fix phantom column); sema could reject it
+  (no near-side id to project), but it's exotic and fails loud, so left as-is for now.
 - **H6-R1. ✅ RESOLVED (D124). A bound create re-selects its written row; `$name.field` reads it.**
   Was: a `tx` `$name.field` reference to a bound create's field that is neither explicitly assigned, nor
   `id`, nor a `@scope` column — an `@created`/`@updated` timestamp or a DB-side default — lowered to a

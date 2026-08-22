@@ -223,12 +223,16 @@ fn member(name: &str, kind: &MemberKind) -> String {
             target,
             optional,
             fk_col,
-            custom_join,
+            custom_on,
             ..
         } => format!(
             "{name}: -> {target}{}  fk={fk_col}{}",
             if *optional { "?" } else { "" },
-            if *custom_join { "  custom-join" } else { "" },
+            if custom_on.is_some() {
+                "  custom-join"
+            } else {
+                ""
+            },
         ),
         MemberKind::Inverse { target, via } => format!("{name}: <- {target} via {via}"),
     }

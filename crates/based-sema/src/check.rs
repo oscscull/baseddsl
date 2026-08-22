@@ -2211,9 +2211,9 @@ fn is_required(kind: &MemberKind) -> bool {
         } => !*optional && default.is_none(),
         MemberKind::Forward {
             optional,
-            custom_join,
+            custom_on,
             ..
-        } => !*optional && !*custom_join,
+        } => !*optional && custom_on.is_none(),
         MemberKind::Inverse { .. } => false,
     }
 }

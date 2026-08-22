@@ -37,7 +37,8 @@ pub mod code {
     pub const INVERSE_INFER: &str = "E0124"; // to-many with no inferable / ambiguous inverse
     pub const JOIN_TABLE: &str = "E0125"; // custom `on:` join names a table not in scope
     pub const JOIN_FORM: &str = "E0126"; // custom `on:` join malformed (not `<table>.<col>`, or not a to-one relation)
-                                         // shapes
+    pub const JOIN_SELF_REF: &str = "E0127"; // custom `on:` join whose near and far are the same model — the two sides can't be named apart
+                                             // shapes
     pub const SHAPE_BARE_RELATION: &str = "E0130"; // bare relation must nest or `=`
     pub const SHAPE_NEST_SCALAR: &str = "E0131"; // nested a non-relation
     pub const SHAPE_REF_UNKNOWN: &str = "E0132"; // `field -> Name` names no shape
@@ -413,11 +414,21 @@ impl CheckedSchema {
     /// target yields one entry on the relation's own `fk_col` (its `(column "…")` override
     /// honored). A composite-key target yields one `<field>_<part_col>` column per key
     /// part, in key order — the auto-expanded multi-column FK. Empty for an inverse edge,
-    /// a missing target, or a keyless target (no key to reference).
+    /// a missing target, a keyless target (no key to reference), or a custom-join edge
+    /// (its join rides declared legacy columns, so it owns no conventional FK column).
     pub fn fk_columns<'s>(&'s self, mem: &RMember) -> Vec<(String, &'s RMember)> {
-        let MemberKind::Forward { target, fk_col, .. } = &mem.kind else {
+        let MemberKind::Forward {
+            target,
+            fk_col,
+            custom_on,
+            ..
+        } = &mem.kind
+        else {
             return Vec::new();
         };
+        if custom_on.is_some() {
+            return Vec::new();
+        }
         let Some(t) = self.model(target) else {
             return Vec::new();
         };
@@ -705,13 +716,10 @@ impl RModel {
     /// (no conventional FK column) never gets one. Actions declared with `@fk(on_delete: …)`
     /// apply regardless of which side (decorator or convention) supplies the presence.
     pub fn resolved_fk(&self, mem: &RMember, fks: ForeignKeys) -> Option<ResolvedFk> {
-        let MemberKind::Forward {
-            custom_join, fk, ..
-        } = &mem.kind
-        else {
+        let MemberKind::Forward { custom_on, fk, .. } = &mem.kind else {
             return None;
         };
-        if *custom_join || self.no_fk || fk.no_fk {
+        if custom_on.is_some() || self.no_fk || fk.no_fk {
             return None;
         }
         let present = fk.fk || matches!(fks, ForeignKeys::All);
@@ -814,7 +822,11 @@ pub enum MemberKind {
         target: String,
         optional: bool,
         fk_col: String,
-        custom_join: bool,
+        /// A custom `on:` join condition (`on: order.user_ref = user.legacy_id`), for
+        /// legacy keys that don't follow the `<field>_id` convention. `Some` marks a
+        /// custom-join edge (it owns no conventional FK column); codegen renders this
+        /// predicate as the join `ON` in place of the `fk_col = pk` correlation.
+        custom_on: Option<Predicate>,
         /// The `@fk`/`@no_fk` intent on this edge (presence resolved via
         /// [`RModel::resolved_fk`] against the `foreign_keys` convention).
         fk: FkDecl,

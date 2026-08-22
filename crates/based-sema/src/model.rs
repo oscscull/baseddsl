@@ -215,7 +215,7 @@ fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> 
                 }
                 | MemberKind::Forward {
                     optional: false,
-                    custom_join: false,
+                    custom_on: None,
                     ..
                 },
             ) => {}
@@ -499,7 +499,7 @@ fn classify(f: &Field, enums: &HashMap<String, EnumKind>) -> MemberKind {
                     target: target.node.clone(),
                     optional: f.ty.optional,
                     fk_col,
-                    custom_join: f.relation_on.is_some(),
+                    custom_on: f.relation_on.clone(),
                     fk: fk_decl(f),
                 }
             }
@@ -684,10 +684,10 @@ fn validate_fk(ast: &Model, mi: usize, models: &[RModel], sink: &mut Sink) {
             continue;
         }
         // The decorators mean something only on a forward to-one relation column.
-        if let Some(MemberKind::Forward { custom_join, .. }) =
+        if let Some(MemberKind::Forward { custom_on, .. }) =
             models[mi].member(&f.name.node).map(|m| &m.kind)
         {
-            if *custom_join {
+            if custom_on.is_some() {
                 sink.error(
                     code::FK_CUSTOM_JOIN,
                     span,
@@ -1175,7 +1175,23 @@ pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
             // scalar, an optional is fine; a `[]` / explicit-inverse edge owns no FK.
             BaseType::Model(target) if !f.ty.many && f.inverse.is_none() => {
                 if let Some(fi) = cx.find(&target.node) {
-                    resolve::check_relation_on(pred, mi, fi, cx, sink);
+                    // A self-ref custom join writes both sides with the same table name
+                    // (`node.parent_ref = node.id`), so neither the source nor codegen can
+                    // tell the near row from the joined row. Reject it — self-relations use
+                    // the `<field>_id` convention, which aliases the two sides distinctly.
+                    if fi == mi {
+                        sink.error(
+                            code::JOIN_SELF_REF,
+                            f.name.span,
+                            format!(
+                                "`on:` custom join on `{}` is self-referential (both sides are `{}`) — \
+                                 its two sides can't be named apart; use the `<field>_id` convention for a self-relation",
+                                f.name.node, target.node
+                            ),
+                        );
+                    } else {
+                        resolve::check_relation_on(pred, mi, fi, cx, sink);
+                    }
                 }
             }
             _ => sink.error(

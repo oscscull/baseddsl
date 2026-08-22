@@ -2459,6 +2459,23 @@ fn custom_join_param_rejected() {
     assert!(errors(&d).contains(&"E0126"), "{:?}", codes(&d));
 }
 
+#[test]
+fn custom_join_self_ref_rejected() {
+    // A self-ref custom join names both sides with the same table (`node.parent_ref =
+    // node.id`), so codegen can't tell the near row from the joined row — rejected;
+    // a self-relation uses the `<field>_id` convention instead.
+    let (_, d) = analyze(
+        r#"
+        Node {
+          id: Id
+          parent_ref: int
+          parent: Node (on: node.parent_ref = node.id)
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0127"), "{:?}", codes(&d));
+}
+
 // ---------- multi-scope DNF: alternatives, E0185, E0186  --------------
 
 #[test]
