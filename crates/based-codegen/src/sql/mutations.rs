@@ -22,9 +22,11 @@
 //! - `hard delete M where (p)` -> real `DELETE FROM m WHERE p` (soft-delete opt-out;
 //!   `@scope` still applies).
 //! - `tx { ... }` -> the inner statements, run in one engine-owned transaction
-//!   (the engine, not this SQL, owns BEGIN/COMMIT). Sibling `create`s
-//!   get distinct id binds (`:id_<step>`), and a `create … as name` binding lets a
-//!   later step reach any prior step's row — `$name.id` binds that create's generated id.
+//!   (the engine, not this SQL, owns BEGIN/COMMIT). Sibling `create`s get distinct id
+//!   binds (`:id_<step>`). A bound `create … as name` re-selects its written row (its
+//!   INSERT carries `RETURNING <cols>`, or on MySQL a follow-up keyed `SELECT`), and a
+//!   later step's `$name.field` reads that row's committed value from a `:bref_name__col`
+//!   bind — so a DB default, engine timestamp, or DB-generated id threads across steps.
 //!
 //! ## Returning the declared shape (create-keyed + where-keyed)
 //! Every mutation reads its written row back in its declared shape via a trailing
@@ -54,7 +56,7 @@ use based_ast::*;
 use based_sema::{CheckedSchema, MemberKind, RModel, ScopeInject, SoftDelete, SoftMode};
 
 use crate::sql::dml::{
-    physical_col, project_return, push_joins, render_raw, soft_pred, BackCtx, Select,
+    bref_name, physical_col, project_return, push_joins, render_raw, soft_pred, BackCtx, Select,
 };
 use crate::Dialect;
 
@@ -107,17 +109,49 @@ pub struct LoweredWrite {
     /// re-select keys on it since there is no generated `id`. `None` for a keyed model /
     /// any other write.
     pub read_key: Option<Vec<(String, String)>>,
-    /// For a `create` on a **`serial`** (DB-generated PK) model: the id is unknown until
-    /// the INSERT runs, so the id column is omitted and the runtime reads the assigned id
-    /// back — `RETURNING <id>` (Postgres/SQLite) rides the SQL here, MariaDB/MySQL use
-    /// `LAST_INSERT_ID()` in the driver. `true` marks such an INSERT for the run stage.
-    pub serial_return: bool,
-    /// The physical column whose DB-generated value the run stage recovers for a
-    /// `serial_return` create: the sole `serial` `id`, or a composite `@key`'s `serial`
-    /// part (Postgres/MariaDB). `None` when `serial_return` is false. For a composite key,
-    /// [`read_key`](Self::read_key) carries the *other* (app-supplied) key parts, so the
-    /// deferred re-select can rebuild the full tuple.
+    /// The physical column whose DB-generated value the run stage recovers for a `serial`
+    /// (DB-generated PK) create: the sole `serial` `id`, or a composite `@key`'s `serial`
+    /// part. `None` for an app-minted / keyless / natural-key create. Its value is
+    /// captured by [`capture`](Self::capture) (a `result_id` bind); `serial_col` marks the
+    /// column so the re-select keying knows the id is DB-generated.
     pub serial_col: Option<String>,
+    /// Whether this statement is a `create` — the mutation's declared re-select keys on a
+    /// create of the return model (`:result_id`), so the assembler needs to know which
+    /// writes create.
+    pub creates: bool,
+    /// For a bound `create` (`create … as name`) and/or a `serial`/composite return
+    /// create, the row read-back: after the INSERT runs, the run stage captures the
+    /// listed columns' committed values into per-column binds a later step (or the
+    /// declared re-select) reads. `None` for a create that neither binds a step nor needs
+    /// a DB-generated id read back, and for every non-create write.
+    pub capture: Option<Capture>,
+}
+
+/// A bound `create`'s row read-back: the committed column values the run stage captures
+/// after the INSERT, so a later `tx` step's `$name.field` (and a DB-generated id's
+/// `:result_id`) reads the row the database actually wrote.
+#[derive(Debug, Clone)]
+pub struct Capture {
+    /// Each column to capture: the bind a later step reads it under, the physical column
+    /// it comes from, and the field name (a member of the created model) whose type the
+    /// run stage coerces the value by.
+    pub cols: Vec<CaptureCol>,
+    /// On Postgres/SQLite/MariaDB the INSERT's own `RETURNING <cols>` returns the row, so
+    /// this is `None`. On MySQL (no `INSERT … RETURNING`) it is a follow-up keyed `SELECT`
+    /// (unbound `:name` SQL) the run stage executes right after the INSERT to read the row.
+    pub followup_select: Option<String>,
+}
+
+/// One captured column of a bound create's re-selected row.
+#[derive(Debug, Clone)]
+pub struct CaptureCol {
+    /// The `:name` bind (without the colon) a later step / the re-select reads this value
+    /// under — `bref_<binding>__<column>`, or `result_id` for a DB-generated return id.
+    pub bind: String,
+    /// The physical column read back from the written row.
+    pub column: String,
+    /// The created model's field whose type coerces the captured value at the later bind.
+    pub field: String,
 }
 
 /// Render every mutation in the schema as its INSERT/UPDATE/DELETE statements, in
@@ -141,6 +175,12 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
         for w in &lm.stmts {
             out.push_str(&w.header);
             out.push_str(&w.sql);
+            // MySQL reads a bound create's written row back with a follow-up keyed SELECT
+            // (no `INSERT … RETURNING`); show it for review parity with the RETURNING form.
+            if let Some(sel) = w.capture.as_ref().and_then(|c| c.followup_select.as_ref()) {
+                out.push_str("-- read-back: the written row's captured columns\n");
+                out.push_str(sel);
+            }
         }
         if let Some(rs) = &lm.ret_select {
             out.push_str("-- return: re-select the written row's declared shape\n");
@@ -177,25 +217,29 @@ fn lower_mutation<'a>(
     let unscoped = m.unscoped.is_some();
     // The per-touched-model scope this mutation injects (the chosen alternative),
     // resolved by sema. Empty when `unscoped`. Threaded into every write's `Select`.
-    let inject: &[ScopeInject] = schema
-        .mutations
-        .iter()
-        .find(|rm| rm.name == m.name.node)
-        .map_or(&[][..], |rm| rm.scope_inject.as_slice());
+    let rm = schema.mutations.iter().find(|rm| rm.name == m.name.node);
+    let inject: &[ScopeInject] = rm.map_or(&[][..], |rm| rm.scope_inject.as_slice());
+    let ret_model = rm.map_or("", |rm| rm.ret_model.as_str());
+    // Which columns each `create … as name` binding's siblings read (`$name.field`), so a
+    // bound create's row read-back projects exactly those. Empty outside a `tx`.
+    let binding_refs = collect_binding_refs(schema, &m.body);
+    let cx = LowerCx {
+        schema,
+        decls,
+        dialect,
+        unscoped,
+        inject,
+        ret_model,
+        binding_refs: &binding_refs,
+    };
     let mut stmts = Vec::new();
     let no_bindings = HashMap::new();
+    // The first `create` of the return model claims the declared re-select's `:result_id`
+    // (its read-back captures the id for a DB-generated key); a later same-model create
+    // does not re-claim it.
+    let mut ret_taken = false;
     for stmt in &m.body {
-        lower_write(
-            schema,
-            decls,
-            stmt,
-            "id",
-            &no_bindings,
-            unscoped,
-            inject,
-            dialect,
-            &mut stmts,
-        );
+        lower_write(&cx, stmt, "id", &no_bindings, &mut ret_taken, &mut stmts);
     }
     // Re-select the declared shape whenever the written row survives the mutation. Two
     // key forms (kept identical to the runtime's `plan_mutation`, so codegen and runtime
@@ -233,7 +277,7 @@ fn lower_mutation<'a>(
             // the runtime from the captured id). Both use `WHERE id = :result_id`.
             let creates_ret = stmts
                 .iter()
-                .any(|w| (w.gen_id.is_some() || w.serial_return) && w.model == rm.ret_model);
+                .any(|w| (w.gen_id.is_some() || w.serial_col.is_some()) && w.model == rm.ret_model);
             let key = if let Some(w) = upsert {
                 RetKey::Conflict(w.conflict_key.clone().unwrap_or_default())
             } else if let Some(w) = composite_serial {
@@ -407,45 +451,220 @@ fn flat_writes(body: &[WriteStmt]) -> Vec<&WriteStmt> {
     out
 }
 
+/// Which columns each `create … as name` binding's siblings read (`$name.field`), so the
+/// bound create's row read-back projects exactly those. Walks the flattened body: first
+/// maps each binding to its model, then collects every `$name.field` reference (an assign
+/// RHS, an arithmetic operand, a composite-FK whole-row `$name`, or a `where` comparison)
+/// to a captured column. Mirrors `Select::binding_field_value`'s resolution so the
+/// captured columns match the emitted `:bref_<name>__<column>` binds.
+fn collect_binding_refs<'a>(
+    schema: &'a CheckedSchema,
+    body: &'a [WriteStmt],
+) -> HashMap<String, Vec<CaptureCol>> {
+    let flat = flat_writes(body);
+    let mut models: HashMap<&str, &RModel> = HashMap::new();
+    for w in &flat {
+        if let WriteStmt::Create {
+            model,
+            binding: Some(b),
+            ..
+        } = w
+        {
+            if let Some(m) = schema.model(&model.node) {
+                models.insert(b.node.as_str(), m);
+            }
+        }
+    }
+    let mut out: HashMap<String, Vec<CaptureCol>> = HashMap::new();
+    for w in &flat {
+        match w {
+            WriteStmt::Create {
+                model,
+                assigns,
+                conflict,
+                ..
+            } => {
+                let m = schema.model(&model.node);
+                collect_assign_refs(schema, m, assigns, &models, &mut out);
+                if let Some(oc) = conflict {
+                    collect_assign_refs(schema, m, &oc.update, &models, &mut out);
+                }
+            }
+            WriteStmt::Update {
+                model,
+                where_,
+                assigns,
+            } => {
+                collect_assign_refs(
+                    schema,
+                    schema.model(&model.node),
+                    assigns,
+                    &models,
+                    &mut out,
+                );
+                collect_pred_refs(where_, &models, &mut out);
+            }
+            WriteStmt::Delete { where_, .. }
+            | WriteStmt::HardDelete { where_, .. }
+            | WriteStmt::Restore { where_, .. } => collect_pred_refs(where_, &models, &mut out),
+            WriteStmt::Tx(_) | WriteStmt::Raw(_) => {}
+        }
+    }
+    out
+}
+
+/// Record `$binding.field` as a captured column of the bound model: its physical column,
+/// deduped, under the `bref_<binding>__<column>` bind a `$binding.field` reference reads.
+fn add_ref(
+    out: &mut HashMap<String, Vec<CaptureCol>>,
+    models: &HashMap<&str, &RModel>,
+    binding: &str,
+    field: &str,
+) {
+    let Some(m) = models.get(binding) else { return };
+    let column = physical_col(m, field);
+    let cols = out.entry(binding.to_string()).or_default();
+    if !cols.iter().any(|c| c.column == column) {
+        cols.push(CaptureCol {
+            bind: bref_name(binding, &column),
+            column,
+            field: field.to_string(),
+        });
+    }
+}
+
+/// Collect binding references from a write's assign block.
+fn collect_assign_refs(
+    schema: &CheckedSchema,
+    model: Option<&RModel>,
+    assigns: &[Assign],
+    models: &HashMap<&str, &RModel>,
+    out: &mut HashMap<String, Vec<CaptureCol>>,
+) {
+    for a in assigns {
+        collect_rhs_refs(schema, model, &a.col.node, &a.value, models, out);
+    }
+}
+
+/// Collect binding references from one assign RHS. A whole-row `$name` filling a
+/// composite-FK column references every key part of the bound model; a `$name.field`
+/// references that one field; an arithmetic RHS recurses into its operands.
+fn collect_rhs_refs(
+    schema: &CheckedSchema,
+    model: Option<&RModel>,
+    col: &str,
+    rhs: &AssignRhs,
+    models: &HashMap<&str, &RModel>,
+    out: &mut HashMap<String, Vec<CaptureCol>>,
+) {
+    match rhs {
+        AssignRhs::Value(Value::Param(pr)) if models.contains_key(pr.name.node.as_str()) => {
+            let binding = pr.name.node.as_str();
+            if let Some(field) = pr.path.first() {
+                add_ref(out, models, binding, &field.node);
+            } else if let Some(mem) = model.and_then(|m| m.member(col)) {
+                // Whole-row `$name` into a composite-FK column: capture every key part.
+                if matches!(mem.kind, MemberKind::Forward { .. }) {
+                    let parts = schema.fk_columns(mem);
+                    if parts.len() > 1 {
+                        for (_, part) in parts {
+                            add_ref(out, models, binding, &part.name);
+                        }
+                    }
+                }
+            }
+        }
+        AssignRhs::Value(_) => {}
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            collect_rhs_refs(schema, model, col, lhs, models, out);
+            collect_rhs_refs(schema, model, col, rhs, models, out);
+        }
+    }
+}
+
+/// Collect binding references from a `where` predicate: a `$name.field` on either side of a
+/// comparison, in an `in (…)` list, or passed as a named-filter argument.
+fn collect_pred_refs(
+    pred: &Predicate,
+    models: &HashMap<&str, &RModel>,
+    out: &mut HashMap<String, Vec<CaptureCol>>,
+) {
+    let record = |out: &mut HashMap<String, Vec<CaptureCol>>, v: &Value| {
+        if let Value::Param(pr) = v {
+            if let Some(field) = pr.path.first() {
+                add_ref(out, models, &pr.name.node, &field.node);
+            }
+        }
+    };
+    match pred {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            collect_pred_refs(a, models, out);
+            collect_pred_refs(b, models, out);
+        }
+        Predicate::Not(inner) => collect_pred_refs(inner, models, out),
+        Predicate::Cmp { value, .. } => record(out, value),
+        Predicate::InList { values, .. } => values.iter().for_each(|v| record(out, v)),
+        Predicate::FilterCall { args, .. } => args.iter().for_each(|v| record(out, v)),
+        Predicate::Bare(_) | Predicate::Raw(_) => {}
+    }
+}
+
+/// The immutable lowering context for a mutation body: schema/decls/dialect, the
+/// `unscoped` + chosen-scope decisions, the return model, and the precomputed per-binding
+/// read-back columns. Threaded through every write of the body.
+struct LowerCx<'a> {
+    schema: &'a CheckedSchema,
+    decls: &'a [Decl],
+    dialect: Dialect,
+    unscoped: bool,
+    inject: &'a [ScopeInject],
+    ret_model: &'a str,
+    binding_refs: &'a HashMap<String, Vec<CaptureCol>>,
+}
+
 /// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`
 /// is the bind name a `create`'s app-generated `id` is emitted under (`id` at top
 /// level, `id_<step>` inside a `tx` so sibling creates stay distinct); `bindings` is the
-/// set of reachable `create … as name` step rows a `$name.field` reads from. A `tx`
-/// flattens: it pushes its inner writes inline and prepends the tx banner to the first.
-// The lowering context (schema/decls/dialect) + the per-write threading (id_param,
-// bindings, unscoped) genuinely need to ride together; bundling them into a struct would
-// obscure more than the arg count costs. The linted set is intentional.
-#[allow(clippy::too_many_arguments)]
+/// set of reachable `create … as name` step rows a `$name.field` reads from. `ret_taken`
+/// tracks whether the return model's create has already claimed the re-select's
+/// `:result_id`. A `tx` flattens: it pushes its inner writes inline and prepends the tx
+/// banner to the first.
 fn lower_write<'a>(
-    schema: &'a CheckedSchema,
-    decls: &'a [Decl],
+    cx: &LowerCx<'a>,
     stmt: &'a WriteStmt,
     id_param: &str,
     bindings: &HashMap<&'a str, BackCtx<'a>>,
-    unscoped: bool,
-    inject: &'a [ScopeInject],
-    dialect: Dialect,
+    ret_taken: &mut bool,
     out: &mut Vec<LoweredWrite>,
 ) {
+    let schema = cx.schema;
     match stmt {
         WriteStmt::Create {
             model,
             assigns,
             conflict,
-            binding: _,
+            binding,
         } => {
             if let Some(m) = schema.model(&model.node) {
+                // This create's binding read-back columns (its siblings' `$name.field`),
+                // and whether it claims the declared re-select's DB-generated `:result_id`.
+                let refs = binding
+                    .as_ref()
+                    .and_then(|b| cx.binding_refs.get(b.node.as_str()))
+                    .map_or(&[][..], Vec::as_slice);
+                let claims_result = !*ret_taken && m.name == cx.ret_model;
+                if claims_result {
+                    *ret_taken = true;
+                }
                 out.push(lower_create(
-                    schema,
-                    decls,
+                    cx,
                     m,
                     assigns,
                     conflict.as_ref(),
                     id_param,
                     bindings,
-                    unscoped,
-                    inject,
-                    dialect,
+                    refs,
+                    claims_result,
                 ));
             }
         }
@@ -455,46 +674,37 @@ fn lower_write<'a>(
             assigns,
         } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_update(
-                    schema, decls, m, where_, assigns, bindings, unscoped, inject, dialect,
-                ));
+                out.push(lower_update(cx, m, where_, assigns, bindings));
             }
         }
         WriteStmt::Delete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_delete(
-                    schema, decls, m, where_, false, unscoped, inject, dialect,
-                ));
+                out.push(lower_delete(cx, m, where_, false));
             }
         }
         WriteStmt::HardDelete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_delete(
-                    schema, decls, m, where_, true, unscoped, inject, dialect,
-                ));
+                out.push(lower_delete(cx, m, where_, true));
             }
         }
         WriteStmt::Restore { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_restore(
-                    schema, decls, m, where_, unscoped, inject, dialect,
-                ));
+                out.push(lower_restore(cx, m, where_));
             }
         }
-        WriteStmt::Tx(inner) => lower_tx(
-            schema, decls, inner, bindings, unscoped, inject, dialect, out,
-        ),
+        WriteStmt::Tx(inner) => lower_tx(cx, inner, bindings, ret_taken, out),
         // A raw write is an escape hatch: text verbatim, `${param}` -> `:param`.
         // No model is attached, so `{table}`/`{id}` interpolation has no root to bind.
         WriteStmt::Raw(raw) => out.push(LoweredWrite {
             header: String::new(),
-            sql: format!("{};\n", render_raw(dialect, raw, "", "")),
+            sql: format!("{};\n", render_raw(cx.dialect, raw, "", "")),
             model: String::new(),
             gen_id: None,
             conflict_key: None,
             read_key: None,
-            serial_return: false,
             serial_col: None,
+            creates: false,
+            capture: None,
         }),
     }
 }
@@ -504,15 +714,11 @@ fn lower_write<'a>(
 /// and a `create … as name` binding records that step's row so a later `$name.field`
 /// (reaching any prior step) resolves against it. A tx banner is prepended to the block's
 /// first write (text surface only).
-#[allow(clippy::too_many_arguments)]
 fn lower_tx<'a>(
-    schema: &'a CheckedSchema,
-    decls: &'a [Decl],
+    cx: &LowerCx<'a>,
     inner: &'a [WriteStmt],
     bindings: &HashMap<&'a str, BackCtx<'a>>,
-    unscoped: bool,
-    inject: &'a [ScopeInject],
-    dialect: Dialect,
+    ret_taken: &mut bool,
     out: &mut Vec<LoweredWrite>,
 ) {
     let start = out.len();
@@ -523,23 +729,15 @@ fn lower_tx<'a>(
             WriteStmt::Create { .. } => format!("id_{step}"),
             _ => "id".to_string(),
         };
-        lower_write(
-            schema, decls, st, &idp, &binds, unscoped, inject, dialect, out,
-        );
-        if let WriteStmt::Create {
-            model,
-            assigns,
-            binding,
-            ..
-        } = st
-        {
+        lower_write(cx, st, &idp, &binds, ret_taken, out);
+        if let WriteStmt::Create { model, binding, .. } = st {
             if let Some(name) = binding {
-                let ctx = BackCtx {
-                    id_param: idp,
-                    assigns,
-                    model: model.node.as_str(),
-                };
-                binds.insert(name.node.as_str(), ctx);
+                binds.insert(
+                    name.node.as_str(),
+                    BackCtx {
+                        model: model.node.as_str(),
+                    },
+                );
             }
             step += 1;
         }
@@ -556,21 +754,20 @@ fn lower_tx<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_create<'a>(
-    schema: &'a CheckedSchema,
-    decls: &'a [Decl],
+    cx: &LowerCx<'a>,
     model: &RModel,
     assigns: &'a [Assign],
     conflict: Option<&'a OnConflict>,
     id_param: &str,
     bindings: &HashMap<&'a str, BackCtx<'a>>,
-    unscoped: bool,
-    inject: &'a [ScopeInject],
-    dialect: Dialect,
+    refs: &[CaptureCol],
+    claims_result: bool,
 ) -> LoweredWrite {
+    let (schema, decls, dialect) = (cx.schema, cx.decls, cx.dialect);
     let mut sel = Select::new(schema, decls, model, dialect)
         .with_bindings(bindings.clone())
-        .with_scope_inject(!unscoped)
-        .with_scope_terms(inject);
+        .with_scope_inject(!cx.unscoped)
+        .with_scope_terms(cx.inject);
     let mut cols: Vec<String> = Vec::new();
     let mut vals: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
@@ -624,13 +821,12 @@ fn lower_create<'a>(
     }
 
     // The primary key. A `serial` PK is DB-generated: the INSERT *omits* the id column
-    // entirely and the runtime reads the assigned value back (`serial_return`). An
+    // entirely and the runtime reads the assigned value back (its `capture`). An
     // app-minted `id` (uuid/ulid, no SQL default) is bound as `:id[_step]` unless the
     // caller set it explicitly. A keyless (`@no_id`) model has no `id` column, and a
     // `@key(field)` model's key is a caller-supplied column set like any other assign.
     let serial_col = serial_return_col(model, dialect);
-    let serial_return = serial_col.is_some();
-    let gen_id = if model.no_id || serial_return || !model.key.is_empty() {
+    let gen_id = if model.no_id || serial_col.is_some() || !model.key.is_empty() {
         None
     } else if !assigned.iter().any(|c| c == "id") {
         cols.insert(0, dialect.quote("id"));
@@ -640,27 +836,13 @@ fn lower_create<'a>(
         None
     };
 
-    // A create with no generated id reads its row back by column(s) it set: a keyless
-    // (`@no_id`) model's `(unique)` column, a single `@key(field)`'s column, or the full
-    // composite `@key(f1, f2, …)` tuple. A composite key with a `serial` part reads back on
-    // its *other* (app-supplied) parts — the serial part rides `:result_id` (the captured
-    // DB value). Sema guarantees a keyless declared-shape return sets a unique column
-    // (E0264); a `@key` model's non-serial key columns are required, always set.
-    let read_key = if let Some(sc) = &serial_col {
-        model
-            .is_composite_key()
-            .then(|| non_serial_key_pairs(model, sc, &assigned, &vals))
-    } else if model.is_composite_key() {
-        composite_read_key(model, &assigned, &vals)
-    } else if model.no_id || !model.key.is_empty() {
-        model.unique_cols.iter().find_map(|u| {
-            value_by_field
-                .get(u)
-                .map(|v| vec![(physical_col(model, u), v.clone())])
-        })
-    } else {
-        None
-    };
+    let read_key = create_read_key(
+        model,
+        serial_col.as_deref(),
+        &assigned,
+        &vals,
+        &value_by_field,
+    );
 
     // `@created`/`@updated` are set on insert, unless the caller already did.
     for col in timestamp_cols(model, &[model.created.as_deref(), model.updated.as_deref()]) {
@@ -670,35 +852,197 @@ fn lower_create<'a>(
         }
     }
 
-    // Upsert tail: `ON CONFLICT (cols) DO UPDATE SET …` (Postgres/SQLite) or `ON DUPLICATE
-    // KEY UPDATE …` (MariaDB — no explicit target; the validated key's uniqueness is what
-    // makes the two agree). The conflict key reads the winning row back on both paths.
-    let (tail, conflict_key) = match conflict {
-        Some(oc) => {
-            let sets = conflict_update_sets(schema, decls, model, oc, dialect);
-            let key: Vec<(String, String)> = oc
-                .target
-                .iter()
-                .filter_map(|t| {
-                    value_by_field
-                        .get(&t.node)
-                        .map(|v| (physical_col(model, &t.node), v.clone()))
-                })
-                .collect();
-            (upsert_tail(dialect, oc, model, &sets), Some(key))
-        }
-        None => (String::new(), None),
-    };
+    let (tail, conflict_key) =
+        upsert_tail_and_key(schema, decls, model, conflict, dialect, &value_by_field);
+
+    // Row read-back (bound create / DB-generated return id) + its `RETURNING` columns.
+    let (capture, returning) = build_capture(
+        model,
+        dialect,
+        refs,
+        claims_result,
+        gen_id.as_deref(),
+        serial_col.as_deref(),
+        read_key.as_deref(),
+        conflict_key.as_deref(),
+    );
 
     LoweredWrite {
         header: format!("-- create {}\n", model.name),
-        sql: insert_sql(dialect, model, &cols, &vals, &tail, serial_col.as_deref()),
+        sql: insert_sql(dialect, model, &cols, &vals, &tail, &returning),
         model: model.name.clone(),
         gen_id,
         conflict_key,
         read_key,
-        serial_return,
         serial_col,
+        creates: true,
+        capture,
+    }
+}
+
+/// Build a create's row read-back plan and the `RETURNING` column list its INSERT carries.
+/// A bound create captures the columns its siblings reference (`refs`); the return model's
+/// create additionally captures its DB-generated id under `result_id` (an app-minted id is
+/// known at plan time and needs no capture). On MySQL (no `INSERT … RETURNING`) the capture
+/// carries a follow-up keyed `SELECT` and the `RETURNING` list is empty (D124).
+#[allow(clippy::too_many_arguments)]
+fn build_capture(
+    model: &RModel,
+    dialect: Dialect,
+    refs: &[CaptureCol],
+    claims_result: bool,
+    gen_id: Option<&str>,
+    serial_col: Option<&str>,
+    read_key: Option<&[(String, String)]>,
+    conflict_key: Option<&[(String, String)]>,
+) -> (Option<Capture>, Vec<String>) {
+    let mut cap_cols: Vec<CaptureCol> = refs.to_vec();
+    if claims_result {
+        if let Some(sc) = serial_col {
+            let field = model
+                .serial_key_member()
+                .map_or_else(|| "id".to_string(), |m| m.name.clone());
+            cap_cols.push(CaptureCol {
+                bind: "result_id".to_string(),
+                column: sc.to_string(),
+                field,
+            });
+        }
+    }
+    if cap_cols.is_empty() {
+        return (None, Vec::new());
+    }
+    // The distinct physical columns to read back, in first-seen order — the `RETURNING`
+    // list (Postgres/SQLite/MariaDB) or the follow-up `SELECT` projection (MySQL).
+    let mut cols: Vec<String> = Vec::new();
+    for c in &cap_cols {
+        if !cols.contains(&c.column) {
+            cols.push(c.column.clone());
+        }
+    }
+    if dialect == Dialect::MySql {
+        let followup_select = followup_select_sql(
+            dialect,
+            model,
+            &cols,
+            gen_id,
+            serial_col,
+            read_key,
+            conflict_key,
+        );
+        (
+            Some(Capture {
+                cols: cap_cols,
+                followup_select: Some(followup_select),
+            }),
+            Vec::new(),
+        )
+    } else {
+        (
+            Some(Capture {
+                cols: cap_cols,
+                followup_select: None,
+            }),
+            cols,
+        )
+    }
+}
+
+/// The MySQL follow-up keyed `SELECT` that reads a just-inserted row's committed columns
+/// back (MySQL has no `INSERT … RETURNING`). Keyed the same way the declared re-select is:
+/// a DB-generated `serial` part on `LAST_INSERT_ID()` (plus any app-supplied composite
+/// parts), an app-minted surrogate id on its `:id[_step]` bind, or a natural/keyless
+/// unique column on its set value. Unbound `:name` SQL — the run stage binds it.
+#[allow(clippy::too_many_arguments)]
+fn followup_select_sql(
+    dialect: Dialect,
+    model: &RModel,
+    cols: &[String],
+    gen_id: Option<&str>,
+    serial_col: Option<&str>,
+    read_key: Option<&[(String, String)]>,
+    conflict_key: Option<&[(String, String)]>,
+) -> String {
+    let projection = cols
+        .iter()
+        .map(|c| dialect.quote(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut wheres: Vec<String> = Vec::new();
+    if let Some(sc) = serial_col {
+        wheres.push(format!("{} = LAST_INSERT_ID()", dialect.quote(sc)));
+        for (c, v) in read_key.unwrap_or(&[]) {
+            wheres.push(format!("{} = {v}", dialect.quote(c)));
+        }
+    } else if let Some(gid) = gen_id {
+        wheres.push(format!("{} = :{gid}", dialect.quote("id")));
+    } else if let Some(pairs) = read_key.or(conflict_key) {
+        for (c, v) in pairs {
+            wheres.push(format!("{} = {v}", dialect.quote(c)));
+        }
+    }
+    format!(
+        "SELECT {projection} FROM {} WHERE {};\n",
+        dialect.quote_table(model.schema.as_deref(), &model.table),
+        wheres.join(" AND ")
+    )
+}
+
+/// The upsert tail (`ON CONFLICT (cols) DO UPDATE SET …` / `ON DUPLICATE KEY UPDATE …`) and
+/// the conflict-target read-back key (each target column's set value), or `("", None)` for a
+/// plain create. The conflict key reads the winning row back on both the insert and conflict
+/// paths.
+fn upsert_tail_and_key(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    model: &RModel,
+    conflict: Option<&OnConflict>,
+    dialect: Dialect,
+    value_by_field: &std::collections::HashMap<String, String>,
+) -> (String, Option<Vec<(String, String)>>) {
+    let Some(oc) = conflict else {
+        return (String::new(), None);
+    };
+    let sets = conflict_update_sets(schema, decls, model, oc, dialect);
+    let key: Vec<(String, String)> = oc
+        .target
+        .iter()
+        .filter_map(|t| {
+            value_by_field
+                .get(&t.node)
+                .map(|v| (physical_col(model, &t.node), v.clone()))
+        })
+        .collect();
+    (upsert_tail(dialect, oc, model, &sets), Some(key))
+}
+
+/// A create with no generated id reads its row back by column(s) it set: a keyless
+/// (`@no_id`) model's `(unique)` column, a single `@key(field)`'s column, or the full
+/// composite `@key(f1, f2, …)` tuple. A composite key with a `serial` part reads back on its
+/// *other* (app-supplied) parts — the serial part rides `:result_id` (the captured DB value).
+/// Sema guarantees a keyless declared-shape return sets a unique column (E0264); a `@key`
+/// model's non-serial key columns are required, always set.
+fn create_read_key(
+    model: &RModel,
+    serial_col: Option<&str>,
+    assigned: &[String],
+    vals: &[String],
+    value_by_field: &std::collections::HashMap<String, String>,
+) -> Option<Vec<(String, String)>> {
+    if let Some(sc) = serial_col {
+        model
+            .is_composite_key()
+            .then(|| non_serial_key_pairs(model, sc, assigned, vals))
+    } else if model.is_composite_key() {
+        composite_read_key(model, assigned, vals)
+    } else if model.no_id || !model.key.is_empty() {
+        model.unique_cols.iter().find_map(|u| {
+            value_by_field
+                .get(u)
+                .map(|v| vec![(physical_col(model, u), v.clone())])
+        })
+    } else {
+        None
     }
 }
 
@@ -765,30 +1109,39 @@ fn non_serial_key_pairs(
         .collect()
 }
 
-/// Assemble the `INSERT` statement text. A `serial` create reads its DB-assigned id back —
-/// `RETURNING <id>` on Postgres/SQLite (the MariaDB/MySQL driver uses `LAST_INSERT_ID()`
-/// instead) — and a create that sets no columns uses the dialect's default-values form.
+/// Assemble the `INSERT` statement text. A bound create (and a `serial` create's id)
+/// reads its written row back via `RETURNING <cols>` on Postgres/SQLite/MariaDB (MySQL
+/// has no `INSERT … RETURNING` — its read-back is a follow-up keyed `SELECT`, so `returning`
+/// is empty there); a create that sets no columns uses the dialect's default-values form.
 fn insert_sql(
     dialect: Dialect,
     model: &RModel,
     cols: &[String],
     vals: &[String],
     tail: &str,
-    serial_col: Option<&str>,
+    returning: &[String],
 ) -> String {
     let table = dialect.quote_table(model.schema.as_deref(), &model.table);
-    let returning = match serial_col {
-        Some(col) if matches!(dialect, Dialect::Postgres | Dialect::Sqlite) => {
-            format!(" RETURNING {}", dialect.quote(col))
-        }
-        _ => String::new(),
+    let returning = if returning.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " RETURNING {}",
+            returning
+                .iter()
+                .map(|c| dialect.quote(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     if cols.is_empty() {
         return match dialect {
             Dialect::Postgres | Dialect::Sqlite => {
                 format!("INSERT INTO {table} DEFAULT VALUES{returning};\n")
             }
-            Dialect::MariaDb | Dialect::MySql => format!("INSERT INTO {table} () VALUES ();\n"),
+            Dialect::MariaDb | Dialect::MySql => {
+                format!("INSERT INTO {table} () VALUES (){returning};\n")
+            }
         };
     }
     format!(
@@ -844,22 +1197,17 @@ fn upsert_tail(dialect: Dialect, oc: &OnConflict, model: &RModel, sets: &[String
 
 // ---------- update ---------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn lower_update<'a>(
-    schema: &'a CheckedSchema,
-    decls: &'a [Decl],
+    cx: &LowerCx<'a>,
     model: &RModel,
     where_: &Predicate,
     assigns: &'a [Assign],
     bindings: &HashMap<&'a str, BackCtx<'a>>,
-    unscoped: bool,
-    inject: &'a [ScopeInject],
-    dialect: Dialect,
 ) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect)
+    let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
         .with_bindings(bindings.clone())
-        .with_scope_inject(!unscoped)
-        .with_scope_terms(inject);
+        .with_scope_inject(!cx.unscoped)
+        .with_scope_terms(cx.inject);
     let mut sets: Vec<String> = Vec::new();
     let mut assigned: Vec<String> = Vec::new();
 
@@ -882,27 +1230,18 @@ fn lower_update<'a>(
         gen_id: None,
         conflict_key: None,
         read_key: None,
-        serial_return: false,
         serial_col: None,
+        creates: false,
+        capture: None,
     }
 }
 
 // ---------- delete / hard delete -------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn lower_delete(
-    schema: &CheckedSchema,
-    decls: &[Decl],
-    model: &RModel,
-    where_: &Predicate,
-    hard: bool,
-    unscoped: bool,
-    inject: &[ScopeInject],
-    dialect: Dialect,
-) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect)
-        .with_scope_inject(!unscoped)
-        .with_scope_terms(inject);
+fn lower_delete(cx: &LowerCx, model: &RModel, where_: &Predicate, hard: bool) -> LoweredWrite {
+    let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
+        .with_scope_inject(!cx.unscoped)
+        .with_scope_terms(cx.inject);
 
     // Soft model + plain `delete` -> tombstone UPDATE, never a real DELETE.
     if let (Some(sd), false) = (&model.soft_delete, hard) {
@@ -919,8 +1258,9 @@ fn lower_delete(
             gen_id: None,
             conflict_key: None,
             read_key: None,
-            serial_return: false,
             serial_col: None,
+            creates: false,
+            capture: None,
         };
     }
 
@@ -939,25 +1279,18 @@ fn lower_delete(
         gen_id: None,
         conflict_key: None,
         read_key: None,
-        serial_return: false,
         serial_col: None,
+        creates: false,
+        capture: None,
     }
 }
 
 // ---------- restore --------------------------------------------------------
 
-fn lower_restore(
-    schema: &CheckedSchema,
-    decls: &[Decl],
-    model: &RModel,
-    where_: &Predicate,
-    unscoped: bool,
-    inject: &[ScopeInject],
-    dialect: Dialect,
-) -> LoweredWrite {
-    let mut sel = Select::new(schema, decls, model, dialect)
-        .with_scope_inject(!unscoped)
-        .with_scope_terms(inject);
+fn lower_restore(cx: &LowerCx, model: &RModel, where_: &Predicate) -> LoweredWrite {
+    let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
+        .with_scope_inject(!cx.unscoped)
+        .with_scope_terms(cx.inject);
     // sema (E-restore) guarantees a soft-delete model here; fall back defensively.
     let mut sets = match &model.soft_delete {
         Some(sd) => vec![tombstone_set(&sel, model, sd, /* deleting = */ false)],
@@ -979,8 +1312,9 @@ fn lower_restore(
         gen_id: None,
         conflict_key: None,
         read_key: None,
-        serial_return: false,
         serial_col: None,
+        creates: false,
+        capture: None,
     }
 }
 

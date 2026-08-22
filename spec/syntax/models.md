@@ -113,8 +113,9 @@ spelled `serial` so its generation is visible; an app-owned key stays a string. 
 honesty:** a `serial` id is a JSON *number* (OpenAPI `{type: integer}`), a uuid/ulid id a
 string; a relation's FK column mirrors the target PK type (a serial parent → a `BIGINT` FK).
 Heterogeneous strategies across one schema are allowed. A serial-created row's id is unknown
-until the INSERT runs, so a `tx` step cannot reference it via `$name.id` (`E0268` — make the
-referenced model app-minted to reach it across steps).
+until the INSERT runs, but a bound create re-selects its written row, so a `tx` step **can**
+reference it via `$name.id` — the read-back threads the DB-generated id into the later step
+(transactions.md / mutations.md).
 
 ### `@no_id("reason")` — keyless legacy tables
 Some adopted tables have no primary key whatsoever. `@no_id("reason")` records that fact:

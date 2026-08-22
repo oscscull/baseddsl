@@ -227,27 +227,6 @@ pub trait DbRead: Send {
 
     /// Execute one write statement (INSERT/UPDATE/DELETE); returns rows affected.
     async fn execute(&mut self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError>;
-
-    /// Execute a `serial` (DB-generated primary key) INSERT and return the assigned id.
-    /// The default reads a `RETURNING <id>` clause the codegen appended (Postgres/SQLite):
-    /// it runs the INSERT as a query and takes the first row's first column. MariaDB/MySQL
-    /// override this to execute then read `LAST_INSERT_ID()` (their INSERT carries no
-    /// RETURNING). Used only by the `serial` read-back planner.
-    async fn execute_returning_id(
-        &mut self,
-        sql: &str,
-        params: &[SqlValue],
-    ) -> Result<i64, DbError> {
-        let rows = fetch_all(self.fetch(sql, params)).await?;
-        let row = rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| DbError::new("serial INSERT returned no id"))?;
-        row.into_iter()
-            .next()
-            .and_then(|(_, v)| v.as_i64())
-            .ok_or_else(|| DbError::new("serial INSERT did not return an integer id"))
-    }
 }
 
 /// A checked-out connection. [`begin`](Db::begin) consumes it into a [`Tx`] — the
@@ -609,57 +588,83 @@ async fn run_writes<D: DbRead + ?Sized>(
     db: &mut D,
     plan: &MutationPlan,
 ) -> Result<TxOutcome, DbError> {
+    use crate::scan::to_positional;
+    use crate::value::coerce;
     use serde_json::Value as J;
-    // A `serial` (DB-generated PK) create yields its id only when it runs; capture it so
-    // the deferred re-select can key on it.
-    let serial_insert = plan.serial.as_ref().map(|s| s.insert_idx);
-    let mut serial_id: Option<i64> = None;
-    for (i, stmt) in plan.stmts.iter().enumerate() {
-        if serial_insert == Some(i) {
-            serial_id = Some(db.execute_returning_id(&stmt.sql, &stmt.params).await?);
+
+    // The value environment accumulates as the writes run: a bound create's row read-back
+    // captures committed column values a later step (or the declared re-select) binds — so
+    // every step is bound late, from this growing environment (D124).
+    let mut env = plan.env0.clone();
+    let bind = |sql: &str, env: &std::collections::HashMap<String, SqlValue>| {
+        to_positional(sql, plan.dialect, |name| env.get(name).cloned())
+            .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (planner mismatch)")))
+    };
+
+    for (i, step) in plan.steps.iter().enumerate() {
+        let (sql, params) = bind(&step.sql, &env)?;
+        // A bound create's row read-back captures the written row's committed columns
+        // (the INSERT's own `RETURNING`, or a MySQL follow-up keyed `SELECT`) into `env`; a
+        // plain write just executes (and, for an `-> ok` DELETE, checks it touched a row).
+        let Some(cap) = &step.capture else {
+            let affected = db.execute(&sql, &params).await?;
+            if plan.ack_check == Some(i) && affected == 0 {
+                return Ok(TxOutcome::NotFound);
+            }
             continue;
-        }
-        let affected = db.execute(&stmt.sql, &stmt.params).await?;
-        if plan.ack_check == Some(i) && affected == 0 {
-            return Ok(TxOutcome::NotFound);
+        };
+        let row = if let Some(sel) = &cap.followup_select {
+            db.execute(&sql, &params).await?;
+            let (ssql, sparams) = bind(sel, &env)?;
+            fetch_all(db.fetch(&ssql, &sparams))
+                .await?
+                .into_iter()
+                .next()
+        } else {
+            fetch_all(db.fetch(&sql, &params)).await?.into_iter().next()
+        };
+        let row = row.ok_or_else(|| DbError::new("bound create read-back returned no row"))?;
+        for c in &cap.cols {
+            let v = row.get(&c.column).cloned().unwrap_or(J::Null);
+            let bound = coerce(&v, c.family, true)
+                .map_err(|e| DbError::new(format!("capture `{}`: {e:?}", c.column)))?;
+            env.insert(c.bind.clone(), bound);
         }
     }
-    // Read the written row back in its declared shape. A serial mutation binds its
-    // re-select late, from the captured DB-generated id.
-    let response = if let Some(readback) = &plan.serial {
-        let id = serial_id.expect("serial INSERT ran and returned an id");
-        match readback.bind(id).map_err(|e| DbError::new(e.to_string()))? {
-            Some(stmt) => {
-                let rows = fetch_all(db.fetch(&stmt.sql, &stmt.params)).await?;
-                match rows.into_iter().next() {
-                    Some(row) => nest_row(row),
-                    None => return Ok(TxOutcome::NotFound),
-                }
+
+    // Read the written row back in its declared shape, bound late from the accumulated
+    // environment (its `:result_id` is app-minted in `env0` or captured above).
+    let response = match &plan.ret_select {
+        Some(sql) => {
+            let (sql, params) = bind(sql, &env)?;
+            let rows = fetch_all(db.fetch(&sql, &params)).await?;
+            match rows.into_iter().next() {
+                Some(row) => nest_row(row),
+                None => return Ok(TxOutcome::NotFound),
             }
-            None => crate::plan::SerialReadback::id_response(id),
         }
-    } else {
-        match &plan.ret_select {
-            Some(stmt) => {
-                let rows = fetch_all(db.fetch(&stmt.sql, &stmt.params)).await?;
-                match rows.into_iter().next() {
-                    Some(row) => nest_row(row),
-                    None => return Ok(TxOutcome::NotFound),
-                }
+        // No declared-shape re-select (the row did not survive — a real DELETE):
+        // identify the created row by its engine `id`, or `{}` when nothing was created.
+        None => match env.get("result_id") {
+            Some(v) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("id".into(), sql_value_to_json(v));
+                J::Object(obj)
             }
-            // No declared-shape re-select (the row did not survive — a real DELETE):
-            // identify the created row by its engine `id`, or `{}` when nothing was created.
-            None => match &plan.result_id {
-                Some(id) => {
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("id".into(), J::String(id.clone()));
-                    J::Object(obj)
-                }
-                None => J::Object(serde_json::Map::new()),
-            },
-        }
+            None => J::Object(serde_json::Map::new()),
+        },
     };
     Ok(TxOutcome::Done(response))
+}
+
+/// The `{ id }` fallback response value for a created row's id — a uuid/ulid string or a
+/// DB-generated integer, mirroring its wire type.
+fn sql_value_to_json(v: &SqlValue) -> serde_json::Value {
+    match v {
+        SqlValue::Int(i) => serde_json::Value::Number((*i).into()),
+        SqlValue::Uuid(s) | SqlValue::Text(s) => serde_json::Value::String(s.clone()),
+        other => serde_json::json!(format!("{other:?}")),
+    }
 }
 
 /// Plan and run a mutation on a caller-owned open transaction — the host-language

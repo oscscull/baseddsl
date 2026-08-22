@@ -176,7 +176,8 @@ now **done** — the last item, a cheap standalone example fix. **Nothing remain
   `Id<E>` int-or-string, FK columns mirror the target PK), per-model minting (`ulid`/`uuid`), and the
   **serial read-back planner** (create omits id → `RETURNING`/`LAST_INSERT_ID()` → engine binds the
   create-keyed re-select on the captured id). New sema errors `E0266` (bare-int PK), `E0267`
-  (`serial`/`ulid` off `id`), `E0268` (`$name.id` of a serial create can't bind a `tx` sibling).
+  (`serial`/`ulid` off `id`). (`E0268` retired by D124 — a bound create re-selects its written row, so a
+  serial `$name.id` sibling reference now resolves to the committed DB-generated id.)
   **Proven live on all three dialects** (SQLite in-memory `serial_integration.rs`; live Postgres +
   MariaDB serial read-back added to the docker integration suites — RETURNING and LAST_INSERT_ID paths
   both green). **`@key(field)` natural single-column key: ✅ DONE (D111 impl).** A `@key(field)` model
@@ -1406,21 +1407,18 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
     tolerated, a `raw(dialect)` line riding separately); `down.mig` reverse correctness (add⇄drop,
     rename⇄rename, create⇄drop) + the loud irreversible comment for a drop/alter; and `_based_migrations`
     ledger idempotency (re-apply is a no-op, the tamper hash catches a post-apply edit).
-- **H6-R1. `$name.<engine-managed-non-scope-column>` tx reference still lowers to a silent `NULL`.**
-  Symptom: a `tx` `$name.field` reference to a bound create's field that is neither explicitly assigned,
-  nor `id`, nor a `@scope` column (fixed in the 2026-08-21(2) sweep) — i.e. an `@created`/`@updated`
-  timestamp column or a scalar with a DB-side default — compiles clean (sema `check_binding_ref` only
-  checks `field` is a member of the bound model) and codegen emits `NULL /* $name.field not set by bound
-  create */`, a silent wrong value (nullable target) or a spurious NOT-NULL failure (required target).
-  Where: based-sema `check.rs::check_binding_ref`; based-codegen `sql/dml.rs::binding_field_value` (the
-  final fall-through). Why deferred (owner design call): the value genuinely is **not** inline-knowable —
-  `CURRENT_TIMESTAMP` re-evaluates per statement (reusing it would bind a *different* instant than the
-  bound row actually got), and a DB-side default isn't visible to codegen at all — so the two honest
-  fixes are (a) **reject** it at sema with a new E-code (safe, principle 6, but forbids a construct a
-  future re-select could serve) or (b) a **runtime re-select** that reads the bound row's committed value
-  back (bigger; the D111 deferred "standalone structured-id param" work is adjacent). Low frequency
-  (reusing a just-generated timestamp across steps is unusual), so it stays a marker until the fork is
-  decided. No behaviour is silently *unsafe* for the common scope case — that is now filled.
+- **H6-R1. ✅ RESOLVED (D124). A bound create re-selects its written row; `$name.field` reads it.**
+  Was: a `tx` `$name.field` reference to a bound create's field that is neither explicitly assigned, nor
+  `id`, nor a `@scope` column — an `@created`/`@updated` timestamp or a DB-side default — lowered to a
+  silent `NULL` marker (a wrong value, or a spurious NOT-NULL failure). Fix (option (b), owner-approved):
+  a bound create (`create … as t`) **always re-selects its written row** immediately after the INSERT —
+  `INSERT … RETURNING <cols>` on Postgres/SQLite/MariaDB, a follow-up keyed `SELECT` on MySQL — and every
+  `$t.field` resolves to the row's real committed value (engine timestamp, DB default, DB-generated
+  `serial` id included). This **unified** `binding_field_value`'s four resolution paths into one (read the
+  row the DB wrote) and **retired E0268** (a serial `$t.id` sibling now works). The runtime binds each
+  `tx` step late from a value environment that accumulates the captured columns. Proven live on all three
+  dialects (SQLite + Postgres + MariaDB — RETURNING differs per dialect): the `@created`-timestamp reuse,
+  the serial `$t.id` sibling FK, and the `@scope`-column scenario. See D124.
 - **H9. ✅ done (D81). `@scope` now confines a nest-only scoped child (correctness/security, from H6).**
   A scoped model reached **only** through a nested shape sub-object (`field { … }` to-one/to-many or
   `field -> Shape`, D79) was not confined by its `@scope` though soft-delete was — a cross-scope read

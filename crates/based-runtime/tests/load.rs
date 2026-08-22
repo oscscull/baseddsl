@@ -59,14 +59,19 @@ fn plans_the_commerce_place_order_mutation() {
         json!({ "org": "org-1" }),
     );
     let plan = plan_mutation(&c, &r, &ids).unwrap();
-    assert_eq!(plan.stmts.len(), 1);
+    assert_eq!(plan.steps.len(), 1);
     assert!(
-        plan.stmts[0].sql.contains("INSERT INTO `order`"),
+        plan.steps[0].sql.contains("INSERT INTO `order`"),
         "{}",
-        plan.stmts[0].sql
+        plan.steps[0].sql
     );
-    // engine id leads the bound values; params carry no unresolved `:name`.
-    assert!(!plan.stmts[0].sql.contains(':'), "{}", plan.stmts[0].sql);
-    assert_eq!(plan.stmts[0].params[0], SqlValue::Uuid("id-0".into()));
+    // Steps hold unbound `:name` SQL (bound late at run time); the app-minted engine id
+    // is in the plan environment and drives the response identity.
+    assert_eq!(
+        plan.env0.get("id").cloned(),
+        Some(SqlValue::Uuid("id-0".into()))
+    );
     assert_eq!(plan.result_id.as_deref(), Some("id-0"));
+    // A plain (unbound) create needs no row read-back.
+    assert!(plan.steps[0].capture.is_none());
 }

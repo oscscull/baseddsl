@@ -16,6 +16,10 @@ fn gen_pg(src: &str) -> String {
     gen_for(src, Dialect::Postgres)
 }
 
+fn gen_mysql(src: &str) -> String {
+    gen_for(src, Dialect::MySql)
+}
+
 fn gen_for(src: &str, dialect: Dialect) -> String {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
@@ -307,12 +311,98 @@ fn tx_step_ref_binds_bound_create_id() {
           }
         }
         "#);
-    // `$user.id` binds the bound create's generated id (`:id_0`); Address's own id is `:id_1`.
+    // The bound User re-selects its written row (`RETURNING`), and `$user.id` reads the
+    // committed id from the capture bind `:bref_user__id`; Address's own id is `:id_1`.
+    assert!(
+        out.contains("INSERT INTO `user` (`id`, `email`)\nVALUES (:id_0, :email) RETURNING `id`"),
+        "\n{out}"
+    );
     assert!(
         out.contains("INSERT INTO `address` (`id`, `user_id`, `city`)"),
         "\n{out}"
     );
-    assert!(out.contains("VALUES (:id_1, :id_0, :city)"), "\n{out}");
+    assert!(
+        out.contains("VALUES (:id_1, :bref_user__id, :city)"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn unbound_create_emits_no_row_read_back() {
+    // An UNBOUND create is unchanged by D124: no `RETURNING`, no follow-up SELECT — just
+    // the plain INSERT (its only re-select is the mutation's own declared-shape return).
+    let out = gen(r#"
+        User { id: Id, email: text }
+        Address { id: Id, user: User, city: text }
+        shape UserCard from User { email }
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email } as user;
+            create Address { user = $user.id, city = $city };
+          }
+        }
+        "#);
+    // The Address create binds no step, so its INSERT carries no `RETURNING`.
+    let addr = out
+        .split("INSERT INTO `address`")
+        .nth(1)
+        .expect("address insert");
+    let addr_stmt = addr.split(";\n").next().unwrap_or(addr);
+    assert!(
+        !addr_stmt.contains("RETURNING"),
+        "unbound create must emit no read-back:\n{addr_stmt}"
+    );
+}
+
+#[test]
+fn mysql_bound_create_reads_back_via_follow_up_select() {
+    // MySQL has no `INSERT … RETURNING`, so a bound create's row read-back is a follow-up
+    // keyed `SELECT` (here `id = :id_0`, the app-minted surrogate), whose `id` column feeds
+    // the sibling's `$user.id` (`:bref_user__id`).
+    let out = gen_mysql(
+        r#"
+        User { id: Id, email: text }
+        Address { id: Id, user: User, city: text }
+        shape UserCard from User { email }
+        mutation signup(email: text, city: text) -> UserCard {
+          tx {
+            create User { email = $email } as user;
+            create Address { user = $user.id, city = $city };
+          }
+        }
+        "#,
+    );
+    // The bound User INSERT carries no RETURNING (MySQL); a follow-up SELECT reads `id`.
+    assert!(
+        !out.contains("RETURNING"),
+        "MySQL has no INSERT … RETURNING:\n{out}"
+    );
+    assert!(
+        out.contains("SELECT `id` FROM `user` WHERE `id` = :id_0"),
+        "MySQL bound create reads back via a follow-up keyed SELECT:\n{out}"
+    );
+    assert!(
+        out.contains("VALUES (:id_1, :bref_user__id, :city)"),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn mysql_serial_read_back_uses_last_insert_id_follow_up_select() {
+    // A `serial` return create on MySQL reads its DB-generated id back via a follow-up
+    // `SELECT … WHERE id = LAST_INSERT_ID()` (no RETURNING), keying the declared re-select.
+    let out = gen_mysql(
+        r#"
+        Org { id: serial, name: text }
+        shape OrgCard from Org { id, name }
+        mutation make(name: text) -> OrgCard { create Org { name = $name }; }
+        "#,
+    );
+    assert!(!out.contains("RETURNING"), "MySQL has no RETURNING:\n{out}");
+    assert!(
+        out.contains("SELECT `id` FROM `org` WHERE `id` = LAST_INSERT_ID()"),
+        "MySQL serial read-back keys on LAST_INSERT_ID():\n{out}"
+    );
 }
 
 #[test]
@@ -332,10 +422,18 @@ fn tx_step_ref_reaches_any_prior_step() {
           }
         }
         "#);
-    // Step 2 (User, `:id_1`) references step 1's org (`:id_0`).
-    assert!(out.contains("VALUES (:id_1, :id_0, :email)"), "\n{out}");
-    // Step 3 (Log, `:id_2`) references step 1's org (`:id_0`) AND step 2's user (`:id_1`).
-    assert!(out.contains("VALUES (:id_2, :id_0, :id_1)"), "\n{out}");
+    // Each bound create re-selects its written row; a sibling reads a prior step's
+    // committed value from that step's capture bind (`:bref_<name>__<column>`).
+    // Step 2 (User, `:id_1`) references step 1's org (`:bref_org__id`).
+    assert!(
+        out.contains("VALUES (:id_1, :bref_org__id, :email)"),
+        "\n{out}"
+    );
+    // Step 3 (Log, `:id_2`) references step 1's org AND step 2's user.
+    assert!(
+        out.contains("VALUES (:id_2, :bref_org__id, :bref_user__id)"),
+        "\n{out}"
+    );
 }
 
 #[test]
@@ -845,16 +943,20 @@ const COMPOSITE_SERIAL: &str = r#"
 #[test]
 fn composite_serial_create_omits_the_serial_part_and_reads_back_the_full_tuple_mariadb() {
     // A composite `@key(device, seq)` with a DB-generated `seq`: the INSERT omits `seq`
-    // (auto-increment) and the declared-shape re-select keys on the captured serial value
-    // (`:result_id`, bound late by the runtime) AND the app-supplied `device` part.
+    // (auto-increment), reads it back via `RETURNING` (captured as `:result_id`), and the
+    // declared-shape re-select keys on that serial value AND the app-supplied `device` part.
     let out = gen(COMPOSITE_SERIAL);
     // The INSERT column list is exactly (device_id, value) — `seq` is DB-generated, omitted.
     assert!(
         out.contains("INSERT INTO `reading` (`device_id`, `value`)"),
         "\n{out}"
     );
-    // MariaDB reads the auto-increment value via LAST_INSERT_ID(), so no RETURNING.
-    assert!(!out.contains("RETURNING"), "\n{out}");
+    // MariaDB (11.4) reads the auto-increment `seq` back via `INSERT … RETURNING` (D124),
+    // captured under `:result_id`; the re-select keys on it AND the app-supplied `device`.
+    assert!(
+        out.contains("VALUES (:device, :value) RETURNING `seq`"),
+        "\n{out}"
+    );
     assert!(
         out.contains("`reading`.`seq` = :result_id AND `reading`.`device_id` = :device"),
         "\n{out}"
@@ -895,10 +997,15 @@ fn tx_binding_reuses_bound_creates_scope_column() {
           }
         }
         "#);
-    // `$p.id` → the bound Project's `:id_0`; `$p.org` → the same `:ctx_org` the Project used.
+    // The bound Project re-selects its written row (`RETURNING` its `id` + engine-set
+    // `org_id`); `$p.id` and `$p.org` read those committed values from the capture binds.
     assert!(
-        out.contains("VALUES (:id_1, :id_0, :ctx_org, :tt)"),
-        "$p.org must bind :ctx_org, not NULL:\n{out}"
+        out.contains("RETURNING `id`, `org_id`"),
+        "Project must re-select id + org_id:\n{out}"
+    );
+    assert!(
+        out.contains("VALUES (:id_1, :bref_p__id, :bref_p__org_id, :tt)"),
+        "$p.org must bind the captured org_id, not NULL:\n{out}"
     );
     assert!(
         !out.contains("not set by bound create"),

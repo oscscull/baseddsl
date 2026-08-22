@@ -1242,18 +1242,21 @@ pub(crate) struct Select<'a> {
     bare_cols: bool,
 }
 
-/// What a `$name.field` tx step reference resolves to: the bound `create`'s app-generated
-/// `id` bind, its assigns (to reuse a caller-supplied value for a non-`id` field), and the
-/// model it created (to reach that model's engine-managed `@scope` columns).
+/// A reachable `create … as name` tx step binding: the model it created, so a
+/// `$name.field` reference resolves to the `:bref_<name>__<column>` value the bound
+/// create's row read-back captures for that field.
 #[derive(Clone)]
 pub(crate) struct BackCtx<'a> {
-    /// The bind name the bound create's app-generated `id` was emitted under
-    /// (`id_<step>` inside a tx). `$name.id` lowers to this.
-    pub(crate) id_param: String,
-    pub(crate) assigns: &'a [Assign],
-    /// The bound create's model name, so a `$name.<scope-column>` reference resolves to
-    /// the `:ctx_<field>` the create engine-set it from (the mutation runs under one `$ctx`).
+    /// The bound create's model name, so `$name.field` resolves `field` to a physical
+    /// column of that model.
     pub(crate) model: &'a str,
+}
+
+/// The bind name a `$name.field` reference reads from — the value the bound create's
+/// row read-back captured for physical column `column`. One placeholder per
+/// (binding, column); the run stage binds it from the re-selected row.
+pub(crate) fn bref_name(binding: &str, column: &str) -> String {
+    format!("bref_{binding}__{column}")
 }
 
 impl<'a> Select<'a> {
@@ -2387,49 +2390,25 @@ impl<'a> Select<'a> {
         }
     }
 
-    /// Lower a `$name.field` tx step reference. `$name.id` binds to the bound create's
-    /// app-generated id (`:id_<step>`, reaching any prior step); any other field reuses
-    /// the value that create assigned to it (a caller param/literal the engine already
-    /// binds). Sema (E0281) guarantees the binding and the field resolve.
+    /// Lower a `$name.field` tx step reference to the bind holding the bound create's
+    /// re-selected value for that field. Sema (E0281) guarantees the binding and the
+    /// field resolve.
     fn binding_value(&self, pr: &ParamRef) -> String {
         let field = pr.path.first().map_or("", |s| s.node.as_str());
         self.binding_field_value(&pr.name.node, field)
     }
 
-    /// The value a bound tx step (`$name`) carries for one of its fields — reused by a
-    /// composite-FK assign to pull each key part from the bound create's part assigns.
+    /// The bind a `$name.field` reference reads from: the bound create re-selects its
+    /// written row, and this is the placeholder holding that row's value for `field`'s
+    /// physical column — the one uniform path for every field (id, scalar, `@scope`
+    /// column, engine timestamp, DB default). Reused by a composite-FK assign to pull
+    /// each key part.
     fn binding_field_value(&self, name: &str, field: &str) -> String {
-        let ctx = &self.bindings[name];
-        // Reuse the value the bound create assigned to this field (a caller
-        // param/literal the engine already binds), if it set one.
-        if let Some(a) = ctx.assigns.iter().find(|a| a.col.node == field) {
-            return match a.value.as_value() {
-                Some(Value::Param(pr)) => format!(":{}", param_key(pr)),
-                Some(Value::Lit(l)) => render_lit(self.dialect, l),
-                Some(Value::Func(f)) => render_func(f),
-                // A path or arithmetic RHS in the bound create is not a plain bind; leave
-                // a visible marker rather than emit something unbindable. (A create never
-                // carries arithmetic — sema E0230.)
-                _ => format!("NULL /* ${name}.{field} unresolved */"),
-            };
-        }
-        // `$name.id` is the app-generated id the bound create binds under `:id_<step>`.
-        if field == "id" {
-            return format!(":{}", ctx.id_param);
-        }
-        // A `@scope` column is engine-set from `$ctx` on the bound create (never an
-        // assign — sema E0181), so its value is the same `:ctx_<field>` the create used;
-        // the whole mutation runs under one `$ctx`, so reusing that bind is exact.
-        if let Some((_, ctx_field)) = self
-            .scope_terms_for(ctx.model)
-            .iter()
-            .find(|(f, _)| f == field)
-        {
-            return format!(":ctx_{ctx_field}");
-        }
-        // Any other unset field (an engine timestamp, a DB-side default) has no value the
-        // engine can bind inline; leave a visible marker rather than a silent wrong write.
-        format!("NULL /* ${name}.{field} not set by bound create */")
+        let column = self
+            .schema
+            .model(self.bindings[name].model)
+            .map_or_else(|| field.to_string(), |m| physical_col(m, field));
+        format!(":{}", bref_name(name, &column))
     }
 
     /// The value SQL for one key part of a composite-FK assign (`enrollment = $rhs`). A tx

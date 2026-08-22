@@ -134,78 +134,69 @@ pub struct KeysetPlan {
     pub page_size: u64,
 }
 
-/// A planned mutation: the write statements in execution order (all bound
-/// positionally), run under one engine-owned transaction.
+/// A planned mutation: the write steps in execution order, run under one engine-owned
+/// transaction. Each step's SQL is **bound late** (at run time), because a bound
+/// `create`'s row read-back captures values (`bref_*`, a DB-generated `:result_id`) that a
+/// later step — or the declared re-select — reads: the run stage binds every step from a
+/// value environment that accumulates those captures (D124).
 #[derive(Debug, Clone)]
 pub struct MutationPlan {
     pub name: String,
-    pub stmts: Vec<Stmt>,
-    /// The engine-generated `id` of the create matching the mutation's return model —
-    /// the row the write response identifies. `None` when the mutation creates no such
-    /// row (a pure update/delete, or a create whose `id` the caller set).
+    pub dialect: based_codegen::Dialect,
+    /// The write steps, in execution order — unbound `:name` SQL plus each step's
+    /// optional row read-back.
+    pub steps: Vec<WriteStep>,
+    /// The plan-time value environment: params, `$ctx`, the app-minted engine ids (and,
+    /// for an app-minted return create, `result_id`). The run stage clones this and adds
+    /// each step's captured values as they are read back.
+    pub env0: std::collections::HashMap<String, SqlValue>,
+    /// The engine-generated `id` of the create matching the mutation's return model, when
+    /// **app-minted** (known at plan time) — the `{ id }` fallback identifier. `None` for a
+    /// pure update/delete, a caller-set id, or a DB-generated (`serial`) id (captured at run
+    /// time into `env` under `result_id`).
     pub result_id: Option<String>,
-    /// The declared-shape re-select: reads the written row back in the mutation's return
-    /// shape so the write response matches the client's decoded output type. Keyed either
-    /// on the created row's id (`:result_id` = [`result_id`](Self::result_id)) or on an
-    /// update/soft-delete/restore's own `where` (its params already bound). `None` only
-    /// when the row does not survive the write (a real DELETE), where the response falls
-    /// back to `{}`.
-    pub ret_select: Option<Stmt>,
-    /// For an `-> ok` mutation, the index (into `stmts`) of the primary DELETE — the
+    /// The declared-shape re-select (unbound `:name` SQL): reads the written row back in
+    /// the mutation's return shape so the write response matches the client's decoded
+    /// output type. Bound late from the run environment (its `:result_id` is either
+    /// app-minted in `env0` or captured from a DB-generated create). `None` only when the
+    /// row does not survive the write (a real DELETE) — the response falls back to `{}`.
+    pub ret_select: Option<String>,
+    /// For an `-> ok` mutation, the index (into `steps`) of the primary DELETE — the
     /// write on the mutation's primary model. Zero rows affected there means the row
     /// was absent (or out of scope): the transaction rolls back and the mutation is a
     /// 404 `not_found`, mirroring a surviving write's empty re-select. `None` for a
     /// shape-returning mutation.
     pub ack_check: Option<usize>,
-    /// For a `serial` (DB-generated primary key) create whose row the mutation returns:
-    /// the run stage must capture the id the INSERT assigns (unknown at plan time) and
-    /// key the declared-shape re-select on it. Carries which statement is that INSERT and
-    /// the *unbound* re-select (its `:result_id` supplied at run time from the captured
-    /// id). `None` for an app-minted mutation — its ids are known at plan time, so
-    /// [`ret_select`](Self::ret_select) is pre-bound and `result_id` is already set.
-    pub serial: Option<SerialReadback>,
 }
 
-/// The `serial` read-back: capture a DB-generated id, then re-select the written row on
-/// it. The re-select is bound late because the id does not exist until the INSERT runs.
+/// One write step: unbound `:name` SQL and an optional row read-back.
 #[derive(Debug, Clone)]
-pub struct SerialReadback {
-    /// Index into [`MutationPlan::stmts`] of the serial INSERT whose assigned id keys the
-    /// re-select (executed via the driver's `execute_returning_id`).
-    pub insert_idx: usize,
-    /// The unbound declared-shape re-select SQL (`… WHERE id = :result_id [AND scope]`),
-    /// or `None` when the mutation declares no shape (the response is `{ id }`).
-    pub ret_sql: Option<String>,
-    /// The bound value environment for the re-select (scope `:ctx_*` binds etc.); the run
-    /// stage adds `:result_id` from the captured id before binding.
-    env: std::collections::HashMap<String, SqlValue>,
-    dialect: based_codegen::Dialect,
+pub struct WriteStep {
+    pub sql: String,
+    /// After the INSERT runs, capture these committed column values into the run
+    /// environment so a later step / the re-select reads the row the database wrote.
+    /// `None` for a write with no read-back (a plain unbound create, or any
+    /// update/delete/restore).
+    pub capture: Option<StepCapture>,
 }
 
-impl SerialReadback {
-    /// Bind the re-select for the captured DB-generated `id`, or `None` when the mutation
-    /// declares no shape (the caller falls back to `{ id }`).
-    pub fn bind(&self, id: i64) -> Result<Option<Stmt>, PlanError> {
-        let Some(sql) = &self.ret_sql else {
-            return Ok(None);
-        };
-        let (sql, params) = to_positional(sql, self.dialect, |name| {
-            if name == "result_id" {
-                Some(SqlValue::Int(id))
-            } else {
-                self.env.get(name).cloned()
-            }
-        })
-        .map_err(PlanError::UnboundPlaceholder)?;
-        Ok(Some(Stmt { sql, params }))
-    }
+/// A bound `create`'s row read-back plan: the columns to capture and how to obtain the row.
+#[derive(Debug, Clone)]
+pub struct StepCapture {
+    pub cols: Vec<CaptureBind>,
+    /// On MySQL (no `INSERT … RETURNING`), the follow-up keyed `SELECT` (unbound) run right
+    /// after the INSERT to read the row. `None` on Postgres/SQLite/MariaDB — the INSERT's
+    /// own `RETURNING` returns the row, so the run stage fetches the INSERT itself.
+    pub followup_select: Option<String>,
+}
 
-    /// The captured id as the `{ id }` fallback response value (no declared shape).
-    pub fn id_response(id: i64) -> serde_json::Value {
-        let mut obj = serde_json::Map::new();
-        obj.insert("id".into(), serde_json::Value::Number(id.into()));
-        serde_json::Value::Object(obj)
-    }
+/// One captured column: the bind a later step reads it under, the physical column read
+/// from the written row, and the coercion family for the value at that later bind.
+#[derive(Debug, Clone)]
+pub struct CaptureBind {
+    pub bind: String,
+    pub column: String,
+    pub family: Family,
 }
 
 /// Why a request could not be planned — all boundary failures, before any SQL.
@@ -418,12 +409,11 @@ pub fn plan_mutation(
 
     // 2. Generate the engine `id` for each create. Record the id of the first create
     //    matching the return model — the row the response identifies. Ids fill uuid
-    //    columns, so they bind as the uuid family.
+    //    columns, so they bind as the uuid family. A DB-generated (`serial`) create has no
+    //    `gen_id` — the DB mints its id, captured at run time.
     let mut result_id = None;
     for w in &low.stmts {
         if let Some(bind) = &w.gen_id {
-            // Mint per the model's strategy: a `ulid` create draws a sortable id, a `uuid`
-            // create a random v4 (a `serial` create has no `gen_id` — the DB mints it).
             let id = match compiled
                 .schema
                 .model(&w.model)
@@ -432,57 +422,43 @@ pub fn plan_mutation(
                 Some(based_sema::PkStrategy::Ulid) => id_gen.next_ulid(),
                 _ => id_gen.next_id(),
             };
-            if result_id.is_none() && w.model == rm.ret_model {
+            if result_id.is_none() && w.creates && w.model == rm.ret_model {
                 result_id = Some(id.clone());
             }
             env.insert(bind.clone(), SqlValue::Uuid(id));
         }
     }
+    // An app-minted return create keys its declared re-select on this known id; a
+    // DB-generated one binds `result_id` at run time from its captured row.
+    if let Some(id) = &result_id {
+        env.insert("result_id".to_string(), SqlValue::Uuid(id.clone()));
+    }
 
-    // 3. Bind every write statement to positional form, in execution order.
-    let stmts = low
+    // 3. Build each write step: its unbound `:name` SQL and its row read-back plan (a
+    //    bound create's captured columns, coerced by the captured field's family). The run
+    //    stage binds each step late, so a `$name.field` reference resolves to the row the
+    //    database actually wrote.
+    let steps = low
         .stmts
         .iter()
-        .map(|w| env.bind(&w.sql))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|w| WriteStep {
+            sql: w.sql.clone(),
+            capture: w.capture.as_ref().map(|cap| StepCapture {
+                cols: cap
+                    .cols
+                    .iter()
+                    .map(|c| CaptureBind {
+                        bind: c.bind.clone(),
+                        column: c.column.clone(),
+                        family: capture_family(&compiled.schema, &w.model, &c.field),
+                    })
+                    .collect(),
+                followup_select: cap.followup_select.clone(),
+            }),
+        })
+        .collect();
 
-    // A `serial` (DB-generated PK) create for the return model: its id is unknown until
-    // the INSERT runs, so the re-select is bound late (from the captured id) by the run
-    // stage rather than pre-bound here.
-    let serial_idx = low
-        .stmts
-        .iter()
-        .position(|w| w.serial_return && w.model == rm.ret_model);
-
-    // 4. The declared-shape re-select: bind it whenever codegen emitted one (codegen and
-    //    this planner apply the same survives-the-write rule, so they agree). A create-keyed
-    //    re-select needs `:result_id` = this create's engine id; a where-keyed one
-    //    (update/soft-delete/restore) reuses the write's own params/`$ctx`, already in
-    //    `env`. Seeding `:result_id` only when a create produced one is harmless for the
-    //    where-keyed form — `to_positional` binds only the placeholders each statement carries.
-    let (ret_select, serial) = if let Some(insert_idx) = serial_idx {
-        // Defer the re-select to run time — the id comes from the DB-generated INSERT.
-        let readback = SerialReadback {
-            insert_idx,
-            ret_sql: low.ret_select.clone(),
-            env: env.snapshot(),
-            dialect: compiled.dialect,
-        };
-        (None, Some(readback))
-    } else {
-        let ret_select = match &low.ret_select {
-            Some(sql) => {
-                if let Some(id) = &result_id {
-                    env.insert("result_id".to_string(), SqlValue::Uuid(id.clone()));
-                }
-                Some(env.bind(sql)?)
-            }
-            None => None,
-        };
-        (ret_select, None)
-    };
-
-    // 5. An `-> ok` mutation has no re-select; its not-found signal is the primary
+    // 4. An `-> ok` mutation has no re-select; its not-found signal is the primary
     //    DELETE (the first write on the primary model) affecting zero rows.
     let ack_check = if rm.ack {
         low.stmts.iter().position(|w| w.model == rm.ret_model)
@@ -492,12 +468,23 @@ pub fn plan_mutation(
 
     Ok(MutationPlan {
         name: req.callable.clone(),
-        stmts,
+        dialect: compiled.dialect,
+        steps,
+        env0: env.snapshot(),
         result_id,
-        ret_select,
+        ret_select: low.ret_select.clone(),
         ack_check,
-        serial,
     })
+}
+
+/// The coercion family for a captured column: the type of the created model's `field`
+/// member (a scalar's primitive, a relation terminal's target key). Defaults to `Any`
+/// when unresolved — a plain text bind.
+fn capture_family(schema: &CheckedSchema, model: &str, field: &str) -> Family {
+    schema
+        .model(model)
+        .and_then(|m| member_family(schema, m, &[field]))
+        .unwrap_or(Family::Any)
 }
 
 // ---------- value environment ---------------------------------------------

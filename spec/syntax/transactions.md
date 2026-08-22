@@ -10,6 +10,12 @@ The DSL is a closed set of queries and mutations; a mutation's `tx { … }` (mut
 read-decide-write — read a row, decide in code, then write — is **host-language logic**, so it
 lives in host Rust against an engine-owned transaction, never in the DSL (principle 5).
 
+Within a `tx`, a `create … as name` **re-selects its written row**, so a later step's
+`$name.field` reads the row the database actually wrote — read-your-writes *inside the
+transaction*, seeing DB defaults, engine timestamps, and DB-generated (`serial`) ids as
+written (mutations.md, D124). This is threading a committed value between static steps, not
+branching on it — the write set is still fixed at compile time.
+
 The seam is **embedded-only** (in-process): it runs a transaction over the same `Engine` an
 embedding app already holds. It is not a wire feature — a transaction cannot span HTTP requests.
 

@@ -1541,9 +1541,10 @@ fn a_composite_key_allows_only_one_serial_part() {
 }
 
 #[test]
-fn serial_id_cannot_be_reached_across_tx_steps() {
-    // `$name.id` of a `serial` create is unknown until the row is written, so it can't
-    // bind a sibling step — E0268. (An app-minted uuid parent is fine.)
+fn serial_id_can_be_reached_across_tx_steps() {
+    // A bound create re-selects its written row, so a `$name.id` reference to a `serial`
+    // (DB-generated) create resolves to the committed id — no E0268 (retired, D124). The
+    // reference still validates the field is a member and the assign types agree.
     let src = r#"
         Org { id: serial  name: text }
         Note { id: Id  org: Org  body: text }
@@ -1555,12 +1556,13 @@ fn serial_id_cannot_be_reached_across_tx_steps() {
           }
         }
     "#;
+    let analyzed = analyze(src);
+    let errs = errors(&analyzed.1);
     assert!(
-        errors(&analyze(src).1).contains(&"E0268"),
-        "{:?}",
-        errors(&analyze(src).1)
+        errs.is_empty(),
+        "serial `$o.id` should check clean: {errs:?}"
     );
-    // The same shape with a uuid parent binds fine.
+    // The same shape with a uuid parent also binds fine.
     let ok = r#"
         Org { id: Id  name: text }
         Note { id: Id  org: Org  body: text }
@@ -1573,7 +1575,7 @@ fn serial_id_cannot_be_reached_across_tx_steps() {
         }
     "#;
     assert!(
-        !errors(&analyze(ok).1).contains(&"E0268"),
+        errors(&analyze(ok).1).is_empty(),
         "{:?}",
         errors(&analyze(ok).1)
     );

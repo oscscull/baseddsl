@@ -1794,3 +1794,91 @@ async fn composite_serial_key_part_is_db_generated_live_postgres() {
     assert_eq!(got.status, 200, "{:?}", got.body);
     assert_eq!(got.body, json!({ "seq": 2, "value": 20 }));
 }
+
+/// D124 against live Postgres (`INSERT … RETURNING`): a bound create's `@created` timestamp
+/// — engine-set, unknowable at plan time — is read back and reused by a sibling step. The
+/// persisted `Event.at` must equal the Ticket's real `created_at`.
+#[tokio::test]
+async fn tx_binding_reuses_engine_timestamp_runs_against_live_postgres() {
+    const SCHEMA: &str = r#"
+        @created(created_at)
+        Ticket { id: Id, created_at: timestamp, subject: text }
+        Event { id: Id, ticket: Ticket, at: timestamp, note: text }
+        shape TicketRow from Ticket { subject, created_at }
+        shape EventRow from Event { note, at, ticket = ticket.id }
+        mutation open(subject: text, note: text) -> TicketRow {
+          tx {
+            create Ticket { subject = $subject } as t;
+            create Event { ticket = $t.id, at = $t.created_at, note = $note };
+          }
+        }
+        query events() -> EventRow[];
+        query tickets() -> TicketRow[];
+    "#;
+    let Some((c, router, _guard)) = live_schema(SCHEMA).await else {
+        return;
+    };
+    let made = call(
+        &c,
+        &router,
+        "POST",
+        "/m/open",
+        json!({ "subject": "S", "note": "N" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(made.status, 200, "{:?}", made.body);
+    let tickets = call(&c, &router, "POST", "/q/tickets", json!({}), json!({})).await;
+    let events = call(&c, &router, "POST", "/q/events", json!({}), json!({})).await;
+    let ticket_created = tickets.body[0]["created_at"]
+        .as_str()
+        .expect("ticket created_at");
+    let event_at = events.body[0]["at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("Event.at is NULL: {:?}", events.body[0]));
+    assert_eq!(
+        event_at, ticket_created,
+        "$t.created_at must be the Ticket's real committed created_at"
+    );
+}
+
+/// D124 against live Postgres (retired E0268): a `serial` create bound `as o`, whose id the
+/// DB assigns, binds a sibling FK via `$o.id` — the RETURNING read-back threads the
+/// DB-generated id into the later step.
+#[tokio::test]
+async fn tx_binding_reaches_serial_id_runs_against_live_postgres() {
+    const SCHEMA: &str = r#"
+        Org { id: serial, name: text }
+        Note { id: Id, org: Org, body: text }
+        shape OrgCard from Org { id, name }
+        shape NoteRow from Note { body, org = org.id }
+        mutation setup(name: text, body: text) -> OrgCard {
+          tx {
+            create Org { name = $name } as o;
+            create Note { org = $o.id, body = $body };
+          }
+        }
+        query notes() -> NoteRow[];
+    "#;
+    let Some((c, router, _guard)) = live_schema(SCHEMA).await else {
+        return;
+    };
+    let made = call(
+        &c,
+        &router,
+        "POST",
+        "/m/setup",
+        json!({ "name": "Acme", "body": "hi" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(made.status, 200, "{:?}", made.body);
+    let org_id = made.body["id"].as_i64().expect("db-generated integer id");
+    let notes = call(&c, &router, "POST", "/q/notes", json!({}), json!({})).await;
+    assert_eq!(
+        notes.body[0]["org"].as_i64(),
+        Some(org_id),
+        "Note.org must be the serial Org's DB-generated id: {:?}",
+        notes.body[0]
+    );
+}

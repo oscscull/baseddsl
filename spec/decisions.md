@@ -80,7 +80,11 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D102 (upsert: `create … on conflict (target) update { … }` — per-dialect `ON CONFLICT DO
   UPDATE` / `ON DUPLICATE KEY UPDATE`, conflict-key-keyed read-back; E0250-E0254),
   D107 (named `tx` step bindings `create … as name;` + `$name.field`, reaches any prior step;
-  **`^` removed entirely**, `E0170` retired; E0280/E0281 — supersedes D16)
+  **`^` removed entirely**, `E0170` retired; E0280/E0281 — supersedes D16),
+  D124 (a bound `create … as name` **re-selects its written row**; every `$name.field`
+  reads that row's committed value — engine timestamp, DB default, DB-generated `serial`
+  id included — via `RETURNING`/keyed-`SELECT`; unifies `binding_field_value`'s four paths
+  into one, **retires E0268**; resolves H6-R1)
 - **Indexing** — D15 (index inference, baseline emission, lints), D103 (inferred join-key indexes
   retire → explicit `@index`, error `E0260` + autofix; principle 8 reworded; `inf_`/`IndexSnap.inferred`
   gone), D104 (exotic indexes: `@index(col) using <method>` + opaque `@index raw("…")`, per-dialect
@@ -5992,3 +5996,71 @@ emits no SQL).
 sema conformance (clean nowait/skip-locked queries), fmt round-trip, codegen dml (per-dialect
 emission) + the `Dialect` unit test; runtime `postgres_integration.rs` + `sqlite_integration.rs`. The
 transaction seam (D118–D120) plus its locking-read modifiers are now complete.
+
+## D124 — a bound create re-selects its written row; `$name.field` reads it
+
+**Owner-approved 2026-08-22.** Resolves H6-R1 (the deferred fork the 2026-08-21(2) write-path
+sweep filed) and retires E0268.
+
+**The rule.** A bound create (`create … as t`) **always re-selects its full written row**
+immediately after the INSERT, and every `$t.field` reference in a later `tx` step resolves
+from that re-selected row's **real committed values**. An UNBOUND create is unchanged (no
+binding re-select). `as t` is the signal that the insert's result is needed — and a
+serial/autoincrement create already round-trips for its id — so "always re-select on a
+binding" is the single, robust, bug-resistant rule. The narrow "skip the re-select when only
+an app-minted `$t.id` is used" optimization was **rejected** (not worth a second code path).
+
+**What it fixes.** Before D124, `Select::binding_field_value` resolved `$t.field` four ways —
+(1) reuse the create's explicit assign, (2) `$t.id` → `:id_<step>`, (3) a `@scope` column →
+`:ctx_<field>`, (4) fall through to `NULL /* not set by bound create */`. Path 4 was a silent
+wrong value (or a spurious NOT-NULL failure) for a field the create never named inline: an
+engine `@created`/`@updated` timestamp (`CURRENT_TIMESTAMP` re-evaluates per statement, so it
+can't be reused inline) or a DB-side column default (invisible to codegen). D124 replaces all
+four with **one uniform path**: read the row the DB actually wrote. `$t.field` lowers to a
+`:bref_<t>__<column>` bind the run stage fills from the re-selected row.
+
+**Mechanism (per dialect, over the `Dialect` seam).** Postgres/SQLite/**MariaDB (11.4 —
+`INSERT … RETURNING` since 10.5)**: the bound create's INSERT is widened to `RETURNING <the
+columns later steps read>` — generalizing the serial planner's `RETURNING id` to the full row
+— and the run stage fetches the INSERT itself. MySQL (no `INSERT … RETURNING`): the INSERT
+executes, then a follow-up keyed `SELECT` reads the row (keyed like the serial read-back:
+`LAST_INSERT_ID()` for a DB-generated part, the `:id_<step>` bind for an app-minted surrogate,
+or the natural/composite key columns). Each captured column binds into a per-column runtime
+value (`bref_<t>__<col>`, plus `result_id` for a DB-generated return id) that later steps and
+the declared-shape re-select read. The `@scope`-column special case (the cd72b20 `:ctx_<field>`
+inline fix) is **subsumed** — the scope column rides the re-select like any other column.
+
+**E0268 (`PK_SERIAL_BACKREF`) retired.** A serial `$t.id` sibling reference now works — the id
+is in the re-selected row. The sema check + its code registration are removed; `check_binding_ref`
+still validates the field is a member and the assign types agree.
+
+**Runtime shape.** `plan_mutation` no longer pre-binds each write; `MutationPlan` carries the
+plan-time value environment plus per-step **unbound** `:name` SQL and an optional per-step
+capture. `run_writes` clones the environment, and as each step runs it binds late, then a bound
+create's read-back adds its captured columns to the environment for the following steps and the
+final re-select. `SerialReadback` + the driver `execute_returning_id` capability are **removed**
+(subsumed by the general capture path; MariaDB's serial id now rides `RETURNING`, not
+`LAST_INSERT_ID()`).
+
+**Semantics.** `$t.field` is read-your-writes *within the transaction* — the re-select sees DB
+defaults, engine timestamps, and triggers as written. This is threading a committed value
+between static steps, not branching on it; the write set stays fixed at compile time
+(principle 5). The mutation's own declared-shape RETURN re-select (D12) is a separate concern
+(the final projection) and is unchanged in intent — it now binds late from the same environment.
+
+**Live proof.** SQLite + Postgres + MariaDB: a bound `@created` model whose sibling assigns
+`at = $t.created_at` persists the ticket's real `created_at`; a `serial` parent's `$t.id`
+threads its DB-generated id into a child FK (the retired-E0268 path); the `@scope`-column
+scenario still resolves correctly through the re-select. Codegen goldens: the widened
+`RETURNING` per dialect, the `$t.field` → `:bref_*` resolution, the MySQL insert+SELECT shape,
+and an unbound create emitting no read-back.
+
+**Blast radius.** `based-codegen` (`sql/dml.rs` `binding_field_value`/`fk_assign_part` → the one
+`:bref_*` path, `BackCtx` slimmed to the model; `sql/mutations.rs` `Capture`/`CaptureCol`,
+`collect_binding_refs` pre-scan, `build_capture`, generalized `insert_sql` RETURNING, MySQL
+`followup_select_sql`, the text emitter prints the follow-up SELECT). `based-sema`
+(`check.rs`/`ir.rs` — E0268 removed). `based-runtime` (`plan.rs` `MutationPlan`/`WriteStep`/
+`StepCapture`/`CaptureBind`, `SerialReadback` removed; `run.rs` `run_writes` late-bind + capture,
+`execute_returning_id` removed; `driver.rs` overrides removed). Spec: `mutations.md`,
+`transactions.md`, `models.md`. Tests: sema `check.rs`, codegen `mutations.rs`, runtime
+`mutation.rs`/`load.rs`/`sqlite_integration.rs`/`mariadb_integration.rs`/`postgres_integration.rs`.

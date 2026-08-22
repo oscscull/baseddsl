@@ -144,7 +144,8 @@ pub mod code {
     // primary-key generation strategy (`id: uuid | ulid | serial`, D110)
     pub const PK_BARE_INT: &str = "E0266"; // a bare `int` (or other numeric) as the `id` PK — a DB-generated integer key must be spelled `serial` (its generation is consequential and must be visible)
     pub const PK_STRATEGY_MISPLACED: &str = "E0267"; // `serial`/`ulid` on a non-primary-key column — they are PK generation strategies, valid only as the `id` type
-    pub const PK_SERIAL_BACKREF: &str = "E0268"; // a `tx` step reads `$name.id` of a `serial` (DB-generated) create — the id is unknown until the row is written, so it can't bind a sibling step
+                                                     // E0268 retired (D124): a bound create re-selects its written row, so a `$name.id`
+                                                     // reference to a `serial` (DB-generated) create resolves to the committed id.
 
     // nominated primary key `@key(f1, f2, …)` (D111): declared column(s) *are* the primary
     // key — no surrogate `id` is synthesized. One field is a natural single-column key; two

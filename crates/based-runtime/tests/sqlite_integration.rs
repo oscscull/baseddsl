@@ -2540,6 +2540,113 @@ async fn tx_binding_reuses_bound_steps_scope_column_end_to_end() {
     );
 }
 
+/// D124 (H6-R1): a bound create's `@created` timestamp — engine-set to `CURRENT_TIMESTAMP`,
+/// unknowable at plan time — is read back and reused by a sibling step. The persisted
+/// `Event.at` must equal the Ticket's real `created_at` (never NULL, never a different
+/// instant): the bound create re-selects its written row, so `$t.created_at` reads the
+/// value the database actually wrote.
+#[tokio::test]
+async fn tx_binding_reuses_bound_creates_engine_timestamp_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @created(created_at)
+        Ticket { id: Id, created_at: timestamp, subject: text }
+        Event { id: Id, ticket: Ticket, at: timestamp, note: text }
+        shape TicketRow from Ticket { subject, created_at }
+        shape EventRow from Event { note, at, ticket = ticket.id }
+        mutation open(subject: text, note: text) -> TicketRow {
+          tx {
+            create Ticket { subject = $subject } as t;
+            create Event { ticket = $t.id, at = $t.created_at, note = $note };
+          }
+        }
+        query events() -> EventRow[];
+        query tickets() -> TicketRow[];
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+
+    let made = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/open",
+        json!({ "subject": "S", "note": "N" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(made.status, 200, "{:?}", made.body);
+
+    let tickets = call(&c, &backend, "POST", "/q/tickets", json!({}), json!({})).await;
+    let events = call(&c, &backend, "POST", "/q/events", json!({}), json!({})).await;
+    let ticket_created = tickets.body[0]["created_at"]
+        .as_str()
+        .expect("ticket created_at");
+    let event_at = events.body[0]["at"].as_str().unwrap_or_else(|| {
+        panic!(
+            "Event.at is NULL — the timestamp binding regressed: {:?}",
+            events.body[0]
+        )
+    });
+    assert_eq!(
+        event_at, ticket_created,
+        "$t.created_at must be the Ticket's real committed created_at"
+    );
+}
+
+/// D124 (retired E0268): a `serial` (DB-generated) create bound `as t`, whose id is unknown
+/// until the INSERT runs, now binds a sibling FK via `$t.id` — the bound create re-selects
+/// its written row (`RETURNING id`), so the DB-generated id threads into the later step.
+#[tokio::test]
+async fn tx_binding_reaches_a_serial_creates_db_generated_id_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        Org { id: serial, name: text }
+        Note { id: Id, org: Org, body: text }
+        shape OrgCard from Org { name }
+        shape NoteRow from Note { body, org = org.id }
+        mutation setup(name: text, body: text) -> OrgCard {
+          tx {
+            create Org { name = $name } as o;
+            create Note { org = $o.id, body = $body };
+          }
+        }
+        query notes() -> NoteRow[];
+        query orgs() -> OrgCard[];
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+
+    let made = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/setup",
+        json!({ "name": "Acme", "body": "hi" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(made.status, 200, "{:?}", made.body);
+
+    let notes = call(&c, &backend, "POST", "/q/notes", json!({}), json!({})).await;
+    // The Note's FK carries the DB-generated Org id (a serial integer, id 1).
+    let org_fk = &notes.body[0]["org"];
+    assert!(
+        org_fk.as_i64() == Some(1) || org_fk.as_str() == Some("1"),
+        "Note.org must be the serial Org's DB-generated id, got {org_fk:?}"
+    );
+}
+
 /// D107 (H6): a 3-step `tx` where step 3 references step 1 (`$user.id`), reaching *past*
 /// the immediately-prior step — proven live, not just at plan time. Both the Address
 /// (step 2) and the Log (step 3) must carry the *same* User id (step 1's app-minted id),

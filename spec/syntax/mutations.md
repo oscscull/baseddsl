@@ -89,8 +89,18 @@ tx {
 `$` unifies to "a value bound in this callable" — a param, a `$ctx` field, or a step
 binding. A binding is **single-assignment** and **field-access only** (`$user.id`, never a
 deeper traversal or a rebinding), so nothing Turing-complete enters the DSL (principle 5).
-The overwhelming use is `$name.id`, wiring a just-created row's key into a later write; a
-non-`id` field reuses the value that create assigned it.
+The overwhelming use is `$name.id`, wiring a just-created row's key into a later write.
+
+**A bound create re-selects its written row (read-your-writes within the transaction).**
+`create … as name` is the signal that the insert's result is needed, so the engine reads
+the row the database actually wrote back immediately after the INSERT, and every
+`$name.field` in a later step resolves to that row's **real committed value** — including a
+value the create never named: an engine `@created`/`@updated` timestamp
+(`CURRENT_TIMESTAMP`), a DB-side column default, or a DB-generated `serial` id. So a
+sibling `at = $t.created_at` persists the ticket's actual `created_at`, and a `serial`
+parent's `$t.id` wires its DB-assigned key into a child. The re-select folds into the
+INSERT as `RETURNING <cols>` on Postgres/SQLite/MariaDB, and is a follow-up keyed `SELECT`
+on MySQL (no `INSERT … RETURNING`). An **unbound** create does no such re-select.
 
 - **`as <name>` is a keyword** — the bare trailing form (`create … user;`) would be two
   adjacent bare tokens, banned by principle 3.

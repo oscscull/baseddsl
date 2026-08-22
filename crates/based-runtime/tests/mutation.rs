@@ -57,7 +57,7 @@ const CREATE_SCHEMA: &str = r#"
 "#;
 
 #[test]
-fn create_generates_id_and_binds_params_positionally() {
+fn create_generates_id_and_seeds_the_bind_environment() {
     let c = compile(CREATE_SCHEMA);
     let ids = SeqIdGen::default();
     let plan = plan_mutation(
@@ -70,25 +70,27 @@ fn create_generates_id_and_binds_params_positionally() {
     )
     .unwrap();
 
-    assert_eq!(plan.stmts.len(), 1);
-    let s = &plan.stmts[0];
+    assert_eq!(plan.steps.len(), 1);
+    let s = &plan.steps[0];
+    // Steps hold unbound `:name` SQL — bound late at run time from the environment.
     assert!(s.sql.contains("INSERT INTO `order`"), "{}", s.sql);
     assert!(
-        s.sql.contains("VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)"),
+        s.sql
+            .contains("VALUES (:id, :org, :buyer, :total, CURRENT_TIMESTAMP)"),
         "{}",
         s.sql
     );
-    assert!(!s.sql.contains(':'), "no named binds left: {}", s.sql);
-    // engine `id` leads, then the params in column order.
+    assert!(s.capture.is_none(), "a plain create needs no read-back");
+    // The engine `id` and the params sit in the bind environment.
     assert_eq!(
-        s.params,
-        vec![
-            SqlValue::Uuid("id-0".into()),
-            SqlValue::Uuid("o-1".into()),
-            SqlValue::Uuid("u-1".into()),
-            SqlValue::Int(42),
-        ]
+        plan.env0.get("id").cloned(),
+        Some(SqlValue::Uuid("id-0".into()))
     );
+    assert_eq!(
+        plan.env0.get("org").cloned(),
+        Some(SqlValue::Uuid("o-1".into()))
+    );
+    assert_eq!(plan.env0.get("total").cloned(), Some(SqlValue::Int(42)));
     // the response identifies the created row by its generated id (return model = Order).
     assert_eq!(plan.result_id.as_deref(), Some("id-0"));
 }
@@ -179,33 +181,31 @@ fn update_binds_arg_then_ctx_scope_and_reselects_by_the_write_where() {
     );
     let plan = plan_mutation(&c, &r, &ids).unwrap();
 
-    let s = &plan.stmts[0];
+    let s = &plan.steps[0];
     assert!(s.sql.starts_with("UPDATE `order`"), "{}", s.sql);
-    assert!(!s.sql.contains(':'), "no named binds left: {}", s.sql);
-    // placeholder order: SET `status` first, then the WHERE `id`, then injected `:ctx_org`.
+    assert!(s.capture.is_none(), "an update has no row read-back");
+    // The write's args + injected `:ctx_org` scope sit in the bind environment (bound
+    // late at run time).
     assert_eq!(
-        s.params,
-        vec![
-            SqlValue::Text("shipped".into()),
-            SqlValue::Uuid("ord-9".into()),
-            SqlValue::Uuid("org-7".into()),
-        ]
+        plan.env0.get("status").cloned(),
+        Some(SqlValue::Text("shipped".into()))
+    );
+    assert_eq!(
+        plan.env0.get("id").cloned(),
+        Some(SqlValue::Uuid("ord-9".into()))
+    );
+    assert_eq!(
+        plan.env0.get("ctx_org").cloned(),
+        Some(SqlValue::Uuid("org-7".into()))
     );
     // No create, so no engine id — but the updated row survives, so the declared shape is
-    // re-selected keyed off the write `where`: `id = :id`, then the live + scope
-    // guards, all reusing the write's already-bound params.
+    // re-selected keyed off the write `where`: `id = :id`, then the live + scope guards,
+    // reusing the write's bound params (the unbound `:name` SQL is bound late at run time).
     assert!(plan.result_id.is_none());
     let rs = plan.ret_select.as_ref().expect("where-keyed re-select");
-    assert!(rs.sql.starts_with("SELECT"), "{}", rs.sql);
-    assert!(rs.sql.contains("FROM `order`"), "{}", rs.sql);
-    assert!(!rs.sql.contains(':'), "no named binds left: {}", rs.sql);
-    assert_eq!(
-        rs.params,
-        vec![
-            SqlValue::Uuid("ord-9".into()),
-            SqlValue::Uuid("org-7".into())
-        ]
-    );
+    assert!(rs.starts_with("SELECT"), "{rs}");
+    assert!(rs.contains("FROM `order`"), "{rs}");
+    assert!(rs.contains(":id") && rs.contains(":ctx_org"), "{rs}");
 }
 
 #[test]
@@ -323,41 +323,50 @@ async fn tx_numbers_sibling_creates_and_step_ref_reuses_prior_id() {
     )
     .unwrap();
 
-    assert_eq!(plan.stmts.len(), 2);
-    // User: its own generated id (`id-0`), then the email.
+    assert_eq!(plan.steps.len(), 2);
+    // User is a bound create (`as user`): its written row is re-selected so `$user.id`
+    // reads the committed id. The INSERT carries `RETURNING` (MariaDB) and captures `id`
+    // under the `bref_user__id` bind a later step reads.
     assert!(
-        plan.stmts[0].sql.contains("INSERT INTO `user`"),
+        plan.steps[0].sql.contains("INSERT INTO `user`"),
         "{}",
-        plan.stmts[0].sql
+        plan.steps[0].sql
     );
-    assert_eq!(
-        plan.stmts[0].params,
-        vec![
-            SqlValue::Uuid("id-0".into()),
-            SqlValue::Text("a@b.c".into())
-        ]
-    );
-    // Address: its own generated id (`id-1`), the `$user.id` step reference reusing the
-    // User's `id-0`, then the city — the reference binds the *same* value the User got.
     assert!(
-        plan.stmts[1].sql.contains("INSERT INTO `address`"),
+        plan.steps[0].sql.contains("RETURNING `id`"),
         "{}",
-        plan.stmts[1].sql
+        plan.steps[0].sql
     );
-    assert_eq!(
-        plan.stmts[1].params,
-        vec![
-            SqlValue::Uuid("id-1".into()),
-            SqlValue::Uuid("id-0".into()),
-            SqlValue::Text("NYC".into()),
-        ]
+    let cap = plan.steps[0]
+        .capture
+        .as_ref()
+        .expect("bound create captures");
+    assert!(
+        cap.cols.iter().any(|c| c.bind == "bref_user__id"),
+        "{cap:?}"
     );
-    // the response identifies the User row (the return model).
+    // Address reads `$user.id` from that capture bind.
+    assert!(
+        plan.steps[1].sql.contains("INSERT INTO `address`"),
+        "{}",
+        plan.steps[1].sql
+    );
+    assert!(
+        plan.steps[1].sql.contains(":bref_user__id"),
+        "{}",
+        plan.steps[1].sql
+    );
+    // the response identifies the User row (the return model, app-minted).
     assert_eq!(plan.result_id.as_deref(), Some("id-0"));
 
-    // both writes plus the declared-shape re-select run under one transaction, in
-    // order; the re-select reads the created User (the return model) back as UserCard.
-    let db = MockDb::new(vec![vec![row(json!({ "email": "a@b.c" }))]]);
+    // Both writes plus the declared-shape re-select run under one transaction, in order.
+    // The User INSERT … RETURNING is fetched (first response = its written row, so
+    // `$user.id` resolves to the committed id), then the Address INSERT executes, then the
+    // re-select reads the created User back as UserCard (second response).
+    let db = MockDb::new(vec![
+        vec![row(json!({ "id": "id-0" }))],
+        vec![row(json!({ "email": "a@b.c" }))],
+    ]);
     let out = run_mutation(
         &c,
         &db,
@@ -370,9 +379,16 @@ async fn tx_numbers_sibling_creates_and_step_ref_reuses_prior_id() {
     .unwrap();
     assert_eq!(out, json!({ "email": "a@b.c" }));
     assert_eq!(db.tx_log(), vec!["begin", "commit"]);
-    // two INSERTs, then the shaped re-select.
+    // User INSERT … RETURNING (fetch), Address INSERT (execute), then the shaped re-select.
     let calls = db.calls();
     assert_eq!(calls.len(), 3);
+    assert!(calls[0].0.contains("INSERT INTO `user`"), "{}", calls[0].0);
+    // the Address INSERT bound `$user.id` to the captured committed id.
+    assert!(
+        calls[1].1.contains(&SqlValue::Uuid("id-0".into())),
+        "{:?}",
+        calls[1].1
+    );
     assert!(calls[2].0.starts_with("SELECT"), "{}", calls[2].0);
 }
 
