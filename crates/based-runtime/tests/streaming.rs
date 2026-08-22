@@ -27,6 +27,19 @@ const SCHEMA: &str = r#"
     }
 "#;
 
+/// A `@scope`d + `@soft_delete`d streamed model — the tenant/tombstone-leak surface: a
+/// stream must inject the scope predicate and tombstone filter exactly like a `list`.
+const SCOPED_SCHEMA: &str = r#"
+    Org { id: Id, name: text }
+    scope Tenant (org: Org = $ctx.org)
+    @soft_delete(deleted_at)
+    @scope Tenant
+    @sort(total desc)
+    Order { id: Id, org: Org, deleted_at: timestamp?, status: text, total: int }
+    shape OrderCard from Order { status, total }
+    query export_orders() -> stream OrderCard scoped Tenant;
+"#;
+
 fn compile(src: &str) -> Compiled {
     let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
     let (schema, diags) = check(&sf.decls);
@@ -266,5 +279,53 @@ mod sqlite {
         .await;
         assert_eq!(full.len(), 3);
         assert!(full.iter().all(std::result::Result::is_ok));
+    }
+
+    /// Nothing is bypassed: a `@scope`d + `@soft_delete`d model streamed must inject the
+    /// scope predicate and tombstone filter exactly like a `list`. Seed a cross-tenant
+    /// row and a tombstoned in-tenant row; the pass must return neither — a stream can
+    /// never see a row the `[]` form would not.
+    #[tokio::test]
+    async fn scope_and_soft_delete_are_injected_into_the_stream() {
+        let c = compile(SCOPED_SCHEMA);
+        let b = SqliteBackend::in_memory().expect("open in-memory sqlite");
+        b.execute_batch(&sql::ddl(&c.schema, Dialect::Sqlite))
+            .await
+            .expect("generated DDL");
+        b.execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme'), ('org-2', 'Other');
+            INSERT INTO `order` (`id`, `org_id`, `deleted_at`, `status`, `total`) VALUES
+                ('o-1', 'org-1', NULL,                  'open', 30),
+                ('o-2', 'org-1', '2020-01-01 00:00:00', 'paid', 25),  -- tombstoned
+                ('o-3', 'org-2', NULL,                  'paid', 40),  -- other tenant
+                ('o-4', 'org-1', NULL,                  'open', 10);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+
+        let stream = dispatch_stream(
+            &c,
+            &b,
+            "",
+            "POST",
+            "/q/export_orders",
+            json!({}),
+            json!({ "org": "org-1" }),
+        )
+        .await
+        .expect("stream starts");
+        let rows: Vec<_> = stream.map(|r| r.expect("row decodes")).collect().await;
+
+        // Only the two live org-1 rows, in `@sort(total desc)` order — the tombstoned
+        // row and the org-2 row are filtered out before the first item.
+        assert_eq!(
+            rows,
+            vec![
+                json!({ "status": "open", "total": 30 }),
+                json!({ "status": "open", "total": 10 }),
+            ]
+        );
     }
 }
