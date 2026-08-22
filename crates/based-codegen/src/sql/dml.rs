@@ -628,7 +628,7 @@ fn keyset_eq(key: &OrderKey, j: usize, dialect: Dialect) -> String {
     }
     match dialect {
         Dialect::Sqlite => format!("{} IS {param}", key.col_ref),
-        Dialect::MariaDb => format!("{} <=> {param}", key.col_ref),
+        Dialect::MariaDb | Dialect::MySql => format!("{} <=> {param}", key.col_ref),
         Dialect::Postgres => format!("{} IS NOT DISTINCT FROM {param}", key.col_ref),
     }
 }
@@ -649,7 +649,7 @@ fn keyset_after(key: &OrderKey, i: usize, dialect: Dialect) -> String {
     // Where NULLs fall in this key's direction: NULL is lowest on MariaDB/SQLite, highest
     // on Postgres, and the direction flips that. `nulls_first` = NULLs sort before the
     // non-NULL values in this key's own order.
-    let nulls_low = matches!(dialect, Dialect::MariaDb | Dialect::Sqlite);
+    let nulls_low = matches!(dialect, Dialect::MariaDb | Dialect::MySql | Dialect::Sqlite);
     let nulls_first = (key.dir == SortDir::Asc) == nulls_low;
     // Parenthesized as a unit: it is ANDed behind the preceding keys' equality prefix, so
     // its inner `OR` must not escape the conjunction.
