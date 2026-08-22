@@ -3,3 +3,5 @@ model Product  decorators=[]  fields=4  indexes=0
 shape ProductRow from Product  fields=3
 query product_for_update  params=1  ret=ProductRow  body=block+for_update
 query cheap_for_update  params=1  ret=ProductRow[]  body=block+for_update
+query product_for_update_nowait  params=1  ret=ProductRow  body=block+for_update(nowait)
+query available_for_update  params=1  ret=ProductRow[]  body=block+for_update(skip_locked)

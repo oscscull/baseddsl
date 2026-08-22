@@ -598,11 +598,25 @@ pub struct Statement {
     /// modifier (a `get` reads one row); the automatic sort cascade is suppressed so an
     /// injected key column can't defeat the dedup.
     pub distinct: bool,
-    /// `get|list … for update` — a pessimistic locking read (`SELECT … FOR UPDATE`). A
-    /// trailing modifier after the clause list; compile-time-confined to transaction
-    /// clients (a lock outside a transaction releases immediately). No-op on SQLite,
-    /// which locks the whole database on its transaction already.
-    pub for_update: bool,
+    /// `get|list … for update[ nowait| skip locked]` — a pessimistic locking read
+    /// (`SELECT … FOR UPDATE`), carrying its wait behaviour when set. A trailing modifier
+    /// after the clause list; compile-time-confined to transaction clients (a lock outside a
+    /// transaction releases immediately). No-op on SQLite, which locks the whole database on
+    /// its transaction already.
+    pub for_update: Option<LockWait>,
+}
+
+/// The wait behaviour of a `for update` locking read when a target row is already locked by
+/// another transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LockWait {
+    /// `for update` — block until the lock is released (the SQL default).
+    #[default]
+    Wait,
+    /// `for update nowait` — fail immediately instead of waiting.
+    NoWait,
+    /// `for update skip locked` — omit already-locked rows instead of waiting.
+    SkipLocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

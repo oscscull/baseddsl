@@ -222,14 +222,21 @@ impl Dialect {
     }
 
     /// The row-locking clause a `get|list … for update` query appends after `ORDER BY`/`LIMIT`
-    /// (transactions.md). Postgres and the MySQL/MariaDB family take `FOR UPDATE`. SQLite has no
-    /// row-level lock, so it returns the empty string (a no-op): its transaction locks the whole
-    /// database (`BEGIN IMMEDIATE`/`EXCLUSIVE`) and already serializes writers, so the lock intent
-    /// is honored at the transaction boundary rather than per row. Routed through this seam so the
-    /// spelling can never drift from the compile target.
-    pub fn for_update_clause(self) -> &'static str {
+    /// (transactions.md), including its optional wait mode. Postgres and the MySQL/MariaDB family
+    /// spell `FOR UPDATE`, `FOR UPDATE NOWAIT`, `FOR UPDATE SKIP LOCKED` (`NOWAIT` needs MySQL
+    /// 8.0+ / MariaDB 10.3+, `SKIP LOCKED` MySQL 8.0+ / MariaDB 10.6+). SQLite has no row-level
+    /// lock, so it returns the empty string (a no-op) for every mode: its transaction locks the
+    /// whole database (`BEGIN IMMEDIATE`/`EXCLUSIVE`) and already serializes writers, so the lock
+    /// intent is honored at the transaction boundary rather than per row. Routed through this seam
+    /// so the spelling can never drift from the compile target.
+    pub fn for_update_clause(self, wait: based_ast::LockWait) -> &'static str {
+        use based_ast::LockWait;
         match self {
-            Self::Postgres | Self::MariaDb | Self::MySql => "FOR UPDATE",
+            Self::Postgres | Self::MariaDb | Self::MySql => match wait {
+                LockWait::Wait => "FOR UPDATE",
+                LockWait::NoWait => "FOR UPDATE NOWAIT",
+                LockWait::SkipLocked => "FOR UPDATE SKIP LOCKED",
+            },
             Self::Sqlite => "",
         }
     }
@@ -298,12 +305,41 @@ mod tests {
 
     #[test]
     fn for_update_clause_per_dialect() {
-        // Postgres + MySQL/MariaDB family lock rows with FOR UPDATE; SQLite has no
-        // row-level lock, so the clause is empty (its transaction locks the whole database).
-        assert_eq!(Dialect::Postgres.for_update_clause(), "FOR UPDATE");
-        assert_eq!(Dialect::MariaDb.for_update_clause(), "FOR UPDATE");
-        assert_eq!(Dialect::MySql.for_update_clause(), "FOR UPDATE");
-        assert_eq!(Dialect::Sqlite.for_update_clause(), "");
+        use based_ast::LockWait;
+        // Postgres + MySQL/MariaDB family lock rows with FOR UPDATE and spell each wait mode;
+        // SQLite has no row-level lock, so the clause is empty for every mode (its transaction
+        // locks the whole database).
+        assert_eq!(
+            Dialect::Postgres.for_update_clause(LockWait::Wait),
+            "FOR UPDATE"
+        );
+        assert_eq!(
+            Dialect::Postgres.for_update_clause(LockWait::NoWait),
+            "FOR UPDATE NOWAIT"
+        );
+        assert_eq!(
+            Dialect::Postgres.for_update_clause(LockWait::SkipLocked),
+            "FOR UPDATE SKIP LOCKED"
+        );
+        assert_eq!(
+            Dialect::MariaDb.for_update_clause(LockWait::Wait),
+            "FOR UPDATE"
+        );
+        assert_eq!(
+            Dialect::MariaDb.for_update_clause(LockWait::NoWait),
+            "FOR UPDATE NOWAIT"
+        );
+        assert_eq!(
+            Dialect::MariaDb.for_update_clause(LockWait::SkipLocked),
+            "FOR UPDATE SKIP LOCKED"
+        );
+        assert_eq!(
+            Dialect::MySql.for_update_clause(LockWait::Wait),
+            "FOR UPDATE"
+        );
+        assert_eq!(Dialect::Sqlite.for_update_clause(LockWait::Wait), "");
+        assert_eq!(Dialect::Sqlite.for_update_clause(LockWait::NoWait), "");
+        assert_eq!(Dialect::Sqlite.for_update_clause(LockWait::SkipLocked), "");
     }
 
     #[test]

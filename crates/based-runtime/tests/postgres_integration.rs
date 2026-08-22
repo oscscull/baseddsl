@@ -1182,6 +1182,98 @@ async fn for_update_lock_is_held_across_a_transaction_live_postgres() {
     txn_b.commit().await.expect("commit B");
 }
 
+/// `for update skip locked` and `for update nowait` behave per SQL, live against Postgres
+/// (transactions.md slice 2 follow-on). Transaction A locks one row; a second transaction's
+/// `skip locked` list returns the OTHER rows (never the locked one) without blocking, and a
+/// `nowait` read of the locked row errors fast instead of waiting. Both wait modes are proven
+/// non-blocking by a timeout that must NOT trip (unlike plain `for update`, which does block).
+#[tokio::test]
+async fn for_update_skip_locked_and_nowait_live_postgres() {
+    use based_runtime::{Engine, TxOptions};
+
+    let Some((c, router, container)) = live_schema(
+        r#"
+        Product { id: text, sku: text, stock: int }
+        shape ProductRow from Product { sku, stock }
+        query lock_one(id) -> ProductRow {
+            get Product where (id = $id) for update;
+        }
+        query available(max) -> ProductRow[] {
+            list Product where (stock <= $max) order (sku) for update skip locked;
+        }
+        query lock_one_nowait(id) -> ProductRow {
+            get Product where (id = $id) for update nowait;
+        }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    container
+        .exec_batch(
+            "INSERT INTO product (id, sku, stock) VALUES \
+             ('p1', 'a', 0), ('p2', 'b', 0), ('p3', 'c', 0);",
+        )
+        .await;
+
+    let engine = Engine::new(c, router, UuidGen);
+
+    // A: lock row p1 and hold it.
+    let txn_a = engine.begin(TxOptions::default()).await.expect("begin A");
+    let a_read = txn_a
+        .transport()
+        .dispatch("/q/lock_one", json!({ "id": "p1" }), json!({}))
+        .await;
+    assert_eq!(a_read.status, 200, "A locks p1: {:?}", a_read.body);
+
+    // B: `skip locked` must return the unlocked rows (p2, p3), never the locked p1, and must
+    // not block — proven by a timeout that must resolve.
+    let txn_b = engine.begin(TxOptions::default()).await.expect("begin B");
+    let b_read = tokio::time::timeout(
+        Duration::from_secs(5),
+        txn_b
+            .transport()
+            .dispatch("/q/available", json!({ "max": 100 }), json!({})),
+    )
+    .await
+    .expect("`skip locked` must not block on A's lock");
+    assert_eq!(b_read.status, 200, "skip locked read: {:?}", b_read.body);
+    let skus: Vec<&str> = b_read
+        .body
+        .as_array()
+        .expect("list")
+        .iter()
+        .map(|r| r["sku"].as_str().expect("sku"))
+        .collect();
+    assert_eq!(
+        skus,
+        vec!["b", "c"],
+        "`skip locked` omits the locked row p1: {:?}",
+        b_read.body
+    );
+    txn_b.commit().await.expect("commit B");
+
+    // C: `nowait` on the locked row must error fast (not block) while A still holds the lock.
+    let txn_c = engine.begin(TxOptions::default()).await.expect("begin C");
+    let c_read = tokio::time::timeout(
+        Duration::from_secs(5),
+        txn_c
+            .transport()
+            .dispatch("/q/lock_one_nowait", json!({ "id": "p1" }), json!({})),
+    )
+    .await
+    .expect("`nowait` must return fast, not block on A's lock");
+    assert_ne!(
+        c_read.status, 200,
+        "`nowait` must error on a locked row: {:?}",
+        c_read.body
+    );
+    txn_c.rollback().await.expect("rollback C");
+
+    txn_a.commit().await.expect("commit A");
+}
+
 /// Bring-your-own transaction (`adopt`) live against Postgres (transactions.md rung 3): a
 /// caller opens a transaction on **its own** `sqlx` pool, does a **raw non-baseddsl write**
 /// on it, then runs baseddsl work (a `for update` locking read + a mutation) through

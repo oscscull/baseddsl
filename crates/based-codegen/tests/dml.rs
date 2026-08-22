@@ -771,6 +771,32 @@ fn for_update_list_lock_follows_order_and_limit() {
 }
 
 #[test]
+fn for_update_wait_modes_emit_nowait_and_skip_locked() {
+    // `for update nowait` / `for update skip locked` append the wait mode after `FOR UPDATE`
+    // on Postgres and the MySQL/MariaDB family; SQLite is a no-op for every mode.
+    let src = r#"
+        Product { id: Id, sku: text, name: text, price: int }
+        shape ProductRow from Product { sku, name, price }
+        query lock_nowait(id) -> ProductRow {
+            get Product where (id = $id) for update nowait;
+        }
+        query lock_skip(max) -> ProductRow[] {
+            list Product where (price <= $max) order (price) for update skip locked;
+        }
+        "#;
+    let pg = gen_pg(src);
+    assert!(pg.contains("\nFOR UPDATE NOWAIT;"), "\n{pg}");
+    assert!(pg.contains("\nFOR UPDATE SKIP LOCKED;"), "\n{pg}");
+    let maria = gen(src);
+    assert!(maria.contains("\nFOR UPDATE NOWAIT;"), "\n{maria}");
+    assert!(maria.contains("\nFOR UPDATE SKIP LOCKED;"), "\n{maria}");
+    let sqlite = gen_for(src, Dialect::Sqlite);
+    assert!(!sqlite.contains("FOR UPDATE"), "\n{sqlite}");
+    assert!(!sqlite.contains("NOWAIT"), "\n{sqlite}");
+    assert!(!sqlite.contains("SKIP LOCKED"), "\n{sqlite}");
+}
+
+#[test]
 fn sqlite_nested_to_many_orders_inside_json_group_array() {
     // SQLite's aggregate ORDER BY form (≥ 3.44): the sort rides inside
     // `json_group_array`, same cascade as the other dialects.

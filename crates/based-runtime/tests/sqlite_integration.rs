@@ -2230,6 +2230,67 @@ async fn far_side_flattening_projection_returns_distinct_far_rows() {
     );
 }
 
+/// On SQLite `for update nowait` and `for update skip locked` are no-ops (SQLite has no
+/// row-level lock — its transaction locks the whole database), consistent with plain
+/// `for update`. The modifier emits no SQL, so the query still runs and returns its rows.
+#[tokio::test]
+async fn for_update_wait_modes_are_a_noop_on_sqlite() {
+    let c = compile_sqlite(
+        r#"
+        Product { id: text, sku: text, stock: int }
+        shape ProductRow from Product { sku, stock }
+        query available(max) -> ProductRow[] {
+            list Product where (stock <= $max) order (sku) for update skip locked;
+        }
+        query one_nowait(id) -> ProductRow {
+            get Product where (id = $id) for update nowait;
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    backend
+        .execute_batch(&sql::ddl(&c.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            "INSERT INTO `product` (`id`, `sku`, `stock`) VALUES ('p1', 'a', 0), ('p2', 'b', 0);",
+        )
+        .await
+        .expect("seed");
+
+    let skip = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/available",
+        json!({ "max": 100 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        skip.status, 200,
+        "`skip locked` no-op runs: {:?}",
+        skip.body
+    );
+    assert_eq!(
+        skip.body,
+        json!([{ "sku": "a", "stock": 0 }, { "sku": "b", "stock": 0 }])
+    );
+
+    let nowait = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/one_nowait",
+        json!({ "id": "p1" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(nowait.status, 200, "`nowait` no-op runs: {:?}", nowait.body);
+    assert_eq!(nowait.body, json!({ "sku": "a", "stock": 0 }));
+}
+
 /// Bring-your-own transaction (`adopt`) against a real SQLite database (transactions.md rung
 /// 3): a caller opens a transaction on its **own** `sqlx` pool, does a **raw non-baseddsl
 /// write**, then runs baseddsl work (a `for update` read — a no-op lock on SQLite, but the

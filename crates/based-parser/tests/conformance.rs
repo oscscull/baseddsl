@@ -118,8 +118,11 @@ fn summarize_decl(decl: &Decl) -> String {
                     if s.distinct {
                         b.push_str("+distinct");
                     }
-                    if s.for_update {
-                        b.push_str("+for_update");
+                    match s.for_update {
+                        None => {}
+                        Some(LockWait::Wait) => b.push_str("+for_update"),
+                        Some(LockWait::NoWait) => b.push_str("+for_update(nowait)"),
+                        Some(LockWait::SkipLocked) => b.push_str("+for_update(skip_locked)"),
                     }
                     b
                 }

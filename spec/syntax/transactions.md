@@ -156,9 +156,31 @@ work in and out of a transaction. In a pure-wire build (no `based_runtime`, no `
 is still declared but has no implementor, so the locking methods are simply uncallable — the module
 compiles unchanged.
 
-Deferred as clean micro-follow-ons (transactions.md): `for update nowait` / `for update skip locked`
-(Postgres both; MariaDB 10.6+ both; SQLite none) — the MariaDB-version gating makes honest emission a
-follow-up, not part of this slice.
+**Wait modes — `for update nowait` / `for update skip locked`.** A `for update` read may carry an
+optional wait mode saying what to do when a target row is already locked by another transaction:
+
+```
+query claim_next(id)  -> JobRow { get  Job where (id = $id)  for update nowait; }
+query take_batch(max) -> JobRow[] { list Job where (id > $max) for update skip locked; }
+```
+
+- **`for update nowait`** — fail immediately (a lock-not-available error) instead of blocking.
+- **`for update skip locked`** — omit already-locked rows instead of blocking (the classic
+  work-queue claim: each worker grabs a different unlocked batch).
+- Plain **`for update`** (no wait mode) is unchanged — it blocks until the lock is released.
+
+`for update`, `for update nowait`, and `for update skip locked` are the three spellings; the wait
+words follow the `for update` keyword, before the `;`. They ride the **same** compile-time boundaries
+as plain `for update` (the E0315–E0318 set above) — a wait mode adds no new legal or illegal
+combination.
+
+**Per-dialect lowering** (the same `Dialect::for_update_clause` seam): Postgres and the MySQL/MariaDB
+family spell `FOR UPDATE NOWAIT` / `FOR UPDATE SKIP LOCKED` (`NOWAIT` needs MySQL 8.0+ / MariaDB
+10.3+, `SKIP LOCKED` MySQL 8.0+ / MariaDB 10.6+ — modern servers; our `mariadb:11.4` target has
+both). On **SQLite** every wait mode is the **same documented no-op** as plain `for update`: SQLite
+has no row-level lock, so there is no already-locked row to skip or fail fast on — its whole-database
+transaction lock serializes writers at the boundary regardless. Consistent with the plain-`for update`
+no-op, never silently misleading (principle 9).
 
 ## What shipped (slice 1)
 
@@ -192,5 +214,9 @@ on commit, discarded together on rollback) on Postgres and SQLite, and demonstra
 flagship axum-helpdesk (`resolve_with_audit` → `POST /tickets/{id}/resolve`, in the smoke). Implementation:
 D120. With this the three-rung transaction seam (D118–D120) is complete.
 
-The only remaining transaction micro-follow-on is `for update nowait` / `skip locked` (deferred above for
-MariaDB-version gating).
+The `for update nowait` / `for update skip locked` wait modes shipped as the documented micro-follow-on
+(the wait-mode section under `for update` above): parser (the optional `nowait` / `skip locked` after
+`for update`) → AST (`Statement.for_update: Option<LockWait>`) → codegen (`Dialect::for_update_clause`
+spells each mode, no-op on SQLite for all) → fmt/LSP round-trip. Proven live on Postgres (`skip locked`
+returns the unlocked rows, `nowait` errors fast on a locked row) and as a no-op on SQLite. The
+three-rung transaction seam plus its locking-read modifiers are now complete.

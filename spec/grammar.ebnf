@@ -308,15 +308,17 @@ tx_block    = 'tx' '{' { write_stmt sep } [ write_stmt ] '}' ;
 
 (* ---------- Read statement (query block body) ----------------------------- *)
 
-statement   = 'get' model_ref { clause } [ 'for' 'update' ] ';'
-            | 'list' [ 'distinct' ] model_ref { clause } [ 'for' 'update' ] ';' ;
+statement   = 'get' model_ref { clause } [ for_update ] ';'
+            | 'list' [ 'distinct' ] model_ref { clause } [ for_update ] ';' ;
                                         (* signature [] vs scalar still drives  *)
                                         (* the client contract independently.   *)
                                         (* `list distinct` dedups projected rows *)
                                         (* (SELECT DISTINCT); `list`-only.       *)
-                                        (* `for update` — trailing pessimistic  *)
-                                        (* locking read (SELECT … FOR UPDATE);   *)
-                                        (* tx-client-only, no-op on SQLite.      *)
+for_update  = 'for' 'update' [ 'nowait' | 'skip' 'locked' ] ;
+                                        (* trailing pessimistic locking read     *)
+                                        (* (SELECT … FOR UPDATE [NOWAIT|SKIP     *)
+                                        (* LOCKED]); tx-client-only, no-op on    *)
+                                        (* SQLite (all wait modes).              *)
 clause      = where_clause | order_clause | page_clause | unindexed_clause
             | group_clause | having_clause ;
 where_clause= 'where' '(' predicate ')' ;

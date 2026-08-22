@@ -449,7 +449,7 @@ pub fn adopt_{suffix}<'a>(
                         } else {
                             query_param_entities(root, &q.params)
                         },
-                        for_update: matches!(&q.body, QueryBody::Block(s) if s.for_update),
+                        for_update: matches!(&q.body, QueryBody::Block(s) if s.for_update.is_some()),
                     });
                 }
                 Decl::Mutation(m) => {

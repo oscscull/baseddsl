@@ -276,7 +276,7 @@ impl Printer {
         let last = stmt.clauses.len() - 1;
         for (i, c) in stmt.clauses.iter().enumerate() {
             // The trailing `for update` (if any) takes the `;`, so the last clause doesn't.
-            let semi = if i == last && !stmt.for_update {
+            let semi = if i == last && stmt.for_update.is_none() {
                 ";"
             } else {
                 ""
@@ -284,8 +284,9 @@ impl Printer {
             self.out
                 .push(format!("{INDENT}{INDENT}{}{semi}", clause(c)));
         }
-        if stmt.for_update {
-            self.out.push(format!("{INDENT}{INDENT}for update;"));
+        if let Some(wait) = stmt.for_update {
+            self.out
+                .push(format!("{INDENT}{INDENT}{};", for_update_modifier(wait)));
         }
     }
 
@@ -686,11 +687,21 @@ fn statement_inline(stmt: &Statement) -> String {
         s.push(' ');
         s.push_str(&clause(c));
     }
-    if stmt.for_update {
-        s.push_str(" for update");
+    if let Some(wait) = stmt.for_update {
+        s.push(' ');
+        s.push_str(for_update_modifier(wait));
     }
     s.push(';');
     s
+}
+
+/// The `for update` locking modifier, with its optional wait mode.
+fn for_update_modifier(wait: LockWait) -> &'static str {
+    match wait {
+        LockWait::Wait => "for update",
+        LockWait::NoWait => "for update nowait",
+        LockWait::SkipLocked => "for update skip locked",
+    }
 }
 
 fn verb(v: Verb) -> &'static str {

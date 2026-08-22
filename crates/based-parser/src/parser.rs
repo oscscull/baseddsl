@@ -1286,13 +1286,22 @@ impl<'a> Parser<'a> {
         while self.at_clause() {
             clauses.push(self.clause()?);
         }
-        // `for update` — a trailing locking-read modifier after the clause list. `for` is
-        // one compound keyword with `update`, mirroring the SQL it lowers to.
+        // `for update[ nowait| skip locked]` — a trailing locking-read modifier after the
+        // clause list. `for update` is one compound keyword, mirroring the SQL it lowers to;
+        // an optional wait mode follows.
         let for_update = if self.eat_kw("for") {
             self.expect_kw("update", "`update` (the `for update` locking modifier)")?;
-            true
+            let wait = if self.eat_kw("nowait") {
+                LockWait::NoWait
+            } else if self.eat_kw("skip") {
+                self.expect_kw("locked", "`locked` (the `for update skip locked` modifier)")?;
+                LockWait::SkipLocked
+            } else {
+                LockWait::Wait
+            };
+            Some(wait)
         } else {
-            false
+            None
         };
         self.skip_seps(); // the statement-terminating `;`
         let end = self.expect(Tok::RBrace, "`}`")?.end;

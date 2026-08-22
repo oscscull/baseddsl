@@ -20,6 +20,8 @@ shape SkuCount from Product
 shape ProductWithItems from Product
 query product_for_update  target=Product verb=get  shape=ProductRow
 query products_for_update  target=Product verb=list many  shape=ProductRow
+query product_nowait  target=Product verb=get  shape=ProductRow
+query products_skip_locked  target=Product verb=list many  shape=ProductRow
 query distinct_lock  target=Product verb=list many  shape=ProductRow
 query agg_lock  target=Product verb=list many  shape=SkuCount
 query nest_lock  target=Product verb=get  shape=ProductWithItems

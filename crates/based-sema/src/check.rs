@@ -813,7 +813,7 @@ fn check_distinct(q: &Query, ret: &Resolved, ti: usize, agg: bool, cx: &Cx, sink
 /// (the `TxBound` marker trait), not here.
 fn check_for_update(q: &Query, ret: &Resolved, ti: usize, agg: bool, cx: &Cx, sink: &mut Sink) {
     let stmt = match &q.body {
-        QueryBody::Block(s) if s.for_update => s,
+        QueryBody::Block(s) if s.for_update.is_some() => s,
         _ => return,
     };
     if stmt.distinct {

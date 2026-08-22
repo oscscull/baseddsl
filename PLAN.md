@@ -1120,9 +1120,9 @@ hardest-value-first like any active item; each carries full resume context below
     seam work rode D114).
 
 Not promoted (stay deferred): `bytes`-in-to-many-array on SQLite, `BINARY(16)` uuid storage,
-`for update nowait`/`skip locked`, standalone structured-id param, inbound-FK column-map override,
-composite m2m endpoints, `@view`/charset/legacy-enum representability niceties, `^^` multi-level tx
-back-refs, shutdown grace deadline, incremental LSP sync.
+standalone structured-id param, inbound-FK column-map override, composite m2m endpoints,
+`@view`/charset/legacy-enum representability niceties, `^^` multi-level tx back-refs, shutdown grace
+deadline, incremental LSP sync.
 
 ## Track T tier-2 — host-language transaction seam (read-decide-write), owner-approved 2026-08
 
@@ -1130,8 +1130,8 @@ back-refs, shutdown grace deadline, incremental LSP sync.
 `spec/syntax/transactions.md`. An **embedded-only** (in-process) transaction ladder over the `Engine`:
 the DSL stays non-Turing-complete (read-decide-write logic is host Rust against a transaction). Built in
 **3 slices** (all done); the generated client is already `Client<T: Transport>`, so a transaction is the
-same client over a transaction-bound transport — no per-callable codegen. Only micro-follow-on left:
-`for update nowait`/`skip locked` (MariaDB-version gating).
+same client over a transaction-bound transport — no per-callable codegen. The `for update
+nowait`/`skip locked` wait-mode micro-follow-on is now **done (D123)** — nothing left on this seam.
 
 - **Slice 1. ✅ DONE (D118).** Isolation (`TxOptions`/`Isolation`/`AccessMode`, applied per dialect
   via `Dialect::begin_transaction_sql` — Postgres `BEGIN ISOLATION LEVEL …`, MySQL/MariaDB
@@ -1152,9 +1152,17 @@ same client over a transaction-bound transport — no per-callable codegen. Only
   `Client<Embedded>`/a wire client is a compile error. SQL-legal boundaries enforced uniformly at compile
   time (E0315 distinct / E0316 aggregate / E0317 to-many-nest / E0318 stream). Proven live on Postgres
   (B's locking read blocks until A commits, then sees A's committed write) + unit/codegen coverage +
-  positive-compile test on the tx client. `nowait`/`skip locked` deferred as a clean micro-follow-on
-  (MariaDB-version gating). Full pipeline: parser/AST → sema → codegen (`Dialect::for_update_clause` seam +
-  dml + `TxBound` in client.rs) → fmt → LSP → goldens → embedded mirror regen.
+  positive-compile test on the tx client. Full pipeline: parser/AST → sema → codegen
+  (`Dialect::for_update_clause` seam + dml + `TxBound` in client.rs) → fmt → LSP → goldens → embedded
+  mirror regen.
+- **Slice 2 follow-on. ✅ DONE (D123). `for update nowait` / `for update skip locked` wait modes.** The
+  optional wait mode after `for update`: `nowait` (fail fast on a locked row) / `skip locked` (omit
+  locked rows). `Statement.for_update` became `Option<LockWait>`; the `Dialect::for_update_clause` seam
+  spells `FOR UPDATE NOWAIT` / `FOR UPDATE SKIP LOCKED` on Postgres + the MySQL/MariaDB family (our
+  `mariadb:11.4` target has both; `SKIP LOCKED` needs MariaDB 10.6+, `NOWAIT` 10.3+), and a no-op on
+  SQLite for every mode (consistent with plain `for update`). Rides the same E0315–E0318 boundaries —
+  no new sema code. Proven live on Postgres (`skip locked` skips a locked row, `nowait` errors fast) +
+  a SQLite no-op test. Pipeline: parser/AST → codegen seam + dml → fmt → LSP/TextMate → goldens.
 - **Slice 3. ✅ DONE (D120). BYO `adopt` + flagship example.** `client::adopt_<driver>(&engine, &mut
   caller_sqlx_tx)` binds the generated calls to a transaction the **caller** already opened on the same
   driver, so baseddsl writes commit atomically with the caller's own raw writes; **`adopt` never

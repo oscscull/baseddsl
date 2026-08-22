@@ -312,6 +312,23 @@ fn for_update_reprints_after_clauses() {
 }
 
 #[test]
+fn for_update_wait_modes_reprint() {
+    // `for update nowait` / `for update skip locked` round-trip, inline and block.
+    let nowait =
+        fmt("query lock(id) -> ProductRow { get Product where (id = $id) for update nowait; }");
+    assert_eq!(
+        nowait,
+        "query lock(id) -> ProductRow { get Product where (id = $id) for update nowait; }\n"
+    );
+    let skip = fmt("query lock(max) -> ProductRow[] { list Product where (price <= $max) order (price) page (20) offset for update skip locked; }");
+    assert_eq!(
+        skip,
+        "query lock(max) -> ProductRow[] {\n  list Product\n    where (price <= $max)\n    order (price)\n    page (20) offset\n    for update skip locked;\n}\n"
+    );
+    assert_eq!(fmt(&skip), skip);
+}
+
+#[test]
 fn aggregate_shape_and_group_by_render_canonically() {
     let src = "shape BuyerStats from Order {\n who = buyer\n orders = count()\n revenue = sum(total)\n}\nquery buyer_stats() -> BuyerStats[] {\n list Order group by (buyer) having (revenue > 100) order (revenue desc);\n}\n";
     let out = fmt(src);

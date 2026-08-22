@@ -66,7 +66,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   feature COMPLETE: BYO `adopt` — per-driver borrowed adapters over a caller-owned `sqlx::Transaction`
   wrapped in `AdoptedTransport`, run through the same `dispatch_on`/`DbRead` path; `adopt` never
   begins/commits/rolls back; `TxBound` so `for update` works; per-dialect `adopt_*` constructor gated on
-  the driver feature)
+  the driver feature), D123 (the `for update nowait` / `for update skip locked` wait modes —
+  `Statement.for_update: Option<LockWait>`, `Dialect::for_update_clause` spells each on Postgres +
+  MySQL/MariaDB, no-op on SQLite for all, riding the same E0315–E0318 boundaries)
 - **SQL codegen — mutations/writes** — D12 (mutation writes + create-keyed re-select), D16 (tx
   back-refs `^`), D58 (update/delete/restore where-keyed declared-shape re-select + delete-shape
   resolution), D92 (zero-row surviving-write mutation → 404 `not_found` + rollback, never a null
@@ -5933,3 +5935,55 @@ and the create input/output fall out of the existing composite-key + shape machi
 /`serial_key_column`, create-required exemption); `based-codegen` (`sql::column_lines` identity
 clause + the MariaDB `KEY` helper, `sql::mutations` `serial_return_col` + `RetKey::CompositeSerial`
 + `RETURNING` on the serial column); live `composite_serial_key_part_is_db_generated_live_{postgres,mariadb}`.
+
+## D123 — `for update nowait` / `for update skip locked` wait modes (transaction seam micro-follow-on)
+
+The clean micro-follow-on D119 deferred: a `for update` locking read may carry an optional **wait
+mode** saying what to do when a target row is already locked by another transaction. Extends the D119
+seam; no design fork (see the SQLite note below), built this session.
+
+**Three spellings, wait words after `for update`.** `for update` (block until released — unchanged),
+`for update nowait` (fail fast with a lock-not-available error), `for update skip locked` (omit
+already-locked rows — the work-queue claim pattern). The wait words follow the `for update` compound
+keyword, still block-body only, before the `;`. No bare-token adjacency (principle 3): `nowait` is one
+token; `skip locked` mirrors the SQL. `for` remains unambiguous in query position.
+
+**One source of truth for the mode.** `Statement.for_update` changed from `bool` to
+`Option<LockWait>` (`Wait` / `NoWait` / `SkipLocked`) — a single field carries both *whether* it locks
+and *how it waits*, so the two can't drift (principle 4). Every "is this a locking read?" site reads
+`.is_some()`; only SQL emission and fmt read the mode.
+
+**Per-dialect lowering over the same `Dialect::for_update_clause` seam** (now taking the `LockWait`):
+Postgres and the MySQL/MariaDB family spell `FOR UPDATE` / `FOR UPDATE NOWAIT` / `FOR UPDATE SKIP
+LOCKED`, appended last (after `ORDER BY`/`LIMIT`). `NOWAIT` needs MySQL 8.0+ / MariaDB 10.3+, `SKIP
+LOCKED` MySQL 8.0+ / MariaDB 10.6+ — the version gating that made this a follow-on; we emit for the
+configured compile target (our live `mariadb:11.4` has both) and document the minimums rather than
+probe an unknowable server version at compile time. On **SQLite** every wait mode is the **same
+documented no-op** as plain `for update`: SQLite has no row-level lock, so there is no already-locked
+row to skip or fail fast on — its whole-database transaction lock serializes writers at the boundary
+regardless. This is not a new design fork — it is the direct, consistent extension of D119's plain
+`for update` no-op precedent (principle 9: honest, never silently misleading), so no owner sign-off was
+needed.
+
+**No new sema code.** The wait mode rides the **same** compile-time boundaries as plain `for update`
+(E0315 distinct / E0316 aggregate / E0317 to-many-nest / E0318 stream) — `check_for_update` already
+keys off `for_update.is_some()`, and a wait mode adds no new legal or illegal combination. The client
+confinement is unchanged: a wait-mode read is still just a locking read, emitted in `impl<T: Transport
++ TxBound> Client<T>`.
+
+**Live proof.** Postgres `for_update_skip_locked_and_nowait_live_postgres`: transaction A locks one
+row; a second transaction's `skip locked` list returns the OTHER rows (never the locked one) without
+blocking, and a `nowait` read of the locked row errors fast — both proven non-blocking by a timeout
+that must NOT trip (unlike plain `for update`, which blocks). SQLite
+`for_update_wait_modes_are_a_noop_on_sqlite`: both modes run and return rows normally (the modifier
+emits no SQL).
+
+**Blast radius.** `based-ast` (`Statement.for_update: Option<LockWait>` + the `LockWait` enum),
+`based-parser` (the optional `nowait` / `skip locked` after `for update`) + `spec/grammar.ebnf`
+(`for_update` production), `based-codegen` (`Dialect::for_update_clause(LockWait)` in lib.rs;
+`sql::dml` `query_for_update` → `Option<LockWait>` + `push_lock_clause`), `based-fmt`
+(`for_update_modifier` reprint), `based-lsp` (keyword completion + raw-SQL semantic tokens),
+`editors/vscode` (TextMate keywords). Goldens: parser conformance (`+for_update(nowait|skip_locked)`),
+sema conformance (clean nowait/skip-locked queries), fmt round-trip, codegen dml (per-dialect
+emission) + the `Dialect` unit test; runtime `postgres_integration.rs` + `sqlite_integration.rs`. The
+transaction seam (D118–D120) plus its locking-read modifiers are now complete.

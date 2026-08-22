@@ -33,6 +33,16 @@ query products_for_update() -> ProductRow[] {
   list Product order (sku) for update;
 }
 
+# Clean: `for update nowait` rides the same boundaries as plain `for update`.
+query product_nowait(id) -> ProductRow {
+  get Product where (id = $id) for update nowait;
+}
+
+# Clean: `for update skip locked` on a list.
+query products_skip_locked() -> ProductRow[] {
+  list Product order (sku) for update skip locked;
+}
+
 # E0315: `for update` with `distinct`.
 query distinct_lock() -> ProductRow[] {
   list distinct Product order (sku) for update;
