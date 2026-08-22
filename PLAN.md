@@ -1273,7 +1273,7 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   wire-contract sentence dropped), and the duplicate `requires […]` **inlay** is removed —
   `FactKind::CtxRequirement` now carries no inlay (the hover holds the bag), so there is no
   hover↔inlay redundancy. Facts tests updated to the concise strings.
-- **H5. Doc + comment critical-eye pass, project-wide (user-raised 2026-07-08).** Two rules, enforced
+- **H5. ✅ DONE (2026-08-22). Doc + comment critical-eye pass, project-wide (user-raised 2026-07-08).** Two rules, enforced
   everywhere a user reads: (a) **no `D#`/decision-refs in any userland surface** — editor hover/inlay
   strings, CLI output, `examples/**` (comments + READMEs), `docker/README.md`, generated-code headers.
   A user must never parse `D50`. The D50 scrub covered *facts editor strings*; this widens it to every
@@ -1289,7 +1289,15 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
   overlong module/block comments compressed to what+why (the user flagged that crate by name). **Left
   standing on purpose:** internal `///` doc-comment `D#` refs in the *other* crates (`based-sema`/
   `runtime`/`ast`/`parser`/…) — the standing rule permits `D#` in internal doc comments (they aid the
-  reviewer, are not a userland surface). A project-wide *wordiness* pass beyond `based-codegen` remains.
+  reviewer, are not a userland surface). **Completed (2026-08-22):** the project-wide *wordiness* pass over
+  the non-`based-codegen` crates — a conservative comments-only pass (−50 net lines) across `based-runtime`
+  (`lib.rs` architecture header, `serve.rs`/`http.rs`/`idempotency.rs`/`plan.rs`/`embed.rs`/`migrate.rs`/
+  `postgres.rs`), `based-sema` (`ir.rs`/`scope.rs`/`check.rs`/`ctx.rs`/`indexes.rs`), and `based-parser`
+  (`parser.rs`/`lexer.rs`), stripping design-history narration ("iteration 1", "the old inline X", "as
+  before", "unchanged from…") and multi-sentence rationale padding from module/block headers. No behavior
+  touched (build + `test --doc` + clippy green). Already-precise what+why docs and load-bearing edge-detail
+  in `based-lsp`/`based-facts`/`based-diagnostics`/`based-manifest` were left alone (churning them would add
+  noise); internal `///` `D#` refs stay per the standing rule. H5 is complete.
 - **H6. Adversarial correctness sweep (user-raised 2026-07-08).** A standing bugfinding pass over the
   built surface — codegen SQL edge cases, runtime binding/nesting, scope/soft-delete predicate
   composition — driven against a live DB, not just unit tests. Scope each sweep to one subsystem; file
@@ -1438,6 +1446,57 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
     far-side flatten's junction and far model each ride their own scope/soft-delete; the sema scope/ctx walk
     already recurses into `Nest`/`NestRef`/`Flatten` (H9), so a nest- or flatten-only scoped child is touched
     at compile time; multi-hop flatten intermediates join with scope injected.
+  - **Sweeps 2026-08-22 (4)(5)(6) — three subsystems run in parallel (worktree-isolated subagents): the
+    `raw(…)` escape hatch, streaming, and the sort/pagination/indexing cascade. Two real correctness bugs
+    found + FIXED, one subsystem swept clean.**
+    - **(4) `raw(…)` escape hatch — Found + FIXED one real silent-wrong-result bug, all dialects.** The
+      named→positional placeholder rewrite (`based-runtime` `scan.rs::to_positional`, run on **every**
+      executed statement — every read via `plan.rs::bind`, every write via `run.rs`) rebuilt its output by
+      pushing each source **byte** as a `char` (`bytes[i] as char`), reinterpreting every UTF-8 multi-byte
+      sequence as separate Latin-1 codepoints — classic UTF-8-as-Latin1 mojibake. A non-ASCII string literal
+      (`WHERE name = 'café'`, bytes `… C3 A9`) went to the driver as `'cafÃ©'` and matched **no row** — a
+      silent empty/wrong result for any non-ASCII literal, DB default, or raw fragment (raw is the clean
+      trigger because it flows arbitrary user SQL text verbatim, but the corruption hit all non-ASCII data).
+      Root cause: the scan built a `String` char-by-char instead of copying bytes. Fix (contained): build the
+      output as a `Vec<u8>` byte buffer, copying source bytes intact and splicing in only ASCII placeholders
+      (`?`/`$n`), then `String::from_utf8` at the end — the quote/`::`/`:name` scan is ASCII-only and UTF-8
+      never puts an ASCII byte inside a multi-byte sequence, so the scan logic + param order are unchanged.
+      Regression: unit `non_ascii_literal_survives_verbatim` (`'café'`/`'🎉'` survive alongside a bind) + live
+      SQLite `raw_body_non_ascii_literal_matches_the_seeded_row` (proven to fail pre-fix, pass post-fix). No
+      `D#` (plain bug fix; the spec already promises raw text rides verbatim). **Swept clean** across raw
+      value/type/index positions, dialect maps (right dialect selected, absent → E0270), `${param}`/`{table}`/
+      `{id}` interpolation + param order, raw-typed column opacity, and raw + scope/soft-delete composition.
+    - **(5) Streaming — swept clean (no bug found).** Verified live + across codegen: codegen never branches
+      on `stream` (`lower_query` injects the tombstone `WHERE` + `@scope` predicate byte-identically for
+      `-> stream Shape` and `-> Shape[]`), so a streamed pass can't leak a cross-tenant or tombstoned row;
+      sema enforces `list`-only (E0200)/no-`page` (E0201)/no-mutation (E0202)/no-raw-body (E0212)/no-`for
+      update` (E0318) for streams; NDJSON framing is well-formed on empty/single/many rows, emits a terminal
+      `error` line with no trailing `done` (no false checksum) on mid-stream failure, and truncation = no
+      terminal line (client reports it as a transport error); cancel-safety returns the checked-out
+      connection on drop (both drivers use true row streaming). Added a defense-in-depth live SQLite test
+      `scope_and_soft_delete_are_injected_into_the_stream` (seeds a cross-tenant + a tombstoned in-tenant row,
+      asserts the streamed pass returns neither).
+    - **(6) Sort/pagination/indexing — Found + FIXED one real wrong-page bug, all dialects.** A keyset page
+      whose primary sort key is a **nullable** column dropped every NULL-valued row from the walk: the
+      "strictly after the cursor" predicate emitted a plain `col < :keyset_0`, and `NULL < v` is `NULL` (not
+      true) — so with `order (score desc)` over `score: int?`, every NULL-scored row silently vanished from
+      the paginated set (a 5-row set returned only 3). Root cause: `keyset_predicate` (based-codegen
+      `sql/dml.rs`) used unconditional `>`/`<`/`=` with no NULL handling and no dialect awareness. Fix
+      (contained, all dialects): thread column nullability into `OrderKey` (`path_nullable` resolver; the
+      appended PK tiebreaker is non-nullable) and split the predicate — `keyset_eq` (null-safe equality for a
+      nullable prefix key: SQLite `IS`, MariaDB/MySQL `<=>`, Postgres `IS NOT DISTINCT FROM`) + `keyset_after`
+      (a NULL-aware "strictly after" matching each dialect's default NULL sort position — NULL lowest on
+      MariaDB/MySQL/SQLite, highest on Postgres — so the predicate agrees with the dialect-default ORDER BY).
+      A non-nullable key stays a plain `col ▷ :v`, so every existing keyset golden is byte-unchanged.
+      Regression: codegen golden `keyset_nullable_sort_key_is_null_aware_per_dialect` (all three dialects) +
+      live SQLite `keyset_over_nullable_sort_column_loses_no_rows` (a full multi-page walk over two NULL rows
+      returns the set complete + correctly ordered, none dropped/repeated). No `D#` (plain bug fix). **Swept
+      clean:** non-null DESC keyset with duplicate sort values (tiebreaker carries the walk), mixed ASC/DESC
+      multi-column keyset, DESC-primary + ASC-id tiebreaker direction, to-many relation `@sort` DESC inside
+      the json-agg, and the index-lint composite-prefix coverage matrix (`(a,b)` covers a filter on `a`, not
+      `b`-only). *(Integration note: this landed via a worktree branched before the mysql/mariadb split
+      D112, so a follow-up commit added the `MySql` arms to `keyset_eq`/`keyset_after` — MySql shares the
+      MariaDB family.)*
 - **H6-R2. ✅ RESOLVED (owner call, H6 sweep 3). A custom `on:` self-join is rejected in sema (`E0127`).**
   A custom join whose near and far models are the **same table** (`parent: Node (on: node.parent_ref =
   node.id)`) is unrenderable: both `node.…` qualifiers map to the same alias, so neither the source nor
