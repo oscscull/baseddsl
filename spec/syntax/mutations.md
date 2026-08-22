@@ -144,9 +144,47 @@ mutation import_products(rows: ProductIn[]) -> ok scoped Tenant {
 - **Chunked + atomic.** The engine emits one `INSERT … VALUES (…),(…),…`, transparently
   chunked above the driver's bind limit (Postgres ~65535 binds — the user never sees the
   cap). The whole insert is all-or-nothing within the surrounding transaction.
-- **Read-back is `-> ok`** in this release (`E0332` otherwise); a per-row `-> Shape[]` /
-  single `-> Shape` read-back is a clean follow-on. The rows are verifiable with a query.
-- **`on conflict` (bulk upsert)** on a `create … from` is not yet supported (`E0331`, BW2).
+- **Read-back — `-> ok`, `-> Shape` (single), or `-> Shape[]` (bulk).** `-> ok` skips the
+  read-back (the motivating case for a large load). A declared shape reads the written rows
+  back **in input order**: a bulk `Model[] from` returns `-> Shape[]`, a single `Model from`
+  returns `-> Shape`; the arity must match the `[]` (`E0332`). The read-back is an IN-keyed
+  re-select over the written rows' keys, reusing the same projection a `get` emits — so
+  nested to-one `{…}` / to-many arrays / FK-link `{ id }` shapes decode identically. It keys
+  on the surrogate id, the natural / composite `@key`, or (for an upsert) the conflict
+  target; a DB-generated `serial` id is learned from the INSERT (`RETURNING` on
+  Postgres/SQLite, the `LAST_INSERT_ID()` range on MySQL/MariaDB).
+
+## Bulk upsert (`create … from … on conflict update`)
+
+A `create … from` may carry the same `on conflict (target) update { … }` tail as an inline
+upsert (above) — a chunked, atomic multi-row INSERT that updates the existing row on a
+unique-key collision instead of inserting a duplicate:
+```
+shape StockIn from Inventory { sku, qty, price }
+
+mutation restock(rows: StockIn[]) -> StockIn[] scoped Tenant {
+  create Inventory[] from $rows
+    on conflict (org, sku) update { qty = qty + incoming.qty, price = incoming.price };
+}
+```
+The conflict-target rules are the singular upsert's (`E0250`–`E0254`), applied over the
+**input shape's** columns: the target must be a declared unique key each of whose columns the
+shape sets, a scoped model's target must include its scope column(s), and a `@soft_delete`
+model is out (`E0253`). In the `update` branch:
+- a **bare column** (`qty`) is the **stored/existing** row's value — identical to the
+  singular upsert, so `qty = qty + incoming.qty` composes on the value already in the DB;
+- **`incoming.<col>`** is the **proposed/incoming** row's value — the value that row would
+  have inserted. Per dialect it lowers to `excluded.<col>` (Postgres/SQLite) or
+  `VALUES(<col>)` (MySQL/MariaDB).
+
+`incoming` is a **contextual keyword**, valid *only* inside a bulk/from `on conflict update`
+branch — elsewhere it is an ordinary identifier (`E0334` where it is misused). `incoming.<col>`
+naming a non-settable column is `E0333`. The winning rows read back (declared shape) keyed on
+the conflict target, so the same `Shape[]` decodes on both the insert and the update path.
+
+The **north star** is symmetric round-trip: read a `Vec<Shape>` out with a query, hand it
+straight back to a bulk upsert, and the rows update in place (no duplicates) — zero
+host-language transformation.
 
 ## Atomic groups
 `tx { ... }` runs a static set of writes in one transaction; rolls back together. Bind a

@@ -81,7 +81,40 @@ pub struct LoweredMutation {
     /// only when the row does not survive the write — a real DELETE (plain-model `delete` /
     /// `hard delete`) — where the response falls back to `{}`.
     pub ret_select: Option<String>,
+    /// The declared-shape read-back for a structured `create … from` (BW1b/BW2): an
+    /// IN-keyed re-select over the written rows' keys, projecting the return shape (single
+    /// `-> Shape` or bulk `-> Shape[]`). Present in place of [`ret_select`](Self::ret_select)
+    /// for a from-create that returns a shape; `None` for a `-> ok` insert / any ordinary
+    /// mutation.
+    pub bulk_readback: Option<BulkReadback>,
 }
+
+/// The read-back for a structured `create … from` (BW1b/BW2). After the chunked INSERT
+/// runs, the runtime collects each written row's key (app-known from the payload, or a
+/// DB-generated `serial` id learned from the INSERT), re-selects the declared shape keyed on
+/// those keys (reusing `project_return`, so nested shapes decode as on a read), and returns
+/// the rows in **input order** — one object (single) or an array (bulk).
+#[derive(Debug, Clone)]
+pub struct BulkReadback {
+    /// The shape re-select, with `project_return`'s projection plus hidden `__bkk_<i>` key
+    /// columns and a `/*BULK_KEYS*/` sentinel where the key-tuple IN-list is spliced. `:name`
+    /// placeholders (scope `$ctx`) are bound by the runtime; the sentinel is replaced with
+    /// the per-row key binds.
+    pub sql: String,
+    /// The physical key columns (in tuple order) the read-back keys on.
+    pub key_cols: Vec<String>,
+    /// `true` for a bulk `-> Shape[]` (array response), `false` for a single `-> Shape`.
+    pub bulk: bool,
+    /// Whether the keys are DB-generated (`serial`) — learned from the INSERT — rather than
+    /// app-known from the payload.
+    pub serial: bool,
+}
+
+/// The token in a [`BulkReadback::sql`] the runtime replaces with the key-tuple IN-list.
+pub const BULK_KEYS_SENTINEL: &str = "/*BULK_KEYS*/";
+/// The alias prefix for the hidden key columns a bulk read-back's projection carries (so the
+/// runtime can pair each fetched row with its input-order key). Stripped before the response.
+pub const BULK_KEY_ALIAS: &str = "__bkk_";
 
 /// One write statement of a mutation: header-free SQL plus the metadata the runtime
 /// needs to bind and respond.
@@ -166,6 +199,20 @@ pub struct BulkInsert {
     /// `create Model from $row -> Shape` can key its declared re-select on it. Empty for
     /// an app-minted / natural key, a bulk (`-> ok`) insert, or a keyless model.
     pub returning: Vec<String>,
+    /// A bulk upsert's per-dialect tail (`\nON CONFLICT (…) DO UPDATE SET …` /
+    /// `\nON DUPLICATE KEY UPDATE …`), appended to every chunk's INSERT (BW2). `:name`
+    /// placeholders (a param / `$ctx`) are bound per chunk by the runtime; a stored column,
+    /// `incoming.<col>` (→ `excluded`/`VALUES()`), enum/literal, and arithmetic are inline.
+    /// `None` for a plain bulk insert.
+    pub conflict_tail: Option<String>,
+    /// The physical columns keying the declared-shape read-back (BW1b): the conflict target
+    /// (upsert), the surrogate/natural/composite key, or a `(unique)` column. Empty for a
+    /// `-> ok` insert (no read-back).
+    pub readback_key: Vec<String>,
+    /// Whether [`readback_key`](Self::readback_key) is a DB-generated `serial` id — learned
+    /// from the INSERT (`RETURNING` on Postgres/SQLite, the `LAST_INSERT_ID()` range on
+    /// MySQL/MariaDB) rather than known from the payload.
+    pub readback_serial: bool,
 }
 
 /// One INSERT column of a structured shape-input create: the physical column and where its
@@ -264,6 +311,12 @@ pub fn mutations(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> St
         if let Some(rs) = &lm.ret_select {
             out.push_str("-- return: re-select the written row's declared shape\n");
             out.push_str(rs);
+        }
+        if let Some(br) = &lm.bulk_readback {
+            out.push_str(
+                "-- return: IN-keyed re-select of the written rows in declared shape (BULK_KEYS spliced at run time)\n",
+            );
+            out.push_str(&br.sql);
         }
     }
     out
@@ -384,10 +437,37 @@ fn lower_mutation<'a>(
                 key,
             ))
         });
+    // A structured `create … from` of the return model that returns a shape (not `-> ok`)
+    // reads its written rows back via an IN-keyed re-select (BW1b/BW2), in place of the
+    // where-/create-keyed `ret_select`.
+    let bulk_readback = rm.and_then(|rm| {
+        if rm.ack {
+            return None;
+        }
+        let w = stmts
+            .iter()
+            .find(|w| w.model == rm.ret_model && w.bulk.is_some())?;
+        let bi = w.bulk.as_ref()?;
+        if bi.readback_key.is_empty() {
+            return None;
+        }
+        Some(lower_bulk_readback(
+            schema,
+            decls,
+            &rm.ret_model,
+            rm.ret_shape.as_deref(),
+            unscoped,
+            inject,
+            dialect,
+            bi,
+        ))
+    });
+
     LoweredMutation {
         name: m.name.node.clone(),
         stmts,
         ret_select,
+        bulk_readback,
     }
 }
 
@@ -482,6 +562,70 @@ fn lower_ret_select(
     push_where(&mut sql, &wheres);
     sql.push_str(";\n");
     sql
+}
+
+/// Build the declared-shape read-back for a structured `create … from` (BW1b/BW2): the
+/// return shape's projection (reusing `project_return`, so nested shapes decode as on a
+/// read) plus hidden `__bkk_<i>` key columns, keyed on the written rows' keys via an
+/// `IN (/*BULK_KEYS*/)` sentinel the runtime splices with the per-row key binds. The
+/// soft-delete live predicate and `@scope` ride the read exactly as a `get` would.
+#[allow(clippy::too_many_arguments)]
+fn lower_bulk_readback(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    ret_model: &str,
+    ret_shape: Option<&str>,
+    unscoped: bool,
+    inject: &[ScopeInject],
+    dialect: Dialect,
+    bi: &BulkInsert,
+) -> BulkReadback {
+    let model = schema
+        .model(ret_model)
+        .expect("return model resolved by sema");
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_scope_inject(!unscoped)
+        .with_scope_terms(inject);
+
+    let mut projection = project_return(&mut sel, decls, ret_shape, ret_model, model);
+    // Hidden key columns so the runtime can pair each fetched row with its input-order key.
+    for (i, col) in bi.readback_key.iter().enumerate() {
+        projection.push_str(&format!(
+            ",\n  {} AS {}",
+            sel.qcol(&sel.root_alias, col),
+            dialect.quote(&format!("{BULK_KEY_ALIAS}{i}"))
+        ));
+    }
+
+    let key_tuple: Vec<String> = bi
+        .readback_key
+        .iter()
+        .map(|c| sel.qcol(&sel.root_alias, c))
+        .collect();
+    let lhs = if key_tuple.len() == 1 {
+        key_tuple[0].clone()
+    } else {
+        format!("({})", key_tuple.join(", "))
+    };
+    let mut wheres = vec![format!("{lhs} IN ({BULK_KEYS_SENTINEL})")];
+    if let Some(sd) = &model.soft_delete {
+        wheres.push(soft_pred(dialect, &sel.root_alias, model, sd));
+    }
+    if let Some(scope) = sel.scope_where(&sel.root_alias, model) {
+        wheres.push(scope);
+    }
+
+    let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.qt(model));
+    push_joins(&mut sql, dialect, &sel.joins);
+    push_where(&mut sql, &wheres);
+    sql.push_str(";\n");
+
+    BulkReadback {
+        sql,
+        key_cols: bi.readback_key.clone(),
+        bulk: bi.bulk,
+        serial: bi.readback_serial,
+    }
 }
 
 /// The write whose surviving row a where-keyed re-select reads back: the first
@@ -742,11 +886,13 @@ fn lower_write<'a>(
                 // INSERT at run time (sema guarantees eligibility + `-> ok` for the bulk
                 // form; a single `from` may still key its declared re-select on the id).
                 if let Some(cf) = from {
-                    let claims_result = !*ret_taken && m.name == cx.ret_model;
-                    if claims_result {
+                    // A from-create of the return model claims the declared read-back (the
+                    // bulk IN-keyed re-select, built at the mutation level from this write's
+                    // `BulkInsert`); mark it taken so a later same-model write doesn't.
+                    if !*ret_taken && m.name == cx.ret_model {
                         *ret_taken = true;
                     }
-                    if let Some(w) = lower_bulk_create(cx, m, cf, claims_result) {
+                    if let Some(w) = lower_bulk_create(cx, m, cf, conflict.as_ref()) {
                         out.push(w);
                     }
                     return;
@@ -960,8 +1106,15 @@ fn lower_create<'a>(
         }
     }
 
-    let (tail, conflict_key) =
-        upsert_tail_and_key(schema, decls, model, conflict, dialect, &value_by_field);
+    let (tail, conflict_key) = upsert_tail_and_key(
+        schema,
+        decls,
+        model,
+        conflict,
+        dialect,
+        &value_by_field,
+        /* incoming = */ false,
+    );
 
     // Row read-back (bound create / DB-generated return id) + its `RETURNING` columns.
     let (capture, returning) = build_capture(
@@ -1140,11 +1293,26 @@ fn lower_bulk_create(
     cx: &LowerCx,
     model: &RModel,
     cf: &CreateFrom,
-    _claims_result: bool,
+    conflict: Option<&OnConflict>,
 ) -> Option<LoweredWrite> {
     let (_from, body) = resolve_from_shape(cx, &cf.param.node)?;
     let dialect = cx.dialect;
     let (columns, serial_col) = bulk_columns(cx, model, body);
+
+    // A bulk upsert (BW2): the per-dialect `ON CONFLICT … / ON DUPLICATE KEY UPDATE` tail,
+    // with `incoming.<col>` lowered to `excluded`/`VALUES()`. Bound + appended per chunk.
+    let conflict_tail = conflict.map(|oc| {
+        let sets = conflict_update_sets(
+            cx.schema, cx.decls, model, oc, dialect, /* incoming = */ true,
+        );
+        upsert_tail(dialect, oc, model, &sets)
+    });
+
+    // The declared-shape read-back key (BW1b/BW2): the conflict target for an upsert, else
+    // the surrogate id / natural / composite key / a `(unique)` column.
+    let (readback_key, readback_serial) =
+        bulk_readback_key(cx, model, conflict, serial_col.as_deref(), &columns);
+
     let bulk = BulkInsert {
         model: model.name.clone(),
         table: dialect.quote_table(model.schema.as_deref(), &model.table),
@@ -1152,6 +1320,9 @@ fn lower_bulk_create(
         bulk: cf.bulk,
         columns,
         returning: serial_col.into_iter().collect(),
+        conflict_tail,
+        readback_key,
+        readback_serial,
     };
     Some(LoweredWrite {
         header: format!(
@@ -1172,6 +1343,57 @@ fn lower_bulk_create(
         bulk: Some(bulk),
         real_delete: false,
     })
+}
+
+/// The physical columns a structured `create … from`'s declared-shape read-back keys on,
+/// and whether they are DB-generated (`serial`, learned from the INSERT). Mirrors the
+/// singular create's key resolution: an upsert reads back on the conflict target; a plain
+/// create on the surrogate id (`serial` → learned; uuid/ulid → app-minted), the natural /
+/// composite `@key`, or (keyless) a `(unique)` column the shape set.
+fn bulk_readback_key(
+    cx: &LowerCx,
+    model: &RModel,
+    conflict: Option<&OnConflict>,
+    serial_col: Option<&str>,
+    columns: &[BulkCol],
+) -> (Vec<String>, bool) {
+    if let Some(oc) = conflict {
+        // The conflict target's value keys the read-back (a conflict path keeps the existing
+        // row, so a generated id would miss it) — app-known from the payload.
+        return (
+            oc.target
+                .iter()
+                .map(|t| physical_col(model, &t.node))
+                .collect(),
+            false,
+        );
+    }
+    // A sole DB-generated `serial` id: learned from the INSERT (not in the payload).
+    if model.pk_is_db_generated() {
+        return (vec![physical_col(model, "id")], true);
+    }
+    // A surrogate app-minted id (uuid/ulid).
+    if !model.no_id && model.key.is_empty() {
+        return (vec![physical_col(model, "id")], false);
+    }
+    // A natural / composite `@key`: its columns are app-supplied. (A composite key with a
+    // `serial` part in a from-create read-back is unsupported — an exotic combination.)
+    if !model.key.is_empty() && serial_col.is_none() {
+        return (
+            model.key.iter().map(|f| physical_col(model, f)).collect(),
+            false,
+        );
+    }
+    // A keyless (`@no_id`) model: the first `(unique)` column the shape set.
+    let _ = cx;
+    let present: Vec<&str> = columns.iter().map(|c| c.column.as_str()).collect();
+    for u in &model.unique_cols {
+        let col = physical_col(model, u);
+        if present.contains(&col.as_str()) {
+            return (vec![col], false);
+        }
+    }
+    (Vec::new(), false)
 }
 
 /// A review-only single-row rendering of a bulk insert for `based gen sql` output (the
@@ -1210,8 +1432,9 @@ fn bulk_review_sql(dialect: Dialect, bulk: &BulkInsert) -> String {
                 .join(", ")
         )
     };
+    let tail = bulk.conflict_tail.as_deref().unwrap_or("");
     format!(
-        "INSERT INTO {} ({})\nVALUES ({}){ret};  -- repeated per row, chunked below the driver's bind limit\n",
+        "INSERT INTO {} ({})\nVALUES ({}){tail}{ret};  -- repeated per row, chunked below the driver's bind limit\n",
         bulk.table,
         cols.join(", "),
         vals.join(", "),
@@ -1337,11 +1560,12 @@ fn upsert_tail_and_key(
     conflict: Option<&OnConflict>,
     dialect: Dialect,
     value_by_field: &std::collections::HashMap<String, String>,
+    incoming: bool,
 ) -> (String, Option<Vec<(String, String)>>) {
     let Some(oc) = conflict else {
         return (String::new(), None);
     };
-    let sets = conflict_update_sets(schema, decls, model, oc, dialect);
+    let sets = conflict_update_sets(schema, decls, model, oc, dialect, incoming);
     let key: Vec<(String, String)> = oc
         .target
         .iter()
@@ -1499,8 +1723,11 @@ fn conflict_update_sets(
     model: &RModel,
     oc: &OnConflict,
     dialect: Dialect,
+    incoming: bool,
 ) -> Vec<String> {
-    let mut sel = Select::new(schema, decls, model, dialect).with_bare_cols(true);
+    let mut sel = Select::new(schema, decls, model, dialect)
+        .with_bare_cols(true)
+        .with_incoming(incoming);
     oc.update
         .iter()
         .map(|a| {

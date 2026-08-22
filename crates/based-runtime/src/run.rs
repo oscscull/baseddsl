@@ -601,11 +601,27 @@ async fn run_writes<D: DbRead + ?Sized>(
             .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (planner mismatch)")))
     };
 
+    // A structured `create … from` with a declared shape return (BW1b/BW2) reads its written
+    // rows back keyed on their keys — app-known from the payload, or DB-generated (`serial`)
+    // ids learned from the INSERT. Captured here, replayed after the writes run.
+    let mut readback_keys: Vec<Vec<SqlValue>> = Vec::new();
+
     for (i, step) in plan.steps.iter().enumerate() {
         // A structured shape-input create (BW1): materialize a chunked, atomic multi-row
-        // INSERT from the plan's resolved rows (no `:name` template, no read-back).
+        // INSERT from the plan's resolved rows. Returns the DB-generated ids for a `serial`
+        // read-back (empty otherwise).
         if let Some(bulk) = &step.bulk {
-            run_bulk(db, plan.dialect, bulk).await?;
+            // Only recover the DB-generated ids when a read-back will consume them (a plain
+            // `-> ok` serial insert needs no `RETURNING` / `LAST_INSERT_ID()` round-trip).
+            let want_ids = plan.bulk_readback.is_some();
+            let serial_ids = run_bulk(db, plan.dialect, bulk, &env, want_ids).await?;
+            if plan.bulk_readback.is_some() {
+                readback_keys = if bulk.serial_return.is_some() {
+                    serial_ids.into_iter().map(|id| vec![id]).collect()
+                } else {
+                    bulk.key_rows.clone()
+                };
+            }
             continue;
         }
         let (sql, params) = bind(&step.sql, &env)?;
@@ -636,6 +652,12 @@ async fn run_writes<D: DbRead + ?Sized>(
                 .map_err(|e| DbError::new(format!("capture `{}`: {e:?}", c.column)))?;
             env.insert(c.bind.clone(), bound);
         }
+    }
+
+    // A structured `create … from` reads its written rows back in the declared shape via an
+    // IN-keyed re-select over the captured keys, returned in input order (BW1b/BW2).
+    if let Some(rb) = &plan.bulk_readback {
+        return run_bulk_readback(db, plan, rb, &readback_keys, &env).await;
     }
 
     // Read the written row back in its declared shape, bound late from the accumulated
@@ -682,9 +704,12 @@ async fn run_bulk<D: DbRead + ?Sized>(
     db: &mut D,
     dialect: based_codegen::Dialect,
     bulk: &crate::plan::BulkStep,
-) -> Result<(), DbError> {
+    env: &std::collections::HashMap<String, SqlValue>,
+    want_ids: bool,
+) -> Result<Vec<SqlValue>, DbError> {
+    use based_codegen::Dialect;
     if bulk.rows.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let col_list = bulk
         .columns
@@ -693,10 +718,24 @@ async fn run_bulk<D: DbRead + ?Sized>(
         .collect::<Vec<_>>()
         .join(", ");
     let per_row = bulk.binds_per_row.max(1);
-    let chunk_rows = (max_binds(dialect) / per_row).max(1);
+    // A bulk upsert's tail binds (a param / `$ctx`) repeat once per chunk statement, so they
+    // count against the chunk's bind budget alongside the per-row binds.
+    let tail_binds = bulk.conflict_tail.as_ref().map_or(0, |t| count_named(t));
+    let chunk_rows = ((max_binds(dialect).saturating_sub(tail_binds)) / per_row).max(1);
+    // The `serial` read-back uses `RETURNING` on Postgres/SQLite; MySQL/MariaDB have none, so
+    // the ids come from the `LAST_INSERT_ID()` range (the first id + a contiguous block).
+    let returning = if want_ids {
+        bulk.serial_return.as_ref()
+    } else {
+        None
+    };
+    let use_returning =
+        returning.is_some() && matches!(dialect, Dialect::Postgres | Dialect::Sqlite);
+    let mut serial_ids: Vec<SqlValue> = Vec::new();
+
     for chunk in bulk.rows.chunks(chunk_rows) {
         let mut sql = format!("INSERT INTO {} ({col_list})\nVALUES ", bulk.table);
-        let mut params: Vec<SqlValue> = Vec::with_capacity(chunk.len() * per_row);
+        let mut params: Vec<SqlValue> = Vec::with_capacity(chunk.len() * per_row + tail_binds);
         let mut ord = 0usize;
         for (r, row) in chunk.iter().enumerate() {
             if r > 0 {
@@ -713,7 +752,7 @@ async fn run_bulk<D: DbRead + ?Sized>(
                 } else {
                     ord += 1;
                     match dialect {
-                        based_codegen::Dialect::Postgres => {
+                        Dialect::Postgres => {
                             sql.push('$');
                             sql.push_str(&ord.to_string());
                         }
@@ -725,10 +764,153 @@ async fn run_bulk<D: DbRead + ?Sized>(
             }
             sql.push(')');
         }
-        sql.push_str(";\n");
-        db.execute(&sql, &params).await?;
+        // Bulk upsert (BW2): the `ON CONFLICT … / ON DUPLICATE KEY UPDATE` tail, its `:name`
+        // binds continuing this statement's positional count.
+        if let Some(tail) = &bulk.conflict_tail {
+            let (frag, tparams) =
+                crate::scan::to_positional_from(tail, dialect, ord, |n| env.get(n).cloned())
+                    .map_err(|n| {
+                        DbError::new(format!("unbound placeholder `:{n}` (upsert tail)"))
+                    })?;
+            sql.push_str(&frag);
+            params.extend(tparams);
+        }
+        if use_returning {
+            let scol = returning.unwrap();
+            sql.push_str(&format!(" RETURNING {}", dialect.quote(scol)));
+            sql.push_str(";\n");
+            let rows = fetch_all(db.fetch(&sql, &params)).await?;
+            for mut row in rows {
+                let v = row.remove(scol).unwrap_or(serde_json::Value::Null);
+                serial_ids.push(json_to_key(&v));
+            }
+        } else if returning.is_some() {
+            // MySQL/MariaDB: no `INSERT … RETURNING` — the ids are the contiguous
+            // `LAST_INSERT_ID()` range (first id .. first + chunk length).
+            sql.push_str(";\n");
+            db.execute(&sql, &params).await?;
+            let first = fetch_all(db.fetch("SELECT LAST_INSERT_ID() AS id", &[]))
+                .await?
+                .into_iter()
+                .next()
+                .and_then(|r| r.get("id").and_then(serde_json::Value::as_i64))
+                .ok_or_else(|| DbError::new("LAST_INSERT_ID() returned no row"))?;
+            for i in 0..chunk.len() as i64 {
+                serial_ids.push(SqlValue::Int(first + i));
+            }
+        } else {
+            sql.push_str(";\n");
+            db.execute(&sql, &params).await?;
+        }
     }
-    Ok(())
+    Ok(serial_ids)
+}
+
+/// Count the `:name` placeholders in a SQL fragment (quote-aware via [`to_positional`]) —
+/// how many binds a bulk upsert's tail contributes to each chunk statement.
+fn count_named(sql: &str) -> usize {
+    crate::scan::to_positional(sql, based_codegen::Dialect::Postgres, |_| Some(()))
+        .map_or(0, |(_, v)| v.len())
+}
+
+/// A read-back key value from a fetched JSON scalar: an integer id stays an `Int`, anything
+/// else its text — enough for equality-keying rows back to their input order.
+fn json_to_key(v: &serde_json::Value) -> SqlValue {
+    match v {
+        serde_json::Value::Number(n) if n.is_i64() => SqlValue::Int(n.as_i64().unwrap()),
+        serde_json::Value::Number(n) if n.is_u64() => SqlValue::Int(n.as_u64().unwrap() as i64),
+        serde_json::Value::String(s) => SqlValue::Text(s.clone()),
+        other => SqlValue::Text(other.to_string()),
+    }
+}
+
+/// The declared-shape read-back for a structured `create … from` (BW1b/BW2): re-select the
+/// written rows keyed on their keys (an `IN (…)` over the captured key tuples), reorder them
+/// to input order via the hidden `__bkk_<i>` key columns, and return one object (`-> Shape`)
+/// or an array (`-> Shape[]`). Reuses the shape projection, so nested shapes decode as on a
+/// read. Zero written rows → an empty array (bulk) / not-found (single).
+async fn run_bulk_readback<D: DbRead + ?Sized>(
+    db: &mut D,
+    plan: &MutationPlan,
+    rb: &crate::plan::BulkReadbackPlan,
+    keys: &[Vec<SqlValue>],
+    env: &std::collections::HashMap<String, SqlValue>,
+) -> Result<TxOutcome, DbError> {
+    use serde_json::Value as J;
+    if keys.is_empty() {
+        return if rb.bulk {
+            Ok(TxOutcome::Done(J::Array(Vec::new())))
+        } else {
+            Ok(TxOutcome::NotFound)
+        };
+    }
+
+    // Splice the key-tuple IN-list into the sentinel, as `:__bk_<row>_<col>` binds.
+    let mut binds: std::collections::HashMap<String, SqlValue> = std::collections::HashMap::new();
+    let mut tuples: Vec<String> = Vec::with_capacity(keys.len());
+    for (r, key) in keys.iter().enumerate() {
+        let parts: Vec<String> = key
+            .iter()
+            .enumerate()
+            .map(|(c, v)| {
+                let name = format!("__bk_{r}_{c}");
+                binds.insert(name.clone(), v.clone());
+                format!(":{name}")
+            })
+            .collect();
+        tuples.push(if parts.len() == 1 {
+            parts.into_iter().next().unwrap()
+        } else {
+            format!("({})", parts.join(", "))
+        });
+    }
+    let sql = rb.sql.replace(
+        based_codegen::sql::mutations::BULK_KEYS_SENTINEL,
+        &tuples.join(", "),
+    );
+    let (bound_sql, params) = crate::scan::to_positional(&sql, plan.dialect, |n| {
+        env.get(n).or_else(|| binds.get(n)).cloned()
+    })
+    .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (bulk read-back)")))?;
+    let rows = fetch_all(db.fetch(&bound_sql, &params)).await?;
+
+    // Map each fetched row by its hidden key columns (stripped before nesting), then emit in
+    // input-key order (a duplicate input key repeats its row; a missing key is skipped).
+    let mut by_key: std::collections::HashMap<String, J> = std::collections::HashMap::new();
+    let alias_prefix = based_codegen::sql::mutations::BULK_KEY_ALIAS;
+    for mut row in rows {
+        let mut kparts: Vec<J> = Vec::with_capacity(rb.key_count);
+        for c in 0..rb.key_count {
+            kparts.push(row.remove(&format!("{alias_prefix}{c}")).unwrap_or(J::Null));
+        }
+        by_key.insert(norm_key(&kparts), nest_row(row));
+    }
+    let mut out: Vec<J> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let kparts: Vec<J> = key.iter().map(sql_value_to_json).collect();
+        if let Some(v) = by_key.get(&norm_key(&kparts)) {
+            out.push(v.clone());
+        }
+    }
+
+    if rb.bulk {
+        Ok(TxOutcome::Done(J::Array(out)))
+    } else {
+        match out.into_iter().next() {
+            Some(v) => Ok(TxOutcome::Done(v)),
+            None => Ok(TxOutcome::NotFound),
+        }
+    }
+}
+
+/// A canonical string key for a tuple of JSON scalars — equal iff the values are equal — so a
+/// fetched row's hidden key columns match the captured input key regardless of source.
+fn norm_key(parts: &[serde_json::Value]) -> String {
+    parts
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\u{1}")
 }
 
 /// The `{ id }` fallback response value for a created row's id — a uuid/ulid string or a

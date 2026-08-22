@@ -34,10 +34,17 @@ native* — `delete`/`update Model where (broad)` lowers to one set-based `DELET
   real DELETE). Full pipeline + live SQLite proof (round-trip / single / chunking / empty-is-success /
   scope-from-ctx). **Read-back deferred (BW1b, clean follow-on):** single `-> Shape` (create-keyed) +
   bulk `-> Shape[]` (IN-keyed re-select). `-> count` stays out.
-- **BW2. Bulk upsert — `create Model[] from $rows on conflict (target) update { … }`.** Bulk insert + the
-  existing `on conflict` clause (D102), composed. **Open sub-fork:** the `update` branch must reference the
-  *incoming/proposed* row's values (an `excluded`-/`$row`-style reference, distinct from the singular
-  upsert's column/param operands) — needs a design call.
+- **BW2. Bulk upsert — `create Model[] from $rows on conflict (target) update { … }` — DONE (D127).** Bulk
+  insert + the `on conflict` clause (D102), composed. The `update` branch references the *incoming/proposed*
+  row via **`incoming.<col>`** (owner-decided keyword) → `excluded.<col>` (Postgres/SQLite) / `VALUES(<col>)`
+  (MySQL/MariaDB); a bare column is the *stored* value (as D102). `incoming` is a contextual keyword (E0334
+  outside a bulk/from upsert branch, E0333 for a non-settable column). Conflict-target rules reuse D102
+  (E0250-E0254) over the input shape's columns; `on conflict` stays disallowed on `@soft_delete`. Also landed
+  **BW1b — bulk read-back**: a `create … from` reads back `-> ok`, `-> Shape` (single), or `-> Shape[]` (bulk,
+  arity via E0332) — an IN-keyed re-select reusing `project_return`, keyed on the conflict-target / surrogate /
+  natural key (app-known) or a DB-generated `serial` id (RETURNING on Postgres·SQLite, `LAST_INSERT_ID()` range
+  on MySQL·MariaDB); rows in input order. Full pipeline + live SQLite (round-trip upsert / accumulate / serial
+  read-back) + live MariaDB (ON DUPLICATE KEY + VALUES() + LAST_INSERT_ID range).
 - **BW3. Whole-table wipe — `hard delete all Model -> ok` (and soft `delete all` → tombstone-all) — DONE
   (D125).** Required greppable `all` keyword (bare `delete Model` stays a parse error);
   `where_: Option<Predicate>`; `Dialect::wipe_all` = `TRUNCATE` on Postgres (transaction-safe there),
@@ -46,20 +53,16 @@ native* — `delete`/`update Model where (broad)` lowers to one set-based `DELET
   every live row; `-> ok` via new `WriteEffect::Wipe`, wipe exempt from the ack zero-row 404. Full
   pipeline + live SQLite proof.
 
-**Status: BW3 done (D125), BW1 done (D126). Next: BW2 (bulk upsert).** BW1's owner-signed-off revision
+**Status: BW queue COMPLETE — BW3 (D125), BW1 (D126), BW2 + BW1b bulk read-back (D127).** BW1's owner-signed-off revision
 (2026-08-23) **dropped the `input` decl** — a `shape` is the row-input type (no new keyword). Resolved
 across BW1/BW3: reuse `create`; `-> ok` broadened to a universal read-back opt-out (E0221 retired for
 surviving writes); wipe = `hard delete all` with dialect-safe TRUNCATE/DELETE; engine-owned param
 chunking. **Follow-ons / reserved:**
-- **BW1b — read-back for a structured create:** single `create Model from $row -> Shape` (create-keyed,
-  reuses the ordinary create re-select) + bulk `create Model[] from $rows -> Shape[]` (an IN-keyed
-  re-select over the written keys, reusing `project_return`). Deferred from BW1 to keep it green; the
-  rows are verifiable with a query meanwhile.
+- **BW1b — read-back for a structured create — DONE (D127):** single `create Model from $row -> Shape` +
+  bulk `create Model[] from $rows -> Shape[]`, an IN-keyed re-select over the written keys reusing
+  `project_return` (serial ids via RETURNING / `LAST_INSERT_ID()` range).
 - **Nested writes** (`order { …non-key payload }` creating the related row too) — syntax reserved,
-  `E0329`.
-- **BW2 — bulk upsert** `create Model[] from $rows on conflict (target) update { … }` (`E0331` stub
-  today): open sub-fork is the `update` branch's incoming-row reference (`excluded`/`$row`-style),
-  distinct from the singular upsert's operands — needs a design call before building.
+  `E0329`. **The one remaining reserved BW follow-up.**
 - `-> count` read-back form stays out.
 
 ## Autonomous build loop (how this is being built out)

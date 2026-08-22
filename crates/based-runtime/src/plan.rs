@@ -163,6 +163,25 @@ pub struct MutationPlan {
     /// 404 `not_found`, mirroring a surviving write's empty re-select. `None` for a
     /// shape-returning mutation.
     pub ack_check: Option<usize>,
+    /// The declared-shape read-back for a structured `create … from` (BW1b/BW2): after the
+    /// chunked INSERT runs, the runtime re-selects the written rows keyed on their keys and
+    /// returns them in input order (one object for `-> Shape`, an array for `-> Shape[]`).
+    /// Replaces [`ret_select`](Self::ret_select) for a from-create; `None` otherwise.
+    pub bulk_readback: Option<BulkReadbackPlan>,
+}
+
+/// The runtime read-back plan for a structured `create … from` (BW1b/BW2).
+#[derive(Debug, Clone)]
+pub struct BulkReadbackPlan {
+    /// The shape re-select with a `/*BULK_KEYS*/` sentinel where the key-tuple IN-list is
+    /// spliced, plus hidden `__bkk_<i>` key columns the runtime reads to reorder + strip.
+    pub sql: String,
+    /// The number of key columns per tuple.
+    pub key_count: usize,
+    /// `true` for a bulk `-> Shape[]` (array response), `false` for a single `-> Shape`.
+    pub bulk: bool,
+    /// Whether the keys are DB-generated (`serial`), learned from the INSERT.
+    pub serial: bool,
 }
 
 /// One write step: unbound `:name` SQL and an optional row read-back.
@@ -195,6 +214,19 @@ pub struct BulkStep {
     pub rows: Vec<Vec<SqlValue>>,
     /// Count of columns that bind a value per row (every column whose `literal` is `None`).
     pub binds_per_row: usize,
+    /// A bulk upsert's per-dialect tail (`ON CONFLICT … / ON DUPLICATE KEY UPDATE …`, BW2),
+    /// appended to every chunk's INSERT. `:name` placeholders (a param / `$ctx`) are bound
+    /// from the run environment. `None` for a plain bulk insert.
+    pub conflict_tail: Option<String>,
+    /// The app-known read-back key of each written row (BW1b/BW2), in input order — the
+    /// conflict target / surrogate / natural key values pulled from the payload. Empty when
+    /// there is no read-back, or when the key is DB-generated (`serial`, see
+    /// [`serial_return`](Self::serial_return)).
+    pub key_rows: Vec<Vec<SqlValue>>,
+    /// For a `serial` read-back, the physical id column to recover from the INSERT
+    /// (`RETURNING` on Postgres/SQLite, the `LAST_INSERT_ID()` range on MySQL/MariaDB) — the
+    /// keys aren't known until the DB assigns them. `None` otherwise.
+    pub serial_return: Option<String>,
 }
 
 /// One INSERT column of a [`BulkStep`]: its quoted name and, for an engine-filled column,
@@ -511,6 +543,13 @@ pub fn plan_mutation(
         None
     };
 
+    let bulk_readback = low.bulk_readback.as_ref().map(|br| BulkReadbackPlan {
+        sql: br.sql.clone(),
+        key_count: br.key_cols.len(),
+        bulk: br.bulk,
+        serial: br.serial,
+    });
+
     Ok(MutationPlan {
         name: req.callable.clone(),
         dialect: compiled.dialect,
@@ -519,6 +558,7 @@ pub fn plan_mutation(
         result_id,
         ret_select: low.ret_select.clone(),
         ack_check,
+        bulk_readback,
     })
 }
 
@@ -551,39 +591,7 @@ fn build_bulk_step(
 
     // The row(s): an array for `create Model[] from`, a single object for `create Model
     // from`. A missing / wrong-shaped arg is a boundary error (never SQL).
-    let empty = serde_json::Map::new();
-    let rows_json: Vec<&serde_json::Map<String, J>> = match req.args.get(&bulk.param) {
-        Some(J::Array(a)) if bulk.bulk => a
-            .iter()
-            .map(|v| {
-                v.as_object().ok_or_else(|| PlanError::BadArg {
-                    name: bulk.param.clone(),
-                    expected: Family::Any,
-                    got: "a non-object array element".to_string(),
-                })
-            })
-            .collect::<Result<_, _>>()?,
-        Some(J::Object(o)) if !bulk.bulk => vec![o],
-        None => {
-            let _ = &empty;
-            return Err(PlanError::MissingArg(bulk.param.clone()));
-        }
-        Some(other) => {
-            return Err(PlanError::BadArg {
-                name: bulk.param.clone(),
-                expected: Family::Any,
-                got: format!(
-                    "{} (expected {})",
-                    json_kind(other),
-                    if bulk.bulk {
-                        "an array of objects"
-                    } else {
-                        "an object"
-                    }
-                ),
-            });
-        }
-    };
+    let rows_json = read_bulk_rows(req, bulk)?;
 
     let columns: Vec<BulkOutCol> = bulk
         .columns
@@ -642,12 +650,88 @@ fn build_bulk_step(
         rows.push(vals);
     }
 
+    let key_rows = bulk_key_rows(bulk, &rows);
+    let serial_return = if bulk.readback_serial {
+        bulk.returning.first().cloned()
+    } else {
+        None
+    };
+
     Ok(BulkStep {
         table: bulk.table.clone(),
         columns,
         rows,
         binds_per_row,
+        conflict_tail: bulk.conflict_tail.clone(),
+        key_rows,
+        serial_return,
     })
+}
+
+/// Read a structured create's row(s) from its shape param: an array for the bulk form, a
+/// single object for the single form. A missing / wrong-shaped arg is a boundary error.
+fn read_bulk_rows<'a>(
+    req: &'a Request,
+    bulk: &based_codegen::sql::mutations::BulkInsert,
+) -> Result<Vec<&'a serde_json::Map<String, serde_json::Value>>, PlanError> {
+    use serde_json::Value as J;
+    match req.args.get(&bulk.param) {
+        Some(J::Array(a)) if bulk.bulk => a
+            .iter()
+            .map(|v| {
+                v.as_object().ok_or_else(|| PlanError::BadArg {
+                    name: bulk.param.clone(),
+                    expected: Family::Any,
+                    got: "a non-object array element".to_string(),
+                })
+            })
+            .collect(),
+        Some(J::Object(o)) if !bulk.bulk => Ok(vec![o]),
+        None => Err(PlanError::MissingArg(bulk.param.clone())),
+        Some(other) => Err(PlanError::BadArg {
+            name: bulk.param.clone(),
+            expected: Family::Any,
+            got: format!(
+                "{} (expected {})",
+                json_kind(other),
+                if bulk.bulk {
+                    "an array of objects"
+                } else {
+                    "an object"
+                }
+            ),
+        }),
+    }
+}
+
+/// The app-known read-back key of each written row (BW1b/BW2): the bind index of each
+/// read-back key column among the per-row bound values, then that value per row, in input
+/// order. Empty for a `serial` (DB-generated) key or a `-> ok` insert (no read-back).
+fn bulk_key_rows(
+    bulk: &based_codegen::sql::mutations::BulkInsert,
+    rows: &[Vec<SqlValue>],
+) -> Vec<Vec<SqlValue>> {
+    use based_codegen::sql::mutations::BulkSource;
+    if bulk.readback_serial || bulk.readback_key.is_empty() {
+        return Vec::new();
+    }
+    let bind_idx: Option<Vec<usize>> = bulk
+        .readback_key
+        .iter()
+        .map(|kc| {
+            bulk.columns
+                .iter()
+                .filter(|c| !matches!(c.source, BulkSource::Now))
+                .position(|c| &c.column == kc)
+        })
+        .collect();
+    match bind_idx {
+        Some(idx) => rows
+            .iter()
+            .map(|r| idx.iter().map(|&i| r[i].clone()).collect())
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 /// A short JSON-kind label for a boundary error message.

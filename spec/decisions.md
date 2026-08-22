@@ -89,7 +89,14 @@ relevant entries instead of scanning. A decision may appear under more than one 
   keyword, bare `delete Model` stays a parse error; `where_: Option<Predicate>`;
   `Dialect::wipe_all` = `TRUNCATE` on Postgres / `DELETE FROM` on MySQL·MariaDB·SQLite;
   scope predicate still rides a scoped wipe; soft model tombstones-all; `-> ok` via new
-  `WriteEffect::Wipe`, wipe exempt from the ack zero-row 404; BW3)
+  `WriteEffect::Wipe`, wipe exempt from the ack zero-row 404; BW3),
+  D126 (bulk / structured shape-input create `create Model[] from $rows` / `create Model
+  from $row` — a `shape` doubles as the row-input type, chunked atomic multi-row INSERT,
+  presence-driven columns, `@scope` always `$ctx`-injected; E0325-E0332, W0112/W0113; BW1),
+  D127 (bulk upsert `create … from … on conflict update` + bulk read-back `-> Shape`/`-> Shape[]`
+  — `incoming.<col>` = proposed row → `excluded`/`VALUES()`, bare col = stored; IN-keyed
+  re-select read-back keyed on conflict-target / key / serial-via-RETURNING·LAST_INSERT_ID;
+  E0332 reworded, E0333/E0334, E0331 retired; BW2/BW1b — completes the BW queue)
 - **Indexing** — D15 (index inference, baseline emission, lints), D103 (inferred join-key indexes
   retire → explicit `@index`, error `E0260` + autofix; principle 8 reworded; `inf_`/`IndexSnap.inferred`
   gone), D104 (exotic indexes: `@index(col) using <method>` + opaque `@index raw("…")`, per-dialect
@@ -6186,3 +6193,66 @@ from` printing / `from` in Create patterns). Spec: `grammar.ebnf`, `mutations.md
 sema conformance (`bulk_create`, `bulk_input_errors`, updated `ack_errors`), codegen `mutations.rs`
 (bulk plan + serial-omit), live SQLite `bulk_integration.rs` (round-trip north star, single, chunking
 across the bind cap, empty-is-success, scope-from-ctx-not-payload).
+
+## D127 — bulk upsert (`create … from … on conflict update`) + bulk read-back (BW2 / BW1b)
+
+**Owner-signed-off 2026-08-23.** Completes the bulk-writes (BW) queue: composes BW1's chunked
+shape-input insert (D126) with the singular upsert's `on conflict` clause (D102), and adds the
+deferred read-back (BW1b). Retires E0331 (bulk upsert was its stub).
+
+**Bulk read-back (BW1b).** A structured `create … from` now reads back `-> ok`, `-> Shape`
+(single `create Model from`), or `-> Shape[]` (bulk `create Model[] from`) — arity must match
+the `[]` (E0332, repurposed from its "must be `-> ok`" stub to an arity-mismatch check). The
+read-back is an **IN-keyed re-select** over the written rows' keys, reusing the read side's
+`project_return`, so nested to-one/to-many/FK-link shapes decode exactly as on a `get`. It keys
+on the surrogate id (uuid/ulid app-minted), the natural/composite `@key`, a keyless model's
+`(unique)` column, or (upsert) the conflict target — all **app-known from the payload** — while
+a DB-generated **`serial`** id is learned from the INSERT: `RETURNING <id>` on **Postgres/
+SQLite**, the contiguous **`LAST_INSERT_ID()` range** on **MySQL/MariaDB** (the dialects
+genuinely diverge — no `INSERT … RETURNING` on MySQL family). Rows return in **input order**:
+the re-select carries hidden `__bkk_<i>` key columns the runtime reads to reorder + strip, then
+splices the key tuples into an `IN (/*BULK_KEYS*/)` sentinel. Accumulates across chunks, atomic
+in the surrounding tx; zero written rows → an empty array (bulk) / not-found (single).
+
+**Bulk upsert (BW2).** `create Model[] from $rows on conflict (target) update { … }` composes
+the two: the per-dialect tail (`ON CONFLICT (cols) DO UPDATE SET …` / `ON DUPLICATE KEY UPDATE
+…`) is appended to every chunk's INSERT, its `:name` param/`$ctx` binds continuing the
+statement's positional count (`to_positional_from`, offset-aware). The conflict-target rules are
+D102's (E0250–E0254), applied over the **input shape's** columns instead of inline assigns
+(E0252 = a conflict column must be a named column of the shape); `on conflict` stays disallowed
+on a `@soft_delete` model (E0253); a scoped model's target must include its scope column(s)
+(E0254). The read-back keys on the conflict target (a conflict path keeps the existing row).
+
+**The `incoming` keyword (owner-decided this session).** In a bulk/from `on conflict update`
+branch, a **bare column** (`qty`) is the **stored/existing** row's value (identical to D102),
+and **`incoming.<col>`** is the **proposed/incoming** row's value — lowered per dialect to
+`excluded.<col>` (Postgres/SQLite) or `VALUES(<col>)` (MySQL/MariaDB). So the canonical
+accumulate is `on conflict (sku) update { qty = qty + incoming.qty, price = incoming.price }`.
+`incoming` is a **contextual keyword**: valid *only* here, an ordinary identifier everywhere
+else. It parses as a plain 2-segment path (no AST/parser change); sema recognizes it by context.
+New codes: **E0333** (`incoming.<col>` names a non-settable column), **E0334** (`incoming.<col>`
+used outside a bulk/from `on conflict update` branch — guarded in `check_assign`, so an inline
+create/update or an inline upsert's branch rejects it while a real relation named `incoming`
+stays traversable elsewhere).
+
+**Client / OpenAPI unchanged.** Both already emit `Vec<Shape>` / `Shape` from `m.ret.many`, so a
+from-create returning a shape needs no client/OpenAPI change once sema accepts it.
+
+**Blast radius.** `based-sema` (`ir.rs` E0331 retired-note, E0332 reworded, E0333/E0334;
+`check.rs` `check_from_creates` arity + `check_bulk_upsert`/`check_conflict_target_over`/
+`input_shape_columns`/`check_incoming_refs`, `check_assign` E0334 guard, `is_incoming_path`/
+`rhs_incoming_span`). `based-codegen` (`sql/dml.rs` `Select::with_incoming` + the `incoming`
+value branch; `sql/mutations.rs` `BulkInsert.{conflict_tail,readback_key,readback_serial}`,
+`BulkReadback` + `LoweredMutation.bulk_readback`, `lower_bulk_create` conflict tail +
+`bulk_readback_key`, `lower_bulk_readback`, `conflict_update_sets`/`upsert_tail_and_key`
+`incoming` param, `BULK_KEYS_SENTINEL`/`BULK_KEY_ALIAS`, text emitter). `based-runtime`
+(`scan.rs` `to_positional_from`; `plan.rs` `BulkStep.{conflict_tail,key_rows,serial_return}` +
+`bulk_key_rows`/`read_bulk_rows`, `MutationPlan.bulk_readback` + `BulkReadbackPlan`; `run.rs`
+`run_bulk` conflict tail + serial-id capture returning `Vec<SqlValue>`, `run_bulk_readback` +
+`norm_key`/`json_to_key`/`count_named`). Spec: `grammar.ebnf`, `mutations.md`. Tests: sema
+conformance `bulk_upsert` (E0250/E0253/E0254/E0333/E0334) + updated `bulk_input_errors` (E0332
+arity), codegen `mutations.rs` (excluded/VALUES tails, IN-keyed re-select, serial read-back
+plan), live SQLite `bulk_integration.rs` (round-trip upsert / accumulate mixed batch / serial
+read-back via RETURNING) + live MariaDB `mariadb_integration.rs` (ON DUPLICATE KEY + VALUES() +
+LAST_INSERT_ID range read-back). This completes the BW queue (BW1/BW2/BW3 all done); **nested
+writes stay the reserved follow-up (E0329)**.

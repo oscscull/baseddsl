@@ -1323,6 +1323,11 @@ pub(crate) struct Select<'a> {
     /// bare column names the existing row across all three dialects (a qualified reference
     /// is rejected or ambiguous there). Off everywhere else.
     bare_cols: bool,
+    /// Interpret a leading-`incoming` operand (`incoming.<col>`) as the **proposed/incoming**
+    /// row of a bulk upsert (`create … from … on conflict update`): Postgres/SQLite lower it
+    /// to `excluded.<col>`, MySQL/MariaDB to `VALUES(<col>)`. Set only for a bulk upsert's SET
+    /// clause; off everywhere else (there `incoming` is an ordinary path — sema forbids it).
+    incoming: bool,
 }
 
 /// A reachable `create … as name` tx step binding: the model it created, so a
@@ -1378,12 +1383,20 @@ impl<'a> Select<'a> {
             scope_inject: &[],
             sub_counter: 0,
             bare_cols: false,
+            incoming: false,
         }
     }
 
     /// Render column operands bare (unqualified) — for an upsert conflict-update SET.
     pub(crate) fn with_bare_cols(mut self, bare: bool) -> Self {
         self.bare_cols = bare;
+        self
+    }
+
+    /// Interpret `incoming.<col>` as the proposed row of a bulk upsert — for a bulk
+    /// `create … from … on conflict update` SET clause.
+    pub(crate) fn with_incoming(mut self, incoming: bool) -> Self {
+        self.incoming = incoming;
         self
     }
 
@@ -1637,6 +1650,7 @@ impl<'a> Select<'a> {
             scope_inject: self.scope_inject,
             sub_counter: self.sub_counter,
             bare_cols: false,
+            incoming: false,
         };
         let elem = sub.json_object_expr(body, child, &child_alias, "");
         // Sort cascade for the traversal: relation `@sort` on the edge beats the child
@@ -1702,6 +1716,7 @@ impl<'a> Select<'a> {
             scope_inject: self.scope_inject,
             sub_counter: self.sub_counter,
             bare_cols: false,
+            incoming: false,
         }
     }
 
@@ -2498,6 +2513,17 @@ impl<'a> Select<'a> {
                 self.binding_value(pr)
             }
             Value::Param(pr) => format!(":{}", param_key(pr)),
+            // `incoming.<col>` in a bulk upsert's SET clause: the proposed/incoming row's
+            // value — `excluded.<col>` (Postgres/SQLite) / `VALUES(<col>)` (MySQL/MariaDB).
+            Value::Path(p)
+                if self.incoming && p.segments.len() == 2 && p.segments[0].node == "incoming" =>
+            {
+                let col = physical_col(model, &p.segments[1].node);
+                match self.dialect {
+                    Dialect::Postgres | Dialect::Sqlite => format!("excluded.{}", self.q(&col)),
+                    Dialect::MariaDb | Dialect::MySql => format!("VALUES({})", self.q(&col)),
+                }
+            }
             Value::Path(p) => {
                 let (alias, col) = self.resolve(p, model);
                 if self.bare_cols {

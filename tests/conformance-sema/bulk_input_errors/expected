@@ -6,7 +6,7 @@ DIAGNOSTICS
   E0329: input relation `category` names non-key columns
   E0330: input shape for `create Product` is missing required column: category
   E0330: input shape for `create Product` is missing required columns: category, name, price
-  E0332: `create Product[] from` must return `-> ok`
+  E0332: `create Product[] from` must return `-> Shape[]` or `-> ok`
   W0104: index on `category` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
   W0104: index on `org` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
   W0112: input shape names the engine-managed timestamp `created_at`
@@ -42,4 +42,5 @@ mutation m_bare  ret=Product ack  ctx=[org: -> Org]
 mutation m_nested  ret=Product ack  ctx=[org: -> Org]
 mutation m_managed  ret=Product ack  ctx=[org: -> Org]
 mutation m_readback  ret=Product  ctx=[org: -> Org]
+mutation m_arity_ret  ret=Product  ctx=[org: -> Org]
 mutation m_arity  ret=Product ack  ctx=[org: -> Org]

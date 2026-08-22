@@ -1,0 +1,37 @@
+DIAGNOSTICS
+  E0250: conflict target (price) is not a unique key of `Inventory`
+  E0253: `on conflict` is not allowed on the @soft_delete model `Ledger`
+  E0254: conflict target on scoped `Inventory` omits the scope column `org`
+  E0333: `incoming.nope` is not a settable column of `Inventory`
+  E0334: `incoming.<col>` is only valid in a bulk `create … from … on conflict update` branch
+  W0104: index on `org` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
+  W0104: index on `org` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model Inventory  table=inventory  scope
+  id: Id
+  org: -> Org  fk=org_id
+  sku: text
+  qty: int
+  price: int
+  index unique(org, sku)
+  index(org)
+model Ledger  table=ledger  soft_delete=deleted_at(timestamp)  scope
+  id: Id
+  org: -> Org  fk=org_id
+  code: text
+  hits: int
+  deleted_at: timestamp?
+  index unique(org, code)
+  index(org)
+shape InvIn from Inventory
+shape InvOut from Inventory
+shape LedgerIn from Ledger
+mutation restock  ret=Inventory  ctx=[org: -> Org]
+mutation restock_ok  ret=Inventory ack  ctx=[org: -> Org]
+mutation bad_incoming  ret=Inventory ack  ctx=[org: -> Org]
+mutation bad_context  ret=Inventory ack  ctx=[org: -> Org]
+mutation bad_target  ret=Inventory ack  ctx=[org: -> Org]
+mutation bump  ret=Ledger ack  ctx=[org: -> Org]

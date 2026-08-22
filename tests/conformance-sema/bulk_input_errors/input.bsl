@@ -42,10 +42,15 @@ mutation m_nested(rows: NestedWrite[]) -> ok scoped Tenant { create Product[] fr
 shape NamesManaged from Product { sku, name, price, category { id }, created_at, updated_at }
 mutation m_managed(rows: NamesManaged[]) -> ok scoped Tenant { create Product[] from $rows; }
 
-# A structured create must be `-> ok` (read-back is a follow-on) -> E0332.
+# A bulk read-back (BW1b): `create Model[] from $rows -> Shape[]` is valid — the written
+# rows read back in the declared shape (arity matches the `[]`). No diagnostic.
 shape Ok from Product { sku, name, price, category { id } }
 mutation m_readback(rows: Ok[]) -> ProductRow[] scoped Tenant { create Product[] from $rows; }
 shape ProductRow from Product { sku, name }
 
-# Wrong arity: a bulk `Model[] from` needs a `shape[]` param -> E0325.
+# Return-arity mismatch: a bulk `Model[] from` reads back `-> Shape[]` (or `-> ok`), not a
+# scalar `-> Shape` -> E0332.
+mutation m_arity_ret(rows: Ok[]) -> ProductRow scoped Tenant { create Product[] from $rows; }
+
+# Wrong param arity: a bulk `Model[] from` needs a `shape[]` param -> E0325.
 mutation m_arity(row: Ok) -> ok scoped Tenant { create Product[] from $row; }

@@ -1914,6 +1914,19 @@ fn check_assign(
     in_update: bool,
     sink: &mut Sink,
 ) {
+    // `incoming.<col>` is the bulk-upsert incoming-row keyword — legal only inside a
+    // `create … from … on conflict update` branch (checked in `check_bulk_upsert`). In every
+    // other assign context (an inline create/update, an inline `on conflict` update) it is
+    // out of context: E0334, before the path is mis-resolved as an unknown relation reach.
+    if let Some(span) = rhs_incoming_span(&a.value) {
+        sink.error_note(
+            code::INPUT_INCOMING_CONTEXT,
+            span,
+            "`incoming.<col>` is only valid in a bulk `create … from … on conflict update` branch",
+            "the incoming-row keyword names the proposed row of a bulk upsert; drop it here",
+        );
+        return;
+    }
     let Some(member) = cx.model(mi).member(&a.col.node) else {
         unknown_field(cx, mi, &a.col, sink);
         return;
@@ -2115,25 +2128,36 @@ fn check_from_creates(m: &Mutation, cx: &Cx, sink: &mut Sink) {
         let Some(mi) = cx.find(&model.node) else {
             continue; // unknown model reported by the write check
         };
-        if conflict.is_some() {
-            sink.error_note(
-                code::INPUT_BULK_UPSERT,
-                cf.span,
-                format!("`create {} from …` cannot carry `on conflict` yet", model.node),
-                "bulk upsert (BW2) is not implemented — use an inline `create … on conflict` for one row",
-            );
-        }
-        // A structured `create … from` must be `-> ok` in this release: read-back (a
-        // single `-> Shape` / bulk `-> Shape[]`) is a clean follow-on. The whole insert is
-        // still atomic and the rows are verifiable with a follow-up query.
-        if !m.ret.ack {
-            let bracket = if cf.bulk { "[]" } else { "" };
+        // A structured `create … from`'s read-back (BW1b): a bulk `Model[] from` reads
+        // back `-> Shape[]` (array) or `-> ok`; a single `Model from` reads back `-> Shape`
+        // (one row) or `-> ok`. A `[]` mismatch between the create and the return is E0332.
+        if !m.ret.ack && m.ret.many != cf.bulk {
+            let (want, verb) = if cf.bulk {
+                (
+                    "`-> Shape[]`",
+                    "a bulk `create Model[] from` reads back an array",
+                )
+            } else {
+                (
+                    "`-> Shape`",
+                    "a single `create Model from` reads back one row",
+                )
+            };
             sink.error_note(
                 code::INPUT_BULK_READBACK,
                 cf.span,
-                format!("`create {}{bracket} from` must return `-> ok`", model.node),
-                "read-back of a shape-input create is a follow-on — declare `-> ok` (verify the rows with a query)",
+                format!(
+                    "`create {}{} from` must return {want} or `-> ok`",
+                    model.node,
+                    if cf.bulk { "[]" } else { "" }
+                ),
+                verb,
             );
+        }
+        // Bulk upsert (BW2): `on conflict (target) update { … }` on a `create … from`. Reuses
+        // the singular upsert's conflict-target rules (D102), over the input shape's columns.
+        if let Some(oc) = conflict {
+            check_bulk_upsert(oc, mi, m, cf, cx, sink);
         }
         if let Some(shape) = resolve_input_shape(m, cf, model, cx, sink) {
             check_input_shape(
@@ -2147,6 +2171,155 @@ fn check_from_creates(m: &Mutation, cx: &Cx, sink: &mut Sink) {
             );
         }
     }
+}
+
+/// A leading-`incoming` dotted path (`incoming.<col>`) — the bulk-upsert incoming-row
+/// keyword. Two segments, the first exactly `incoming`.
+fn is_incoming_path(p: &Path) -> bool {
+    p.segments.len() == 2 && p.segments[0].node == "incoming"
+}
+
+/// The span of the first `incoming.<col>` operand in an assign RHS (walking arithmetic),
+/// or `None` when no operand is one.
+fn rhs_incoming_span(rhs: &AssignRhs) -> Option<Span> {
+    match rhs {
+        AssignRhs::Value(Value::Path(p)) if is_incoming_path(p) => Some(p.segments[0].span),
+        AssignRhs::Value(_) => None,
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            rhs_incoming_span(lhs).or_else(|| rhs_incoming_span(rhs))
+        }
+    }
+}
+
+/// Validate a bulk upsert's `on conflict (target) update { … }` on a `create … from` (BW2).
+/// The conflict-target rules are the singular upsert's (D102), applied to the input shape's
+/// columns: a unique key (E0250) whose columns the shape sets (E0252 — a named column of the
+/// input shape), no `@soft_delete` model (E0253), scope columns present on a scoped model
+/// (E0254). The `update` branch is an ordinary assign block whose operands may reference the
+/// **stored** row (a bare column), a param/literal, self-referential arithmetic, and the
+/// **incoming** proposed row (`incoming.<col>`, E0333 for an unknown column).
+fn check_bulk_upsert(
+    oc: &OnConflict,
+    mi: usize,
+    m: &Mutation,
+    cf: &CreateFrom,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let m_model = cx.model(mi);
+    let target: Vec<&str> = oc.target.iter().map(|t| t.node.as_str()).collect();
+
+    // The input shape's covered (settable) columns supply the conflict value — the bulk
+    // counterpart of "assigned in the create block".
+    let shape_cols = input_shape_columns(m, cf, cx);
+    check_conflict_target_over(
+        oc,
+        &target,
+        mi,
+        &shape_cols,
+        m.scoped.as_ref(),
+        m.unscoped.is_some(),
+        cx,
+        sink,
+    );
+
+    // The update branch: E0251 (moves the key), incoming-col validation (E0333), and a
+    // reference/type check of every non-incoming operand (bare stored column / param /
+    // literal / arithmetic).
+    let no_bindings = Bindings::default();
+    let params: Vec<String> = m.params.iter().map(|p| p.name.node.clone()).collect();
+    for a in &oc.update {
+        if target.iter().any(|t| *t == a.col.node) {
+            sink.error_note(
+                code::UPSERT_TARGET_SET,
+                a.col.span,
+                format!(
+                    "the `on conflict update` branch assigns the conflict column `{}`",
+                    a.col.node
+                ),
+                "the update runs on a conflict *of* this key — don't move it",
+            );
+        }
+        // Validate the LHS is a settable column of the model.
+        if m_model.member(&a.col.node).is_none() {
+            unknown_field(cx, mi, &a.col, sink);
+            continue;
+        }
+        // Validate every `incoming.<col>` operand names a settable column.
+        check_incoming_refs(&a.value, m_model, cx, mi, sink);
+        // Non-incoming operands get the ordinary assign check; an assign that mentions
+        // `incoming` is validated by the walk above (its type agreement is the column's).
+        if rhs_incoming_span(&a.value).is_none() {
+            check_assign(
+                a,
+                mi,
+                cx,
+                &params,
+                &no_bindings,
+                /* in_update = */ true,
+                sink,
+            );
+        }
+    }
+}
+
+/// Validate every `incoming.<col>` operand of an assign RHS: `<col>` must be a settable
+/// scalar column of the model (E0333). Walks arithmetic operands.
+fn check_incoming_refs(rhs: &AssignRhs, model: &RModel, cx: &Cx, mi: usize, sink: &mut Sink) {
+    match rhs {
+        AssignRhs::Value(Value::Path(p)) if is_incoming_path(p) => {
+            let field = &p.segments[1];
+            let settable = model.member(&field.node).is_some_and(|mem| {
+                matches!(mem.kind, MemberKind::Scalar { .. }) && mem.kind.opaque().is_none()
+            });
+            if !settable {
+                let _ = (cx, mi);
+                sink.error_note(
+                    code::INPUT_INCOMING_FIELD,
+                    field.span,
+                    format!("`incoming.{}` is not a settable column of `{}`", field.node, model.name),
+                    "`incoming.<col>` reads the proposed row's value — name a scalar column of the model",
+                );
+            }
+        }
+        AssignRhs::Value(_) => {}
+        AssignRhs::Arith { lhs, rhs, .. } => {
+            check_incoming_refs(lhs, model, cx, mi, sink);
+            check_incoming_refs(rhs, model, cx, mi, sink);
+        }
+    }
+}
+
+/// The columns a `create … from` input shape sets (its bare scalar fields, single-column
+/// renames, and FK-link relation names) — the bulk counterpart of a create block's assigns,
+/// used to check the conflict target's coverage.
+fn input_shape_columns(m: &Mutation, cf: &CreateFrom, cx: &Cx) -> Vec<String> {
+    let Some(param) = m.params.iter().find(|p| p.name.node == cf.param.node) else {
+        return Vec::new();
+    };
+    let Some(based_ast::BaseType::Model(name)) = param.ty.as_ref().map(|t| &t.base) else {
+        return Vec::new();
+    };
+    let Some(body) = cx.shape_bodies.get(&name.node).copied() else {
+        return Vec::new();
+    };
+    let mut cols = Vec::new();
+    for f in body {
+        match f {
+            ShapeField::Bare(id) => cols.push(id.node.clone()),
+            ShapeField::Rename {
+                out,
+                value: ShapeValue::Path(p),
+            } if p.segments.len() == 1 => {
+                // The output json key names the settable column (a single-column rename).
+                cols.push(out.node.clone());
+                cols.push(p.segments[0].node.clone());
+            }
+            ShapeField::Nest { field, .. } => cols.push(field.node.clone()),
+            _ => {}
+        }
+    }
+    cols
 }
 
 /// Resolve a `create … from $param`'s input shape: `$param` must be a declared parameter
@@ -2563,6 +2736,24 @@ fn check_conflict_target(
     cx: &Cx,
     sink: &mut Sink,
 ) {
+    let set_cols: Vec<String> = create_assigns.iter().map(|a| a.col.node.clone()).collect();
+    check_conflict_target_over(oc, target, mi, &set_cols, scoped, unscoped, cx, sink);
+}
+
+/// The conflict-target rules (D102), parameterized by the columns the create *sets* — an
+/// inline create's assigns, or a `create … from` input shape's covered columns (BW2). Shared
+/// so the inline and bulk upsert paths validate the target identically.
+#[allow(clippy::too_many_arguments)]
+fn check_conflict_target_over(
+    oc: &OnConflict,
+    target: &[&str],
+    mi: usize,
+    set_cols: &[String],
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let m = cx.model(mi);
 
     // A tombstoned row still occupies its unique key, so a conflict would silently
@@ -2599,7 +2790,7 @@ fn check_conflict_target(
         .map(|(field, _)| field)
         .collect();
 
-    let assigned: Vec<&str> = create_assigns.iter().map(|a| a.col.node.as_str()).collect();
+    let assigned: Vec<&str> = set_cols.iter().map(String::as_str).collect();
     for t in &oc.target {
         let set = assigned.contains(&t.node.as_str()) || scope_cols.iter().any(|c| c == &t.node);
         if !set {

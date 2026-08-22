@@ -229,8 +229,10 @@ pub mod code {
     pub const INPUT_BAD_RELATION: &str = "E0328"; // a relation in an input shape must be an inline nested key block `rel { key }` (bare / reach / named-nest / flatten not settable)
     pub const INPUT_NESTED_WRITE: &str = "E0329"; // a relation block names non-key payload — a nested write, not yet supported (reserved)
     pub const INPUT_MISSING_REQUIRED: &str = "E0330"; // a required column is not covered by the input shape
-    pub const INPUT_BULK_UPSERT: &str = "E0331"; // `on conflict` on a structured `create … from` — bulk upsert (BW2) is not supported yet
-    pub const INPUT_BULK_READBACK: &str = "E0332"; // a structured `create … from` must be `-> ok` — shape read-back (single `-> Shape` / bulk `-> Shape[]`) is a follow-on
+    pub const INPUT_BULK_UPSERT: &str = "E0331"; // (retired by BW2 / D127 — `on conflict` on a `create … from` is now supported; kept for numbering)
+    pub const INPUT_BULK_READBACK: &str = "E0332"; // a structured `create … from`'s return arity mismatches its `[]` — a bulk `Model[] from` reads back `-> Shape[]` (or `-> ok`); a single `Model from` reads back `-> Shape` (or `-> ok`)
+    pub const INPUT_INCOMING_FIELD: &str = "E0333"; // `incoming.<col>` in a bulk `on conflict update` branch names a column that is not a settable column of the model
+    pub const INPUT_INCOMING_CONTEXT: &str = "E0334"; // `incoming.<col>` used outside a `create … from … on conflict update` branch — the incoming-row keyword is contextual to bulk/from upsert
 
     // Warnings on an input-used shape naming an engine-managed column (BW1).
     pub const INPUT_NAMES_TIMESTAMP: &str = "W0112"; // names an `@created`/`@updated` column — the explicit value overrides the auto-timestamp

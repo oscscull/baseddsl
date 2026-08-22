@@ -1208,3 +1208,95 @@ fn serial_bulk_create_omits_the_db_generated_id() {
         .iter()
         .any(|c| matches!(c.source, BulkSource::MintUuid | BulkSource::MintUlid)));
 }
+
+// ---------- bulk upsert (BW2) + bulk read-back (BW1b, D127) -----------------
+
+const BULK_UPSERT_SCHEMA: &str = r#"
+    Org { id: Id, name: text }
+    scope Tenant (org: Org = $ctx.org)
+    @scope Tenant
+    Inventory {
+      id: Id
+      org: Org
+      sku: text
+      qty: int
+      price: int
+      @index(org, sku) unique
+      @index(org)
+    }
+    shape InvIn from Inventory { sku, qty, price }
+    mutation restock(rows: InvIn[]) -> InvIn[] scoped Tenant {
+      create Inventory[] from $rows
+        on conflict (org, sku) update { qty = qty + incoming.qty, price = incoming.price };
+    }
+"#;
+
+#[test]
+fn bulk_upsert_postgres_uses_excluded_for_incoming() {
+    let lm = lower(BULK_UPSERT_SCHEMA, Dialect::Postgres);
+    let bulk = lm[0].stmts[0].bulk.as_ref().expect("bulk insert");
+    let tail = bulk.conflict_tail.as_deref().expect("conflict tail");
+    // Bare stored column + `excluded.<col>` for the incoming proposed row.
+    assert_eq!(
+        tail,
+        "\nON CONFLICT (\"org_id\", \"sku\") DO UPDATE SET \"qty\" = (\"qty\" + excluded.\"qty\"), \"price\" = excluded.\"price\""
+    );
+    // The read-back keys on the conflict target (not a generated id), app-known.
+    assert_eq!(
+        bulk.readback_key,
+        vec!["org_id".to_string(), "sku".to_string()]
+    );
+    assert!(!bulk.readback_serial);
+}
+
+#[test]
+fn bulk_upsert_mysql_uses_values_for_incoming() {
+    let lm = lower(BULK_UPSERT_SCHEMA, Dialect::MySql);
+    let bulk = lm[0].stmts[0].bulk.as_ref().expect("bulk insert");
+    let tail = bulk.conflict_tail.as_deref().expect("conflict tail");
+    // MariaDB/MySQL: no explicit target list; `incoming.<col>` → `VALUES(<col>)`.
+    assert_eq!(
+        tail,
+        "\nON DUPLICATE KEY UPDATE `qty` = (`qty` + VALUES(`qty`)), `price` = VALUES(`price`)"
+    );
+}
+
+#[test]
+fn bulk_read_back_is_an_in_keyed_reselect_of_the_shape() {
+    let lm = lower(BULK_UPSERT_SCHEMA, Dialect::Sqlite);
+    let br = lm[0]
+        .bulk_readback
+        .as_ref()
+        .expect("a shape-returning from-create reads back");
+    assert!(br.bulk, "`-> InvIn[]` is an array read-back");
+    assert!(!br.serial);
+    assert_eq!(br.key_cols, vec!["org_id".to_string(), "sku".to_string()]);
+    // The re-select projects the shape, carries hidden key columns, and leaves a sentinel
+    // for the key-tuple IN-list the runtime splices per written row.
+    assert!(br.sql.contains("/*BULK_KEYS*/"), "sql: {}", br.sql);
+    assert!(
+        br.sql.contains("AS `__bkk_0`") && br.sql.contains("AS `__bkk_1`"),
+        "sql: {}",
+        br.sql
+    );
+    assert!(br.sql.contains("IN (/*BULK_KEYS*/)"), "sql: {}", br.sql);
+}
+
+#[test]
+fn serial_bulk_read_back_learns_keys_from_the_insert() {
+    let src = r#"
+        Ticket { id: serial, subject: text }
+        shape TicketIn from Ticket { subject }
+        shape TicketOut from Ticket { id, subject }
+        mutation file(rows: TicketIn[]) -> TicketOut[] { create Ticket[] from $rows; }
+    "#;
+    let lm = lower(src, Dialect::Postgres);
+    let bulk = lm[0].stmts[0].bulk.as_ref().expect("bulk insert");
+    assert_eq!(bulk.readback_key, vec!["id".to_string()]);
+    assert!(
+        bulk.readback_serial,
+        "a serial id read-back is DB-generated"
+    );
+    let br = lm[0].bulk_readback.as_ref().expect("read-back");
+    assert!(br.serial);
+}

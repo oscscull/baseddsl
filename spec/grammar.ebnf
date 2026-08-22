@@ -286,7 +286,12 @@ write_stmt  = create_stmt | update_stmt | delete_stmt
 (* where the row(s) come from a shape-typed param (`shape[]` bulk / `shape` single). The     *)
 (* runtime materializes a chunked, atomic multi-row INSERT; the input shape names the         *)
 (* settable columns (a to-one relation FK-linked with an inline `{ key }` block). Sema        *)
-(* E0325-E0332 (use-site eligibility), W0112/W0113 (named engine-managed column).             *)
+(* E0325-E0332 (use-site eligibility), W0112/W0113 (named engine-managed column). A           *)
+(* `create_from` reads back `-> ok`, `-> Shape` (single), or `-> Shape[]` (bulk, D127).       *)
+(* `on_conflict` may follow either form — a `create_from … on_conflict` is a BULK UPSERT      *)
+(* (BW2/D127): its `update` branch may reference the proposed row via `incoming.<col>` (a     *)
+(* contextual keyword valid only here; sema E0333/E0334), lowered to `excluded.<col>`         *)
+(* (Postgres/SQLite) / `VALUES(<col>)` (MySQL/MariaDB). A bare column is the stored value.    *)
 create_stmt = 'create' model_ref ( assign_block | create_from )
               [ on_conflict ] [ 'as' binding_name ] ;
 create_from = [ '[]' ] 'from' param_ref ;   (* `[]` = bulk (shape[]); bare = one row (shape) *)

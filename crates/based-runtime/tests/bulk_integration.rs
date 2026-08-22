@@ -62,6 +62,44 @@ mutation add_one_product(row: ProductIn) -> ok scoped Tenant {
 }
 
 query all_products() -> ProductIn[] scoped Tenant;
+
+# BW2 — bulk upsert: a per-tenant sku is a composite unique key (scope + sku).
+@scope Tenant
+Inventory {
+  id: Id
+  org: Org
+  sku: text
+  qty: int
+  price: int
+  @index(org, sku) unique
+  @index(org)
+}
+shape InvIn from Inventory { sku, qty, price }
+
+# On a conflict, accumulate the stored qty with the incoming qty and take the incoming
+# price. Reads the winning rows back in `InvIn` (BW1b), keyed on the conflict target.
+mutation restock(rows: InvIn[]) -> InvIn[] scoped Tenant {
+  create Inventory[] from $rows
+    on conflict (org, sku) update { qty = qty + incoming.qty, price = incoming.price };
+}
+query all_inventory() -> InvIn[] scoped Tenant;
+
+# BW1b — single-form read-back: `create Model from $row -> Shape` returns the one written row.
+shape InvCard from Inventory { id, sku, qty }
+mutation add_one_inv(row: InvIn) -> InvCard scoped Tenant { create Inventory from $row; }
+
+# BW1b — bulk read-back of DB-generated `serial` ids (RETURNING on SQLite/Postgres).
+@created(made_at)
+Ticket {
+  id: serial
+  subject: text
+  made_at: timestamp
+}
+shape TicketIn from Ticket { subject }
+shape TicketOut from Ticket { id, subject }
+mutation file_tickets(rows: TicketIn[]) -> TicketOut[] {
+  create Ticket[] from $rows;
+}
 "#;
 
 async fn load() -> (Compiled, SqliteBackend) {
@@ -430,4 +468,193 @@ async fn bulk_insert_injects_scope_from_ctx_not_the_payload() {
         .len();
     assert_eq!(acme_rows, 1);
     assert_eq!(beta_rows, 0, "the rows are confined to the caller's scope");
+}
+
+/// Seed an org (the scope) and return its `$ctx`.
+async fn seed_org(c: &Compiled, b: &SqliteBackend, ids: &SeqIdGen, name: &str) -> Value {
+    let org = call(
+        c,
+        b,
+        ids,
+        "/m/create_org",
+        json!({ "name": name }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(org.status, 200, "{:?}", org.body);
+    json!({ "org": org.body["id"].clone() })
+}
+
+fn sorted_inv(mut v: Vec<Value>) -> Vec<Value> {
+    v.sort_by_key(|r| r["sku"].as_str().unwrap_or_default().to_string());
+    v
+}
+
+#[tokio::test]
+async fn bulk_upsert_round_trips_and_updates_without_duplicating() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    // Seed three inventory rows via the fresh-insert path of the same upsert mutation.
+    let seed = json!([
+        { "sku": "A", "qty": 10, "price": 1 },
+        { "sku": "B", "qty": 20, "price": 2 },
+        { "sku": "C", "qty": 30, "price": 3 },
+    ]);
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/restock",
+        json!({ "rows": seed }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "seed upsert failed: {:?}", r.body);
+    // The read-back returns the written rows in the declared shape (BW1b).
+    assert_eq!(r.body.as_array().expect("array").len(), 3);
+
+    // Read the exact Vec<InvIn> out.
+    let out = call(&c, &b, &ids, "/q/all_inventory", json!({}), ctx.clone())
+        .await
+        .body
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(out.len(), 3);
+
+    // North star: feed the SAME Vec back into the upsert — every row conflicts on (org, sku),
+    // so each updates the existing row (qty += incoming.qty), never inserts a duplicate.
+    let re = call(
+        &c,
+        &b,
+        &ids,
+        "/m/restock",
+        json!({ "rows": Value::Array(out.clone()) }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(re.status, 200, "re-upsert failed: {:?}", re.body);
+
+    let after = sorted_inv(
+        call(&c, &b, &ids, "/q/all_inventory", json!({}), ctx)
+            .await
+            .body
+            .as_array()
+            .expect("array")
+            .clone(),
+    );
+    assert_eq!(
+        after.len(),
+        3,
+        "conflict path updated in place — no duplicates"
+    );
+    assert_eq!(after[0]["sku"], json!("A"));
+    assert_eq!(after[0]["qty"], json!(20), "10 stored + 10 incoming");
+    assert_eq!(after[1]["qty"], json!(40), "20 stored + 20 incoming");
+    assert_eq!(after[2]["qty"], json!(60), "30 stored + 30 incoming");
+}
+
+#[tokio::test]
+async fn bulk_upsert_accumulates_on_conflict_and_inserts_on_fresh() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    // Seed sku A with qty 5.
+    call(
+        &c,
+        &b,
+        &ids,
+        "/m/restock",
+        json!({ "rows": [{ "sku": "A", "qty": 5, "price": 1 }] }),
+        ctx.clone(),
+    )
+    .await;
+
+    // A mixed batch: A conflicts (5 + 3 = 8), B is fresh (inserted at 7).
+    let mixed = json!([
+        { "sku": "A", "qty": 3, "price": 9 },
+        { "sku": "B", "qty": 7, "price": 4 },
+    ]);
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/restock",
+        json!({ "rows": mixed }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "mixed upsert failed: {:?}", r.body);
+    // The read-back echoes both winning rows (the accumulated conflict + the fresh insert).
+    let echoed = sorted_inv(r.body.as_array().expect("array").clone());
+    assert_eq!(echoed.len(), 2);
+    assert_eq!(echoed[0]["sku"], json!("A"));
+    assert_eq!(echoed[0]["qty"], json!(8), "5 stored + 3 incoming");
+    assert_eq!(echoed[0]["price"], json!(9), "took the incoming price");
+    assert_eq!(echoed[1]["sku"], json!("B"));
+    assert_eq!(echoed[1]["qty"], json!(7), "fresh insert");
+
+    let after = sorted_inv(
+        call(&c, &b, &ids, "/q/all_inventory", json!({}), ctx)
+            .await
+            .body
+            .as_array()
+            .expect("array")
+            .clone(),
+    );
+    assert_eq!(after.len(), 2, "one conflict update + one fresh insert");
+    assert_eq!(after[0]["qty"], json!(8));
+    assert_eq!(after[1]["qty"], json!(7));
+}
+
+#[tokio::test]
+async fn single_from_create_reads_back_one_row_in_shape() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    let row = json!({ "sku": "SOLO", "qty": 42, "price": 7 });
+    let r = call(&c, &b, &ids, "/m/add_one_inv", json!({ "row": row }), ctx.clone()).await;
+    assert_eq!(r.status, 200, "single read-back failed: {:?}", r.body);
+    // A single `create Model from $row -> Shape` returns one object (not an array), with the
+    // engine-minted id filled in.
+    assert!(r.body.is_object(), "single read-back is one object: {:?}", r.body);
+    assert_eq!(r.body["sku"], json!("SOLO"));
+    assert_eq!(r.body["qty"], json!(42));
+    assert!(r.body["id"].is_string(), "the minted id is read back: {:?}", r.body);
+}
+
+#[tokio::test]
+async fn bulk_read_back_returns_db_generated_serial_ids() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+
+    let rows = json!([{ "subject": "first" }, { "subject": "second" }, { "subject": "third" }]);
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/file_tickets",
+        json!({ "rows": rows }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(r.status, 200, "bulk serial read-back failed: {:?}", r.body);
+    let out = r.body.as_array().expect("array").clone();
+    assert_eq!(out.len(), 3);
+
+    // Row order matches input order; the DB assigned each a distinct integer id.
+    assert_eq!(out[0]["subject"], json!("first"));
+    assert_eq!(out[1]["subject"], json!("second"));
+    assert_eq!(out[2]["subject"], json!("third"));
+    let id0 = out[0]["id"].as_i64().expect("serial id is an integer");
+    let id1 = out[1]["id"].as_i64().expect("serial id is an integer");
+    let id2 = out[2]["id"].as_i64().expect("serial id is an integer");
+    assert!(
+        id0 < id1 && id1 < id2,
+        "distinct, ordered DB-generated ids: {id0},{id1},{id2}"
+    );
 }

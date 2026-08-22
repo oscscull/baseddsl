@@ -24,6 +24,19 @@ use based_codegen::Dialect;
 pub fn to_positional<T>(
     sql: &str,
     dialect: Dialect,
+    resolve: impl FnMut(&str) -> Option<T>,
+) -> Result<(String, Vec<T>), String> {
+    to_positional_from(sql, dialect, 0, resolve)
+}
+
+/// Like [`to_positional`], but Postgres ordinals start at `offset + 1` — for splicing a SQL
+/// fragment (a bulk upsert's `ON CONFLICT … SET` tail) after `offset` binds already emitted
+/// on the same statement, so the fragment's `$n` continues the running count. `?`-dialects
+/// are offset-independent. The returned `Vec` holds only the fragment's own binds.
+pub fn to_positional_from<T>(
+    sql: &str,
+    dialect: Dialect,
+    offset: usize,
     mut resolve: impl FnMut(&str) -> Option<T>,
 ) -> Result<(String, Vec<T>), String> {
     let bytes = sql.as_bytes();
@@ -73,7 +86,7 @@ pub fn to_positional<T>(
                     // is the running parameter count, so it matches the bind order.
                     match dialect {
                         Dialect::Postgres => {
-                            out.extend_from_slice(format!("${}", params.len()).as_bytes());
+                            out.extend_from_slice(format!("${}", offset + params.len()).as_bytes());
                         }
                         _ => out.push(b'?'),
                     }
