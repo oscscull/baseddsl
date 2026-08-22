@@ -1369,6 +1369,43 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
     aggregate alias inlines the aggregate expression (no unportable alias reference); soft-delete excludes
     tombstoned rows *before* grouping (an excluded row's measure never enters a `SUM`); and an empty result
     set returns `[]`.
+  - **Sweep 2026-08-22 (2) — migration diff → render → apply correctness on a live seeded DB (`@was`
+    rename × composite/natural key × `@schema` move × the D113-deferred incremental-ALTER-on-namespaced
+    hole × FK action change × add/drop column+index × drift refusal × down.mig × ledger idempotency).
+    Found + FIXED one real correctness bug (completes D113, the KNOWN mechanical follow-up — no new D#):**
+    an **incremental ALTER on an already-`@schema`d table emitted an unqualified `ALTER TABLE <table>`**,
+    targeting the connection's *default* namespace instead of the model's — a hard miscompile on a live
+    namespaced table (the ALTER errors "no such table" against Postgres/MariaDB, or silently hits a
+    same-named default-schema table). It bit every incremental table-carrying step — add/drop/alter column,
+    add/drop index, add/drop FK, rename column, rename table, drop table — on all three dialects (SQLite's
+    attached-database case included). Root cause: the `Step` variants carried only the bare table name, and
+    `sql.rs::step_statements` (+ `reverse_statements`, the `drop_index_sql`/`alter_column`/`add_fk`/`drop_fk`
+    helpers) rendered `dialect.quote(table)` — never `quote_table(schema, table)`; only the from-scratch
+    `create table` (which carries a whole `TableSnap`) and the `alter schema` move were qualified. Fix
+    (contained, all dialects): thread `schema: Option<String>` through the ~11 table-carrying `Step`
+    variants (`DropTable` promoted tuple→struct), populated at diff-construction from the owning
+    snapshot table (the *source* snapshot for a drop/rename, the *target* for a survivor's ALTERs — after a
+    same-migration `alter schema` move, the move runs first so the later ALTERs correctly target the new
+    namespace), and render every incremental step through `quote_table`. The reviewable `up.mig` step lines
+    stay bare (schema in the `table schema=…` snapshot header + the qualified rendered SQL), so the
+    snapshot-authoritative drift check + every existing `up.mig` golden are byte-unchanged; the SQLite
+    table-rebuild already qualified via the target snapshot (untouched). Regression: codegen goldens
+    `incremental_alter_on_a_namespaced_table_qualifies_schema_dot_table` +
+    `dropping_a_namespaced_table_and_column_qualifies_the_schema` (based-codegen/tests/migrate.rs —
+    rename/add-fk/add-index/drop-column/drop-table qualify `analytics.event`/`.legacy` on PG + MariaDB, and
+    the SQLite rebuild recreates/copies the namespaced table) + live MariaDB apply-with-data
+    `incremental_alter_on_a_namespaced_table_preserves_data_live` (migrate_apply_mariadb.rs — create
+    `analytics.widget` via 0001, seed a row, apply 0002's incremental `ADD COLUMN` to the namespaced table,
+    assert the column landed on `analytics.widget` AND the seeded row's value survived). **Swept clean** (no
+    bug found, live SQLite apply-with-data + `render`/`apply`/codegen across dialects): `@was` column + table
+    renames preserve the row value (in-place `RENAME`, never drop+add); a rename composed with an `alter
+    column` on the same table in one diff; composite/natural-key from-scratch + inbound multi-column FK
+    (`<field>_<part>` columns); FK referential-action change diffs to drop+re-add; add/drop column with
+    NOT NULL+default marking; add/drop index; enum variant add/remove (CHECK change); the D106 structural
+    drift refusal (a hand-edited structural `up.mig` line refused, a cosmetic whitespace/comment edit
+    tolerated, a `raw(dialect)` line riding separately); `down.mig` reverse correctness (add⇄drop,
+    rename⇄rename, create⇄drop) + the loud irreversible comment for a drop/alter; and `_based_migrations`
+    ledger idempotency (re-apply is a no-op, the tamper hash catches a post-apply edit).
 - **H6-R1. `$name.<engine-managed-non-scope-column>` tx reference still lowers to a silent `NULL`.**
   Symptom: a `tx` `$name.field` reference to a bound create's field that is neither explicitly assigned,
   nor `id`, nor a `@scope` column (fixed in the 2026-08-21(2) sweep) — i.e. an `@created`/`@updated`

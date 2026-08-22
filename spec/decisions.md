@@ -27,7 +27,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
   family, native `UUID` opt-in for MariaDB 10.7+, `BINARY(16)` deferred; spec-only, impl PR8),
   D113 (schema/database namespace qualifier `@schema("name")` DONE — Postgres schema / MySQL
   database, `quote_table` per-part quoting across DDL/DML/FK/index/migration, `Step::AlterSchema`
-  move, E0296/E0297; incremental-ALTER-on-namespaced-table deferred),
+  move, E0296/E0297; incremental-ALTER-on-namespaced-table qualified — H6 2026-08-22),
   D117 (`time` + `bytes` scalar types: `time` = time-of-day (`TIME`/TEXT-on-SQLite), ordered like
   date/timestamp, wire = `HH:MM:SS` string; `bytes` = binary blob (`BYTEA`/`BLOB`), wire = base64
   string, equality-only; 3-driver binary decode incl. Postgres `pg_time`/`bytea`→base64;
@@ -5324,13 +5324,18 @@ JOIN, and a list query) and MariaDB (the same, where a "schema" is a database), 
 Docker suites; conformance DDL goldens (qualified `CREATE TABLE` + FK, per dialect), a DML golden
 (qualified FROM/JOIN, bare-table column refs), and a migration round-trip + schema-move golden.
 
-**Deferred (clean follow-up).** An **incremental ALTER on an already-namespaced table** — add/drop
-column/index/FK, rename, drop — currently emits an *unqualified* `ALTER TABLE <table>` (correct only
-in the default namespace); threading `schema` through the ~10 table-carrying `Step` variants is a
-mechanical follow-up. The dominant onboarding path — representing and *creating* tables in a named
-namespace, all DML across them, cross-schema FKs, and the from-scratch migration — is fully covered,
-and a schema *move* IS handled. Snapshot table identity remains the bare table name (two same-named
-tables in different schemas is not distinguished by the diff — documented, not a target).
+**Incremental ALTER on a namespaced table — RESOLVED (H6 sweep 2026-08-22, no new D#).** The
+originally-deferred hole (an add/drop column/index/FK, rename, or drop on an already-namespaced table
+emitting an *unqualified* `ALTER TABLE <table>`, correct only in the default namespace) is now fixed:
+`schema: Option<String>` is threaded through the ~11 table-carrying `Step` variants (populated at
+diff-construction from the owning snapshot table — the source snapshot for a drop/rename, the target for
+a survivor's ALTERs), and every incremental step renders through `quote_table(schema, table)`. The
+reviewable `up.mig` step lines stay bare (schema lives in the snapshot `table schema=…` header + the
+qualified rendered SQL), so the snapshot-authoritative drift check and existing goldens are unchanged.
+Proven live (MariaDB apply-with-data: an incremental `ADD COLUMN` on `analytics.widget` lands on the
+namespaced table and preserves an existing row) + codegen goldens across all three dialects. Snapshot
+table identity remains the bare table name (two same-named tables in different schemas is not
+distinguished by the diff — documented, not a target).
 
 **Impl note under D3.** See D3's naming hooks: `@schema` is the namespace-qualifier sibling of the
 `@table`/`(column "…")` legacy-name hooks; a `.` in `@table` is now steered to `@schema` (`E0297`).

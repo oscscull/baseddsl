@@ -192,7 +192,7 @@ fn dropping_a_column_and_a_table_is_destructive() {
         .any(|s| matches!(s, Step::DropColumn { column, .. } if column == "b")));
     assert!(steps
         .iter()
-        .any(|s| matches!(s, Step::DropTable(n) if n == "gone")));
+        .any(|s| matches!(s, Step::DropTable { name, .. } if name == "gone")));
 }
 
 #[test]
@@ -431,6 +431,7 @@ fn add_column_and_string_default_render() {
     c.default = Some("\"pending\"".to_string());
     let steps = vec![Step::AddColumn {
         table: "order".to_string(),
+        schema: None,
         column: c,
     }];
     let maria = render_sql(&steps, MariaDb);
@@ -447,9 +448,13 @@ fn drop_column_and_drop_table_carry_destructive_markers() {
     let steps = vec![
         Step::DropColumn {
             table: "product".to_string(),
+            schema: None,
             column: "legacy".to_string(),
         },
-        Step::DropTable("gone".to_string()),
+        Step::DropTable {
+            name: "gone".to_string(),
+            schema: None,
+        },
     ];
     let out = render_sql(&steps, Postgres);
     assert!(
@@ -476,6 +481,7 @@ fn alter_column_diverges_per_dialect() {
     ];
     let steps = vec![Step::AlterColumn {
         table: "t".to_string(),
+        schema: None,
         column: "v".to_string(),
         changes,
         after,
@@ -516,6 +522,7 @@ fn mariadb_default_only_alter_avoids_modify() {
     let after = col("v", "int", false);
     let steps = vec![Step::AlterColumn {
         table: "t".to_string(),
+        schema: None,
         column: "v".to_string(),
         changes: vec![ColumnChange::SetDefault("0".to_string())],
         after,
@@ -539,6 +546,7 @@ fn index_add_and_drop_render_per_dialect() {
     };
     let add = vec![Step::AddUnique {
         table: "u".to_string(),
+        schema: None,
         index: uq,
     }];
     let out = render_sql(&add, Postgres);
@@ -550,6 +558,7 @@ fn index_add_and_drop_render_per_dialect() {
 
     let drop = vec![Step::DropIndex {
         table: "u".to_string(),
+        schema: None,
         name: "idx_u_name".to_string(),
     }];
     // MySQL/MariaDB need the `ON <table>` qualifier; Postgres/SQLite drop by name.
@@ -575,6 +584,7 @@ fn sql_statements_are_bare_and_one_per_statement() {
         Step::CreateTable(t),
         Step::AddColumn {
             table: "thing".to_string(),
+            schema: None,
             column: col("size", "int", true),
         },
     ];
@@ -611,6 +621,7 @@ fn sql_statements_errs_on_sqlite_alter_column() {
     // SQLite can't ALTER COLUMN in place — `apply` must fail loudly, not emit broken SQL.
     let steps = vec![Step::AlterColumn {
         table: "t".to_string(),
+        schema: None,
         column: "v".to_string(),
         changes: vec![ColumnChange::SetNotNull { has_default: false }],
         after: col("v", "int", false),
@@ -637,6 +648,7 @@ fn sqlite_alter_column_rebuilds_the_table() {
     let target = snap1(table("t", vec![col("v", "int", false)]));
     let steps = vec![Step::AlterColumn {
         table: "t".to_string(),
+        schema: None,
         column: "v".to_string(),
         changes: vec![ColumnChange::SetNotNull { has_default: false }],
         after: col("v", "int", false),
@@ -694,6 +706,7 @@ fn sqlite_add_foreign_key_rebuilds_with_the_constraint() {
     let target = snap1(t);
     let steps = vec![Step::AddForeignKey {
         table: "post".to_string(),
+        schema: None,
         fk: ForeignKeySnap {
             columns: vec!["author_id".to_string()],
             ref_table: "author".to_string(),
@@ -726,12 +739,14 @@ fn sqlite_rebuild_omits_columns_added_this_migration() {
     let steps = vec![
         Step::AlterColumn {
             table: "t".to_string(),
+            schema: None,
             column: "v".to_string(),
             changes: vec![ColumnChange::SetNotNull { has_default: false }],
             after: col("v", "int", false),
         },
         Step::AddColumn {
             table: "t".to_string(),
+            schema: None,
             column: col("note", "text", true),
         },
     ];
@@ -763,11 +778,13 @@ fn sqlite_rebuild_copies_renamed_column_from_its_old_name() {
     let steps = vec![
         Step::RenameColumn {
             table: "t".to_string(),
+            schema: None,
             from: "upc".to_string(),
             to: "barcode".to_string(),
         },
         Step::AlterColumn {
             table: "t".to_string(),
+            schema: None,
             column: "barcode".to_string(),
             changes: vec![ColumnChange::SetNotNull { has_default: false }],
             after: col("barcode", "text", false),
@@ -791,6 +808,7 @@ fn migration_sql_matches_sql_statements_off_sqlite() {
     let target = snap1(table("t", vec![col("v", "int", true)]));
     let steps = vec![Step::AlterColumn {
         table: "t".to_string(),
+        schema: None,
         column: "v".to_string(),
         changes: vec![ColumnChange::SetNotNull { has_default: true }],
         after: col("v", "int", false),
@@ -810,6 +828,7 @@ fn render_migration_labels_the_sqlite_rebuild() {
     let target = snap1(table("t", vec![col("v", "int", false)]));
     let steps = vec![Step::AlterColumn {
         table: "t".to_string(),
+        schema: None,
         column: "v".to_string(),
         changes: vec![ColumnChange::SetNull],
         after: col("v", "int", true),
@@ -877,7 +896,7 @@ fn table_rename_and_spent_rename_is_inert() {
     let steps = diff_snapshots(&prev, &now);
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert!(
-        matches!(&steps[0], Step::RenameTable { from, to } if from == "legacy_product" && to == "product")
+        matches!(&steps[0], Step::RenameTable { from, to, .. } if from == "legacy_product" && to == "product")
     );
     assert!(render_sql(&steps, Postgres)
         .contains("ALTER TABLE \"legacy_product\" RENAME TO \"product\";"));
@@ -940,6 +959,7 @@ fn raw_step_renders_only_for_its_dialect() {
 fn render_up_header_states_the_honest_contract() {
     let steps = vec![Step::AddColumn {
         table: "product".to_string(),
+        schema: None,
         column: col("barcode", "text", true),
     }];
     let up = render_up(&steps);
@@ -1001,6 +1021,7 @@ fn multi_line_raw_block_round_trips() {
 fn up_mig_matches_snapshot_detects_structural_drift_only() {
     let steps = vec![Step::AddColumn {
         table: "widget".to_string(),
+        schema: None,
         column: col("size", "int", true),
     }];
     // Generated form (with header) matches.
@@ -1030,14 +1051,17 @@ fn render_down_prefills_reversible_and_flags_the_rest() {
         Step::CreateTable(table("gadget", vec![col("name", "text", false)])),
         Step::AddColumn {
             table: "widget".to_string(),
+            schema: None,
             column: col("size", "int", true),
         },
         Step::DropColumn {
             table: "widget".to_string(),
+            schema: None,
             column: "legacy".to_string(),
         },
         Step::RenameColumn {
             table: "widget".to_string(),
+            schema: None,
             from: "upc".to_string(),
             to: "barcode".to_string(),
         },

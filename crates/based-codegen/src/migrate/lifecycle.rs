@@ -54,10 +54,12 @@ pub fn spent_was_edits(
     let mut col_renames: HashSet<(&str, &str, &str)> = HashSet::new(); // (table, old, new)
     for s in steps {
         match s {
-            Step::RenameTable { from, to } => {
+            Step::RenameTable { from, to, .. } => {
                 table_renames.insert((from.as_str(), to.as_str()));
             }
-            Step::RenameColumn { table, from, to } => {
+            Step::RenameColumn {
+                table, from, to, ..
+            } => {
                 col_renames.insert((table.as_str(), from.as_str(), to.as_str()));
             }
             _ => {}
@@ -224,8 +226,8 @@ pub fn rename_hints(prev: &Snapshot, now: &Snapshot) -> Vec<RenameHint> {
     let mut adds: BTreeMap<&str, Vec<&ColumnSnap>> = BTreeMap::new();
     for s in &steps {
         match s {
-            Step::DropColumn { table, column } => drops.entry(table).or_default().push(column),
-            Step::AddColumn { table, column } => adds.entry(table).or_default().push(column),
+            Step::DropColumn { table, column, .. } => drops.entry(table).or_default().push(column),
+            Step::AddColumn { table, column, .. } => adds.entry(table).or_default().push(column),
             _ => {}
         }
     }

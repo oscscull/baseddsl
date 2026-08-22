@@ -23,15 +23,29 @@ use std::collections::HashSet;
 pub enum Step {
     /// Full `CREATE TABLE` — `0001_init` is entirely these.
     CreateTable(TableSnap),
-    /// `drop table <name>` — DESTRUCTIVE.
-    DropTable(String),
-    /// `add column <table>.<col> …`.
-    AddColumn { table: String, column: ColumnSnap },
+    /// `drop table <name>` — DESTRUCTIVE. `schema` = the table's `@schema` namespace
+    /// (from the prior snapshot), so the `DROP` targets the right SQL schema / database.
+    DropTable {
+        name: String,
+        schema: Option<String>,
+    },
+    /// `add column <table>.<col> …`. `schema` names the table's `@schema` namespace so an
+    /// incremental ALTER on an already-namespaced table qualifies `schema.table`.
+    AddColumn {
+        table: String,
+        schema: Option<String>,
+        column: ColumnSnap,
+    },
     /// `drop column <table>.<col>` — DESTRUCTIVE.
-    DropColumn { table: String, column: String },
+    DropColumn {
+        table: String,
+        schema: Option<String>,
+        column: String,
+    },
     /// `alter column <table>.<col> …` — one or more changes.
     AlterColumn {
         table: String,
+        schema: Option<String>,
         column: String,
         changes: Vec<ColumnChange>,
         /// The resulting column state. Carried because MariaDB alters a column via a
@@ -41,28 +55,58 @@ pub enum Step {
         after: ColumnSnap,
     },
     /// `add index <name> (<cols>)`.
-    AddIndex { table: String, index: IndexSnap },
+    AddIndex {
+        table: String,
+        schema: Option<String>,
+        index: IndexSnap,
+    },
     /// `drop index <name>`.
-    DropIndex { table: String, name: String },
+    DropIndex {
+        table: String,
+        schema: Option<String>,
+        name: String,
+    },
     /// `add unique <name> (<cols>)` — DESTRUCTIVE over existing data.
-    AddUnique { table: String, index: IndexSnap },
+    AddUnique {
+        table: String,
+        schema: Option<String>,
+        index: IndexSnap,
+    },
     /// `drop unique <name>`.
-    DropUnique { table: String, name: String },
+    DropUnique {
+        table: String,
+        schema: Option<String>,
+        name: String,
+    },
     /// `add foreign_key <table>.<col> -> <ref>` — a new FK constraint on an existing
     /// column. `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` on Postgres/MariaDB; SQLite
     /// cannot ALTER-add an FK (needs a table rebuild) — the renderer surfaces that loudly.
-    AddForeignKey { table: String, fk: ForeignKeySnap },
+    AddForeignKey {
+        table: String,
+        schema: Option<String>,
+        fk: ForeignKeySnap,
+    },
     /// `drop foreign_key <table>.<col>` — drop the FK constraint on a column (or the
     /// `(c1, c2)` column set of a composite FK). Safe. `ALTER TABLE … DROP
     /// CONSTRAINT`/`DROP FOREIGN KEY`; SQLite needs a rebuild (loud).
-    DropForeignKey { table: String, columns: Vec<String> },
+    DropForeignKey {
+        table: String,
+        schema: Option<String>,
+        columns: Vec<String>,
+    },
     /// `rename table <old> -> <new>` — only ever emitted via a model `@was` (never
-    /// auto-guessed). Safe: an in-place `ALTER TABLE … RENAME`.
-    RenameTable { from: String, to: String },
+    /// auto-guessed). Safe: an in-place `ALTER TABLE … RENAME`. `schema` is the table's
+    /// namespace (a rename does not move it) so the `ALTER` qualifies the source table.
+    RenameTable {
+        from: String,
+        to: String,
+        schema: Option<String>,
+    },
     /// `rename column <table>.<old> -> <new>` — only ever emitted via a field `@was`.
     /// Safe: an in-place `ALTER TABLE … RENAME COLUMN`, so existing data survives.
     RenameColumn {
         table: String,
+        schema: Option<String>,
         from: String,
         to: String,
     },
@@ -127,7 +171,7 @@ impl Step {
     /// `--allow-destructive` / `unsafe("reason")`; this engine only reports the marker.
     pub fn destructive(&self) -> bool {
         match self {
-            Self::DropTable(_) | Self::DropColumn { .. } | Self::AddUnique { .. } => true,
+            Self::DropTable { .. } | Self::DropColumn { .. } | Self::AddUnique { .. } => true,
             Self::AlterColumn { changes, .. } => changes.iter().any(|c| match c {
                 ColumnChange::Type { from, to } => is_narrowing(from, to),
                 ColumnChange::SetNotNull { has_default } => !has_default,
@@ -181,6 +225,8 @@ pub fn diff_snapshots(prev: &Snapshot, now: &Snapshot) -> Vec<Step> {
             steps.push(Step::RenameTable {
                 from: from.clone(),
                 to: to.clone(),
+                // A rename does not move namespace: the source table's schema (from `prev`).
+                schema: prev.table(from).and_then(|t| t.schema.clone()),
             });
             renamed_from.insert(from.as_str());
             renamed_to.insert(to.as_str());
@@ -210,7 +256,10 @@ pub fn diff_snapshots(prev: &Snapshot, now: &Snapshot) -> Vec<Step> {
     // Tables dropped (present before, absent now, not a rename source) → DROP.
     for t in &prev.tables {
         if now.table(&t.name).is_none() && !renamed_from.contains(t.name.as_str()) {
-            steps.push(Step::DropTable(t.name.clone()));
+            steps.push(Step::DropTable {
+                name: t.name.clone(),
+                schema: t.schema.clone(),
+            });
         }
     }
 
@@ -305,6 +354,7 @@ fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &m
         }
         steps.push(Step::RenameColumn {
             table: now.name.clone(),
+            schema: now.schema.clone(),
             from: from.clone(),
             to: to.clone(),
         });
@@ -315,6 +365,7 @@ fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &m
             if !changes.is_empty() {
                 steps.push(Step::AlterColumn {
                     table: now.name.clone(),
+                    schema: now.schema.clone(),
                     column: to.clone(),
                     changes,
                     after: new.clone(),
@@ -327,6 +378,7 @@ fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &m
         if prev.column(&c.name).is_none() && !renamed_to.contains(c.name.as_str()) {
             steps.push(Step::AddColumn {
                 table: now.name.clone(),
+                schema: now.schema.clone(),
                 column: c.clone(),
             });
         }
@@ -341,6 +393,7 @@ fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &m
             if !changes.is_empty() {
                 steps.push(Step::AlterColumn {
                     table: now.name.clone(),
+                    schema: now.schema.clone(),
                     column: c.name.clone(),
                     changes,
                     after: c.clone(),
@@ -353,6 +406,7 @@ fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &m
         if now.column(&c.name).is_none() && !renamed_from.contains(c.name.as_str()) {
             steps.push(Step::DropColumn {
                 table: now.name.clone(),
+                schema: now.schema.clone(),
                 column: c.name.clone(),
             });
         }
@@ -367,11 +421,13 @@ fn diff_indexes(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
         if i.unique {
             Step::AddUnique {
                 table: now.name.clone(),
+                schema: now.schema.clone(),
                 index: i.clone(),
             }
         } else {
             Step::AddIndex {
                 table: now.name.clone(),
+                schema: now.schema.clone(),
                 index: i.clone(),
             }
         }
@@ -406,15 +462,18 @@ fn diff_foreign_keys(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
             Some(_) => {
                 steps.push(Step::DropForeignKey {
                     table: now.name.clone(),
+                    schema: now.schema.clone(),
                     columns: f.columns.clone(),
                 });
                 steps.push(Step::AddForeignKey {
                     table: now.name.clone(),
+                    schema: now.schema.clone(),
                     fk: f.clone(),
                 });
             }
             None => steps.push(Step::AddForeignKey {
                 table: now.name.clone(),
+                schema: now.schema.clone(),
                 fk: f.clone(),
             }),
         }
@@ -424,6 +483,7 @@ fn diff_foreign_keys(prev: &TableSnap, now: &TableSnap, steps: &mut Vec<Step>) {
         if now_fk(&f.columns).is_none() {
             steps.push(Step::DropForeignKey {
                 table: now.name.clone(),
+                schema: now.schema.clone(),
                 columns: f.columns.clone(),
             });
         }
@@ -434,11 +494,13 @@ fn drop_index_step(idx: &IndexSnap, table: &TableSnap, steps: &mut Vec<Step>) {
     if idx.unique {
         steps.push(Step::DropUnique {
             table: table.name.clone(),
+            schema: table.schema.clone(),
             name: idx.name.clone(),
         });
     } else {
         steps.push(Step::DropIndex {
             table: table.name.clone(),
+            schema: table.schema.clone(),
             name: idx.name.clone(),
         });
     }
@@ -479,7 +541,7 @@ impl Step {
     pub fn table_name(&self) -> Option<&str> {
         match self {
             Self::CreateTable(t) => Some(&t.name),
-            Self::DropTable(n) => Some(n),
+            Self::DropTable { name, .. } => Some(name),
             Self::AddColumn { table, .. }
             | Self::DropColumn { table, .. }
             | Self::AlterColumn { table, .. }
@@ -501,9 +563,11 @@ impl Step {
     pub fn describe(&self) -> String {
         match self {
             Self::CreateTable(t) => format!("new table `{}`", t.name),
-            Self::DropTable(n) => format!("dropped table `{n}`"),
-            Self::AddColumn { table, column } => format!("added column `{table}.{}`", column.name),
-            Self::DropColumn { table, column } => format!("dropped column `{table}.{column}`"),
+            Self::DropTable { name, .. } => format!("dropped table `{name}`"),
+            Self::AddColumn { table, column, .. } => {
+                format!("added column `{table}.{}`", column.name)
+            }
+            Self::DropColumn { table, column, .. } => format!("dropped column `{table}.{column}`"),
             Self::AlterColumn { table, column, .. } => format!("altered column `{table}.{column}`"),
             Self::AddIndex { index, .. } | Self::AddUnique { index, .. } => {
                 format!("added index `{}`", index.name)
@@ -511,14 +575,16 @@ impl Step {
             Self::DropIndex { name, .. } | Self::DropUnique { name, .. } => {
                 format!("dropped index `{name}`")
             }
-            Self::AddForeignKey { table, fk } => {
+            Self::AddForeignKey { table, fk, .. } => {
                 format!("added foreign key `{table}.{}`", fk.label())
             }
-            Self::DropForeignKey { table, columns } => {
+            Self::DropForeignKey { table, columns, .. } => {
                 format!("dropped foreign key `{table}.{}`", columns.join(", "))
             }
-            Self::RenameTable { from, to } => format!("renamed table `{from}` → `{to}`"),
-            Self::RenameColumn { table, from, to } => {
+            Self::RenameTable { from, to, .. } => format!("renamed table `{from}` → `{to}`"),
+            Self::RenameColumn {
+                table, from, to, ..
+            } => {
                 format!("renamed column `{table}.{from}` → `{to}`")
             }
             Self::AlterSchema { table, from, to } => format!(

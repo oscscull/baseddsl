@@ -229,7 +229,7 @@ fn folded_table(step: &Step) -> Option<&str> {
         | Step::RenameColumn { table, .. }
         | Step::AlterSchema { table, .. } => Some(table),
         Step::CreateTable(_)
-        | Step::DropTable(_)
+        | Step::DropTable { .. }
         | Step::RenameTable { .. }
         | Step::Raw { .. }
         | Step::ScopeChange(_) => None,
@@ -251,7 +251,9 @@ fn sqlite_rebuild_statements(table: &str, target: &Snapshot, steps: &[Step]) -> 
     let added: HashSet<&str> = steps
         .iter()
         .filter_map(|s| match s {
-            Step::AddColumn { table: t, column } if t == table => Some(column.name.as_str()),
+            Step::AddColumn {
+                table: t, column, ..
+            } if t == table => Some(column.name.as_str()),
             _ => None,
         })
         .collect();
@@ -259,7 +261,9 @@ fn sqlite_rebuild_statements(table: &str, target: &Snapshot, steps: &[Step]) -> 
     let mut source_schema = tt.schema.clone();
     for s in steps {
         match s {
-            Step::RenameColumn { table: t, from, to } if t == table => {
+            Step::RenameColumn {
+                table: t, from, to, ..
+            } if t == table => {
                 old_name.insert(to.as_str(), from.as_str());
             }
             Step::AlterSchema { table: t, from, .. } if t == table => {
@@ -329,44 +333,84 @@ fn physical_columns(t: &TableSnap) -> Vec<String> {
 fn step_statements(step: &Step, dialect: Dialect) -> Result<Vec<String>, String> {
     Ok(match step {
         Step::CreateTable(t) => create_table_statements(t, dialect),
-        Step::DropTable(name) => vec![format!("DROP TABLE {}", dialect.quote(name))],
-        Step::AddColumn { table, column } => vec![format!(
+        Step::DropTable { name, schema } => vec![format!(
+            "DROP TABLE {}",
+            dialect.quote_table(schema.as_deref(), name)
+        )],
+        Step::AddColumn {
+            table,
+            schema,
+            column,
+        } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",
-            dialect.quote(table),
+            dialect.quote_table(schema.as_deref(), table),
             column_ddl(column, dialect),
         )],
-        Step::DropColumn { table, column } => vec![format!(
+        Step::DropColumn {
+            table,
+            schema,
+            column,
+        } => vec![format!(
             "ALTER TABLE {} DROP COLUMN {}",
-            dialect.quote(table),
+            dialect.quote_table(schema.as_deref(), table),
             dialect.quote(column),
         )],
         Step::AlterColumn {
             table,
+            schema,
             column,
             changes,
             after,
-        } => alter_column_statements(table, column, changes, after, dialect)?,
-        Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
-            vec![create_index_sql(dialect, None, table, index)]
+        } => alter_column_statements(table, schema.as_deref(), column, changes, after, dialect)?,
+        Step::AddIndex {
+            table,
+            schema,
+            index,
         }
-        Step::DropIndex { table, name } | Step::DropUnique { table, name } => {
-            vec![drop_index_sql(dialect, table, name)]
+        | Step::AddUnique {
+            table,
+            schema,
+            index,
+        } => {
+            vec![create_index_sql(dialect, schema.as_deref(), table, index)]
         }
-        Step::AddForeignKey { table, fk } => add_foreign_key_statements(table, fk, dialect)?,
-        Step::DropForeignKey { table, columns } => {
-            drop_foreign_key_statements(table, columns, dialect)?
+        Step::DropIndex {
+            table,
+            schema,
+            name,
         }
+        | Step::DropUnique {
+            table,
+            schema,
+            name,
+        } => {
+            vec![drop_index_sql(dialect, schema.as_deref(), table, name)]
+        }
+        Step::AddForeignKey { table, schema, fk } => {
+            add_foreign_key_statements(table, schema.as_deref(), fk, dialect)?
+        }
+        Step::DropForeignKey {
+            table,
+            schema,
+            columns,
+        } => drop_foreign_key_statements(table, schema.as_deref(), columns, dialect)?,
         // Renames are a safe in-place ALTER on every target (Postgres always; MariaDB
         // ≥10.5.2 / SQLite ≥3.25 for `RENAME COLUMN`; `RENAME TO` universal) — existing
         // data survives, so this is a real rename, never a drop+recreate.
-        Step::RenameTable { from, to } => vec![format!(
+        Step::RenameTable { from, to, schema } => vec![format!(
             "ALTER TABLE {} RENAME TO {}",
-            dialect.quote(from),
+            dialect.quote_table(schema.as_deref(), from),
+            // `RENAME TO` names the new table unqualified — it stays in the same schema.
             dialect.quote(to),
         )],
-        Step::RenameColumn { table, from, to } => vec![format!(
+        Step::RenameColumn {
+            table,
+            schema,
+            from,
+            to,
+        } => vec![format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {}",
-            dialect.quote(table),
+            dialect.quote_table(schema.as_deref(), table),
             dialect.quote(from),
             dialect.quote(to),
         )],
@@ -462,31 +506,57 @@ pub fn render_down(steps: &[Step], dialect: Dialect) -> String {
 /// (a scope change — no DDL either way) contributes nothing but isn't "irreversible".
 fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
     Some(match step {
-        Step::CreateTable(t) => vec![format!("DROP TABLE {}", dialect.quote(&t.name))],
-        Step::AddColumn { table, column } => vec![format!(
+        Step::CreateTable(t) => vec![format!(
+            "DROP TABLE {}",
+            dialect.quote_table(t.schema.as_deref(), &t.name)
+        )],
+        Step::AddColumn {
+            table,
+            schema,
+            column,
+        } => vec![format!(
             "ALTER TABLE {} DROP COLUMN {}",
-            dialect.quote(table),
+            dialect.quote_table(schema.as_deref(), table),
             dialect.quote(&column.name),
         )],
-        Step::AddIndex { table, index } | Step::AddUnique { table, index } => {
-            vec![drop_index_sql(dialect, table, &index.name)]
+        Step::AddIndex {
+            table,
+            schema,
+            index,
+        }
+        | Step::AddUnique {
+            table,
+            schema,
+            index,
+        } => {
+            vec![drop_index_sql(
+                dialect,
+                schema.as_deref(),
+                table,
+                &index.name,
+            )]
         }
         // An added FK reverses to a drop (safe on PG/MariaDB; SQLite has no in-place drop,
         // so its reverse is left to a hand-authored raw step — mark irreversible here).
-        Step::AddForeignKey { table, fk } => {
-            match drop_foreign_key_statements(table, &fk.columns, dialect) {
+        Step::AddForeignKey { table, schema, fk } => {
+            match drop_foreign_key_statements(table, schema.as_deref(), &fk.columns, dialect) {
                 Ok(stmts) => stmts,
                 Err(_) => return None,
             }
         }
-        Step::RenameTable { from, to } => vec![format!(
+        Step::RenameTable { from, to, schema } => vec![format!(
             "ALTER TABLE {} RENAME TO {}",
-            dialect.quote(to),
+            dialect.quote_table(schema.as_deref(), to),
             dialect.quote(from),
         )],
-        Step::RenameColumn { table, from, to } => vec![format!(
+        Step::RenameColumn {
+            table,
+            schema,
+            from,
+            to,
+        } => vec![format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {}",
-            dialect.quote(table),
+            dialect.quote_table(schema.as_deref(), table),
             dialect.quote(to),
             dialect.quote(from),
         )],
@@ -499,7 +569,7 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
         // but empty, never flagged irreversible.
         Step::ScopeChange(_) => vec![],
         // Drops/alters lose the prior state; a raw escape is opaque. Not reversible.
-        Step::DropTable(_)
+        Step::DropTable { .. }
         | Step::DropColumn { .. }
         | Step::AlterColumn { .. }
         | Step::DropIndex { .. }
@@ -626,6 +696,7 @@ fn create_table_statements(t: &TableSnap, dialect: Dialect) -> Vec<String> {
 /// `raw(sqlite)` rebuild, never a silently-skipped constraint.
 fn add_foreign_key_statements(
     table: &str,
+    schema: Option<&str>,
     fk: &super::model::ForeignKeySnap,
     dialect: Dialect,
 ) -> Result<Vec<String>, String> {
@@ -644,7 +715,7 @@ fn add_foreign_key_statements(
     };
     let mut s = format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-        dialect.quote(table),
+        dialect.quote_table(schema, table),
         dialect.quote(&name),
         quote_list(&fk.columns),
         dialect.quote_table(fk.ref_schema.as_deref(), &fk.ref_table),
@@ -692,6 +763,7 @@ fn alter_schema_statements(
 /// in-place FK drop either — same honest table-rebuild message.
 fn drop_foreign_key_statements(
     table: &str,
+    schema: Option<&str>,
     columns: &[String],
     dialect: Dialect,
 ) -> Result<Vec<String>, String> {
@@ -699,12 +771,12 @@ fn drop_foreign_key_statements(
     Ok(match dialect {
         Dialect::Postgres => vec![format!(
             "ALTER TABLE {} DROP CONSTRAINT {}",
-            dialect.quote(table),
+            dialect.quote_table(schema, table),
             dialect.quote(&name),
         )],
         Dialect::MariaDb | Dialect::MySql => vec![format!(
             "ALTER TABLE {} DROP FOREIGN KEY {}",
-            dialect.quote(table),
+            dialect.quote_table(schema, table),
             dialect.quote(&name),
         )],
         Dialect::Sqlite => {
@@ -718,11 +790,13 @@ fn drop_foreign_key_statements(
 
 fn alter_column_statements(
     table: &str,
+    schema: Option<&str>,
     column: &str,
     changes: &[ColumnChange],
     after: &ColumnSnap,
     dialect: Dialect,
 ) -> Result<Vec<String>, String> {
+    let table_q = dialect.quote_table(schema, table);
     Ok(match dialect {
         // Postgres: one `ALTER COLUMN` sub-statement per change (it has them all).
         Dialect::Postgres => changes
@@ -740,8 +814,7 @@ fn alter_column_statements(
                     ColumnChange::DropDefault => "DROP DEFAULT".to_string(),
                 };
                 format!(
-                    "ALTER TABLE {} ALTER COLUMN {} {clause}",
-                    dialect.quote(table),
+                    "ALTER TABLE {table_q} ALTER COLUMN {} {clause}",
                     dialect.quote(column),
                 )
             })
@@ -759,8 +832,7 @@ fn alter_column_statements(
             });
             if structural {
                 vec![format!(
-                    "ALTER TABLE {} MODIFY COLUMN {}",
-                    dialect.quote(table),
+                    "ALTER TABLE {table_q} MODIFY COLUMN {}",
                     column_ddl(after, dialect),
                 )]
             } else {
@@ -768,14 +840,12 @@ fn alter_column_statements(
                     .iter()
                     .filter_map(|ch| match ch {
                         ColumnChange::SetDefault(d) => Some(format!(
-                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
-                            dialect.quote(table),
+                            "ALTER TABLE {table_q} ALTER COLUMN {} SET DEFAULT {}",
                             dialect.quote(column),
                             render_neutral_default(d, dialect),
                         )),
                         ColumnChange::DropDefault => Some(format!(
-                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-                            dialect.quote(table),
+                            "ALTER TABLE {table_q} ALTER COLUMN {} DROP DEFAULT",
                             dialect.quote(column),
                         )),
                         _ => None,
@@ -821,14 +891,15 @@ fn create_index_sql(
     }
 }
 
-/// `DROP INDEX` — MySQL/MariaDB require the `ON <table>` qualifier; SQLite/Postgres
-/// drop by index name alone. Bare (no trailing `;`).
-fn drop_index_sql(dialect: Dialect, table: &str, name: &str) -> String {
+/// `DROP INDEX` — MySQL/MariaDB require the `ON <table>` qualifier (namespaced when the
+/// table lives in a named database); SQLite/Postgres drop by index name alone (Postgres
+/// resolves the index in its own schema, so no table qualifier is needed). Bare.
+fn drop_index_sql(dialect: Dialect, schema: Option<&str>, table: &str, name: &str) -> String {
     match dialect {
         Dialect::MariaDb | Dialect::MySql => format!(
             "DROP INDEX {} ON {}",
             dialect.quote(name),
-            dialect.quote(table)
+            dialect.quote_table(schema, table)
         ),
         Dialect::Sqlite | Dialect::Postgres => format!("DROP INDEX {}", dialect.quote(name)),
     }

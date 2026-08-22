@@ -278,7 +278,7 @@ fn dropping_a_model_is_a_marked_drop_table() {
     let steps = migrate::diff(&prev, &checked(evolved));
 
     assert_eq!(steps.len(), 1);
-    assert!(matches!(&steps[0], migrate::Step::DropTable(n) if n == "legacy"));
+    assert!(matches!(&steps[0], migrate::Step::DropTable { name, .. } if name == "legacy"));
     assert!(steps[0].destructive());
     let up = migrate::render_up(&steps);
     assert!(up.contains("drop table legacy  # DESTRUCTIVE"), "\n{up}");
@@ -394,7 +394,7 @@ fn gen_self_consumes_a_model_was_on_its_own_line() {
 
     assert!(steps
         .iter()
-        .any(|s| matches!(s, migrate::Step::RenameTable { from, to }
+        .any(|s| matches!(s, migrate::Step::RenameTable { from, to, .. }
             if from == "legacy" && to == "widget")));
 
     let edits = migrate::spent_was_edits(&steps, &schema, &decls, &sources(evolved));
@@ -616,6 +616,110 @@ fn dropping_an_fk_diffs_to_drop_foreign_key() {
     assert!(
         pg.contains(r#"DROP CONSTRAINT "fk_order_org_id""#),
         "\n{pg}"
+    );
+}
+
+#[test]
+fn incremental_alter_on_a_namespaced_table_qualifies_schema_dot_table() {
+    // An incremental ALTER on an already-`@schema`d table must target `schema.table`, not a
+    // bare (default-namespace) table — otherwise the ALTER hits the wrong schema / errors.
+    let prev = Snapshot::from_schema(&checked(
+        r#"
+        @schema("core")
+        Org { id: Id  name: text }
+        @schema("analytics")
+        Event { id: Id  org: Org  note: text  legacy: text }
+        "#,
+    ));
+    let now = Snapshot::from_schema(&checked(
+        r#"
+        @schema("core")
+        Org { id: Id  name: text }
+        @schema("analytics")
+        Event {
+          id: Id
+          org: Org @fk(on_delete: cascade)
+          note: text
+          tag: text? @was("legacy")
+          @index tag
+        }
+        "#,
+    ));
+    let steps = migrate::diff_snapshots(&prev, &now);
+
+    // Postgres: every incremental step names `"analytics"."event"` (never a bare `"event"`).
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#"ALTER TABLE "analytics"."event" RENAME COLUMN "legacy" TO "tag""#),
+        "rename must qualify the schema\n{pg}"
+    );
+    assert!(
+        pg.contains(r#"ALTER TABLE "analytics"."event" ADD CONSTRAINT"#),
+        "add-fk must qualify the schema\n{pg}"
+    );
+    assert!(
+        pg.contains(r#"CREATE INDEX "idx_event_tag" ON "analytics"."event""#),
+        "add-index must qualify the schema\n{pg}"
+    );
+    assert!(
+        !pg.lines()
+            .any(|l| l.trim_start().starts_with("ALTER TABLE \"event\"")),
+        "no incremental ALTER may target the bare (default-namespace) table\n{pg}"
+    );
+
+    // MariaDB: a "schema" is a database — same `analytics`.`event` qualification.
+    let maria = migrate::render_sql(&steps, Dialect::MariaDb);
+    assert!(
+        maria.contains("ALTER TABLE `analytics`.`event` RENAME COLUMN `legacy` TO `tag`"),
+        "\n{maria}"
+    );
+    assert!(
+        maria.contains("ALTER TABLE `analytics`.`event` ADD CONSTRAINT"),
+        "\n{maria}"
+    );
+    assert!(
+        maria.contains("CREATE INDEX `idx_event_tag` ON `analytics`.`event`"),
+        "\n{maria}"
+    );
+
+    // SQLite: the FK add + rename fold into a table rebuild whose recreated table + copy
+    // read/write the `analytics`-attached-database table, not a bare one.
+    let sqlite = migrate::render_migration(&steps, Dialect::Sqlite, &now);
+    assert!(
+        sqlite.contains("CREATE TABLE `analytics`.`event`"),
+        "the rebuild must recreate the namespaced table\n{sqlite}"
+    );
+    assert!(
+        sqlite.contains("FROM `analytics`.`event__based_rebuild`"),
+        "the rebuild must copy from the namespaced staging table\n{sqlite}"
+    );
+}
+
+#[test]
+fn dropping_a_namespaced_table_and_column_qualifies_the_schema() {
+    let prev = Snapshot::from_schema(&checked(
+        r#"
+        @schema("analytics")
+        Event { id: Id  note: text  scratch: text }
+        @schema("analytics")
+        Legacy { id: Id  name: text }
+        "#,
+    ));
+    let now = Snapshot::from_schema(&checked(
+        r#"
+        @schema("analytics")
+        Event { id: Id  note: text }
+        "#,
+    ));
+    let steps = migrate::diff_snapshots(&prev, &now);
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#"ALTER TABLE "analytics"."event" DROP COLUMN "scratch""#),
+        "drop-column must qualify the schema\n{pg}"
+    );
+    assert!(
+        pg.contains(r#"DROP TABLE "analytics"."legacy""#),
+        "drop-table must qualify the schema\n{pg}"
     );
 }
 

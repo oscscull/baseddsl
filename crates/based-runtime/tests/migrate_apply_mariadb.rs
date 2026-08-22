@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use based_codegen::Dialect;
 use based_runtime::driver::{PoolConfig, ShardRouter};
 use based_runtime::fetch_all;
-use based_runtime::migrate::{apply, load_migrations, ApplyOpts, MigrateError};
+use based_runtime::migrate::{apply, load_migrations, ApplyOpts, Direction, MigrateError};
 use based_runtime::run::DbRead;
 
 use docker_mariadb::MariaDbContainer;
@@ -152,4 +152,96 @@ async fn editing_an_applied_migration_is_a_tamper_error_live() {
         .await
         .unwrap_err();
     assert!(matches!(err, MigrateError::Tamper { .. }), "{err}");
+}
+
+/// A namespaced-table migration tree: 0001 creates `analytics.widget`, 0002 adds a `size`
+/// column to it — an **incremental ALTER on an already-`@schema`d table**. The `ALTER` must
+/// qualify `analytics.widget`; an unqualified `ALTER TABLE widget` would hit the connection's
+/// default database (where no `widget` exists) and fail. Seeds a row after 0001 so the test
+/// also proves the ALTER preserves existing data.
+fn namespaced_scenario() -> Scratch {
+    let s = Scratch::new();
+    s.migration(
+        "0001_init",
+        "create table analytics.widget {\n  column name text not_null\n}\n",
+        "snapshot v1 dialect=neutral\n\ntable widget schema=analytics\n  column name text not_null\n",
+    );
+    s.migration(
+        "0002_add_size",
+        "add column widget.size int null\n",
+        "snapshot v1 dialect=neutral\n\ntable widget schema=analytics\n  column name text not_null\n  column size int null\n",
+    );
+    s
+}
+
+#[tokio::test]
+async fn incremental_alter_on_a_namespaced_table_preserves_data_live() {
+    let Some(container) = MariaDbContainer::start().await else {
+        return;
+    };
+    let router = ShardRouter::single(&container.url(), PoolConfig::default())
+        .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
+    // Fresh, re-runnable: a MariaDB "schema" is a database. Drop the ledger in the default db.
+    container
+        .exec_batch(
+            "DROP DATABASE IF EXISTS analytics;\nCREATE DATABASE analytics;\n\
+             DROP TABLE IF EXISTS `_based_migrations`;",
+        )
+        .await;
+
+    let s = namespaced_scenario();
+    let migs = load_migrations(&s.0, Dialect::MariaDb).unwrap();
+
+    // Apply only 0001 (creates `analytics`.`widget`), then seed a row *before* the ALTER.
+    let report = apply(
+        &router,
+        Dialect::MariaDb,
+        &migs,
+        &ApplyOpts {
+            allow_destructive: false,
+            direction: Direction::To(1),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.applied, vec!["0001_init"]);
+    container
+        .exec_batch(
+            "INSERT INTO `analytics`.`widget` (`id`, `name`) \
+             VALUES ('11111111-1111-1111-1111-111111111111', 'Acme');",
+        )
+        .await;
+
+    // Apply 0002: the incremental `ADD COLUMN` must target `analytics`.`widget`.
+    let report = apply(&router, Dialect::MariaDb, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(report.applied, vec!["0002_add_size"]);
+
+    // Structure: the `size` column now exists on the *namespaced* table.
+    let mut db = router.checkout("").await.unwrap();
+    let cols = fetch_all(db.fetch(
+        "SELECT COUNT(*) AS c FROM information_schema.columns \
+         WHERE table_schema = 'analytics' AND table_name = 'widget' AND column_name = 'size'",
+        &[],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        cols[0]["c"].as_i64().unwrap(),
+        1,
+        "0002 added `size` to analytics.widget"
+    );
+
+    // Data: the pre-existing row survived the ALTER, its value intact, new column NULL.
+    let rows = fetch_all(db.fetch(
+        "SELECT `name`, `size` FROM `analytics`.`widget` \
+         WHERE `id` = '11111111-1111-1111-1111-111111111111'",
+        &[],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "the seeded row must survive the ALTER");
+    assert_eq!(rows[0]["name"].as_str().unwrap(), "Acme");
+    assert!(rows[0]["size"].is_null(), "new column defaults to NULL");
 }

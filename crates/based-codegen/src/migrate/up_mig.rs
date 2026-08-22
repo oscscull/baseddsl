@@ -48,13 +48,13 @@ fn render_step(out: &mut String, step: &Step) {
     let destructive = step.destructive();
     match step {
         Step::CreateTable(t) => render_create_table(out, t),
-        Step::DropTable(name) => {
+        Step::DropTable { name, .. } => {
             let _ = writeln!(out, "drop table {name}  # DESTRUCTIVE");
         }
-        Step::AddColumn { table, column } => {
+        Step::AddColumn { table, column, .. } => {
             let _ = writeln!(out, "add column {table}.{}", column_spec(column));
         }
-        Step::DropColumn { table, column } => {
+        Step::DropColumn { table, column, .. } => {
             let _ = writeln!(out, "drop column {table}.{column}  # DESTRUCTIVE");
         }
         Step::AlterColumn {
@@ -83,7 +83,7 @@ fn render_step(out: &mut String, step: &Step) {
         Step::DropUnique { name, .. } => {
             let _ = writeln!(out, "drop unique {name}");
         }
-        Step::AddForeignKey { table, fk } => {
+        Step::AddForeignKey { table, fk, .. } => {
             let ref_table = match &fk.ref_schema {
                 Some(sc) => format!("{sc}::{}", fk.ref_table),
                 None => fk.ref_table.clone(),
@@ -102,17 +102,19 @@ fn render_step(out: &mut String, step: &Step) {
             }
             let _ = writeln!(out, "{line}");
         }
-        Step::DropForeignKey { table, columns } => {
+        Step::DropForeignKey { table, columns, .. } => {
             let _ = writeln!(
                 out,
                 "drop foreign_key {table}.{}",
                 super::model::col_list_text(columns)
             );
         }
-        Step::RenameTable { from, to } => {
+        Step::RenameTable { from, to, .. } => {
             let _ = writeln!(out, "rename table {from} -> {to}");
         }
-        Step::RenameColumn { table, from, to } => {
+        Step::RenameColumn {
+            table, from, to, ..
+        } => {
             let _ = writeln!(out, "rename column {table}.{from} -> {to}");
         }
         Step::AlterSchema { table, from, to } => {
