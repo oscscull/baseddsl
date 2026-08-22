@@ -1594,3 +1594,63 @@ fn custom_join_correlates_a_to_many_inverse_via_the_condition() {
     );
     assert!(!maria.contains("placed_by_id"), "\n{maria}");
 }
+
+// A keyset page whose primary sort key is a **nullable** column: the cursor comparison
+// must be NULL-aware, or a plain `score < :keyset_0` drops every NULL-scored row from the
+// walk (`NULL < v` is `NULL`, not true). Each dialect's own default NULL sort position —
+// NULLs lowest on MariaDB/SQLite, highest on Postgres — drives the rendered predicate so
+// it matches the (dialect-default) ORDER BY. The non-nullable `id` tiebreaker stays a
+// plain comparison, and a fully non-nullable keyset (see `block_query_where_order_page…`)
+// is unchanged.
+#[test]
+fn keyset_nullable_sort_key_is_null_aware_per_dialect() {
+    let src = r#"
+        @sort(id asc)
+        Item { id: Id, name: text, score: int? }
+        shape ItemCard from Item { name, score }
+        query items() -> ItemCard[] { list Item order (score desc) page (2); }
+        "#;
+
+    // MariaDB/SQLite: NULLs sort lowest, so under `desc` they trail — a NULL cursor is the
+    // last position (nothing after it) and non-NULL cursors also admit the trailing NULLs.
+    let maria = gen(src);
+    assert!(
+        maria.contains(
+            "(:keyset_0 IS NOT NULL AND (`item`.`score` < :keyset_0 OR `item`.`score` IS NULL))"
+        ),
+        "\n{maria}"
+    );
+    // Null-safe equality carries the tiebreaker chain across a NULL sort value.
+    assert!(
+        maria.contains("`item`.`score` <=> :keyset_0 AND `item`.`id` > :keyset_1"),
+        "\n{maria}"
+    );
+
+    let lite = gen_for(src, Dialect::Sqlite);
+    assert!(
+        lite.contains(
+            "(:keyset_0 IS NOT NULL AND (`item`.`score` < :keyset_0 OR `item`.`score` IS NULL))"
+        ),
+        "\n{lite}"
+    );
+    assert!(
+        lite.contains("`item`.`score` IS :keyset_0 AND `item`.`id` > :keyset_1"),
+        "\n{lite}"
+    );
+
+    // Postgres: NULLs sort highest, so under `desc` they lead — a NULL cursor is passed by
+    // every non-NULL row, a non-NULL cursor excludes the already-seen NULL lead.
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(
+            "((:keyset_0 IS NULL AND \"item\".\"score\" IS NOT NULL) OR (:keyset_0 IS NOT NULL AND \"item\".\"score\" < :keyset_0))"
+        ),
+        "\n{pg}"
+    );
+    assert!(
+        pg.contains(
+            "\"item\".\"score\" IS NOT DISTINCT FROM :keyset_0 AND \"item\".\"id\" > :keyset_1"
+        ),
+        "\n{pg}"
+    );
+}

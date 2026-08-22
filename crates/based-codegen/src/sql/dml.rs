@@ -294,7 +294,7 @@ fn lower_query(
         projection = format!("{projection},\n{hidden}");
         main_wheres.push(format!(
             "(:keyset_active = 0 OR ({}))",
-            keyset_predicate(&order_keys)
+            keyset_predicate(&order_keys, sel.dialect)
         ));
     }
 
@@ -600,21 +600,68 @@ fn double_cast_type(dialect: Dialect) -> &'static str {
 /// comparison) is used because SQL row comparison cannot mix ASC/DESC directions and
 /// the expansion is portable across all three dialects. The final key is always the
 /// unique `id` tiebreaker, so the comparison never drops or repeats a row.
-fn keyset_predicate(keys: &[OrderKey]) -> String {
+///
+/// A nullable sort key needs NULL-aware SQL, or a plain `col < :v` silently drops every
+/// NULL-valued row from the walk (`NULL < v` is `NULL`, not true). Each dialect's own
+/// default NULL sort position — NULL lowest on MariaDB/SQLite, highest on Postgres —
+/// decides where such rows fall, and [`keyset_after`]/[`keyset_eq`] render a comparison
+/// that matches it, so the ORDER BY (left at the dialect default) and the cursor predicate
+/// agree and every row is returned exactly once.
+fn keyset_predicate(keys: &[OrderKey], dialect: Dialect) -> String {
     (0..keys.len())
         .map(|i| {
-            let mut ands: Vec<String> = (0..i)
-                .map(|j| format!("{} = :keyset_{j}", keys[j].col_ref))
-                .collect();
-            let cmp = match keys[i].dir {
-                SortDir::Asc => ">",
-                SortDir::Desc => "<",
-            };
-            ands.push(format!("{} {} :keyset_{i}", keys[i].col_ref, cmp));
+            let mut ands: Vec<String> = (0..i).map(|j| keyset_eq(&keys[j], j, dialect)).collect();
+            ands.push(keyset_after(&keys[i], i, dialect));
             format!("({})", ands.join(" AND "))
         })
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+/// The equality prefix step for sort key `j` (`col = :keyset_j`). A nullable key uses the
+/// dialect's null-safe equality so a NULL at this position still chains into the following
+/// key's comparison instead of collapsing the whole conjunct to NULL.
+fn keyset_eq(key: &OrderKey, j: usize, dialect: Dialect) -> String {
+    let param = format!(":keyset_{j}");
+    if !key.nullable {
+        return format!("{} = {param}", key.col_ref);
+    }
+    match dialect {
+        Dialect::Sqlite => format!("{} IS {param}", key.col_ref),
+        Dialect::MariaDb => format!("{} <=> {param}", key.col_ref),
+        Dialect::Postgres => format!("{} IS NOT DISTINCT FROM {param}", key.col_ref),
+    }
+}
+
+/// The "strictly after" step for sort key `i`. A non-nullable key is a plain `col ▷ :v`.
+/// A nullable key expands to cover NULL on either side, using the key's direction and the
+/// dialect's default NULL position so the predicate ranks NULLs exactly as the ORDER BY.
+fn keyset_after(key: &OrderKey, i: usize, dialect: Dialect) -> String {
+    let param = format!(":keyset_{i}");
+    let cmp = match key.dir {
+        SortDir::Asc => ">",
+        SortDir::Desc => "<",
+    };
+    let col = &key.col_ref;
+    if !key.nullable {
+        return format!("{col} {cmp} {param}");
+    }
+    // Where NULLs fall in this key's direction: NULL is lowest on MariaDB/SQLite, highest
+    // on Postgres, and the direction flips that. `nulls_first` = NULLs sort before the
+    // non-NULL values in this key's own order.
+    let nulls_low = matches!(dialect, Dialect::MariaDb | Dialect::Sqlite);
+    let nulls_first = (key.dir == SortDir::Asc) == nulls_low;
+    // Parenthesized as a unit: it is ANDed behind the preceding keys' equality prefix, so
+    // its inner `OR` must not escape the conjunction.
+    if nulls_first {
+        // NULLs lead: a NULL cursor is passed only by non-NULL rows; a non-NULL cursor is
+        // passed by rows that plainly compare after it (NULL rows precede it, excluded).
+        format!("(({param} IS NULL AND {col} IS NOT NULL) OR ({param} IS NOT NULL AND {col} {cmp} {param}))")
+    } else {
+        // NULLs trail: a NULL cursor is the last position (nothing is after it here); a
+        // non-NULL cursor is passed by later non-NULL rows and by the trailing NULL rows.
+        format!("({param} IS NOT NULL AND ({col} {cmp} {param} OR {col} IS NULL))")
+    }
 }
 
 // ---------- projection -----------------------------------------------------
@@ -930,13 +977,15 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
 
 // ---------- sort cascade ---------------------------------------------------
 
-/// One resolved sort key: its quoted `table`.`col` reference, direction, and the
-/// column's primitive (the type the runtime re-binds the cursor value as). Drives both
-/// the ORDER BY and (for a keyset page) the cursor comparison, so the two can't drift.
+/// One resolved sort key: its quoted `table`.`col` reference, direction, the column's
+/// primitive (the type the runtime re-binds the cursor value as), and whether the column
+/// is nullable (the cursor comparison is NULL-aware for a nullable key). Drives both the
+/// ORDER BY and (for a keyset page) the cursor comparison, so the two can't drift.
 struct OrderKey {
     col_ref: String,
     dir: SortDir,
     prim: Primitive,
+    nullable: bool,
 }
 
 /// query `order (...)` > model `@sort` > none (sema already lints the empty case).
@@ -991,6 +1040,7 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
             col_ref: sel.qcol(&alias, &col),
             dir: t.dir,
             prim,
+            nullable: path_nullable(sel.schema, root, &t.path),
         });
     }
     if let Some(page) = query_page(q) {
@@ -1001,12 +1051,14 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
         // don't need the tiebreaker (their window is positional). A keyless (`@no_id`) model
         // has no PK to append — sema (E0263) guarantees its declared sort already carries a
         // unique tiebreaker. A composite `@key` appends the full key tuple, in key order.
+        // The primary key is non-nullable, so its tiebreaker keys need no NULL handling.
         if !page.offset && !last_is_pk && !query_distinct(q) {
             for (col, prim) in &pk_cols {
                 out.push(OrderKey {
                     col_ref: sel.qcol(&sel.root_alias, col),
                     dir: SortDir::Asc,
                     prim: *prim,
+                    nullable: false,
                 });
             }
         }
@@ -1156,6 +1208,37 @@ fn widen(p: Primitive) -> Primitive {
         },
         other => other,
     }
+}
+
+/// Whether a dotted sort path terminates in a nullable column: a scalar's `optional`, a
+/// forward relation's nullable FK. A to-many/inverse terminal or an unresolved path is
+/// treated as non-nullable (the keyset comparison stays in its plain, non-NULL form).
+fn path_nullable(schema: &CheckedSchema, root: &RModel, path: &Path) -> bool {
+    let mut cur = root;
+    let n = path.segments.len();
+    for (i, seg) in path.segments.iter().enumerate() {
+        let last = i + 1 == n;
+        match cur.member(&seg.node).map(|m| &m.kind) {
+            Some(MemberKind::Scalar { optional, .. }) => return *optional,
+            Some(MemberKind::Forward {
+                target, optional, ..
+            }) => {
+                if last {
+                    return *optional;
+                }
+                match schema.model(target) {
+                    Some(m) => cur = m,
+                    None => return false,
+                }
+            }
+            Some(MemberKind::Inverse { target, .. }) => match schema.model(target) {
+                Some(m) if !last => cur = m,
+                _ => return false,
+            },
+            None => return false,
+        }
+    }
+    false
 }
 
 // ---------- the join-accumulating resolver --------------------------------
