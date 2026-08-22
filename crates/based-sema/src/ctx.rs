@@ -23,11 +23,8 @@ use based_ast::*;
 use crate::ir::*;
 use crate::resolve::{self, Cx, Terminal};
 
-/// The `$ctx` a query requires: the scope terms it injects (`scope_reqs` — the
-/// caller resolves them from the query's chosen `@scope` alternative per touched
-/// model, `scope::inject_ctx_reqs`, so the requirement matches the `:ctx_<field>`
-/// binds codegen emits) plus its own `where`s, each field typed by inference.
-/// Deduped (one entry per distinct field+type).
+/// The `$ctx` a query requires: the injected scope terms (`scope_reqs`) plus its own
+/// `where`s, each field typed by inference. Deduped (one entry per distinct field+type).
 pub fn collect_query(q: &Query, ti: usize, cx: &Cx, scope_reqs: Vec<CtxReq>) -> Vec<CtxReq> {
     let mut out = scope_reqs;
     for clause in query_clauses(q) {

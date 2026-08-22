@@ -62,17 +62,13 @@ impl Request {
     }
 
     /// A stable hash of this request's payload — its args and `$ctx` — for the idempotency
-    /// store. A genuine retry of the same request produces the same fingerprint (so the
-    /// stored response replays); a caller who reuses one key for a different request
-    /// produces a different one, which the store rejects rather than silently answering
-    /// with the first request's result.
+    /// store. A genuine retry produces the same fingerprint (the stored response replays); a
+    /// key reused for a different request produces a different one, which the store rejects.
     ///
-    /// Only the payload is fingerprinted, not the callable or the key — the store already
-    /// scopes an entry by `(callable, key)`, so the fingerprint's job is purely to detect a
-    /// payload change under a reused `(callable, key)`. The idempotency key itself is
-    /// deliberately excluded (it *is* the entry's key). `serde_json::Map` is BTreeMap-backed
-    /// (sorted keys), so `to_string` is a canonical serialization and the hash is stable
-    /// across attempts.
+    /// Only the payload is fingerprinted: the store already scopes an entry by
+    /// `(callable, key)`, so the fingerprint's job is to detect a payload change under a
+    /// reused `(callable, key)`. `serde_json::Map` is BTreeMap-backed (sorted keys), so
+    /// `to_string` is a canonical serialization and the hash is stable across attempts.
     pub fn fingerprint(&self) -> crate::idempotency::Fingerprint {
         // FNV-1a over the canonical JSON of (args, ctx). A field-count prefix separates the
         // two maps so that moving a field from args to ctx changes the hash (no ambiguous

@@ -88,8 +88,7 @@ impl sqlx::Encode<'_, Postgres> for PgNull {
 
 /// Bind every [`SqlValue`] onto a query, positionally, as its native Postgres type.
 /// The typed text-riding variants parse here — and only here; the rest of the runtime
-/// carries wire strings. A value that does not parse is an operational error (the same
-/// class the server's own rejection of a bad literal used to be).
+/// carries wire strings. A value that does not parse is an operational error.
 fn bind_all<'q>(
     mut q: Query<'q, Postgres, PgArguments>,
     params: &[SqlValue],

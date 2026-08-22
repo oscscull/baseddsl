@@ -1,44 +1,39 @@
 //! The HTTP listener (`based serve`) — the thin axum edge over [`crate::serve::dispatch`].
 //!
-//! The interesting logic lives in the pure dispatch core; this module only decodes the
-//! socket into `dispatch`'s arguments and writes its [`WireResponse`] back. It is an
-//! async tokio service: concurrency is bounded by the backend's connection pool (a
-//! request past the pool's capacity waits at most the checkout timeout, then fails fast
-//! as a `503`), so no separate worker ceiling is configured here.
+//! This module only decodes the socket into `dispatch`'s arguments and writes its
+//! [`WireResponse`] back; the logic lives in the pure dispatch core. It is an async tokio
+//! service whose concurrency is bounded by the backend's connection pool (a request past
+//! the pool's capacity waits at most the checkout timeout, then fails fast as a `503`).
 //!
 //! ## Per-request flow
 //! 1. Decode the request line (`POST /q|m/<name>`), headers, and the (size-capped) JSON
 //!    body (the argument object). A non-POST or unroutable path is rejected before a
 //!    connection is borrowed ([`crate::serve::preflight`]).
-//! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`] — never the
-//!    body (a client cannot inject scope; request context is server-supplied out of band
-//!    by the auth edge). The shard key is derived from the callable's resolved `@scope`
-//!    owner field pulled out of `$ctx` — the same `@scope` that filters the row, so
-//!    routing and row-visibility share one source of truth (an explicit
-//!    `X-Based-Shard-Key` header can override it).
-//! 3. Run [`dispatch`] with a fresh per-request [`UuidGen`]; dispatch checks a
-//!    connection out of the [`Backend`] for that shard key. The edge is
-//!    `Backend`-generic, so any dialect's backend drops in without a change here.
+//! 2. Derive `$ctx` from the headers via the pluggable [`ContextSource`], never the body
+//!    (request context is server-supplied out of band by the auth edge). The shard key is
+//!    the callable's resolved `@scope` owner field pulled out of `$ctx` — the same
+//!    `@scope` that filters the row, so routing and row-visibility share one source (an
+//!    explicit `X-Based-Shard-Key` header overrides it).
+//! 3. Run [`dispatch`] with a fresh per-request [`UuidGen`]; dispatch checks a connection
+//!    out of the [`Backend`] for that shard key. The edge is `Backend`-generic.
 //! 4. Write `WireResponse.status` + JSON body back. A `-> stream` query diverges only
-//!    here: [`dispatch_stream`] starts the row stream (pre-body failures keep their
-//!    real statuses) and the body is NDJSON with a mandatory terminal line.
+//!    here: [`dispatch_stream`] starts the row stream (pre-body failures keep their real
+//!    statuses) and the body is NDJSON with a mandatory terminal line.
 //!
 //! ## Operational endpoints
-//! Two unauthenticated `GET` probes an orchestrator / load balancer uses, answered before
+//! Two unauthenticated `GET` probes for an orchestrator / load balancer, answered before
 //! any routing:
-//! - `GET /healthz` — liveness: the process is up and serving. Always `200` while
-//!   serving; a container that fails this is restarted. No DB touch.
-//! - `GET /readyz` — readiness: this instance should receive traffic. `200` only when the
-//!   backend can serve (`Backend::ping`) and we are not draining. On shutdown it flips to
-//!   `503` first, so the load balancer pulls the instance out of rotation before in-flight
-//!   requests finish — the drain half of a zero-downtime rolling deploy.
+//! - `GET /healthz` — liveness: `200` while serving, no DB touch.
+//! - `GET /readyz` — readiness: `200` only when the backend can serve (`Backend::ping`)
+//!   and we are not draining. On shutdown it flips to `503` first, so the load balancer
+//!   pulls the instance out of rotation before in-flight requests finish (the drain half
+//!   of a zero-downtime rolling deploy).
 //!
 //! ## Graceful shutdown
 //! [`Handle::shutdown`] (wired to SIGTERM/SIGINT by the CLI) flips the drain flag (so
 //! `/readyz` fails first), holds the listener open for [`DRAIN_WINDOW`] so the load
-//! balancer's probe can observe the failing readiness and stop routing, then triggers
-//! axum's graceful shutdown: the listener stops accepting, in-flight requests run to
-//! completion, then [`serve`] returns.
+//! balancer's probe can observe it, then triggers axum's graceful shutdown: the listener
+//! stops accepting, in-flight requests run to completion, then [`serve`] returns.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

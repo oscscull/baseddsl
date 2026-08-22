@@ -546,10 +546,9 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         cx.model(ti).shard_key_ctx_field()
     };
 
-    // The alternative this query injects per touched scoped model  — threaded to
-    // codegen so a callable naming one `@scope` alternative filters differently from one
-    // naming another. Single-alternative models resolve to the same terms as before.
-    // The `$ctx` requirement derives from the same choice, so the ctx bag always
+    // The alternative this query injects per touched scoped model — threaded to codegen
+    // so a callable naming one `@scope` alternative filters differently from one naming
+    // another. The `$ctx` requirement derives from the same choice, so the ctx bag always
     // carries exactly the fields the injected `:ctx_<field>` binds read.
     let scope_inject =
         crate::scope::resolve_inject(q.scoped.as_ref(), q.unscoped.is_some(), &touched, cx);

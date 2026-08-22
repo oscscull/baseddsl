@@ -1,12 +1,10 @@
 //! The index requirements + the index lints.
 //!
-//! Runs after every query/shape/mutation is resolved, because the whole point is
-//! closed-world reasoning: the access layer *is* the set of generated SQL, so the
-//! engine can know which indexes queries need and which declared indexes nothing
-//! uses.
+//! Runs after every query/shape/mutation is resolved: closed-world reasoning over the
+//! access layer (the whole set of generated SQL) tells the engine which indexes queries
+//! need and which declared indexes nothing uses.
 //!
-//! Two index facts carry independent write/disk cost and are load-bearing, so they
-//! are written in source, not silently derived:
+//! Two index facts carry independent write/disk cost and are written in source:
 //!   * **E0260 `unindexed`**: a query — or a mutation's `update`/`delete`/`restore`
 //!     `where`, which scans the same way — whose root filter pattern no available
 //!     index serves, and a relation join key some query/shape traverses that no

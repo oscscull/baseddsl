@@ -9,7 +9,7 @@
 //! This module resolves the decls into [`RScope`], then attaches each model's
 //! `@scope` refs: it checks the names exist (`E0183`) and the model carries each
 //! scope's columns at a conforming type (`E0184`), and synthesizes the injected
-//! predicate ([`RModel::scope`]) so codegen lowers scope exactly as before.
+//! predicate ([`RModel::scope`]) that codegen lowers.
 
 use based_ast::*;
 use std::collections::HashMap;
@@ -176,10 +176,9 @@ fn check_column(model: &RModel, scope: &RScope, term: &RScopeTerm, at: Span, sin
     }
 }
 
-/// Synthesize the injected `Predicate` from the alternative's terms — the AND of
-/// each `col = $ctx.field`. Codegen lowers this exactly as the old inline `@scope`
-/// predicate, so scope injection (root `WHERE`, joined `ON`, create auto-set, shard
-/// key) is unchanged in effect . `None` when the alternative is empty.
+/// Synthesize the injected `Predicate` from the alternative's terms — the AND of each
+/// `col = $ctx.field`. Codegen lowers it into the root `WHERE`, joined `ON`, create
+/// auto-set, and shard key. `None` when the alternative is empty.
 fn synthesize_pred(terms: &[&RScopeTerm], span: Span) -> Option<Predicate> {
     let mut acc: Option<Predicate> = None;
     for t in terms {
@@ -306,8 +305,8 @@ pub fn check_ack(
 /// `(column, ctx_field)` terms. For model `M`, the chosen axes are the callable's named
 /// axes that `M` declares a `@scope` for (a superset of ≥1 of `M`'s alternatives, which
 /// `check_ack`/`E0185` guarantees), so `M` is always fully confined and naming extra
-/// axes only narrows (never leaks). `unscoped` → empty (no injection). For a single-
-/// alternative model this is that model's whole scope — byte-identical to iteration 1.
+/// axes only narrows (never leaks). `unscoped` → empty (no injection). For a
+/// single-alternative model this is that model's whole scope.
 pub fn resolve_inject(
     scoped: Option<&Scoped>,
     unscoped_present: bool,

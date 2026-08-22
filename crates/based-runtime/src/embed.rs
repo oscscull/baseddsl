@@ -2,39 +2,34 @@
 //!
 //! [`Engine`] is the library twin of `based serve`: it owns a [`Compiled`] schema, a
 //! [`Backend`] (the connection source), and an id generator ([`IdGen`]), and runs a
-//! callable straight through [`crate::serve::dispatch`] — the same wire core the HTTP
-//! listener uses, minus the socket. So an embedded call and an HTTP call take the
-//! identical plan → run → shape path and yield the identical [`WireResponse`].
-//!
-//! Dropping the socket removes the loopback TCP + HTTP framing while keeping the same
-//! typed generated client — one binary (no sidecar), lower and steadier latency, and
-//! `MockDb`-backed end-to-end tests.
+//! callable through [`crate::serve::dispatch`] — the same wire core the HTTP listener
+//! uses, minus the socket. An embedded call and an HTTP call take the identical
+//! plan → run → shape path and yield the identical [`WireResponse`]. Dropping the socket
+//! keeps the same typed generated client in one binary (no sidecar) with `MockDb`-backed
+//! end-to-end tests.
 //!
 //! ## Wiring the generated client
 //! The generated client (`based gen client`) is generic over a `Transport` trait it
-//! defines itself, so — by the orphan rule — a library-side `impl Transport for Engine`
-//! in this crate is forbidden. Instead `based gen client` emits the bridge when asked
+//! defines itself, so the orphan rule forbids a library-side `impl Transport for Engine`
+//! here. Instead `based gen client` emits the bridge when asked
 //! (`ClientOptions::embedded`): the generated module carries an `Embedded` transport over
-//! `Engine` plus an `embedded(&engine)` constructor, so wiring a client is one call and
-//! zero bridge code:
+//! `Engine` plus an `embedded(&engine)` constructor, so wiring a client is one call:
 //!
 //! ```ignore
 //! let api = client::embedded(&engine);              // no Transport impl to write
 //! let out = api.place_order(input, ctx).await?;      // typed, in-process, no socket
 //! ```
 //!
-//! The emitted bridge serializes the typed input and the typed `$ctx` to JSON, calls
+//! The emitted bridge serializes the typed input and typed `$ctx` to JSON, calls
 //! [`Engine::call`], then decodes the `200` body into the output type (a non-`200` becomes
-//! the client's `ClientError`). `$ctx` is a typed method argument supplied straight in —
-//! the app, not the caller, sets it; a public callable passes `()`, which the bridge maps
-//! to an empty context bag.
+//! the client's `ClientError`). `$ctx` is a typed method argument the app sets; a public
+//! callable passes `()`, which the bridge maps to an empty context bag.
 //!
 //! ## Concurrency
-//! `Engine` is `Send + Sync` and `Clone` — a cheap handle over shared state, like a
-//! connection pool. Clone it into shared state (e.g. an axum router) and call it from
-//! any number of tasks: every call checks a connection out of the [`Backend`] for its
-//! own duration, so concurrency is bounded by the backend's pool, exactly like the
-//! HTTP edge.
+//! `Engine` is `Send + Sync` and `Clone` — a cheap handle over shared state. Clone it into
+//! shared state (e.g. an axum router) and call it from any number of tasks: every call
+//! checks a connection out of the [`Backend`] for its own duration, so concurrency is
+//! bounded by the backend's pool, like the HTTP edge.
 
 use std::sync::Arc;
 

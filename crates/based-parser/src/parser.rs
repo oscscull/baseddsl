@@ -1,10 +1,10 @@
-//! Hand-written recursive-descent parser; each `parse_*` corresponds to a grammar
-//! production. Hand-written (not generated) for error-message quality.
+//! Hand-written recursive-descent parser (for error-message quality); each `parse_*`
+//! corresponds to a grammar production.
 //!
-//! Separators (`,` `;` and newlines) are insignificant between items: the block
-//! loops skip them and never require them. Keywords are matched positionally by
-//! identifier text — see `lexer.rs` — so a legacy field named `order:` parses
-//! where a field is expected.
+//! Separators (`,` `;` and newlines) are insignificant between items: the block loops
+//! skip them and never require them. Keywords are matched positionally by identifier
+//! text — see `lexer.rs` — so a legacy field named `order:` parses where a field is
+//! expected.
 
 use based_ast::*;
 use based_diagnostics::Diagnostic;

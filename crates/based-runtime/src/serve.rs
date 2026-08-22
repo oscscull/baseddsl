@@ -1,23 +1,19 @@
 //! The wire surface: an HTTP request → a planned+executed callable → a JSON response.
 //!
-//! This module is the *dispatch core* only — the pure translation from a decoded
-//! request (method, path, args, `$ctx`) into a [`WireResponse`] (an HTTP status +
-//! JSON body). It links no HTTP library and opens no socket, so the whole route →
-//! response path is testable against a [`crate::run::MockDb`] with no network and no
-//! database. The concrete listener (`based serve`) is a thin edge that decodes the
-//! socket into these arguments and writes the response back (the network is a driver
-//! concern, kept out of the core).
+//! This module is the *dispatch core* only — the pure translation from a decoded request
+//! (method, path, args, `$ctx`) into a [`WireResponse`] (an HTTP status + JSON body). It
+//! links no HTTP library and opens no socket, so the whole route → response path is
+//! testable against a [`crate::run::MockDb`]. The concrete listener (`based serve`) is a
+//! thin edge that decodes the socket into these arguments and writes the response back.
 //!
 //! ## Wire contract
-//! - `POST /q/<name>` runs query `<name>`; `POST /m/<name>` runs mutation `<name>`.
-//!   The route prefix is authoritative — a name looked up under the wrong verb is a
-//!   404, never a silent cross-dispatch.
-//! - The JSON body is the argument object. It carries arguments, not `$ctx`: request
-//!   context is server-supplied out-of-band (a client can never inject scope), so `ctx`
-//!   arrives here as a separate value the embedding server derived from its auth layer,
-//!   not from the body.
-//! - Success → `200` + the shaped response (`run_query`/`run_mutation`'s JSON). A
-//!   boundary failure ([`PlanError`]) → a `4xx`/`5xx` with `{ "error": { code, message } }`.
+//! - `POST /q/<name>` runs query `<name>`; `POST /m/<name>` runs mutation `<name>`. The
+//!   route prefix is authoritative — a name looked up under the wrong verb is a 404.
+//! - The JSON body is the argument object, not `$ctx`: request context is server-supplied
+//!   out of band, so `ctx` arrives as a separate value the embedding server derived from
+//!   its auth layer.
+//! - Success → `200` + the shaped response (`run_query`/`run_mutation`'s JSON). A boundary
+//!   failure ([`PlanError`]) → a `4xx`/`5xx` with `{ "error": { code, message } }`.
 
 use crate::guard::{GuardRequest, GuardVerdict, Guards};
 use crate::id::IdGen;
@@ -53,24 +49,20 @@ impl WireResponse {
     }
 }
 
-/// Route + run one request. `method`/`path` come straight off the request line; `args`
-/// is the decoded JSON body; `ctx` is the server-derived request context (never the
-/// body); `shard_key` routes the checkout ([`resolve_shard_key`] derives it);
-/// `idem_key` is the out-of-band mutation idempotency key (the `Idempotency-Key`
-/// header, `None` when absent, ignored by queries) and `store` is the dedupe store it
-/// consults. `guards` holds the registered host guard implementations (auth.md Handle
-/// 3): a mutation that declares one is checked here — before its write body, before
-/// the idempotency store, before argument validation — on every door, so the two
-/// doors can never enforce differently. Connections are checked out here, per call —
-/// a query borrows one for its reads, a mutation opens one fresh transaction per
-/// attempt. Every failure is a `WireResponse`, so the listener never has to branch on
-/// error kinds — it writes `status` + `body` verbatim.
+/// Route + run one request. `method`/`path` come off the request line; `args` is the
+/// decoded JSON body; `ctx` is the server-derived request context; `shard_key` routes the
+/// checkout ([`resolve_shard_key`] derives it); `idem_key` is the out-of-band mutation
+/// idempotency key (`None` when absent, ignored by queries) and `store` is the dedupe store
+/// it consults. `guards` holds the registered host guard implementations (auth.md Handle
+/// 3): a declared guard is checked before the write body, the idempotency store, and
+/// argument validation, on every door. Connections are checked out per call — a query
+/// borrows one for its reads, a mutation opens one fresh transaction per attempt. Every
+/// failure is a `WireResponse`, so the listener writes `status` + `body` verbatim.
 ///
-/// A caller that wants no idempotency passes a [`crate::idempotency::NoStore`] and a
-/// `None` key; a schema with no guards passes an empty [`Guards`] — one dispatch
-/// path, never a with/without fork. `engine` is the re-entry handle a guard reaches
-/// through ([`crate::guard::GuardRequest::engine`]) — `Some` on every [`crate::Engine`]
-/// call, `None` for a raw dispatch (a guarded schema is never served that way).
+/// No idempotency → pass a [`crate::idempotency::NoStore`] and a `None` key; no guards →
+/// pass an empty [`Guards`]. `engine` is the re-entry handle a guard reaches through
+/// ([`crate::guard::GuardRequest::engine`]) — `Some` on every [`crate::Engine`] call,
+/// `None` for a raw dispatch.
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     compiled: &Compiled,

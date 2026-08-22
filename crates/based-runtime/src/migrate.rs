@@ -7,12 +7,11 @@
 //!
 //! ## Execution model — snapshot-authoritative
 //! A migration's executable steps are re-derived as `diff(snapshot[N-1], snapshot[N])` from
-//! the stored `schema.snap`s — the same authoritative model `based migrate render` uses,
-//! so the SQL applied is exactly the SQL a reviewer read, with no separate `up.mig` text
-//! parser to drift. The `up.mig` file is the human-readable review artifact and the tamper
-//! anchor: its [`content_hash`](based_codegen::migrate::content_hash) is recorded in the
-//! ledger, and an edit to an already-applied migration is a hard error (never a silent
-//! re-apply).
+//! the stored `schema.snap`s — the same model `based migrate render` uses, so the SQL
+//! applied matches the SQL a reviewer read. The `up.mig` file is the human-readable review
+//! artifact and tamper anchor: its
+//! [`content_hash`](based_codegen::migrate::content_hash) is recorded in the ledger, and an
+//! edit to an already-applied migration is a hard error.
 //!
 //! ## The ledger
 //! [`ensure_ledger`] creates the engine-owned `_based_migrations` table (id + content-hash +

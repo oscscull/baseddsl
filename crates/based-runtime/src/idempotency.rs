@@ -1,19 +1,17 @@
 //! Write-retry idempotency — dedupe a retried `create`/mutation.
 //!
 //! The engine mints a fresh `id` for every `create`, so a client that retries a mutation
-//! after a `503`/timeout — not knowing whether the first attempt committed — would
-//! double-insert. An idempotency key closes it: the caller attaches a stable key to a
-//! mutation, and the engine runs the write body at most once per key — a retry replays
-//! the first attempt's stored response instead of writing again.
+//! after a `503`/timeout would double-insert. An idempotency key closes it: the caller
+//! attaches a stable key to a mutation, and the engine runs the write body at most once
+//! per key — a retry replays the first attempt's stored response.
 //!
 //! ## Scope
-//! - Mutations only. A query is naturally idempotent (no writes), so it never touches the
-//!   store — only [`crate::run::run_mutation`] does.
-//! - Opt-in. No key → run every time. The key is request metadata, supplied out of band
-//!   by the wire edge (`Idempotency-Key` header), never the JSON body. A schema never
-//!   reads the key: it is engine infrastructure, not application data.
-//! - Keyed by `(callable, key)`. The key is scoped to the callable it accompanies, so the
-//!   same key reused across two different mutations does not collide.
+//! - Mutations only. A query is naturally idempotent, so only [`crate::run::run_mutation`]
+//!   touches the store.
+//! - Opt-in. No key → run every time. The key is request metadata, supplied out of band by
+//!   the wire edge (`Idempotency-Key` header); a schema never reads it.
+//! - Keyed by `(callable, key)`, so the same key reused across two mutations does not
+//!   collide.
 //!
 //! ## Semantics
 //! On a mutation carrying a key, [`run_mutation`] consults the store via
@@ -24,11 +22,10 @@
 //! - Done → a prior attempt with the same fingerprint already committed; replay its stored
 //!   response with no writes (exactly-once).
 //! - InFlight → a concurrent attempt with the same key + fingerprint is still running;
-//!   reject with a retryable `409` rather than run a second write.
-//! - Mismatch → the key was seen before but with a different fingerprint: the caller
-//!   reused one key for two different requests. Replaying the first would silently return
-//!   the wrong request's result, so this is rejected (a non-retryable `422`) rather than
-//!   run or replayed.
+//!   reject with a retryable `409`.
+//! - Mismatch → the key was seen before with a different fingerprint (the caller reused one
+//!   key for two requests); reject with a non-retryable `422` rather than replay the wrong
+//!   result.
 //!
 //! ## The store is a seam
 //! [`IdempotencyStore`] is a trait. [`MemStore`] is an in-process implementation (correct
@@ -52,11 +49,10 @@ const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A stable hash of a request's args + `$ctx` — the payload a keyed mutation carries.
 ///
-/// Two attempts that are genuine retries of the same request produce the same
-/// fingerprint; a caller that accidentally reuses one key for two different requests
-/// produces different ones, which the store rejects rather than silently replaying the
-/// first. Built by [`Request::fingerprint`](crate::Request::fingerprint); opaque and
-/// compared only for equality (the exact hash is never surfaced).
+/// Genuine retries of the same request produce the same fingerprint; a key reused for two
+/// different requests produces different ones, which the store rejects. Built by
+/// [`Request::fingerprint`](crate::Request::fingerprint); opaque, compared only for
+/// equality.
 pub type Fingerprint = u64;
 
 /// What the store says about an idempotency key when a mutation asks to run under it.

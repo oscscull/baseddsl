@@ -1,12 +1,10 @@
 //! Lexer for `.bsl`. Thin wrapper over a `logos` token set.
 //!
-//! Casing is load-bearing, so lower- and upper-camel identifiers are distinct
-//! token kinds — the parser never re-inspects the first byte. Keywords are NOT
-//! lexed as dedicated tokens: they ride in as `LowerIdent` and the parser
-//! recognizes them positionally. This is what lets a legacy-named field like
-//! `order:` (a reserved word) parse where a field is expected, while `order (...)`
-//! still reads as a clause where a clause is expected — the token is the same,
-//! only the position differs.
+//! Casing is load-bearing, so lower- and upper-camel identifiers are distinct token
+//! kinds — the parser never re-inspects the first byte. Keywords ride in as
+//! `LowerIdent` and the parser recognizes them positionally, so a legacy-named field
+//! like `order:` parses where a field is expected while `order (...)` still reads as a
+//! clause — same token, different position.
 //!
 //! Whitespace, newlines and `#` comments are skipped: they separate tokens but
 //! never carry meaning. Item separators (`,` `;`) survive as tokens and are

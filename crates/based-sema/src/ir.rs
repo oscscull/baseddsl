@@ -520,14 +520,12 @@ pub struct RScopeTerm {
     pub ty: CtxField,
 }
 
-/// The scope injection a single callable chose for one touched scoped model .
+/// The scope injection a single callable chose for one touched scoped model.
 /// A model may declare several `@scope` alternatives (DNF); the callable's `scoped …`
 /// clause selects which axes confine *this* callable. `terms` is the flattened
-/// `(column_field, ctx_field)` set of the chosen axes — exactly the equalities codegen
-/// ANDs into the root `WHERE`, the joined `ON`, and the create auto-set for `model`.
-/// Two callables naming different alternatives of the same model therefore inject
-/// different predicates. For a single-alternative model this is that model's whole
-/// scope, so the emitted SQL is unchanged from iteration 1 .
+/// `(column_field, ctx_field)` set of the chosen axes — the equalities codegen ANDs into
+/// the root `WHERE`, the joined `ON`, and the create auto-set for `model`. Two callables
+/// naming different alternatives of the same model inject different predicates.
 #[derive(Debug, Clone)]
 pub struct ScopeInject {
     /// The touched scoped model this injection confines (by name).
@@ -551,17 +549,14 @@ pub struct RModel {
     pub soft_delete: Option<SoftDelete>,
     /// Model default sort (`@sort`); empty when none is declared.
     pub sort: Vec<SortTerm>,
-    /// The standing scope filter injected into every read/write on this model
-    /// Synthesized from the model's `@scope Name` reference(s) —
-    /// the conjunction of the referenced `scope` decls' `col = $ctx.field` terms
-    /// (the single alternative, iteration 1). `None` when the model is not scoped.
-    /// Codegen lowers it exactly like any `where` , so scope injection is
-    /// unchanged in effect from the old inline `@scope(pred)`.
+    /// The standing scope filter injected into every read/write on this model.
+    /// Synthesized from the model's `@scope Name` reference(s) — the conjunction of the
+    /// referenced `scope` decls' `col = $ctx.field` terms. Codegen lowers it like any
+    /// `where`. `None` when the model is not scoped.
     pub scope: Option<Predicate>,
     /// The model's `@scope` alternatives as scope-name sets (DNF): each
-    /// `@scope Name[, Name]*` decorator is one alternative (an AND of names). Empty
-    /// when the model is not scoped. Iteration 1 resolves exactly one alternative but
-    /// stores a list so multi-scope  adds DNF without reshaping this.
+    /// `@scope Name[, Name]*` decorator is one alternative (an AND of names). Empty when
+    /// the model is not scoped.
     pub scope_alts: Vec<Vec<String>>,
     /// `@created` / `@updated` engine-managed timestamp fields .
     pub created: Option<String>,
@@ -742,16 +737,13 @@ impl RModel {
         out
     }
 
-    /// The single `$ctx` field a request on this model **shards** on , or `None`
-    /// when the model has no `@scope`. A scope is a conjunction of `col = $ctx.field`
-    /// ; the shard key is the *owner* the scope filters by, i.e. the `$ctx` field
-    /// of the **first** scope term (`@scope(org = $ctx.org)` → `Some("org")`). This is
-    /// the one field the router hashes to pick a physical shard (single-shard-
-    /// per-request), read from the same `@scope` that filters rows — one source of
-    /// truth, so the shard a row lives in and the shard its owner's requests route to
-    /// can never drift. A multi-term scope shards on its first `$ctx` field (the
-    /// remaining terms narrow *within* that owner's shard); a model with no scope has
-    /// no owning shard (single-shard deployments send it to shard 0).
+    /// The single `$ctx` field a request on this model **shards** on, or `None` when the
+    /// model has no `@scope`. The shard key is the owner the scope filters by: the `$ctx`
+    /// field of the **first** scope term (`@scope(org = $ctx.org)` → `Some("org")`). The
+    /// router hashes it to pick a physical shard (single-shard-per-request), read from the
+    /// same `@scope` that filters rows, so a row's shard and its owner's request routing
+    /// share one source. A multi-term scope shards on its first `$ctx` field; a model with
+    /// no scope has no owning shard (single-shard deployments send it to shard 0).
     pub fn shard_key_ctx_field(&self) -> Option<String> {
         self.scope_terms().into_iter().next().map(|(_, ctx)| ctx)
     }
