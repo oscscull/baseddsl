@@ -526,15 +526,22 @@ fn walk_write_join(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<usize>) {
                 }
             }
         }
-        WriteStmt::Update { model, where_, .. }
-        | WriteStmt::Delete { model, where_ }
-        | WriteStmt::HardDelete { model, where_ }
-        | WriteStmt::Restore { model, where_ } => {
+        WriteStmt::Update { model, where_, .. } | WriteStmt::Restore { model, where_ } => {
             if let Some(mi) = cx.find(&model.node) {
                 if is_scoped(cx, mi) {
                     push(out, mi);
                 }
                 walk_pred_join(where_, mi, cx, out);
+            }
+        }
+        WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
+            if let Some(mi) = cx.find(&model.node) {
+                if is_scoped(cx, mi) {
+                    push(out, mi);
+                }
+                if let Some(pred) = where_ {
+                    walk_pred_join(pred, mi, cx, out);
+                }
             }
         }
         WriteStmt::Tx(inner) => {

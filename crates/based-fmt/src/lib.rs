@@ -835,19 +835,17 @@ fn write_line(w: &WriteStmt) -> String {
             predicate(where_, 0),
             assign_block(assigns)
         ),
-        WriteStmt::Delete { model, where_ } => {
-            format!("delete {} where ({})", model.node, predicate(where_, 0))
-        }
+        WriteStmt::Delete { model, where_ } => match where_ {
+            Some(p) => format!("delete {} where ({})", model.node, predicate(p, 0)),
+            None => format!("delete all {}", model.node),
+        },
         WriteStmt::Restore { model, where_ } => {
             format!("restore {} where ({})", model.node, predicate(where_, 0))
         }
-        WriteStmt::HardDelete { model, where_ } => {
-            format!(
-                "hard delete {} where ({})",
-                model.node,
-                predicate(where_, 0)
-            )
-        }
+        WriteStmt::HardDelete { model, where_ } => match where_ {
+            Some(p) => format!("hard delete {} where ({})", model.node, predicate(p, 0)),
+            None => format!("hard delete all {}", model.node),
+        },
         WriteStmt::Raw(r) => raw_sql(r),
         // Tx is handled by the caller (it spans multiple lines).
         WriteStmt::Tx(_) => String::new(),

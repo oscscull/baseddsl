@@ -1604,6 +1604,10 @@ fn check_keyless_readback(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut Sink
 enum WriteEffect<'a> {
     /// A real DELETE — plain-model `delete` or `hard delete`: the row is removed.
     RealDelete(&'a Ident),
+    /// A whole-table wipe — `delete all` on a soft-delete model (tombstones every row).
+    /// Like a real DELETE for the return rules (no single row to read back → `-> ok`,
+    /// a declared shape is an error), even though the SQL is an UPDATE.
+    Wipe(&'a Ident),
     /// create / update / restore / soft `delete` (tombstone): a row survives to
     /// read back. Carries the verb for the diagnostic.
     Surviving(&'a Ident, &'static str),
@@ -1620,14 +1624,16 @@ fn write_effects<'a>(body: &'a [WriteStmt], cx: &Cx) -> Vec<WriteEffect<'a>> {
             WriteStmt::Update { model, .. } => out.push(WriteEffect::Surviving(model, "update")),
             WriteStmt::Restore { model, .. } => out.push(WriteEffect::Surviving(model, "restore")),
             WriteStmt::HardDelete { model, .. } => out.push(WriteEffect::RealDelete(model)),
-            WriteStmt::Delete { model, .. } => {
+            WriteStmt::Delete { model, where_ } => {
                 let soft = cx
                     .find(&model.node)
                     .is_some_and(|mi| cx.model(mi).soft_delete.is_some());
-                if soft {
-                    out.push(WriteEffect::Surviving(model, "delete (soft)"));
-                } else {
-                    out.push(WriteEffect::RealDelete(model));
+                match (soft, where_.is_none()) {
+                    // Soft `delete all` tombstones every row — an ack wipe, not a
+                    // read-backable surviving write.
+                    (true, true) => out.push(WriteEffect::Wipe(model)),
+                    (true, false) => out.push(WriteEffect::Surviving(model, "delete (soft)")),
+                    (false, _) => out.push(WriteEffect::RealDelete(model)),
                 }
             }
             WriteStmt::Tx(inner) => out.extend(write_effects(inner, cx)),
@@ -1644,7 +1650,9 @@ fn resolve_ack_return(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<Resolved
     let mut primary: Option<&Ident> = None;
     for e in write_effects(&m.body, cx) {
         match e {
-            WriteEffect::RealDelete(model) => primary = primary.or(Some(model)),
+            WriteEffect::RealDelete(model) | WriteEffect::Wipe(model) => {
+                primary = primary.or(Some(model));
+            }
             WriteEffect::Surviving(model, verb) => {
                 sink.error_note(
                     code::ACK_SURVIVING,
@@ -1688,7 +1696,11 @@ fn check_shape_on_real_delete(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut 
     let mut survives_ret = false;
     for e in write_effects(&m.body, cx) {
         match e {
-            WriteEffect::RealDelete(model) if model.node == ret.model => deletes_ret = true,
+            WriteEffect::RealDelete(model) | WriteEffect::Wipe(model)
+                if model.node == ret.model =>
+            {
+                deletes_ret = true;
+            }
             WriteEffect::Surviving(model, _) if model.node == ret.model => survives_ret = true,
             _ => {}
         }
@@ -1802,7 +1814,10 @@ fn check_write(
         }
         WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
             if let Some(mi) = write_model(model, cx, sink) {
-                resolve::check_predicate(where_, Some(mi), cx, params, sink);
+                // `where_` is `None` for the `delete all` whole-table wipe.
+                if let Some(pred) = where_ {
+                    resolve::check_predicate(pred, Some(mi), cx, params, sink);
+                }
             }
         }
         WriteStmt::Restore { model, where_ } => {

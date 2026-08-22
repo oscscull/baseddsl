@@ -273,6 +273,19 @@ fn ack_return_prints_bare_ok() {
 }
 
 #[test]
+fn delete_all_whole_table_wipe_reprints() {
+    let hard = fmt("mutation wipe() -> ok {  hard  delete  all  Widget  }");
+    assert_eq!(
+        hard,
+        "mutation wipe() -> ok {\n  hard delete all Widget;\n}\n"
+    );
+    let soft = fmt("mutation archive() -> ok {  delete all Order  }");
+    assert_eq!(soft, "mutation archive() -> ok {\n  delete all Order;\n}\n");
+    assert!(based_parser::parse_file(&hard, FileId(0)).is_ok());
+    assert_eq!(fmt(&hard), hard);
+}
+
+#[test]
 fn distinct_list_reprints_after_verb() {
     // `distinct` follows the `list` verb. A one-clause block stays inline; a three-clause
     // block breaks one clause per line, `distinct` riding the head.

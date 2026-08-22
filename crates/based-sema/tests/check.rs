@@ -3487,6 +3487,62 @@ fn ack_plain_delete_on_plain_model_is_clean() {
 }
 
 #[test]
+fn ack_hard_delete_all_wipes_the_table() {
+    let (schema, d) = analyze(
+        r#"
+        Widget { id: Id, name: text }
+        mutation wipe() -> ok {
+          hard delete all Widget;
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    assert!(schema.mutations[0].ack);
+    assert_eq!(schema.mutations[0].ret_model, "Widget");
+}
+
+#[test]
+fn ack_soft_delete_all_is_a_tombstone_wipe_not_a_surviving_write() {
+    // A soft `delete all` tombstones every row — no single row to read back, so `-> ok`
+    // is valid (it does NOT trip E0221 the way a filtered soft `delete` with `-> ok` would).
+    let (schema, d) = analyze(
+        r#"
+        @soft_delete(deleted_at)
+        Order { id: Id, deleted_at: timestamp? }
+        mutation archive_all() -> ok {
+          delete all Order;
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    assert!(schema.mutations[0].ack);
+}
+
+#[test]
+fn shape_on_soft_delete_all_is_rejected() {
+    // No single surviving row to read back from a whole-table tombstone → E0220.
+    let (_, d) = analyze(
+        r#"
+        @soft_delete(deleted_at)
+        Order { id: Id, deleted_at: timestamp?, total: int }
+        shape OrderRow from Order { total }
+        mutation archive_all() -> OrderRow {
+          delete all Order;
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0220"), "{:?}", codes(&d));
+}
+
+#[test]
+fn bare_delete_without_where_or_all_is_a_parse_error() {
+    // `delete Model` with neither a `where` clause nor the `all` keyword must not parse —
+    // "delete everything" is only ever the explicit, greppable `all`.
+    let sf = parse_file("mutation m() -> ok { delete Widget; }", FileId(0));
+    assert!(sf.is_err(), "a bare `delete Model` must be a parse error");
+}
+
+#[test]
 fn shape_on_real_delete_is_rejected() {
     // No surviving row to read back as the shape → E0220.
     let (_, d) = analyze(

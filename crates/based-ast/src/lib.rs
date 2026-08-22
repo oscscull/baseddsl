@@ -709,7 +709,10 @@ pub enum WriteStmt {
     },
     Delete {
         model: Ident,
-        where_: Predicate,
+        /// `Some(pred)` for `delete M where (…)`; `None` for the whole-table wipe
+        /// `delete all M` — every row in scope. Never absent: the parser requires a
+        /// `where` clause or the `all` keyword (a bare `delete M` is a parse error).
+        where_: Option<Predicate>,
     },
     Restore {
         model: Ident,
@@ -717,7 +720,9 @@ pub enum WriteStmt {
     },
     HardDelete {
         model: Ident,
-        where_: Predicate,
+        /// `Some(pred)` for `hard delete M where (…)`; `None` for the whole-table wipe
+        /// `hard delete all M`. See [`WriteStmt::Delete`].
+        where_: Option<Predicate>,
     },
     Tx(Vec<Self>),
     Raw(RawSql),

@@ -14,9 +14,37 @@ mutation place_order(org: Id, buyer: Id) -> OrderCard {
 - `create Model { field = $in, ... }`
 - `update Model where (...) { field = $in }`
 - `delete Model where (...)` — on a soft-delete model, rewritten to the soft action, never real DELETE.
+- `delete all Model` — whole-table wipe (below). `all` is required and greppable.
 - `restore Model where (...)`
 - `hard delete Model where (...)` — explicit, loud opt-out for real DELETE. A real DELETE
   leaves no row to read back, so the mutation returns `ok` (below).
+- `hard delete all Model` — whole-table wipe, physically (below).
+
+## Whole-table wipe (`delete all`)
+`delete all Model` / `hard delete all Model` deletes **every row** — the bulk counterpart of a
+filtered delete. The `all` keyword is **required and greppable**: a bare `delete Model` (no `where`,
+no `all`) is a parse error, so "delete everything" is a deliberate, visible choice, never a forgotten
+filter (principle 1).
+```
+mutation clear_cache() -> ok {
+  hard delete all CacheEntry;
+}
+```
+- **Contract = delete-semantics.** Every row is gone, atomically inside the surrounding transaction.
+- **Scope still applies.** On a `@scope`d model, `all` means every row *in the caller's scope* — the
+  scope predicate rides the wipe, so another tenant's rows survive. (`unscoped` forfeits this.)
+- **Soft-delete model.** `delete all` **tombstones every live row** (one `UPDATE … SET <tombstone>`
+  with no filter beyond the live + scope guards), never a real DELETE. `hard delete all` still
+  physically removes rows (the loud opt-out).
+- **Read-back is `-> ok`.** A wipe has no single surviving row to read back, so it acknowledges
+  (below) — `-> ok` is required; a declared shape is `E0220`. Unlike a filtered delete, a wipe of an
+  **already-empty** table is a success, not a 404 (there is no specific row that had to exist).
+- **Lowering (per-dialect over the `Dialect` seam).** An unfiltered `hard delete all` (no scope guard)
+  lowers to `TRUNCATE` on **Postgres** (transactional there — rolls back with the surrounding tx) and
+  to `DELETE FROM t` on **MySQL/MariaDB** (`TRUNCATE` is DDL and auto-commits — it would silently
+  break the transaction) and **SQLite** (no `TRUNCATE` statement; an unfiltered `DELETE FROM t` already
+  triggers its truncate optimization). A *scoped* wipe keeps its scope predicate, so it stays a
+  `DELETE FROM t WHERE <scope>` on every dialect.
 
 ## Atomic update expressions
 An `update` assignment's right-hand side may be a scalar **arithmetic expression** over the target
@@ -153,11 +181,13 @@ read-back, with the same no-existence-leak response.
 The two forms never mix (one way to say each thing):
 - A shape on a mutation whose only write(s) on the return model are real DELETEs is an error
   (`E0220`) — declare `-> ok`.
-- `-> ok` on a mutation with any surviving write (`create` / `update` / `restore` / soft `delete`)
-  is an error (`E0221`) — a surviving write's read-back is the contract; declare its shape. A raw
-  write may ride along (its effect is outside the engine's knowledge), but at least one real DELETE
-  is required; the *first* real DELETE's model is the mutation's primary model (scope, sharding, and
-  the 404 check ride on it).
+- `-> ok` on a mutation with any surviving write (`create` / `update` / `restore` / a *filtered*
+  soft `delete`) is an error (`E0221`) — a surviving write's read-back is the contract; declare its
+  shape. A raw write may ride along (its effect is outside the engine's knowledge), but at least one
+  destructive write is required; the *first* one's model is the mutation's primary model (scope,
+  sharding, and the 404 check ride on it). A **whole-table wipe** (`delete all` / `hard delete all`,
+  including a soft model's tombstone-all) counts as destructive — no single row survives to read back
+  — so `-> ok` is required on a wipe and a shape is `E0220`.
 - `-> ok` on a query is an error (`E0222`) — a query returns data.
 
 ## Read-decide-write

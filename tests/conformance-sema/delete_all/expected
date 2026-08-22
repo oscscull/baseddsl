@@ -1,0 +1,19 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model Widget  table=widget
+  id: Id
+  name: text
+model Order  table=order  soft_delete=deleted_at(timestamp)
+  id: Id
+  deleted_at: timestamp?
+model Invoice  table=invoice  scope
+  id: Id
+  org: -> Org  fk=org_id
+  index(org)
+mutation wipe_widgets  ret=Widget ack
+mutation archive_all_orders  ret=Order ack
+mutation wipe_my_invoices  ret=Invoice ack  ctx=[org: -> Org]

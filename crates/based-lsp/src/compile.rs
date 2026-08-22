@@ -1285,10 +1285,13 @@ impl Snapshot {
                     self.pred_variant_sites(where_, model.node.as_str(), out);
                     self.assign_variant_sites(model.node.as_str(), assigns, out);
                 }
-                WriteStmt::Delete { model, where_ }
-                | WriteStmt::Restore { model, where_ }
-                | WriteStmt::HardDelete { model, where_ } => {
+                WriteStmt::Restore { model, where_ } => {
                     self.pred_variant_sites(where_, model.node.as_str(), out);
+                }
+                WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
+                    if let Some(p) = where_ {
+                        self.pred_variant_sites(p, model.node.as_str(), out);
+                    }
                 }
                 WriteStmt::Tx(inner) => self.write_variant_sites(inner, out),
                 WriteStmt::Raw(_) => {}
@@ -2103,10 +2106,14 @@ fn clause_filter_refs<'a>(c: &'a Clause, out: &mut Vec<&'a Ident>) {
 fn write_filter_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
     for w in body {
         match w {
-            WriteStmt::Update { where_, .. }
-            | WriteStmt::Delete { where_, .. }
-            | WriteStmt::Restore { where_, .. }
-            | WriteStmt::HardDelete { where_, .. } => pred_filter_refs(where_, out),
+            WriteStmt::Update { where_, .. } | WriteStmt::Restore { where_, .. } => {
+                pred_filter_refs(where_, out);
+            }
+            WriteStmt::Delete { where_, .. } | WriteStmt::HardDelete { where_, .. } => {
+                if let Some(p) = where_ {
+                    pred_filter_refs(p, out);
+                }
+            }
             WriteStmt::Tx(inner) => write_filter_refs(inner, out),
             WriteStmt::Create { .. } | WriteStmt::Raw(_) => {}
         }
@@ -2256,10 +2263,13 @@ fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>)
                 pred_paths(where_, model.node.as_str(), out);
                 assign_paths(assigns, model.node.as_str(), out);
             }
-            WriteStmt::Delete { model, where_ }
-            | WriteStmt::Restore { model, where_ }
-            | WriteStmt::HardDelete { model, where_ } => {
+            WriteStmt::Restore { model, where_ } => {
                 pred_paths(where_, model.node.as_str(), out);
+            }
+            WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
+                if let Some(p) = where_ {
+                    pred_paths(p, model.node.as_str(), out);
+                }
             }
             WriteStmt::Tx(inner) => write_paths(inner, out),
             WriteStmt::Raw(_) => {}
@@ -2392,9 +2402,12 @@ fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
                     assign_rhs_param_refs(&a.value, out);
                 }
             }
-            WriteStmt::Delete { where_, .. }
-            | WriteStmt::Restore { where_, .. }
-            | WriteStmt::HardDelete { where_, .. } => pred_param_refs(where_, out),
+            WriteStmt::Restore { where_, .. } => pred_param_refs(where_, out),
+            WriteStmt::Delete { where_, .. } | WriteStmt::HardDelete { where_, .. } => {
+                if let Some(p) = where_ {
+                    pred_param_refs(p, out);
+                }
+            }
             WriteStmt::Tx(inner) => write_param_refs(inner, out),
             WriteStmt::Raw(r) => raw_param_refs(r, out),
         }
@@ -2553,10 +2566,14 @@ fn pred_raw<'a>(p: &'a Predicate, out: &mut Vec<&'a RawSql>) {
 fn write_raw<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a RawSql>) {
     for w in body {
         match w {
-            WriteStmt::Update { where_, .. }
-            | WriteStmt::Delete { where_, .. }
-            | WriteStmt::Restore { where_, .. }
-            | WriteStmt::HardDelete { where_, .. } => pred_raw(where_, out),
+            WriteStmt::Update { where_, .. } | WriteStmt::Restore { where_, .. } => {
+                pred_raw(where_, out);
+            }
+            WriteStmt::Delete { where_, .. } | WriteStmt::HardDelete { where_, .. } => {
+                if let Some(p) = where_ {
+                    pred_raw(p, out);
+                }
+            }
             WriteStmt::Tx(inner) => write_raw(inner, out),
             WriteStmt::Raw(r) => out.push(r),
             WriteStmt::Create { .. } => {}

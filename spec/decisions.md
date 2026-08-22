@@ -84,7 +84,12 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D124 (a bound `create … as name` **re-selects its written row**; every `$name.field`
   reads that row's committed value — engine timestamp, DB default, DB-generated `serial`
   id included — via `RETURNING`/keyed-`SELECT`; unifies `binding_field_value`'s four paths
-  into one, **retires E0268**; resolves H6-R1)
+  into one, **retires E0268**; resolves H6-R1),
+  D125 (whole-table wipe `delete all` / `hard delete all` — required greppable `all`
+  keyword, bare `delete Model` stays a parse error; `where_: Option<Predicate>`;
+  `Dialect::wipe_all` = `TRUNCATE` on Postgres / `DELETE FROM` on MySQL·MariaDB·SQLite;
+  scope predicate still rides a scoped wipe; soft model tombstones-all; `-> ok` via new
+  `WriteEffect::Wipe`, wipe exempt from the ack zero-row 404; BW3)
 - **Indexing** — D15 (index inference, baseline emission, lints), D103 (inferred join-key indexes
   retire → explicit `@index`, error `E0260` + autofix; principle 8 reworded; `inf_`/`IndexSnap.inferred`
   gone), D104 (exotic indexes: `@index(col) using <method>` + opaque `@index raw("…")`, per-dialect
@@ -6064,3 +6069,48 @@ and an unbound create emitting no read-back.
 `execute_returning_id` removed; `driver.rs` overrides removed). Spec: `mutations.md`,
 `transactions.md`, `models.md`. Tests: sema `check.rs`, codegen `mutations.rs`, runtime
 `mutation.rs`/`load.rs`/`sqlite_integration.rs`/`mariadb_integration.rs`/`postgres_integration.rs`.
+
+## D125 — whole-table wipe: `hard delete all` / `delete all` (bulk writes BW3)
+
+**`all` is a required, greppable keyword.** `delete all Model` / `hard delete all Model` deletes
+every row — the bulk counterpart of a filtered delete. A bare `delete Model` (no `where`, no `all`)
+stays a **parse error**: the grammar requires either a `where_clause` or the `all` keyword, so
+"delete everything" is always a deliberate, visible choice, never a forgotten filter (principle 1).
+`all` precedes the model (`delete all Widget`), so it can't be confused with an UpperCamel model ref.
+
+**AST.** `WriteStmt::Delete`/`HardDelete` carry `where_: Option<Predicate>` — `None` is the wipe.
+Parser `delete_target()` is shared by both verbs.
+
+**Contract = delete-semantics**, atomic in the surrounding tx. Scope still applies: on a `@scope`d
+model `all` means every row *in the caller's scope* (the scope predicate rides the wipe; another
+tenant's rows survive; `unscoped` forfeits it). A soft-delete model's `delete all` **tombstones every
+live row** (one `UPDATE … SET <tombstone>` with only the live + scope guards, no user filter), never a
+real DELETE; `hard delete all` on a soft model still physically removes rows.
+
+**Dialect seam (`Dialect::wipe_all`).** An unfiltered `hard delete all` (no scope guard remaining)
+lowers to `TRUNCATE t` on **Postgres** — transactional there, rolls back with the surrounding tx, and
+leaves sequences untouched (no `RESTART IDENTITY`), matching a `DELETE`'s row semantics — and to
+`DELETE FROM t` on **MySQL/MariaDB** (`TRUNCATE` is DDL and auto-commits, which would silently break
+the transaction) and **SQLite** (no `TRUNCATE` statement; an unfiltered `DELETE FROM t` already
+triggers its truncate optimization). A *scoped* wipe keeps its scope predicate → `DELETE FROM t WHERE
+<scope>` on every dialect (a filter and `TRUNCATE` can't compose).
+
+**Read-back = `-> ok`.** A wipe has no single surviving row, so it acknowledges (`{}` wire, unit
+client method). This holds for a soft `delete all` too: a new `WriteEffect::Wipe` classifies it like a
+real DELETE for the return rules — `-> ok` valid (does *not* trip E0221 the way a filtered soft
+`delete` with `-> ok` would), a declared shape is `E0220`. **Not** the E0221 relaxation (that is BW1's
+job — this is only the wipe case.) A wipe is also exempt from the ack zero-row 404: a `LoweredWrite.wipe`
+flag suppresses `ack_check`, so wiping an already-empty table is a success, not `not_found` (there is
+no specific row that had to exist).
+
+**No new error code.** The bare-delete case is a parse error (clearer message pointing at `where`/
+`all`); the shape/ack rules reuse E0220/E0221. Highest code unchanged.
+
+**Blast radius.** `based-ast` (`Delete`/`HardDelete` where_ → Option). `based-parser`
+(`delete_target`). `based-sema` (`check.rs` `WriteEffect::Wipe` + write classification; `scope.rs`/
+`ctx.rs`/`indexes.rs`/`client`-scan Option-guarded predicate walks). `based-codegen` (`Dialect::wipe_all`;
+`sql/mutations.rs` `lower_delete` Option + wipe branch, `LoweredWrite.wipe`, `surviving_ret_write`).
+`based-runtime` (`plan.rs` ack_check skips a wipe). `based-fmt`/`based-lsp` (`delete all` printing +
+Option-guarded walks). Spec: `grammar.ebnf`, `mutations.md`. Tests: parser `parse.rs`, sema `check.rs`
++ conformance-sema `delete_all`, codegen `mutations.rs`, fmt `format.rs`, runtime
+`sqlite_integration.rs` (wipe / scoped-wipe / soft-tombstone-all live).

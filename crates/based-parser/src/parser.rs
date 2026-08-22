@@ -1472,8 +1472,7 @@ impl<'a> Parser<'a> {
                 assigns,
             })
         } else if self.eat_kw("delete") {
-            let model = self.upper_ident("model")?;
-            let where_ = self.where_clause()?;
+            let (model, where_) = self.delete_target()?;
             Ok(WriteStmt::Delete { model, where_ })
         } else if self.eat_kw("restore") {
             let model = self.upper_ident("model")?;
@@ -1485,8 +1484,7 @@ impl<'a> Parser<'a> {
                 self.err("expected `delete` after `hard`");
                 return Err(());
             }
-            let model = self.upper_ident("model")?;
-            let where_ = self.where_clause()?;
+            let (model, where_) = self.delete_target()?;
             Ok(WriteStmt::HardDelete { model, where_ })
         } else if self.eat_kw("tx") {
             self.expect(Tok::LBrace, "`{`")?;
@@ -1508,6 +1506,26 @@ impl<'a> Parser<'a> {
             );
             Err(())
         }
+    }
+
+    /// The `[all] Model (where (...))` target shared by `delete` and `hard delete`. The
+    /// `all` keyword is the required, greppable whole-table wipe: `delete all Model` /
+    /// `hard delete all Model` (`where_` = `None`). Without `all`, a `where` clause is
+    /// required — a bare `delete Model` is a parse error (the grammar demands one or the
+    /// other), so "delete everything" is never a forgotten filter.
+    fn delete_target(&mut self) -> PResult<(Ident, Option<Predicate>)> {
+        let all = self.eat_kw("all");
+        let model = self.upper_ident("model")?;
+        if all {
+            return Ok((model, None));
+        }
+        // A bare `delete Model` (no `where`, no `all`) is a parse error: deleting
+        // everything must be spelled with the explicit, greppable `all` keyword.
+        if !self.at_kw("where") {
+            self.err("expected `where (…)` to filter, or `all` to wipe the whole table");
+            return Err(());
+        }
+        Ok((model, Some(self.where_clause()?)))
     }
 
     fn where_clause(&mut self) -> PResult<Predicate> {

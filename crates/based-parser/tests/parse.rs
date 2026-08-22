@@ -441,6 +441,39 @@ fn mutation_with_create_and_param_refs() {
 }
 
 #[test]
+fn delete_all_parses_with_none_where_and_bare_delete_errors() {
+    let sf = parse_ok(
+        r#"
+        mutation wipe() -> ok {
+          hard delete all Widget;
+          delete all Order;
+        }
+        "#,
+    );
+    let mu = match &sf.decls[0] {
+        Decl::Mutation(m) => m,
+        other => panic!("expected mutation, got {other:?}"),
+    };
+    match &mu.body[0] {
+        WriteStmt::HardDelete { model, where_ } => {
+            assert_eq!(model.node, "Widget");
+            assert!(where_.is_none(), "`all` => no where predicate");
+        }
+        other => panic!("expected hard delete, got {other:?}"),
+    }
+    match &mu.body[1] {
+        WriteStmt::Delete { model, where_ } => {
+            assert_eq!(model.node, "Order");
+            assert!(where_.is_none());
+        }
+        other => panic!("expected delete, got {other:?}"),
+    }
+    // A bare `delete Model` (no `where`, no `all`) must not parse.
+    assert!(parse_file("mutation m() -> ok { delete Widget; }", FileId(0)).is_err());
+    assert!(parse_file("mutation m() -> ok { hard delete Widget; }", FileId(0)).is_err());
+}
+
+#[test]
 fn tx_create_binds_and_references_step() {
     let sf = parse_ok(
         r#"

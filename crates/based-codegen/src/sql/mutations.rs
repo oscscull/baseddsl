@@ -125,6 +125,11 @@ pub struct LoweredWrite {
     /// declared re-select) reads. `None` for a create that neither binds a step nor needs
     /// a DB-generated id read back, and for every non-create write.
     pub capture: Option<Capture>,
+    /// A whole-table wipe (`delete all` / `hard delete all`): no `where` narrows it, so
+    /// "zero rows affected" is a legitimate success (the table was already empty), not the
+    /// absent-row 404 an ordinary delete's zero rows signals. The runtime therefore skips
+    /// the ack-row-count check for a wipe.
+    pub wipe: bool,
 }
 
 /// A bound `create`'s row read-back: the committed column values the run stage captures
@@ -424,11 +429,15 @@ fn surviving_ret_write<'a>(
             }
             // A soft `delete` tombstones (the row survives — read it back *without* the
             // live predicate); a plain-model `delete` really removes it (skip — no row).
-            WriteStmt::Delete { model, where_ }
-                if model.node == ret_model
-                    && schema
-                        .model(&model.node)
-                        .is_some_and(|m| m.soft_delete.is_some()) =>
+            // A soft `delete all` (`where_` = `None`) tombstones every row — no single
+            // surviving row to read back, so it is an `-> ok` ack (skip here too).
+            WriteStmt::Delete {
+                model,
+                where_: Some(where_),
+            } if model.node == ret_model
+                && schema
+                    .model(&model.node)
+                    .is_some_and(|m| m.soft_delete.is_some()) =>
             {
                 return Some((where_, false));
             }
@@ -504,9 +513,12 @@ fn collect_binding_refs<'a>(
                 );
                 collect_pred_refs(where_, &models, &mut out);
             }
-            WriteStmt::Delete { where_, .. }
-            | WriteStmt::HardDelete { where_, .. }
-            | WriteStmt::Restore { where_, .. } => collect_pred_refs(where_, &models, &mut out),
+            WriteStmt::Restore { where_, .. } => collect_pred_refs(where_, &models, &mut out),
+            WriteStmt::Delete { where_, .. } | WriteStmt::HardDelete { where_, .. } => {
+                if let Some(p) = where_ {
+                    collect_pred_refs(p, &models, &mut out);
+                }
+            }
             WriteStmt::Tx(_) | WriteStmt::Raw(_) => {}
         }
     }
@@ -679,12 +691,12 @@ fn lower_write<'a>(
         }
         WriteStmt::Delete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_delete(cx, m, where_, false));
+                out.push(lower_delete(cx, m, where_.as_ref(), false));
             }
         }
         WriteStmt::HardDelete { model, where_ } => {
             if let Some(m) = schema.model(&model.node) {
-                out.push(lower_delete(cx, m, where_, true));
+                out.push(lower_delete(cx, m, where_.as_ref(), true));
             }
         }
         WriteStmt::Restore { model, where_ } => {
@@ -705,6 +717,7 @@ fn lower_write<'a>(
             serial_col: None,
             creates: false,
             capture: None,
+            wipe: false,
         }),
     }
 }
@@ -877,6 +890,7 @@ fn lower_create<'a>(
         serial_col,
         creates: true,
         capture,
+        wipe: false,
     }
 }
 
@@ -1233,26 +1247,48 @@ fn lower_update<'a>(
         serial_col: None,
         creates: false,
         capture: None,
+        wipe: false,
     }
 }
 
 // ---------- delete / hard delete -------------------------------------------
 
-fn lower_delete(cx: &LowerCx, model: &RModel, where_: &Predicate, hard: bool) -> LoweredWrite {
+/// Lower a `delete` / `hard delete`. `where_` is `None` for the whole-table wipe
+/// `delete all` — every row (in scope). A soft model's plain `delete[ all]` tombstones
+/// (UPDATE) rather than really deleting; `hard delete[ all]` and a plain model emit a real
+/// DELETE. A `hard delete all` with no injected guard (unscoped / non-scoped, non-soft)
+/// lowers to `TRUNCATE` on Postgres (transaction-safe there) — see [`Dialect::wipe_all`].
+fn lower_delete(
+    cx: &LowerCx,
+    model: &RModel,
+    where_: Option<&Predicate>,
+    hard: bool,
+) -> LoweredWrite {
+    let wipe = where_.is_none();
     let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
         .with_scope_inject(!cx.unscoped)
         .with_scope_terms(cx.inject);
 
-    // Soft model + plain `delete` -> tombstone UPDATE, never a real DELETE.
+    // Soft model + plain `delete[ all]` -> tombstone UPDATE, never a real DELETE.
     if let (Some(sd), false) = (&model.soft_delete, hard) {
         let mut sets = vec![tombstone_set(&sel, model, sd, /* deleting = */ true)];
         if let Some(bump) = updated_bump(&sel, model, &[]) {
             sets.push(bump);
         }
-        let mut wheres = vec![sel.predicate(where_, model)];
+        // `delete all` narrows by nothing user-supplied; only the injected live + scope
+        // guards remain (tombstone every live row in scope).
+        let mut wheres: Vec<String> = where_
+            .map(|p| sel.predicate(p, model))
+            .into_iter()
+            .collect();
         inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
+        let header = if wipe {
+            "-- delete all (soft): tombstone every row in scope\n"
+        } else {
+            "-- delete (soft): tombstone, never a real DELETE\n"
+        };
         return LoweredWrite {
-            header: "-- delete (soft): tombstone, never a real DELETE\n".to_string(),
+            header: header.to_string(),
             sql: update_stmt(&sel, model, &sets, &wheres),
             model: model.name.clone(),
             gen_id: None,
@@ -1261,20 +1297,34 @@ fn lower_delete(cx: &LowerCx, model: &RModel, where_: &Predicate, hard: bool) ->
             serial_col: None,
             creates: false,
             capture: None,
+            wipe,
         };
     }
 
     // Plain model, or the loud `hard delete` opt-out -> real DELETE.
-    let mut wheres = vec![sel.predicate(where_, model)];
+    let mut wheres: Vec<String> = where_
+        .map(|p| sel.predicate(p, model))
+        .into_iter()
+        .collect();
     inject_guards(&mut sel, model, &mut wheres, /* live = */ false);
-    let header = if hard {
-        "-- hard delete: real DELETE (explicit soft-delete opt-out)\n".to_string()
+
+    // `[hard ]delete all` with no remaining WHERE (unscoped / non-scoped) is a true
+    // whole-table wipe: `TRUNCATE` where transaction-safe (Postgres), else `DELETE FROM t`.
+    // A scoped wipe keeps its scope predicate, so it stays a `DELETE FROM t WHERE <scope>`.
+    let sql = if wipe && wheres.is_empty() {
+        cx.dialect.wipe_all(&sel.qt(model))
     } else {
-        String::new()
+        delete_stmt(&sel, model, &wheres)
+    };
+    let header = match (hard, wipe) {
+        (true, true) => "-- hard delete all: whole-table wipe\n",
+        (true, false) => "-- hard delete: real DELETE (explicit soft-delete opt-out)\n",
+        (false, true) => "-- delete all: whole-table wipe\n",
+        (false, false) => "",
     };
     LoweredWrite {
-        header,
-        sql: delete_stmt(&sel, model, &wheres),
+        header: header.to_string(),
+        sql,
         model: model.name.clone(),
         gen_id: None,
         conflict_key: None,
@@ -1282,6 +1332,7 @@ fn lower_delete(cx: &LowerCx, model: &RModel, where_: &Predicate, hard: bool) ->
         serial_col: None,
         creates: false,
         capture: None,
+        wipe,
     }
 }
 
@@ -1315,6 +1366,7 @@ fn lower_restore(cx: &LowerCx, model: &RModel, where_: &Predicate) -> LoweredWri
         serial_col: None,
         creates: false,
         capture: None,
+        wipe: false,
     }
 }
 

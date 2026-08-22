@@ -110,6 +110,28 @@ impl Dialect {
         }
     }
 
+    /// The whole-table wipe statement for an unfiltered `[hard ]delete all` (no scope or
+    /// soft-delete guard narrows it). `qualified_table` is already quoted (and schema-
+    /// qualified). The seam exists because `TRUNCATE`'s transaction-safety differs by
+    /// dialect:
+    /// - **Postgres** — `TRUNCATE <t>` is fully transactional (rolls back with the
+    ///   surrounding tx), so the engine uses it (faster, reclaims space) — sequences are
+    ///   left as-is (no `RESTART IDENTITY`), matching a `DELETE`'s row semantics.
+    /// - **MySQL/MariaDB** — `TRUNCATE` is DDL and **auto-commits**, which would silently
+    ///   break the mutation's surrounding transaction, so a plain `DELETE FROM <t>` is
+    ///   emitted (transactional, respects the tx boundary).
+    /// - **SQLite** — has no `TRUNCATE` statement; a `DELETE FROM <t>` with no `WHERE`
+    ///   already triggers its internal truncate optimization, so `DELETE FROM <t>` is both
+    ///   correct and fast.
+    pub fn wipe_all(self, qualified_table: &str) -> String {
+        match self {
+            Self::Postgres => format!("TRUNCATE {qualified_table};\n"),
+            Self::MariaDb | Self::MySql | Self::Sqlite => {
+                format!("DELETE FROM {qualified_table};\n")
+            }
+        }
+    }
+
     /// The boolean literal spelling. MariaDB/Postgres have the `TRUE`/`FALSE`
     /// keywords; SQLite stores bools as integers, so it is `1`/`0`.
     pub fn bool_lit(self, b: bool) -> &'static str {

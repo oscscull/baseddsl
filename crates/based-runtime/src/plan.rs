@@ -455,9 +455,14 @@ pub fn plan_mutation(
         .collect();
 
     // 4. An `-> ok` mutation has no re-select; its not-found signal is the primary
-    //    DELETE (the first write on the primary model) affecting zero rows.
+    //    DELETE (the first write on the primary model) affecting zero rows. A whole-table
+    //    wipe (`delete all`) is exempt: zero rows means an already-empty table, a success —
+    //    not an absent-row 404.
     let ack_check = if rm.ack {
-        low.stmts.iter().position(|w| w.model == rm.ret_model)
+        low.stmts
+            .iter()
+            .position(|w| w.model == rm.ret_model)
+            .filter(|&i| !low.stmts[i].wipe)
     } else {
         None
     };
@@ -663,11 +668,13 @@ fn param_use_in_stmts(compiled: &Compiled, stmts: &[WriteStmt], name: &str) -> O
                 assigns,
             } => param_use_in_assigns(schema, &model.node, assigns, name)
                 .or_else(|| param_use_in_pred(compiled, schema.model(&model.node)?, where_, name)),
-            WriteStmt::Delete { model, where_ }
-            | WriteStmt::Restore { model, where_ }
-            | WriteStmt::HardDelete { model, where_ } => {
+            WriteStmt::Restore { model, where_ } => {
                 param_use_in_pred(compiled, schema.model(&model.node)?, where_, name)
             }
+            // `delete all` (`where_` = `None`) binds no params.
+            WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => where_
+                .as_ref()
+                .and_then(|p| param_use_in_pred(compiled, schema.model(&model.node)?, p, name)),
             WriteStmt::Tx(inner) => param_use_in_stmts(compiled, inner, name),
             // A raw write is opaque SQL — its params stay text binds (the escape hatch
             // writes its own casts).

@@ -265,6 +265,105 @@ fn delete_on_plain_model_is_a_real_delete() {
 }
 
 #[test]
+fn hard_delete_all_wipes_the_table_truncate_on_pg_delete_elsewhere() {
+    let src = r#"
+        Widget { id: Id, name: text }
+        mutation wipe() -> ok {
+          hard delete all Widget;
+        }
+        "#;
+    // Postgres: TRUNCATE (transaction-safe there).
+    let pg = gen_pg(src);
+    assert!(pg.contains("TRUNCATE \"widget\";"), "\n{pg}");
+    assert!(!pg.contains("DELETE FROM"), "PG wipe uses TRUNCATE:\n{pg}");
+    // MySQL/MariaDB: plain DELETE FROM (TRUNCATE auto-commits — would break the tx).
+    let maria = gen(src);
+    assert!(maria.contains("DELETE FROM `widget`;"), "\n{maria}");
+    assert!(!maria.contains("TRUNCATE"), "\n{maria}");
+    let mysql = gen_mysql(src);
+    assert!(mysql.contains("DELETE FROM `widget`;"), "\n{mysql}");
+    // No WHERE on any dialect (whole-table).
+    assert!(!maria.contains("WHERE"), "wipe has no WHERE:\n{maria}");
+}
+
+#[test]
+fn scoped_hard_delete_all_keeps_the_scope_predicate_not_truncate() {
+    let src = r#"
+        Org { id: Id, name: text }
+        scope Tenant (org: Org = $ctx.org)
+        @scope Tenant
+        Order { id: Id, org: Org, @index(org) }
+        mutation wipe_mine() -> ok scoped Tenant {
+          hard delete all Order;
+        }
+        "#;
+    // A scoped `all` is all rows *in scope* — a filtered DELETE, never a TRUNCATE.
+    let pg = gen_pg(src);
+    assert!(
+        !pg.contains("TRUNCATE"),
+        "scoped wipe is not a TRUNCATE:\n{pg}"
+    );
+    assert!(
+        pg.contains("DELETE FROM \"order\"") && pg.contains("\"org_id\" = :ctx_org"),
+        "\n{pg}"
+    );
+    let maria = gen(src);
+    assert!(
+        maria.contains("DELETE FROM `order`\nWHERE `order`.`org_id` = :ctx_org;"),
+        "\n{maria}"
+    );
+}
+
+#[test]
+fn soft_delete_all_tombstones_every_row_never_a_real_delete() {
+    let src = r#"
+        @soft_delete(deleted_at)
+        Order { id: Id, deleted_at: timestamp? }
+        mutation archive_all() -> ok {
+          delete all Order;
+        }
+        "#;
+    let out = gen(src);
+    assert!(
+        out.contains("-- delete all (soft): tombstone every row in scope"),
+        "\n{out}"
+    );
+    // UPDATE … SET deleted_at = now(), filtered only by the live predicate (no user WHERE).
+    assert!(out.contains("UPDATE `order`"), "\n{out}");
+    assert!(
+        out.contains("SET `order`.`deleted_at` = CURRENT_TIMESTAMP"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("WHERE `order`.`deleted_at` IS NULL;"),
+        "soft wipe keeps only the live predicate:\n{out}"
+    );
+    assert!(
+        !out.contains("DELETE FROM") && !out.contains("TRUNCATE"),
+        "soft delete all must not physically delete:\n{out}"
+    );
+}
+
+#[test]
+fn hard_delete_all_on_soft_model_still_physically_wipes() {
+    let src = r#"
+        @soft_delete(deleted_at)
+        Order { id: Id, deleted_at: timestamp? }
+        mutation nuke() -> ok {
+          hard delete all Order;
+        }
+        "#;
+    let pg = gen_pg(src);
+    assert!(pg.contains("TRUNCATE \"order\";"), "\n{pg}");
+    let maria = gen(src);
+    assert!(maria.contains("DELETE FROM `order`;"), "\n{maria}");
+    assert!(
+        !maria.contains("deleted_at"),
+        "hard wipe ignores the tombstone:\n{maria}"
+    );
+}
+
+#[test]
 fn tx_renders_each_write_in_order() {
     let out = gen(r#"
         User { id: Id, email: text }

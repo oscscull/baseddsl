@@ -123,11 +123,16 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
                 }
             }
         }
-        WriteStmt::Delete { model, where_ }
-        | WriteStmt::HardDelete { model, where_ }
-        | WriteStmt::Restore { model, where_ } => {
+        WriteStmt::Restore { model, where_ } => {
             if let Some(mi) = cx.find(&model.node) {
                 walk_pred(where_, mi, cx, &mut Vec::new(), out);
+            }
+        }
+        WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
+            if let Some(mi) = cx.find(&model.node) {
+                if let Some(pred) = where_ {
+                    walk_pred(pred, mi, cx, &mut Vec::new(), out);
+                }
             }
         }
         WriteStmt::Tx(inner) => {

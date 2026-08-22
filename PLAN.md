@@ -38,13 +38,13 @@ native* — `delete`/`update Model where (broad)` lowers to one set-based `DELET
   existing `on conflict` clause (D102), composed. **Open sub-fork:** the `update` branch must reference the
   *incoming/proposed* row's values (an `excluded`-/`$row`-style reference, distinct from the singular
   upsert's column/param operands) — needs a design call.
-- **BW3. Whole-table wipe — `hard delete all Model -> ok`** (and soft `delete all` → tombstone-all on a
-  soft-delete model). **`all` is a required, greppable keyword** — "everything" is deliberate, never a
-  forgotten `where` (a bare `hard delete Model` stays a parse error; the grammar requires `where_clause`).
-  Contract = *delete-semantics* (every row gone, atomically in the tx); the engine emits `TRUNCATE` only
-  where transaction-safe (Postgres/SQLite) and plain `DELETE` on MySQL/MariaDB (there `TRUNCATE` auto-
-  commits — DDL — and would silently break the surrounding transaction). Independent + lower-stakes — can
-  ship first.
+- **BW3. Whole-table wipe — `hard delete all Model -> ok` (and soft `delete all` → tombstone-all) — DONE
+  (D125).** Required greppable `all` keyword (bare `delete Model` stays a parse error);
+  `where_: Option<Predicate>`; `Dialect::wipe_all` = `TRUNCATE` on Postgres (transaction-safe there),
+  plain `DELETE FROM t` on MySQL/MariaDB (TRUNCATE auto-commits) + SQLite (no TRUNCATE stmt; unfiltered
+  DELETE hits its truncate optimization); a scoped wipe keeps its scope predicate; soft model tombstones
+  every live row; `-> ok` via new `WriteEffect::Wipe`, wipe exempt from the ack zero-row 404. Full
+  pipeline + live SQLite proof.
 
 **Forks resolved (owner, 2026-08-22):** reuse `create` (no new insert verb); row input = a reusable
 first-class `input` decl; `-> ok` broadened to any mutation + bulk `-> Row[]`; wipe = `hard delete all`

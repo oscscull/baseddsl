@@ -634,10 +634,13 @@ pub fn adopt_{suffix}<'a>(
                 }
                 scan_pred(m, where_, map);
             }
-            WriteStmt::Delete { model, where_ }
-            | WriteStmt::Restore { model, where_ }
-            | WriteStmt::HardDelete { model, where_ } => {
+            WriteStmt::Restore { model, where_ } => {
                 scan_pred(schema.model(&model.node), where_, map);
+            }
+            WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
+                if let Some(p) = where_ {
+                    scan_pred(schema.model(&model.node), p, map);
+                }
             }
             WriteStmt::Tx(stmts) => {
                 for s in stmts {

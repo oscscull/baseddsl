@@ -237,11 +237,14 @@ fn collect_write(
     usage: &mut [Usage],
     patterns: &mut Vec<(usize, Pattern)>,
 ) {
-    let (model, where_) = match stmt {
-        WriteStmt::Update { model, where_, .. }
-        | WriteStmt::Delete { model, where_ }
-        | WriteStmt::HardDelete { model, where_ }
-        | WriteStmt::Restore { model, where_ } => (model, where_),
+    let (model, where_): (_, Option<&Predicate>) = match stmt {
+        WriteStmt::Update { model, where_, .. } | WriteStmt::Restore { model, where_ } => {
+            (model, Some(where_))
+        }
+        // `delete all` (`where_` = `None`) carries only the model's `@scope` pattern.
+        WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
+            (model, where_.as_ref())
+        }
         WriteStmt::Tx(inner) => {
             for s in inner {
                 collect_write(s, mut_name, inject, cx, usage, patterns);
@@ -265,14 +268,16 @@ fn collect_write(
 fn write_pattern(
     name: &str,
     span: Span,
-    where_: &Predicate,
+    where_: Option<&Predicate>,
     mi: usize,
     inject: &[ScopeInject],
     cx: &Cx,
     usage: &mut [Usage],
 ) -> Pattern {
     let mut pat = Pattern::new(name.to_string(), span, false);
-    pat.walk(where_, mi, cx, usage, &mut Vec::new());
+    if let Some(pred) = where_ {
+        pat.walk(pred, mi, cx, usage, &mut Vec::new());
+    }
     for si in inject {
         if si.model == cx.model(mi).name {
             for (col, _) in &si.terms {

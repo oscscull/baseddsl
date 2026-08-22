@@ -285,9 +285,17 @@ create_stmt = 'create' model_ref assign_block [ on_conflict ] [ 'as' binding_nam
 binding_name = lower_ident ;
 on_conflict = 'on' 'conflict' '(' column_name { ',' column_name } ')' 'update' assign_block ;
 update_stmt = 'update' model_ref where_clause assign_block ;
-delete_stmt = 'delete' model_ref where_clause ;
 restore_stmt= 'restore' model_ref where_clause ;
-hard_delete_stmt = 'hard' 'delete' model_ref where_clause ;
+
+(* A `delete` / `hard delete` targets either a `where`-filtered set OR — with the         *)
+(* required, greppable `all` keyword — every row (a whole-table wipe). One of the two is   *)
+(* mandatory: a bare `delete Model` (no `where`, no `all`) is a parse error, so "delete    *)
+(* everything" is never a forgotten filter (principle 1). `all` precedes the model.        *)
+(* `delete all` on a @soft_delete model tombstones every row; `hard delete all` physically *)
+(* removes them (real DELETE, or TRUNCATE where transaction-safe). Read-back is `-> ok`     *)
+(* (no single surviving row).                                                              *)
+delete_stmt = 'delete' ( 'all' model_ref | model_ref where_clause ) ;
+hard_delete_stmt = 'hard' 'delete' ( 'all' model_ref | model_ref where_clause ) ;
 
 assign_block = '{' { assign sep } [ assign ] '}' ;
 assign      = column_name '=' assign_rhs ;
