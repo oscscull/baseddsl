@@ -11,6 +11,51 @@ the **remaining milestones**. Spec is truth for *what* the language is; this is 
 > lean so resuming work doesn't cost a full history read. When a line below cites a `D#`,
 > that decision entry (and the archive) is where the detail is.
 
+## ⭐ FIRST PRIORITY — Bulk writes (BW) (owner-raised 2026-08-22)
+
+**Framing (owner): a representability gap, not an ergonomics one.** Today the only way to express an
+*efficient* bulk insert is to leave the language for `raw`/`adopt` — so the syntax disallows an efficient
+operation, which is the precise failure class bsl exists to close (same shape as pagination: the engine
+owns the portable-fiddly hard part, clean syntax rides on top). Note *bulk delete/update are already
+native* — `delete`/`update Model where (broad)` lowers to one set-based `DELETE`/`UPDATE … WHERE` (no
+`LIMIT`), deleting/updating every match in a single statement. The genuine gaps are **bulk insert/upsert**
+(still one row per `create`) and an explicit **whole-table wipe**. Three primitives:
+
+- **BW1. Bulk insert — `create Model[] from $rows -> Row[]` | `-> ok`.** One multi-row `INSERT …
+  RETURNING` (or `COPY` on Postgres), **engine-chunked transparently** above driver param limits (Postgres
+  ~65535 binds — the user never sees the cap). Atomic all-or-nothing within the surrounding tx.
+  - **Row input type (owner call): a new first-class `input` declaration** — the input dual of `shape` —
+    **reusable for BOTH single-row and bulk** (`create Product from $p` *and* `create Product[] from
+    $rows`). One concept a user learns once; it names the user-assignable columns (engine-managed columns —
+    `id`, `@created`/`@updated`, `@scope` — are excluded and filled per row by the engine, exactly as the
+    singular `create` already does). The existing `create Model { field = $param }` assign-block form stays
+    for inline/computed assigns; the `input`-driven `from` form is the structured-record path.
+  - **Read-back (owner call): broaden `-> ok` to ANY mutation** (a universal opt-out of the read-back —
+    relaxes E0221, which made `-> ok` on a surviving write an error) **plus bulk `-> Row[]`** via RETURNING.
+    So a huge load goes `-> ok` (skips echoing rows back); ask `-> Row[]` when you need the DB-generated
+    ids/defaults. `-> count` (affected-row count) is a possible third form — open.
+- **BW2. Bulk upsert — `create Model[] from $rows on conflict (target) update { … }`.** Bulk insert + the
+  existing `on conflict` clause (D102), composed. **Open sub-fork:** the `update` branch must reference the
+  *incoming/proposed* row's values (an `excluded`-/`$row`-style reference, distinct from the singular
+  upsert's column/param operands) — needs a design call.
+- **BW3. Whole-table wipe — `hard delete all Model -> ok`** (and soft `delete all` → tombstone-all on a
+  soft-delete model). **`all` is a required, greppable keyword** — "everything" is deliberate, never a
+  forgotten `where` (a bare `hard delete Model` stays a parse error; the grammar requires `where_clause`).
+  Contract = *delete-semantics* (every row gone, atomically in the tx); the engine emits `TRUNCATE` only
+  where transaction-safe (Postgres/SQLite) and plain `DELETE` on MySQL/MariaDB (there `TRUNCATE` auto-
+  commits — DDL — and would silently break the surrounding transaction). Independent + lower-stakes — can
+  ship first.
+
+**Forks resolved (owner, 2026-08-22):** reuse `create` (no new insert verb); row input = a reusable
+first-class `input` decl; `-> ok` broadened to any mutation + bulk `-> Row[]`; wipe = `hard delete all`
+keyword form with dialect-safe TRUNCATE/DELETE; engine-owned param chunking. **Open sub-forks (for a later
+call, don't block BW1/BW3):** BW2's incoming-row reference syntax; whether an `input` decl may subset/rename
+model columns (vs. exactly the assignable set); the `-> count` read-back form. Needs full pipeline —
+grammar/AST → sema (new `input` decl + relaxed E0221 + `all` keyword + `[]`-create/`from`) → codegen
+(multi-row INSERT/RETURNING/COPY + chunking + TRUNCATE-vs-DELETE seam) → runtime binding → client-gen →
+goldens + live per-dialect. Spec: new `spec/syntax/` coverage (input shapes, bulk writes) + `mutations.md`
+update. Design sign-off on the open sub-forks before those slices.
+
 ## Autonomous build loop (how this is being built out)
 
 This roadmap is executed by a self-driving loop. Protocol, for whoever (human or agent)
