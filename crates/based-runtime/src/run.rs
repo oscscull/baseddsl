@@ -602,6 +602,12 @@ async fn run_writes<D: DbRead + ?Sized>(
     };
 
     for (i, step) in plan.steps.iter().enumerate() {
+        // A structured shape-input create (BW1): materialize a chunked, atomic multi-row
+        // INSERT from the plan's resolved rows (no `:name` template, no read-back).
+        if let Some(bulk) = &step.bulk {
+            run_bulk(db, plan.dialect, bulk).await?;
+            continue;
+        }
         let (sql, params) = bind(&step.sql, &env)?;
         // A bound create's row read-back captures the written row's committed columns
         // (the INSERT's own `RETURNING`, or a MySQL follow-up keyed `SELECT`) into `env`; a
@@ -655,6 +661,74 @@ async fn run_writes<D: DbRead + ?Sized>(
         },
     };
     Ok(TxOutcome::Done(response))
+}
+
+/// The per-dialect ceiling on bound parameters in one statement, above which a bulk INSERT
+/// is chunked (BW1). Postgres's wire protocol caps at 65535; SQLite's compile-time variable
+/// limit is smaller and version-dependent, so a conservative value keeps every build safe.
+/// The user never sees the cap — the engine chunks transparently.
+fn max_binds(dialect: based_codegen::Dialect) -> usize {
+    match dialect {
+        based_codegen::Dialect::Sqlite => 900,
+        _ => 65000,
+    }
+}
+
+/// Execute a structured shape-input create (`create Model[]? from …`, BW1) as one or more
+/// multi-row `INSERT … VALUES (…),(…),…` statements, transparently chunked below the
+/// driver's bind limit. Every chunk runs on the same transaction connection, so the whole
+/// insert is atomic (all-or-nothing) with the surrounding mutation. Zero rows is a no-op.
+async fn run_bulk<D: DbRead + ?Sized>(
+    db: &mut D,
+    dialect: based_codegen::Dialect,
+    bulk: &crate::plan::BulkStep,
+) -> Result<(), DbError> {
+    if bulk.rows.is_empty() {
+        return Ok(());
+    }
+    let col_list = bulk
+        .columns
+        .iter()
+        .map(|c| c.quoted.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let per_row = bulk.binds_per_row.max(1);
+    let chunk_rows = (max_binds(dialect) / per_row).max(1);
+    for chunk in bulk.rows.chunks(chunk_rows) {
+        let mut sql = format!("INSERT INTO {} ({col_list})\nVALUES ", bulk.table);
+        let mut params: Vec<SqlValue> = Vec::with_capacity(chunk.len() * per_row);
+        let mut ord = 0usize;
+        for (r, row) in chunk.iter().enumerate() {
+            if r > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('(');
+            let mut bind_i = 0usize;
+            for (ci, c) in bulk.columns.iter().enumerate() {
+                if ci > 0 {
+                    sql.push_str(", ");
+                }
+                if let Some(lit) = &c.literal {
+                    sql.push_str(lit);
+                } else {
+                    ord += 1;
+                    match dialect {
+                        based_codegen::Dialect::Postgres => {
+                            sql.push('$');
+                            sql.push_str(&ord.to_string());
+                        }
+                        _ => sql.push('?'),
+                    }
+                    params.push(row[bind_i].clone());
+                    bind_i += 1;
+                }
+            }
+            sql.push(')');
+        }
+        sql.push_str(";\n");
+        db.execute(&sql, &params).await?;
+    }
+    Ok(())
 }
 
 /// The `{ id }` fallback response value for a created row's id — a uuid/ulid string or a

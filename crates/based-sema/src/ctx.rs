@@ -97,9 +97,13 @@ fn walk_write(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<CtxReq>) {
         WriteStmt::Create {
             model,
             assigns,
+            from: _,
             conflict,
             binding: _,
         } => {
+            // A structured `create … from $param` carries its values in the param's
+            // shape, not inline assigns — no `$ctx` reach in the statement itself (the
+            // `@scope` auto-set adds its own requirement in `resolve_inject`).
             if let Some(mi) = cx.find(&model.node) {
                 for a in assigns {
                     record_assign(a, mi, cx, out);

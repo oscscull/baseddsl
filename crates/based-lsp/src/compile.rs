@@ -1269,6 +1269,7 @@ impl Snapshot {
                 WriteStmt::Create {
                     model,
                     assigns,
+                    from: _,
                     conflict,
                     binding: _,
                 } => {
@@ -2247,6 +2248,7 @@ fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>)
             WriteStmt::Create {
                 model,
                 assigns,
+                from: _,
                 conflict,
                 binding: _,
             } => {

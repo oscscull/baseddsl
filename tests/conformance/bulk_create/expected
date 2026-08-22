@@ -1,0 +1,8 @@
+OK
+model Org  decorators=[]  fields=2  indexes=0
+scope Tenant  terms=1
+model Category  decorators=[]  fields=2  indexes=0
+model Product  decorators=[]  fields=6  indexes=2
+shape ProductIn from Product  fields=4
+mutation bulk_add_products  params=1  ret=ok  writes=1
+mutation add_one_product  params=1  ret=ok  writes=1

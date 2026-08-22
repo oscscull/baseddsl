@@ -1524,6 +1524,10 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
         );
     }
 
+    // Shape-as-input eligibility for every `create … from $param` (BW1) — checked at the
+    // use site, with the mutation's param types in hand.
+    check_from_creates(m, cx, sink);
+
     check_keyless_readback(m, &ret, cx, sink);
 
     // Scope acknowledgement: a mutation touching a scoped
@@ -1609,8 +1613,8 @@ enum WriteEffect<'a> {
     /// a declared shape is an error), even though the SQL is an UPDATE.
     Wipe(&'a Ident),
     /// create / update / restore / soft `delete` (tombstone): a row survives to
-    /// read back. Carries the verb for the diagnostic.
-    Surviving(&'a Ident, &'static str),
+    /// read back.
+    Surviving(&'a Ident),
     /// A raw write — its effect is outside the engine's knowledge.
     Raw,
 }
@@ -1620,9 +1624,9 @@ fn write_effects<'a>(body: &'a [WriteStmt], cx: &Cx) -> Vec<WriteEffect<'a>> {
     let mut out = Vec::new();
     for stmt in body {
         match stmt {
-            WriteStmt::Create { model, .. } => out.push(WriteEffect::Surviving(model, "create")),
-            WriteStmt::Update { model, .. } => out.push(WriteEffect::Surviving(model, "update")),
-            WriteStmt::Restore { model, .. } => out.push(WriteEffect::Surviving(model, "restore")),
+            WriteStmt::Create { model, .. } => out.push(WriteEffect::Surviving(model)),
+            WriteStmt::Update { model, .. } => out.push(WriteEffect::Surviving(model)),
+            WriteStmt::Restore { model, .. } => out.push(WriteEffect::Surviving(model)),
             WriteStmt::HardDelete { model, .. } => out.push(WriteEffect::RealDelete(model)),
             WriteStmt::Delete { model, where_ } => {
                 let soft = cx
@@ -1632,7 +1636,7 @@ fn write_effects<'a>(body: &'a [WriteStmt], cx: &Cx) -> Vec<WriteEffect<'a>> {
                     // Soft `delete all` tombstones every row — an ack wipe, not a
                     // read-backable surviving write.
                     (true, true) => out.push(WriteEffect::Wipe(model)),
-                    (true, false) => out.push(WriteEffect::Surviving(model, "delete (soft)")),
+                    (true, false) => out.push(WriteEffect::Surviving(model)),
                     (false, _) => out.push(WriteEffect::RealDelete(model)),
                 }
             }
@@ -1643,27 +1647,21 @@ fn write_effects<'a>(body: &'a [WriteStmt], cx: &Cx) -> Vec<WriteEffect<'a>> {
     out
 }
 
-/// Resolve an `-> ok` mutation: every write must be a real DELETE (a raw write is
-/// allowed — its effect is the author's), and the primary model — the one scope,
-/// sharding, and the 404-on-zero-rows check ride on — is the first real DELETE's.
+/// Resolve an `-> ok` mutation: `ok` is the **universal opt-out of read-back** (BW1
+/// broadened it from real-DELETE-only) — any mutation may forfeit the declared-shape
+/// return. The primary model — the one scope, sharding, and (for a real DELETE) the
+/// 404-on-zero-rows check ride on — is the first non-raw write's model. E0221 is retired:
+/// a surviving write under `-> ok` is legal (a bulk `create Model[] from $rows -> ok` is
+/// the motivating case). A body of only raw writes still needs a primary model to hang
+/// scope/sharding on, so it stays an error.
 fn resolve_ack_return(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<Resolved> {
     let mut primary: Option<&Ident> = None;
     for e in write_effects(&m.body, cx) {
         match e {
-            WriteEffect::RealDelete(model) | WriteEffect::Wipe(model) => {
+            WriteEffect::RealDelete(model)
+            | WriteEffect::Wipe(model)
+            | WriteEffect::Surviving(model) => {
                 primary = primary.or(Some(model));
-            }
-            WriteEffect::Surviving(model, verb) => {
-                sink.error_note(
-                    code::ACK_SURVIVING,
-                    m.ret.ty.span,
-                    format!(
-                        "mutation `{}` returns `ok` but `{verb} {}` leaves a surviving row",
-                        m.name.node, model.node
-                    ),
-                    "a surviving write reads its row back — declare its shape; `-> ok` is for real DELETEs",
-                );
-                return None;
             }
             WriteEffect::Raw => {}
         }
@@ -1673,10 +1671,10 @@ fn resolve_ack_return(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<Resolved
             code::ACK_SURVIVING,
             m.ret.ty.span,
             format!(
-                "mutation `{}` returns `ok` but performs no real DELETE",
+                "mutation `{}` returns `ok` but has no engine-known write",
                 m.name.node
             ),
-            "`-> ok` acknowledges a destructive write: a plain-model `delete` or `hard delete`",
+            "`-> ok` acknowledges a write (create / update / delete / …); a raw-only body has no primary model",
         );
         return None;
     };
@@ -1701,7 +1699,7 @@ fn check_shape_on_real_delete(m: &Mutation, ret: &Resolved, cx: &Cx, sink: &mut 
             {
                 deletes_ret = true;
             }
-            WriteEffect::Surviving(model, _) if model.node == ret.model => survives_ret = true,
+            WriteEffect::Surviving(model) if model.node == ret.model => survives_ret = true,
             _ => {}
         }
     }
@@ -1782,10 +1780,18 @@ fn check_write(
         WriteStmt::Create {
             model,
             assigns,
+            from,
             conflict,
             binding: _,
         } => {
             if let Some(mi) = write_model(model, cx, sink) {
+                // The structured `create … from $param` form carries no inline assigns;
+                // its shape-as-input eligibility is checked by `check_from_creates` (it
+                // needs the mutation's param types, threaded there, not here).
+                if from.is_some() {
+                    let _ = mi;
+                    return;
+                }
                 for a in assigns {
                     check_assign(
                         a, mi, cx, params, bindings, /* in_update = */ false, sink,
@@ -2074,6 +2080,426 @@ fn check_create_required(
                 if missing.len() == 1 { "" } else { "s" },
                 missing.join(", ")
             ),
+        );
+    }
+}
+
+/// Flatten a mutation body's writes (`tx` blocks inlined) so a whole-body scan sees every
+/// statement in execution order.
+fn flatten_writes(body: &[WriteStmt]) -> Vec<&WriteStmt> {
+    let mut out = Vec::new();
+    for w in body {
+        match w {
+            WriteStmt::Tx(inner) => out.extend(inner.iter()),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Shape-as-input eligibility for every `create … from $param` in the body (BW1). A
+/// `shape` is a neutral bag of typed fields; whether it may serve as a create's row input
+/// is a property of the **use site** (this shape meeting this `create Model`), not of the
+/// shape declaration — so the check lives here, with the mutation's param types in scope.
+fn check_from_creates(m: &Mutation, cx: &Cx, sink: &mut Sink) {
+    for stmt in flatten_writes(&m.body) {
+        let WriteStmt::Create {
+            model,
+            from: Some(cf),
+            conflict,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        let Some(mi) = cx.find(&model.node) else {
+            continue; // unknown model reported by the write check
+        };
+        if conflict.is_some() {
+            sink.error_note(
+                code::INPUT_BULK_UPSERT,
+                cf.span,
+                format!("`create {} from …` cannot carry `on conflict` yet", model.node),
+                "bulk upsert (BW2) is not implemented — use an inline `create … on conflict` for one row",
+            );
+        }
+        // A structured `create … from` must be `-> ok` in this release: read-back (a
+        // single `-> Shape` / bulk `-> Shape[]`) is a clean follow-on. The whole insert is
+        // still atomic and the rows are verifiable with a follow-up query.
+        if !m.ret.ack {
+            let bracket = if cf.bulk { "[]" } else { "" };
+            sink.error_note(
+                code::INPUT_BULK_READBACK,
+                cf.span,
+                format!("`create {}{bracket} from` must return `-> ok`", model.node),
+                "read-back of a shape-input create is a follow-on — declare `-> ok` (verify the rows with a query)",
+            );
+        }
+        if let Some(shape) = resolve_input_shape(m, cf, model, cx, sink) {
+            check_input_shape(
+                &shape,
+                mi,
+                cf,
+                m.scoped.as_ref(),
+                m.unscoped.is_some(),
+                cx,
+                sink,
+            );
+        }
+    }
+}
+
+/// Resolve a `create … from $param`'s input shape: `$param` must be a declared parameter
+/// typed as a `shape` (single `create Model from`) or `shape[]` (bulk `create Model[]
+/// from`) whose `from` model is exactly the create target. Returns the shape name, or
+/// `None` (with a diagnostic) when any of those fails.
+fn resolve_input_shape(
+    m: &Mutation,
+    cf: &CreateFrom,
+    model: &Ident,
+    cx: &Cx,
+    sink: &mut Sink,
+) -> Option<String> {
+    let Some(param) = m.params.iter().find(|p| p.name.node == cf.param.node) else {
+        sink.error(
+            code::INPUT_PARAM_TYPE,
+            cf.span,
+            format!(
+                "`from ${}` names no parameter of mutation `{}`",
+                cf.param.node, m.name.node
+            ),
+        );
+        return None;
+    };
+    let want = if cf.bulk { "[]" } else { "" };
+    let Some(ty) = &param.ty else {
+        sink.error_note(
+            code::INPUT_PARAM_TYPE,
+            cf.span,
+            format!("parameter `{}` needs an explicit shape type", cf.param.node),
+            format!("type it `{}: {}{want}`", cf.param.node, model.node),
+        );
+        return None;
+    };
+    let based_ast::BaseType::Model(name) = &ty.base else {
+        sink.error_note(
+            code::INPUT_PARAM_TYPE,
+            cf.span,
+            format!(
+                "`create {} from ${}` needs a shape-typed param",
+                model.node, cf.param.node
+            ),
+            format!(
+                "type `{}` as a `shape` projecting `{}` (`{}{want}`)",
+                cf.param.node, model.node, model.node
+            ),
+        );
+        return None;
+    };
+    let Some(from_model) = cx.shapes.get(&name.node) else {
+        sink.error_note(
+            code::INPUT_PARAM_TYPE,
+            cf.span,
+            format!("`{}` is not a shape", name.node),
+            "the row-input type of a `create … from` must be a declared `shape`",
+        );
+        return None;
+    };
+    if ty.many != cf.bulk {
+        let (spelled, need) = if cf.bulk {
+            (name.node.clone(), format!("{}[]", name.node))
+        } else {
+            (format!("{}[]", name.node), name.node.clone())
+        };
+        sink.error_note(
+            code::INPUT_PARAM_TYPE,
+            cf.span,
+            format!("`create {}{} from` expects `{need}`, got `{spelled}`", model.node, want),
+            if cf.bulk {
+                "a bulk `create Model[] from` takes a `shape[]` param"
+            } else {
+                "a single `create Model from` takes a `shape` param (write `Model[]` for the bulk form)"
+            },
+        );
+        return None;
+    }
+    if from_model != &model.node {
+        sink.error_note(
+            code::INPUT_PARAM_TYPE,
+            cf.span,
+            format!(
+                "shape `{}` projects `{from_model}`, but this creates `{}`",
+                name.node, model.node
+            ),
+            "a `create … from` shape must project the model being created (round-trip: read-shape == write-shape)",
+        );
+        return None;
+    }
+    Some(name.node.clone())
+}
+
+/// Walk an input shape's fields against the create target, enforcing the presence-driven
+/// input rules (BW1): every named scalar maps to a settable column; relations are inline
+/// nested key blocks (FK link); no computed/aggregate/raw/reach fields; every required,
+/// non-engine-managed column is covered; and warn on a named engine-managed column.
+fn check_input_shape(
+    shape: &str,
+    mi: usize,
+    cf: &CreateFrom,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let Some(body) = cx.shape_bodies.get(shape).copied() else {
+        return;
+    };
+    let m = cx.model(mi);
+    let scope_cols: Vec<String> = crate::scope::resolve_inject(scoped, unscoped, &[mi], cx)
+        .into_iter()
+        .flat_map(|si| si.terms)
+        .map(|(f, _)| f)
+        .collect();
+    let mut covered: Vec<String> = Vec::new();
+    for field in body {
+        match field {
+            ShapeField::Bare(id) => {
+                check_input_scalar(m, &id.node, id.span, &scope_cols, &mut covered, sink);
+            }
+            ShapeField::Rename { out, value } => match value {
+                // A rename of one *local* column is a settable mapping (json key `out` →
+                // that column). A cross-relation reach, raw, aggregate, or computed value
+                // has no single column to write.
+                ShapeValue::Path(p) if p.segments.len() == 1 => {
+                    check_input_scalar(m, &p.segments[0].node, out.span, &scope_cols, &mut covered, sink);
+                }
+                ShapeValue::Path(_) => sink.error_note(
+                    code::INPUT_BAD_RELATION,
+                    out.span,
+                    format!("input field `{}` reaches across a relation", out.node),
+                    "a `create … from` shape writes local columns; link a relation with an inline `rel { key }` block",
+                ),
+                _ => sink.error_note(
+                    code::INPUT_COMPUTED_FIELD,
+                    out.span,
+                    format!("input field `{}` is computed / aggregated / raw", out.node),
+                    "a `create … from` shape may only name settable columns and FK-link blocks",
+                ),
+            },
+            ShapeField::Nest { field, body } => {
+                check_input_nest(m, field, body, &mut covered, cx, sink);
+            }
+            ShapeField::NestRef { field, .. } => sink.error_note(
+                code::INPUT_BAD_RELATION,
+                field.span,
+                format!("input relation `{}` uses a named-shape nest", field.node),
+                "link a relation with an inline `rel { key }` block (the target's key)",
+            ),
+            ShapeField::Flatten { out, .. } => sink.error_note(
+                code::INPUT_BAD_RELATION,
+                out.span,
+                format!("input field `{}` flattens a many-to-many path", out.node),
+                "a create writes one row's columns — a flatten is not settable",
+            ),
+        }
+    }
+    check_input_coverage(m, cf, &scope_cols, &covered, sink);
+}
+
+/// A named scalar field of an input shape: it must be a settable scalar column of the
+/// target (not a relation, not opaque). Warns when it names an engine-managed column.
+fn check_input_scalar(
+    m: &RModel,
+    field: &str,
+    span: Span,
+    scope_cols: &[String],
+    covered: &mut Vec<String>,
+    sink: &mut Sink,
+) {
+    let Some(mem) = m.member(field) else {
+        sink.error(
+            code::INPUT_FIELD_NOT_COLUMN,
+            span,
+            format!("`{}` is not a column of `{}`", field, m.name),
+        );
+        return;
+    };
+    match &mem.kind {
+        MemberKind::Forward { .. } | MemberKind::Inverse { .. } => {
+            sink.error_note(
+                code::INPUT_BAD_RELATION,
+                span,
+                format!("input field `{field}` is a relation, not a column"),
+                "link a relation with an inline `rel { key }` block (the target's key)",
+            );
+            // Mark it named so coverage doesn't *also* report it missing (one diagnostic).
+            covered.push(field.to_string());
+            return;
+        }
+        MemberKind::Scalar { .. } if mem.kind.opaque().is_some() => {
+            sink.error_note(
+                code::INPUT_FIELD_NOT_COLUMN,
+                span,
+                format!("input field `{field}` is an opaque `raw(…)` column"),
+                "an opaque column cannot be written — drop it from the input shape",
+            );
+            return;
+        }
+        MemberKind::Scalar { .. } => {}
+    }
+    warn_managed_input(m, field, span, scope_cols, sink);
+    covered.push(field.to_string());
+}
+
+/// Warn when an input shape names an engine-managed column: an `@created`/`@updated`
+/// timestamp (the explicit value overrides the auto-stamp) or a `@scope` column (the value
+/// is silently engine-injected from `$ctx`).
+fn warn_managed_input(m: &RModel, field: &str, span: Span, scope_cols: &[String], sink: &mut Sink) {
+    if scope_cols.iter().any(|c| c == field) {
+        sink.warn_note(
+            code::INPUT_NAMES_SCOPE,
+            span,
+            format!("input shape names the `@scope` column `{field}`"),
+            "its value is ignored — the engine injects the scope from `$ctx`",
+        );
+    } else if m.created.as_deref() == Some(field) || m.updated.as_deref() == Some(field) {
+        sink.warn_note(
+            code::INPUT_NAMES_TIMESTAMP,
+            span,
+            format!("input shape names the engine-managed timestamp `{field}`"),
+            "the payload value is written verbatim, overriding the automatic now() stamp",
+        );
+    }
+}
+
+/// An input shape's inline relation nest (`rel { key }`) — an FK link to an existing row.
+/// The relation must be a to-one forward edge, and the block must name exactly the
+/// target's key part(s). A block naming any non-key column is a nested write (E0329,
+/// reserved).
+fn check_input_nest(
+    m: &RModel,
+    field: &Ident,
+    body: &[ShapeField],
+    covered: &mut Vec<String>,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let Some(mem) = m.member(&field.node) else {
+        sink.error(
+            code::INPUT_FIELD_NOT_COLUMN,
+            field.span,
+            format!("`{}` is not a column of `{}`", field.node, m.name),
+        );
+        return;
+    };
+    // Whatever the nest resolves to, treat it as named so coverage doesn't double-report it.
+    covered.push(field.node.clone());
+    let target = match &mem.kind {
+        MemberKind::Forward { target, .. } => target.clone(),
+        MemberKind::Inverse { .. } => {
+            sink.error_note(
+                code::INPUT_BAD_RELATION,
+                field.span,
+                format!("input relation `{}` is a to-many collection", field.node),
+                "only a to-one relation can be FK-linked in a create input",
+            );
+            return;
+        }
+        MemberKind::Scalar { .. } => {
+            sink.error_note(
+                code::INPUT_BAD_RELATION,
+                field.span,
+                format!("`{}` is a column, not a relation to link", field.node),
+                "drop the `{ … }` block — a scalar column is named bare",
+            );
+            return;
+        }
+    };
+    let key_fields: Vec<String> = cx
+        .find(&target)
+        .map(|ti| {
+            cx.model(ti)
+                .pk_field_names()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Every block field must be one of the target's key parts (a bare key column). Any
+    // other column would create/update the related row — a nested write, reserved.
+    for f in body {
+        let name = match f {
+            ShapeField::Bare(id) => &id.node,
+            ShapeField::Rename {
+                value: ShapeValue::Path(p),
+                ..
+            } if p.segments.len() == 1 => &p.segments[0].node,
+            _ => {
+                nested_write_reserved(field, sink);
+                return;
+            }
+        };
+        if !key_fields.iter().any(|k| k == name) {
+            nested_write_reserved(field, sink);
+            return;
+        }
+    }
+    // The link must name the *whole* key (else it can't identify a row).
+    if !key_fields.is_empty() && body.len() != key_fields.len() {
+        sink.error_note(
+            code::INPUT_NESTED_WRITE,
+            field.span,
+            format!("input relation `{}` names only part of `{}`'s key", field.node, target),
+            "an FK link names the target's full key; a partial / payload block is a nested write (not yet supported)",
+        );
+    }
+}
+
+fn nested_write_reserved(field: &Ident, sink: &mut Sink) {
+    sink.error_note(
+        code::INPUT_NESTED_WRITE,
+        field.span,
+        format!("input relation `{}` names non-key columns", field.node),
+        "a relation block may only FK-link an existing row (`rel { key }`) — nested writes are reserved, not yet supported",
+    );
+}
+
+/// Required-column coverage for an input shape: every column that is required (NOT NULL, no
+/// default) and not engine-managed must be named by the shape, else the create can't run.
+fn check_input_coverage(
+    m: &RModel,
+    cf: &CreateFrom,
+    scope_cols: &[String],
+    covered: &[String],
+    sink: &mut Sink,
+) {
+    let serial_key_field = m.serial_key_member().map(|mem| mem.name.clone());
+    let managed = |name: &str| {
+        name == "id"
+            || m.created.as_deref() == Some(name)
+            || m.updated.as_deref() == Some(name)
+            || m.soft_delete.as_ref().map(|s| s.field.as_str()) == Some(name)
+            || scope_cols.iter().any(|f| f == name)
+            || serial_key_field.as_deref() == Some(name)
+    };
+    let missing: Vec<&str> = m
+        .members
+        .iter()
+        .filter(|mem| is_required(&mem.kind) && mem.kind.opaque().is_none())
+        .map(|mem| mem.name.as_str())
+        .filter(|name| !managed(name) && !covered.iter().any(|c| c == name))
+        .collect();
+    if !missing.is_empty() {
+        sink.error_note(
+            code::INPUT_MISSING_REQUIRED,
+            cf.span,
+            format!(
+                "input shape for `create {}` is missing required column{}: {}",
+                m.name,
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", ")
+            ),
+            "every required, non-engine-managed column must be named by the input shape",
         );
     }
 }

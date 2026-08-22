@@ -21,19 +21,19 @@ native* — `delete`/`update Model where (broad)` lowers to one set-based `DELET
 `LIMIT`), deleting/updating every match in a single statement. The genuine gaps are **bulk insert/upsert**
 (still one row per `create`) and an explicit **whole-table wipe**. Three primitives:
 
-- **BW1. Bulk insert — `create Model[] from $rows -> Row[]` | `-> ok`.** One multi-row `INSERT …
-  RETURNING` (or `COPY` on Postgres), **engine-chunked transparently** above driver param limits (Postgres
-  ~65535 binds — the user never sees the cap). Atomic all-or-nothing within the surrounding tx.
-  - **Row input type (owner call): a new first-class `input` declaration** — the input dual of `shape` —
-    **reusable for BOTH single-row and bulk** (`create Product from $p` *and* `create Product[] from
-    $rows`). One concept a user learns once; it names the user-assignable columns (engine-managed columns —
-    `id`, `@created`/`@updated`, `@scope` — are excluded and filled per row by the engine, exactly as the
-    singular `create` already does). The existing `create Model { field = $param }` assign-block form stays
-    for inline/computed assigns; the `input`-driven `from` form is the structured-record path.
-  - **Read-back (owner call): broaden `-> ok` to ANY mutation** (a universal opt-out of the read-back —
-    relaxes E0221, which made `-> ok` on a surviving write an error) **plus bulk `-> Row[]`** via RETURNING.
-    So a huge load goes `-> ok` (skips echoing rows back); ask `-> Row[]` when you need the DB-generated
-    ids/defaults. `-> count` (affected-row count) is a possible third form — open.
+- **BW1. Bulk / structured shape-input insert — `create Model[] from $rows` / `create Model from $row`
+  — DONE (D126).** A **`shape` doubles as the row-input type** (owner revised: **no new `input`
+  keyword**) — any shape a query can *read*, you bulk-*write* back with the same struct, zero
+  transformation (the round-trip north star). Bulk = one chunked, atomic multi-row INSERT
+  (`max_binds`-capped, Postgres ~65535 — invisible); single = one row. **Presence-driven columns:** a
+  named column is written verbatim (`id`/`@created`/`@updated` included), an absent engine-managed one
+  is filled (mint / DB-gen / `now()`); **`@scope` is always `$ctx`-injected, never the payload**
+  (`W0112`/`W0113` warn a named managed column). Relations = inline `{ key }` FK-link blocks (nested
+  writes reserved, `E0329`). Use-site eligibility `E0325-E0332`. **`-> ok` broadened to a universal
+  read-back opt-out** (E0221 retired for surviving writes; the zero-row 404 now rides only a filtered
+  real DELETE). Full pipeline + live SQLite proof (round-trip / single / chunking / empty-is-success /
+  scope-from-ctx). **Read-back deferred (BW1b, clean follow-on):** single `-> Shape` (create-keyed) +
+  bulk `-> Shape[]` (IN-keyed re-select). `-> count` stays out.
 - **BW2. Bulk upsert — `create Model[] from $rows on conflict (target) update { … }`.** Bulk insert + the
   existing `on conflict` clause (D102), composed. **Open sub-fork:** the `update` branch must reference the
   *incoming/proposed* row's values (an `excluded`-/`$row`-style reference, distinct from the singular
@@ -46,15 +46,21 @@ native* — `delete`/`update Model where (broad)` lowers to one set-based `DELET
   every live row; `-> ok` via new `WriteEffect::Wipe`, wipe exempt from the ack zero-row 404. Full
   pipeline + live SQLite proof.
 
-**Forks resolved (owner, 2026-08-22):** reuse `create` (no new insert verb); row input = a reusable
-first-class `input` decl; `-> ok` broadened to any mutation + bulk `-> Row[]`; wipe = `hard delete all`
-keyword form with dialect-safe TRUNCATE/DELETE; engine-owned param chunking. **Open sub-forks (for a later
-call, don't block BW1/BW3):** BW2's incoming-row reference syntax; whether an `input` decl may subset/rename
-model columns (vs. exactly the assignable set); the `-> count` read-back form. Needs full pipeline —
-grammar/AST → sema (new `input` decl + relaxed E0221 + `all` keyword + `[]`-create/`from`) → codegen
-(multi-row INSERT/RETURNING/COPY + chunking + TRUNCATE-vs-DELETE seam) → runtime binding → client-gen →
-goldens + live per-dialect. Spec: new `spec/syntax/` coverage (input shapes, bulk writes) + `mutations.md`
-update. Design sign-off on the open sub-forks before those slices.
+**Status: BW3 done (D125), BW1 done (D126). Next: BW2 (bulk upsert).** BW1's owner-signed-off revision
+(2026-08-23) **dropped the `input` decl** — a `shape` is the row-input type (no new keyword). Resolved
+across BW1/BW3: reuse `create`; `-> ok` broadened to a universal read-back opt-out (E0221 retired for
+surviving writes); wipe = `hard delete all` with dialect-safe TRUNCATE/DELETE; engine-owned param
+chunking. **Follow-ons / reserved:**
+- **BW1b — read-back for a structured create:** single `create Model from $row -> Shape` (create-keyed,
+  reuses the ordinary create re-select) + bulk `create Model[] from $rows -> Shape[]` (an IN-keyed
+  re-select over the written keys, reusing `project_return`). Deferred from BW1 to keep it green; the
+  rows are verifiable with a query meanwhile.
+- **Nested writes** (`order { …non-key payload }` creating the related row too) — syntax reserved,
+  `E0329`.
+- **BW2 — bulk upsert** `create Model[] from $rows on conflict (target) update { … }` (`E0331` stub
+  today): open sub-fork is the `update` branch's incoming-row reference (`excluded`/`$row`-style),
+  distinct from the singular upsert's operands — needs a design call before building.
+- `-> count` read-back form stays out.
 
 ## Autonomous build loop (how this is being built out)
 

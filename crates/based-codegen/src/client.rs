@@ -254,6 +254,29 @@ mod rust {
                 emit_struct(&mut out, &c.out_struct, &mut seen);
             }
         }
+        // Input-only shape structs: a `create … from $param` mutation (BW1) carries its
+        // rows as a shape struct (`Vec<Shape>` / `Shape`) that may not appear as any return
+        // type, so emit it here (deduped against the output structs above).
+        for c in &callables {
+            for p in c.params {
+                let Some(te) = &p.ty else { continue };
+                let BaseType::Model(name) = &te.base else {
+                    continue;
+                };
+                if let Some(shape) = find_shape(decls, &name.node) {
+                    let model = schema.model(&shape.from.node);
+                    let st = build_struct(
+                        schema,
+                        decls,
+                        name.node.clone(),
+                        &shape.body,
+                        model,
+                        &mut vec![name.node.clone()],
+                    );
+                    emit_struct(&mut out, &st, &mut seen);
+                }
+            }
+        }
 
         // Input structs (+ the per-callable `Ctx` struct, when the callable needs
         // context) + routes, in declaration order.
@@ -610,9 +633,12 @@ pub fn adopt_{suffix}<'a>(
             WriteStmt::Create {
                 model,
                 assigns,
+                from: _,
                 conflict,
                 binding: _,
             } => {
+                // A `create … from $param` carries its ids inside the shape param, typed
+                // by the shape struct — no `col = $param` id entity to record here.
                 let m = schema.model(&model.node);
                 for a in assigns {
                     scan_assign(m, a, map);
@@ -1042,6 +1068,17 @@ pub fn adopt_{suffix}<'a>(
         if let Some(te) = &p.ty {
             if let BaseType::Model(name) = &te.base {
                 if schema.enum_(&name.node).is_some() {
+                    let base = wrap(&name.node, false, te.many);
+                    return if optional {
+                        format!("Option<{base}>")
+                    } else {
+                        base
+                    };
+                }
+                // A shape-typed param — the row input of a `create … from $p` (BW1). Its
+                // Rust type is the shape's own struct (`Vec<Shape>` for the bulk form),
+                // reusing the same struct a query returning that shape emits.
+                if schema.shapes.iter().any(|s| s.name == name.node) {
                     let base = wrap(&name.node, false, te.many);
                     return if optional {
                         format!("Option<{base}>")

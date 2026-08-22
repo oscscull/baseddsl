@@ -280,8 +280,16 @@ write_stmt  = create_stmt | update_stmt | delete_stmt
 (* `ON CONFLICT (cols) DO UPDATE`, MariaDB to `ON DUPLICATE KEY UPDATE`. Sema E0250-E0254.  *)
 (* `as <name>` binds this step's produced row so a later `tx` step reaches a column of it   *)
 (* as `$name.field` (mutations.md Atomic groups). `as` is a keyword — the bare trailing     *)
-(* form is two adjacent bare tokens, banned by principle 3.                                 *)
-create_stmt = 'create' model_ref assign_block [ on_conflict ] [ 'as' binding_name ] ;
+(* form is two adjacent bare tokens, banned by principle 3.                                  *)
+(* A create takes its column values two ways: an inline `assign_block` (`{ f = $x }`), or    *)
+(* — BW1 — a `create_from` tail (`create Model[] from $rows` / `create Model from $row`),     *)
+(* where the row(s) come from a shape-typed param (`shape[]` bulk / `shape` single). The     *)
+(* runtime materializes a chunked, atomic multi-row INSERT; the input shape names the         *)
+(* settable columns (a to-one relation FK-linked with an inline `{ key }` block). Sema        *)
+(* E0325-E0332 (use-site eligibility), W0112/W0113 (named engine-managed column).             *)
+create_stmt = 'create' model_ref ( assign_block | create_from )
+              [ on_conflict ] [ 'as' binding_name ] ;
+create_from = [ '[]' ] 'from' param_ref ;   (* `[]` = bulk (shape[]); bare = one row (shape) *)
 binding_name = lower_ident ;
 on_conflict = 'on' 'conflict' '(' column_name { ',' column_name } ')' 'update' assign_block ;
 update_stmt = 'update' model_ref where_clause assign_block ;

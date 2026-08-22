@@ -128,6 +128,19 @@ fn document(schema: &CheckedSchema, decls: &[Decl]) -> Value {
     for c in &callables {
         register_out_schema(&c.out_schema, &mut schemas, &mut seen);
     }
+    // Input-only shape schemas: a `create … from $param` (BW1) references a shape that may
+    // not appear as any return type — register its component so the `$ref` resolves.
+    for c in &callables {
+        for p in c.params {
+            let Some(te) = &p.ty else { continue };
+            let BaseType::Model(name) = &te.base else {
+                continue;
+            };
+            if let Some(os) = input_shape_out_schema(schema, decls, &name.node) {
+                register_out_schema(&os, &mut schemas, &mut seen);
+            }
+        }
+    }
     for c in &callables {
         schemas.insert(input_name(c.name), input_schema(schema, c));
     }
@@ -463,6 +476,29 @@ fn page_schema(item: &Value, with_count: bool) -> Value {
 /// Resolve a return type to the object schema we register for it. A declared shape
 /// projects its body; a bare model (or `full`) projects every stored column. The twin
 /// of the client emitter's `out_struct`.
+/// The output-style object schema for a shape used as a `create … from` row input (BW1) —
+/// same projection a query returning that shape would emit, so input and output share one
+/// component. `None` when the name is not a declared shape.
+fn input_shape_out_schema(schema: &CheckedSchema, decls: &[Decl], name: &str) -> Option<OutSchema> {
+    let shape = find_shape(decls, name)?;
+    let model = schema.model(&shape.from.node);
+    let mut nested = Vec::new();
+    let fields = shape_fields(
+        schema,
+        decls,
+        &shape.body,
+        model,
+        &mut nested,
+        &mut vec![name.to_string()],
+    );
+    Some(OutSchema {
+        name: name.to_string(),
+        fields,
+        is_result_fallback: false,
+        nested,
+    })
+}
+
 fn out_schema(
     schema: &CheckedSchema,
     decls: &[Decl],
@@ -859,6 +895,11 @@ fn param_schema(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> Val
             if let BaseType::Model(name) = &te.base {
                 if schema.enum_(&name.node).is_some() {
                     return wrap(enum_schema(schema, &name.node), te.many);
+                }
+                // A shape-typed param — the row input of a `create … from $p` (BW1):
+                // `$ref` the shape's component (an array of it for the bulk form).
+                if schema.shapes.iter().any(|s| s.name == name.node) {
+                    return wrap(schema_ref(&name.node), te.many);
                 }
             }
             wrap(base_schema(&te.base), te.many)

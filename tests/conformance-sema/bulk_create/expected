@@ -1,0 +1,22 @@
+DIAGNOSTICS
+  W0104: index on `category` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
+  W0104: index on `org` is unnecessary: no query filters, sorts, or joins on it, so it only adds write cost — drop it or add the query that needs it
+SCHEMA
+model Org  table=org
+  id: Id
+  name: text
+model Category  table=category
+  id: Id
+  name: text
+model Product  table=product  scope
+  id: Id
+  org: -> Org  fk=org_id
+  category: -> Category  fk=category_id
+  sku: text
+  name: text
+  price: int
+  index(org)
+  index(category)
+shape ProductIn from Product
+mutation bulk_add_products  ret=Product ack  ctx=[org: -> Org]
+mutation add_one_product  ret=Product ack  ctx=[org: -> Org]

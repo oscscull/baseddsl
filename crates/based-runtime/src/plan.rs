@@ -174,6 +174,36 @@ pub struct WriteStep {
     /// `None` for a write with no read-back (a plain unbound create, or any
     /// update/delete/restore).
     pub capture: Option<StepCapture>,
+    /// A structured shape-input create (`create Model[]? from $param`, BW1): its rows are
+    /// fully resolved at plan time (id-minted, `$ctx`-scoped, coerced). The run stage
+    /// materializes a chunked, atomic multi-row INSERT from it. `None` for every ordinary
+    /// write (which uses `sql`).
+    pub bulk: Option<BulkStep>,
+}
+
+/// A structured shape-input create resolved for execution (BW1): the target table, the
+/// INSERT columns (each a bind or an engine literal like `CURRENT_TIMESTAMP`), and every
+/// row's already-resolved bind values. The run stage chunks the rows below the driver's
+/// bind limit and executes each chunk as one multi-row INSERT inside the surrounding
+/// transaction (all-or-nothing).
+#[derive(Debug, Clone)]
+pub struct BulkStep {
+    pub table: String,
+    pub columns: Vec<BulkOutCol>,
+    /// One entry per input row: the bind values for the non-literal columns, in column
+    /// order. Empty (zero rows) is a valid no-op success.
+    pub rows: Vec<Vec<SqlValue>>,
+    /// Count of columns that bind a value per row (every column whose `literal` is `None`).
+    pub binds_per_row: usize,
+}
+
+/// One INSERT column of a [`BulkStep`]: its quoted name and, for an engine-filled column,
+/// the SQL literal used verbatim in every row's tuple (`CURRENT_TIMESTAMP`). A `None`
+/// literal is a per-row bound value pulled from [`BulkStep::rows`].
+#[derive(Debug, Clone)]
+pub struct BulkOutCol {
+    pub quoted: String,
+    pub literal: Option<String>,
 }
 
 /// A bound `create`'s row read-back plan: the columns to capture and how to obtain the row.
@@ -388,8 +418,19 @@ pub fn plan_mutation(
     // 1. Assemble the value environment: params, then `$ctx` (no pagination on a
     //    write). A param's family resolves through its use in the write body (the
     //    column it assigns or filters), so the driver can bind it typed.
+    // A `create … from $param`'s param carries the row(s) as a shape object/array, not a
+    // scalar bind — the bulk step reads it straight from `req.args`. Skip it here so the
+    // scalar coercion never sees the array.
+    let from_params: std::collections::HashSet<&str> = low
+        .stmts
+        .iter()
+        .filter_map(|w| w.bulk.as_ref().map(|b| b.param.as_str()))
+        .collect();
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
+        if from_params.contains(p.name.node.as_str()) {
+            continue;
+        }
         let (family, optional) = mutation_param_family(compiled, ast, p);
         env.insert(
             p.name.node.clone(),
@@ -434,10 +475,13 @@ pub fn plan_mutation(
     //    bound create's captured columns, coerced by the captured field's family). The run
     //    stage binds each step late, so a `$name.field` reference resolves to the row the
     //    database actually wrote.
-    let steps = low
-        .stmts
-        .iter()
-        .map(|w| WriteStep {
+    let mut steps = Vec::with_capacity(low.stmts.len());
+    for w in &low.stmts {
+        let bulk = match &w.bulk {
+            Some(bi) => Some(build_bulk_step(compiled, req, id_gen, &env, bi)?),
+            None => None,
+        };
+        steps.push(WriteStep {
             sql: w.sql.clone(),
             capture: w.capture.as_ref().map(|cap| StepCapture {
                 cols: cap
@@ -451,18 +495,18 @@ pub fn plan_mutation(
                     .collect(),
                 followup_select: cap.followup_select.clone(),
             }),
-        })
-        .collect();
+            bulk,
+        });
+    }
 
-    // 4. An `-> ok` mutation has no re-select; its not-found signal is the primary
-    //    DELETE (the first write on the primary model) affecting zero rows. A whole-table
-    //    wipe (`delete all`) is exempt: zero rows means an already-empty table, a success —
-    //    not an absent-row 404.
+    // 4. An `-> ok` mutation's not-found signal is a filtered **real** DELETE (`hard delete
+    //    M where …` / a plain-model `delete M where …`) on the primary model affecting zero
+    //    rows (D98). A create / update / restore / wipe under `-> ok` (BW1's universal
+    //    read-back opt-out) never 404s — a bulk insert of an empty array is a success.
     let ack_check = if rm.ack {
         low.stmts
             .iter()
-            .position(|w| w.model == rm.ret_model)
-            .filter(|&i| !low.stmts[i].wipe)
+            .position(|w| w.model == rm.ret_model && w.real_delete)
     } else {
         None
     };
@@ -486,6 +530,136 @@ fn capture_family(schema: &CheckedSchema, model: &str, field: &str) -> Family {
         .model(model)
         .and_then(|m| member_family(schema, m, &[field]))
         .unwrap_or(Family::Any)
+}
+
+/// Resolve a structured shape-input create (BW1) for execution: read the row(s) from the
+/// shape param, then, per row, mint app ids, inject the `$ctx` scope, and coerce each
+/// payload value by its column's family — so the run stage only has to chunk + bind.
+fn build_bulk_step(
+    compiled: &Compiled,
+    req: &Request,
+    id_gen: &dyn IdGen,
+    env: &Env,
+    bulk: &based_codegen::sql::mutations::BulkInsert,
+) -> Result<BulkStep, PlanError> {
+    use based_codegen::sql::mutations::BulkSource;
+    use serde_json::Value as J;
+    let schema = &compiled.schema;
+    let model = schema
+        .model(&bulk.model)
+        .ok_or_else(|| PlanError::UnboundPlaceholder(format!("bulk model `{}`", bulk.model)))?;
+
+    // The row(s): an array for `create Model[] from`, a single object for `create Model
+    // from`. A missing / wrong-shaped arg is a boundary error (never SQL).
+    let empty = serde_json::Map::new();
+    let rows_json: Vec<&serde_json::Map<String, J>> = match req.args.get(&bulk.param) {
+        Some(J::Array(a)) if bulk.bulk => a
+            .iter()
+            .map(|v| {
+                v.as_object().ok_or_else(|| PlanError::BadArg {
+                    name: bulk.param.clone(),
+                    expected: Family::Any,
+                    got: "a non-object array element".to_string(),
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(J::Object(o)) if !bulk.bulk => vec![o],
+        None => {
+            let _ = &empty;
+            return Err(PlanError::MissingArg(bulk.param.clone()));
+        }
+        Some(other) => {
+            return Err(PlanError::BadArg {
+                name: bulk.param.clone(),
+                expected: Family::Any,
+                got: format!(
+                    "{} (expected {})",
+                    json_kind(other),
+                    if bulk.bulk {
+                        "an array of objects"
+                    } else {
+                        "an object"
+                    }
+                ),
+            });
+        }
+    };
+
+    let columns: Vec<BulkOutCol> = bulk
+        .columns
+        .iter()
+        .map(|c| BulkOutCol {
+            quoted: compiled.dialect.quote(&c.column),
+            literal: matches!(c.source, BulkSource::Now).then(|| "CURRENT_TIMESTAMP".to_string()),
+        })
+        .collect();
+    let binds_per_row = bulk
+        .columns
+        .iter()
+        .filter(|c| !matches!(c.source, BulkSource::Now))
+        .count();
+
+    let mut rows: Vec<Vec<SqlValue>> = Vec::with_capacity(rows_json.len());
+    for obj in &rows_json {
+        let mut vals = Vec::with_capacity(binds_per_row);
+        for c in &bulk.columns {
+            match &c.source {
+                BulkSource::Now => {}
+                BulkSource::MintUuid => vals.push(SqlValue::Uuid(id_gen.next_id())),
+                BulkSource::MintUlid => vals.push(SqlValue::Uuid(id_gen.next_ulid())),
+                BulkSource::Ctx { ctx_field } => {
+                    vals.push(
+                        env.values
+                            .get(&format!("ctx_{ctx_field}"))
+                            .cloned()
+                            .unwrap_or(SqlValue::Null),
+                    );
+                }
+                BulkSource::Field { json_key, field } => {
+                    let fam = member_family(schema, model, &[field]).unwrap_or(Family::Any);
+                    let jv = obj.get(json_key).cloned().unwrap_or(J::Null);
+                    vals.push(
+                        coerce(&jv, fam, true)
+                            .map_err(|e| bad_arg(&format!("{}.{json_key}", bulk.param), e))?,
+                    );
+                }
+                BulkSource::FkPart {
+                    relation,
+                    key_field,
+                } => {
+                    let fam = member_family(schema, model, &[relation]).unwrap_or(Family::Uuid);
+                    let jv = obj
+                        .get(relation)
+                        .and_then(|r| r.get(key_field))
+                        .cloned()
+                        .unwrap_or(J::Null);
+                    vals.push(coerce(&jv, fam, true).map_err(|e| {
+                        bad_arg(&format!("{}.{relation}.{key_field}", bulk.param), e)
+                    })?);
+                }
+            }
+        }
+        rows.push(vals);
+    }
+
+    Ok(BulkStep {
+        table: bulk.table.clone(),
+        columns,
+        rows,
+        binds_per_row,
+    })
+}
+
+/// A short JSON-kind label for a boundary error message.
+fn json_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 // ---------- value environment ---------------------------------------------
@@ -655,6 +829,7 @@ fn param_use_in_stmts(compiled: &Compiled, stmts: &[WriteStmt], name: &str) -> O
             WriteStmt::Create {
                 model,
                 assigns,
+                from: _,
                 conflict,
                 binding: _,
             } => param_use_in_assigns(schema, &model.node, assigns, name).or_else(|| {

@@ -6114,3 +6114,75 @@ no specific row that had to exist).
 Option-guarded walks). Spec: `grammar.ebnf`, `mutations.md`. Tests: parser `parse.rs`, sema `check.rs`
 + conformance-sema `delete_all`, codegen `mutations.rs`, fmt `format.rs`, runtime
 `sqlite_integration.rs` (wipe / scoped-wipe / soft-tombstone-all live).
+
+## D126 — bulk / structured shape-input create: `create Model[] from $rows` (bulk writes BW1)
+
+**Owner-signed-off 2026-08-23.** Supersedes the PLAN's original BW1 sketch (a new first-class
+`input` decl): there is **no new keyword** — a `shape` IS the row-input type.
+
+**The model — a `shape` doubles as bulk input.** `create Model[] from $rows` inserts many rows
+(`$rows: SomeShape[]`) as one chunked, atomic multi-row INSERT; `create Model from $row` inserts one
+(`$row: SomeShape`). The existing inline `create Model { field = $p }` form stays (computed/param
+path) — the `from` form is *added*, not a replacement. No `input` keyword; the north star is that any
+shape a query can **read**, you can bulk-**write** back with the same Rust struct, zero transformation.
+
+**Input-eligibility is a use-site property** (this shape meeting this `create Model`), not a property
+of the shape decl (the decl stays a neutral bag of fields). Checked where the `from` create is written,
+with the mutation's param types in hand (`check_from_creates`):
+- the `from` param must be a `shape` (single) / `shape[]` (bulk) whose `from` model is the create
+  target, arity matching the `[]` (`E0325`);
+- every named scalar maps to a settable column (`E0326` unknown; `E0328` a relation/reach not settable;
+  `E0327` computed/aggregate/raw — no column to write);
+- **required-column coverage** — every required column (NOT NULL, no default, not engine-managed)
+  must be named, else `E0330`;
+- a structured create must be `-> ok` this release (`E0332`); `on conflict` is `E0331` (BW2).
+
+**Presence-driven columns (the core rule).** A column **named** in the shape is written **verbatim**
+from the payload — `id`, `@created`, `@updated` included. A column **absent** is engine-filled: `id`
+minted (`uuid`/`ulid`) or DB-generated (`serial`, omitted from the INSERT); `@created`/`@updated` →
+`CURRENT_TIMESTAMP`. **`@scope` is the sole exception:** always injected from `$ctx`, never the
+payload, even when the shape names it (tenant safety). A named `@created`/`@updated` warns `W0112` (the
+explicit value overrides the auto-stamp); a named `@scope` column warns `W0113` (value ignored).
+
+**Relations = inline nested key blocks, FK-link only.** `order { id }` names exactly the target's key
+→ sets the FK column(s) from the payload; it round-trips (the output projection of `order { id }`
+yields the same `{ id }` struct). A composite-key target names its key parts. **No flatten:** the
+client field is the nested type (identical to the output projection), never a flattened scalar. A block
+naming **non-key payload** is a nested write — reserved, `E0329`, not yet implemented. A bare relation
+/ named-nest / flatten as input is `E0328`.
+
+**`-> ok` broadened to a universal read-back opt-out (E0221 retired for surviving writes).** Any
+mutation may forfeit its declared-shape return with `-> ok` — a bulk load's motivating case. The
+primary model is the first engine-known write's. The zero-row **404** now fires only for a filtered
+**real DELETE** (a new `LoweredWrite.real_delete` flag), so a `create`/`update`/`restore`/wipe under
+`-> ok` never 404s (an empty bulk insert is a success). E0221 now fires only for a raw-only `-> ok`
+body (no primary model). E0220/E0222 unchanged.
+
+**Chunked, atomic, runtime-materialized.** The row count is dynamic, so codegen carries a structured
+`LoweredWrite.bulk: Option<BulkInsert>` (a column plan: `BulkSource::{Field, FkPart, MintUuid,
+MintUlid, Ctx, Now}`) rather than a finished statement; `sql` holds only a review-only single-row
+template. The runtime resolves every row at plan time (`build_bulk_step`: mint ids, inject `$ctx`,
+coerce payload by column family) into a `BulkStep`, then `run_bulk` emits `INSERT … VALUES (…),(…),…`
+chunked below the driver bind cap (`max_binds`: Postgres/MySQL 65000, SQLite 900), each chunk on the
+same tx connection (all-or-nothing). The `from` param is skipped by the scalar param-binder.
+
+**Read-back deferred (clean follow-on, "BW1b").** A single `-> Shape` and bulk `-> Shape[]` read-back
+(create-keyed for one row; an IN-keyed re-select over the written keys for many) is a follow-on — the
+rows are verifiable with a query, and `-> ok` is the correct primary form for a large load. `-> count`
+stays out.
+
+**Client / OpenAPI.** A shape-typed param emits `Vec<Shape>` / `Shape` (reusing the shape's struct),
+and the input-only shape struct is emitted even when no query returns it. OpenAPI `$ref`s the shape
+component (registered for input-only shapes too).
+
+**Blast radius.** `based-ast` (`WriteStmt::Create.from: Option<CreateFrom>`; `CreateFrom{param,bulk}`).
+`based-parser` (`create … [] from $p`). `based-sema` (`check_from_creates` + `check_input_*`; E0325-
+E0332, W0112/W0113; `resolve_ack_return` relaxed, `WriteEffect::Surviving` verb dropped). `based-codegen`
+(`sql/mutations.rs` `lower_bulk_create`/`BulkInsert`/`BulkSource`/`bulk_review_sql`, `LoweredWrite.bulk`
++ `real_delete`; `client.rs` shape-param type + input-struct emit; `openapi.rs` shape-param `$ref` +
+`input_shape_out_schema`). `based-runtime` (`plan.rs` `BulkStep`/`build_bulk_step`, skip from-param,
+`ack_check` via `real_delete`; `run.rs` `run_bulk`/`max_binds`). `based-fmt`/`based-lsp` (`create …
+from` printing / `from` in Create patterns). Spec: `grammar.ebnf`, `mutations.md`. Tests: parser +
+sema conformance (`bulk_create`, `bulk_input_errors`, updated `ack_errors`), codegen `mutations.rs`
+(bulk plan + serial-omit), live SQLite `bulk_integration.rs` (round-trip north star, single, chunking
+across the bind cap, empty-is-success, scope-from-ctx-not-payload).

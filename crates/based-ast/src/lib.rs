@@ -696,6 +696,12 @@ pub enum WriteStmt {
     Create {
         model: Ident,
         assigns: Vec<Assign>,
+        /// `create Model from $row` / `create Model[] from $rows` — the structured
+        /// shape-input form: the row(s) come from a mutation param typed by a `shape`
+        /// (single) or `shape[]` (bulk) rather than an inline `{ field = … }` block.
+        /// `Some` ⇒ `assigns` is empty (the two forms are mutually exclusive). `None` is
+        /// the inline assign-block create.
+        from: Option<CreateFrom>,
         /// `on conflict (cols) update { … }` — upsert. `None` for a plain insert.
         conflict: Option<OnConflict>,
         /// `create … as <name>` — binds this step's produced row so a later `tx` step
@@ -732,6 +738,17 @@ pub enum WriteStmt {
 pub struct Assign {
     pub col: Ident,
     pub value: AssignRhs,
+}
+
+/// `create Model from $row` / `create Model[] from $rows` — the structured shape-input
+/// tail of a `create`. `param` names the mutation param the row(s) come from (typed by a
+/// `shape` for a single record, a `shape[]` for the bulk form); `bulk` distinguishes the
+/// two (`Model[]` ⇒ many rows in one chunked, atomic INSERT).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFrom {
+    pub param: Ident,
+    pub bulk: bool,
+    pub span: Span,
 }
 
 /// `on conflict (target) update { update }` — the upsert tail of a `create`. On a

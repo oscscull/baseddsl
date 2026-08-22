@@ -1448,7 +1448,41 @@ impl<'a> Parser<'a> {
     fn write_stmt(&mut self) -> PResult<WriteStmt> {
         if self.eat_kw("create") {
             let model = self.upper_ident("model")?;
-            let assigns = self.assign_block()?;
+            // Structured shape-input form: `create Model[] from $rows` (bulk) or
+            // `create Model from $row` (single). A `[]` or a `from` here (rather than an
+            // assign block `{`) selects it; the row values come from the named param.
+            let (from, assigns) = if self.at(Tok::LBracket) || self.at_kw("from") {
+                let start = self.here().start;
+                let bulk = self.at(Tok::LBracket);
+                if bulk {
+                    self.bump();
+                    self.expect(Tok::RBracket, "`]` (bulk `create Model[] from …`)")?;
+                }
+                if !self.eat_kw("from") {
+                    self.err("expected `from $param` after `create Model[]`");
+                    return Err(());
+                }
+                let pr = self.param_ref()?;
+                if !pr.path.is_empty() {
+                    self.err("`create … from` takes a bare `$param`, not a field path");
+                    return Err(());
+                }
+                let span = Span {
+                    file: self.file,
+                    start,
+                    end: self.prev_end(),
+                };
+                (
+                    Some(CreateFrom {
+                        param: pr.name,
+                        bulk,
+                        span,
+                    }),
+                    Vec::new(),
+                )
+            } else {
+                (None, self.assign_block()?)
+            };
             let conflict = self.on_conflict()?;
             // `as <name>` binds this step's produced row for a later `$name.field` in the tx.
             let binding = if self.eat_kw("as") {
@@ -1459,6 +1493,7 @@ impl<'a> Parser<'a> {
             Ok(WriteStmt::Create {
                 model,
                 assigns,
+                from,
                 conflict,
                 binding,
             })

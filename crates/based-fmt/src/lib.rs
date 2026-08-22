@@ -805,10 +805,19 @@ fn write_line(w: &WriteStmt) -> String {
         WriteStmt::Create {
             model,
             assigns,
+            from,
             conflict,
             binding,
         } => {
-            let mut s = format!("create {} {}", model.node, assign_block(assigns));
+            let mut s = match from {
+                Some(cf) => format!(
+                    "create {}{} from ${}",
+                    model.node,
+                    if cf.bulk { "[]" } else { "" },
+                    cf.param.node
+                ),
+                None => format!("create {} {}", model.node, assign_block(assigns)),
+            };
             if let Some(oc) = conflict {
                 s.push_str(&format!(
                     " on conflict ({}) update {}",

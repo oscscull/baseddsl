@@ -1111,3 +1111,100 @@ fn tx_binding_reuses_bound_creates_scope_column() {
         "a knowable scope column must not degrade to the NULL marker:\n{out}"
     );
 }
+
+// ---------- BW1: bulk / structured shape-input create ----------------------
+
+const BULK_SCHEMA: &str = r#"
+    Org { id: Id, name: text }
+    scope Tenant (org: Org = $ctx.org)
+    Category { id: Id, name: text }
+    @created(created_at)
+    @updated(updated_at)
+    @scope Tenant
+    Product {
+      id: Id
+      org: Org
+      category: Category
+      sku: text
+      name: text
+      price: int
+      created_at: timestamp
+      updated_at: timestamp
+      @index(org)
+      @index(category)
+    }
+    shape ProductIn from Product { sku, name, price, category { id } }
+    mutation bulk_add(rows: ProductIn[]) -> ok scoped Tenant { create Product[] from $rows; }
+    mutation add_one(row: ProductIn) -> ok scoped Tenant { create Product from $row; }
+"#;
+
+fn lower(src: &str, dialect: Dialect) -> Vec<based_codegen::sql::mutations::LoweredMutation> {
+    let sf = parse_file(src, FileId(0)).unwrap();
+    let (schema, _) = check(&sf.decls);
+    based_codegen::sql::mutations::lower_mutations(&schema, &sf.decls, dialect)
+}
+
+#[test]
+fn bulk_create_builds_a_presence_driven_column_plan() {
+    use based_codegen::sql::mutations::BulkSource;
+    let lm = lower(BULK_SCHEMA, Dialect::Sqlite);
+    let bulk = lm
+        .iter()
+        .find(|m| m.name == "bulk_add")
+        .and_then(|m| m.stmts[0].bulk.as_ref())
+        .expect("bulk_add lowers to a BulkInsert");
+    assert!(bulk.bulk, "`Product[] from` is the bulk form");
+    // Column → source, presence-driven: shape scalars verbatim, the FK-link `{ id }`, the
+    // `@scope` org from `$ctx`, a minted uuid id, and engine `@created`/`@updated` stamps.
+    let by_col = |name: &str| {
+        bulk.columns
+            .iter()
+            .find(|c| c.column == name)
+            .map(|c| &c.source)
+    };
+    assert!(matches!(by_col("sku"), Some(BulkSource::Field { json_key, .. }) if json_key == "sku"));
+    assert!(matches!(by_col("price"), Some(BulkSource::Field { .. })));
+    assert!(
+        matches!(by_col("category_id"), Some(BulkSource::FkPart { relation, key_field }) if relation == "category" && key_field == "id")
+    );
+    assert!(matches!(by_col("org_id"), Some(BulkSource::Ctx { ctx_field }) if ctx_field == "org"));
+    assert!(matches!(by_col("id"), Some(BulkSource::MintUuid)));
+    assert!(matches!(by_col("created_at"), Some(BulkSource::Now)));
+    assert!(matches!(by_col("updated_at"), Some(BulkSource::Now)));
+    // A scope column is NEVER taken from the payload, even if the shape were to name it.
+    assert!(!bulk
+        .columns
+        .iter()
+        .any(|c| c.column == "org_id" && matches!(c.source, BulkSource::Field { .. })));
+}
+
+#[test]
+fn single_structured_create_is_a_one_row_bulk_plan() {
+    let lm = lower(BULK_SCHEMA, Dialect::Sqlite);
+    let bulk = lm
+        .iter()
+        .find(|m| m.name == "add_one")
+        .and_then(|m| m.stmts[0].bulk.as_ref())
+        .expect("add_one lowers to a BulkInsert");
+    assert!(!bulk.bulk, "`Product from` is the single form");
+}
+
+#[test]
+fn serial_bulk_create_omits_the_db_generated_id() {
+    use based_codegen::sql::mutations::BulkSource;
+    let src = r#"
+        Widget { id: serial, label: text }
+        shape WidgetIn from Widget { label }
+        mutation add_widgets(rows: WidgetIn[]) -> ok { create Widget[] from $rows; }
+    "#;
+    let lm = lower(src, Dialect::Postgres);
+    let bulk = lm[0].stmts[0].bulk.as_ref().unwrap();
+    assert!(
+        !bulk.columns.iter().any(|c| c.column == "id"),
+        "a serial id is DB-generated — omitted from the INSERT"
+    );
+    assert!(!bulk
+        .columns
+        .iter()
+        .any(|c| matches!(c.source, BulkSource::MintUuid | BulkSource::MintUlid)));
+}

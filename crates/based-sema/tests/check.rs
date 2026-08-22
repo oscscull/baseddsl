@@ -3593,8 +3593,9 @@ fn shape_survives_when_a_tx_sibling_creates_the_return_row() {
 }
 
 #[test]
-fn ack_on_soft_delete_is_rejected() {
-    // A plain `delete` on a soft-delete model tombstones — the row survives (E0221).
+fn ack_on_soft_delete_is_allowed_universal_optout() {
+    // BW1 broadened `-> ok` to a universal opt-out of read-back — a surviving write
+    // (here a soft `delete` tombstone) under `-> ok` is legal, no longer E0221.
     let (_, d) = analyze(
         r#"
         @soft_delete(deleted_at)
@@ -3604,11 +3605,12 @@ fn ack_on_soft_delete_is_rejected() {
         }
         "#,
     );
-    assert!(errors(&d).contains(&"E0221"), "{:?}", codes(&d));
+    assert!(!errors(&d).contains(&"E0221"), "{:?}", codes(&d));
 }
 
 #[test]
-fn ack_on_create_or_update_is_rejected() {
+fn ack_on_create_or_update_is_allowed_universal_optout() {
+    // A `create`/`update` may opt out of its declared-shape read-back with `-> ok`.
     let (_, d) = analyze(
         r#"
         Tag { id: Id, label: text }
@@ -3617,7 +3619,7 @@ fn ack_on_create_or_update_is_rejected() {
         }
         "#,
     );
-    assert!(errors(&d).contains(&"E0221"), "{:?}", codes(&d));
+    assert!(!errors(&d).contains(&"E0221"), "{:?}", codes(&d));
 }
 
 #[test]

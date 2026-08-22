@@ -11,7 +11,8 @@ mutation place_order(org: Id, buyer: Id) -> OrderCard {
 ```
 
 ## Actions
-- `create Model { field = $in, ... }`
+- `create Model { field = $in, ... }` — inline assign block (computed/param values)
+- `create Model from $row` / `create Model[] from $rows` — structured shape-input insert (below)
 - `update Model where (...) { field = $in }`
 - `delete Model where (...)` — on a soft-delete model, rewritten to the soft action, never real DELETE.
 - `delete all Model` — whole-table wipe (below). `all` is required and greppable.
@@ -103,6 +104,50 @@ DO UPDATE SET …`, MariaDB `INSERT … ON DUPLICATE KEY UPDATE …` (its form c
 target list — the uniqueness of the validated key is what makes the two agree). `@scope`
 auto-set and the read-back's scope/live guards apply exactly as on a plain `create`.
 
+## Bulk / structured insert (`create … from`)
+
+A `create` can take its column values from a **shape-typed param** instead of an inline
+assign block — a `shape` doubles as the row-input type. `create Model[] from $rows`
+inserts many rows (`$rows: SomeShape[]`) as one chunked, atomic multi-row INSERT;
+`create Model from $row` inserts one (`$row: SomeShape`). The inline `create Model { … }`
+form stays for computed/param assigns — this is the structured-record path.
+```
+shape ProductIn from Product { sku, name, price, category { id } }
+
+mutation import_products(rows: ProductIn[]) -> ok scoped Tenant {
+  create Product[] from $rows;
+}
+```
+- **The shape is the input type.** No separate `input` decl — any shape a query can *read*
+  can bulk-*write* back, with the same struct, zero transformation (the round-trip north
+  star). Input-eligibility is checked at the **use site** (where the shape meets
+  `create Model`), not on the shape decl:
+  - every named scalar field maps to a settable column of `Model` (else `E0326`/`E0328`);
+  - **required-column coverage** — every required column (NOT NULL, no default, not
+    engine-managed) must be named by the shape, else `E0330`;
+  - no computed / aggregate / raw field (`E0327`), no cross-relation reach (`E0328`);
+  - the shape's `from` model must be the create target, and the param's arity must match
+    (`shape[]` for `Model[]`, `shape` for `Model`) — else `E0325`.
+- **Presence-driven columns.** A column **named** in the shape is written **verbatim** from
+  the payload — including `id`, `@created`, `@updated`. A column **absent** is engine-filled:
+  `id` is minted (`uuid`/`ulid`) or DB-generated (`serial`, omitted from the INSERT);
+  `@created`/`@updated` stamp `now()`. **`@scope` is the sole exception:** it is *always*
+  injected from `$ctx`, never the payload, even when the shape names it (tenant safety).
+  Naming an `@updated`/`@created` column is legal but **warned** (`W0112`) — the explicit
+  value overrides the auto-stamp; a named `@scope` value is silently overridden (`W0113`).
+- **Relations = inline nested key blocks, one direction: FK link.** `category { id }` names
+  exactly the target's key → sets the FK column(s) from the payload (round-trips: the same
+  `{ id }` an output projection yields). A composite-key target names its key parts
+  (`enrollment { student, course }`). A relation block naming **non-key payload** would
+  create the related row too — a **nested write**, reserved and not yet supported (`E0329`).
+  A bare relation, a named-shape nest, or a flatten as input is `E0328`.
+- **Chunked + atomic.** The engine emits one `INSERT … VALUES (…),(…),…`, transparently
+  chunked above the driver's bind limit (Postgres ~65535 binds — the user never sees the
+  cap). The whole insert is all-or-nothing within the surrounding transaction.
+- **Read-back is `-> ok`** in this release (`E0332` otherwise); a per-row `-> Shape[]` /
+  single `-> Shape` read-back is a clean follow-on. The rows are verifiable with a query.
+- **`on conflict` (bulk upsert)** on a `create … from` is not yet supported (`E0331`, BW2).
+
 ## Atomic groups
 `tx { ... }` runs a static set of writes in one transaction; rolls back together. Bind a
 step's produced row with `create … as <name>`, and reference a column of it from **any
@@ -178,16 +223,20 @@ OpenAPI advertises the shared empty `Ack` schema. A DELETE that matches **no row
 id another scope owns — is the same `not_found` (`404`) rollback as a surviving write's empty
 read-back, with the same no-existence-leak response.
 
-The two forms never mix (one way to say each thing):
+**`-> ok` is the universal opt-out of read-back** (broadened in BW1 from real-DELETE-only): *any*
+mutation may forfeit its declared-shape return with `-> ok` — a bulk `create Model[] from $rows -> ok`
+is the motivating case (a large load skips echoing every row back). The primary model (scope, sharding)
+is the first engine-known write's. The **zero-row 404** still fires only for a filtered **real DELETE**
+(`hard delete M where …` / a plain-model `delete M where …`) affecting no row; a `create` / `update` /
+`restore` / wipe under `-> ok` never 404s (opting out of read-back opts out of the not-found signal too).
+
+The remaining rules (one way to say each thing):
 - A shape on a mutation whose only write(s) on the return model are real DELETEs is an error
   (`E0220`) — declare `-> ok`.
-- `-> ok` on a mutation with any surviving write (`create` / `update` / `restore` / a *filtered*
-  soft `delete`) is an error (`E0221`) — a surviving write's read-back is the contract; declare its
-  shape. A raw write may ride along (its effect is outside the engine's knowledge), but at least one
-  destructive write is required; the *first* one's model is the mutation's primary model (scope,
-  sharding, and the 404 check ride on it). A **whole-table wipe** (`delete all` / `hard delete all`,
-  including a soft model's tombstone-all) counts as destructive — no single row survives to read back
-  — so `-> ok` is required on a wipe and a shape is `E0220`.
+- `-> ok` on a mutation with **no engine-known write** (a raw-only body — nothing to hang scope /
+  sharding on) is an error (`E0221`). A raw write may ride along a real write, but cannot stand alone.
+- A **whole-table wipe** (`delete all` / `hard delete all`, including a soft model's tombstone-all)
+  is destructive — no single row survives — so `-> ok` is required on a wipe and a shape is `E0220`.
 - `-> ok` on a query is an error (`E0222`) — a query returns data.
 
 ## Read-decide-write

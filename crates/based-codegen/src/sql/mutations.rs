@@ -53,7 +53,9 @@
 use std::collections::HashMap;
 
 use based_ast::*;
-use based_sema::{CheckedSchema, MemberKind, RModel, ScopeInject, SoftDelete, SoftMode};
+use based_sema::{
+    CheckedSchema, MemberKind, PkStrategy, RModel, ScopeInject, SoftDelete, SoftMode,
+};
 
 use crate::sql::dml::{
     bref_name, physical_col, project_return, push_joins, render_raw, soft_pred, BackCtx, Select,
@@ -130,6 +132,78 @@ pub struct LoweredWrite {
     /// absent-row 404 an ordinary delete's zero rows signals. The runtime therefore skips
     /// the ack-row-count check for a wipe.
     pub wipe: bool,
+    /// A structured shape-input create (`create Model from $row` / `create Model[] from
+    /// $rows`, BW1): the row values come from a shape-typed param, not the `:name`
+    /// template in `sql`. The runtime reads the param, expands it to a chunked, atomic
+    /// multi-row `INSERT`. `None` for every ordinary inline write. When `Some`, `sql`
+    /// carries only a review-only single-row template.
+    pub bulk: Option<BulkInsert>,
+    /// A filtered **real** DELETE (`hard delete M where …`, or a plain-model `delete M
+    /// where …`) — the only write whose zero-rows-affected is an absent-row 404 under an
+    /// `-> ok` acknowledgement (D98). A wipe, a soft tombstone, a create, and an update
+    /// all leave it `false`, so a surviving-write `-> ok` (BW1's relaxed E0221) never 404s.
+    pub real_delete: bool,
+}
+
+/// A structured shape-input `create` (BW1). The runtime materializes the actual SQL — the
+/// row count is dynamic, so codegen carries the column plan rather than a finished
+/// statement. Rows above the driver's bind limit are transparently chunked; the whole
+/// insert is one atomic unit within the surrounding transaction.
+#[derive(Debug, Clone)]
+pub struct BulkInsert {
+    /// The target model (the runtime resolves per-column coercion families + the id
+    /// strategy from it).
+    pub model: String,
+    /// The fully-qualified, quoted table name.
+    pub table: String,
+    /// The mutation param the row(s) come from — a JSON object (single) or array (bulk).
+    pub param: String,
+    /// `Model[] from` (many rows) vs `Model from` (one row).
+    pub bulk: bool,
+    /// The INSERT columns in order, each with the per-row value source.
+    pub columns: Vec<BulkCol>,
+    /// A DB-generated `serial` id column to `RETURNING` after insert, so a single
+    /// `create Model from $row -> Shape` can key its declared re-select on it. Empty for
+    /// an app-minted / natural key, a bulk (`-> ok`) insert, or a keyless model.
+    pub returning: Vec<String>,
+}
+
+/// One INSERT column of a structured shape-input create: the physical column and where its
+/// per-row value comes from.
+#[derive(Debug, Clone)]
+pub struct BulkCol {
+    /// Physical column name (unquoted — the runtime quotes per dialect).
+    pub column: String,
+    pub source: BulkSource,
+}
+
+/// The per-row value source for one bulk-insert column (BW1). The presence-driven rule:
+/// a column named in the shape is written verbatim from the payload; an absent
+/// engine-managed column is filled by the engine; `@scope` is *always* engine-injected.
+#[derive(Debug, Clone)]
+pub enum BulkSource {
+    /// `row[json_key]` — a scalar column written verbatim from the payload. `field` names
+    /// the model member whose type coerces the value (usually == `json_key`).
+    Field {
+        json_key: String,
+        field: String,
+    },
+    /// `row[relation][key_field]` — an FK column linking an existing row (a nested
+    /// `rel { key }` block in the input shape).
+    FkPart {
+        relation: String,
+        key_field: String,
+    },
+    /// An app-minted id per row (`uuid` / `ulid`), absent from the shape.
+    MintUuid,
+    MintUlid,
+    /// A `@scope` column — always the caller's `$ctx.<field>`, identical for every row
+    /// (never taken from the payload, even when the shape names it).
+    Ctx {
+        ctx_field: String,
+    },
+    /// `CURRENT_TIMESTAMP` — an engine `@created`/`@updated` stamp, absent from the shape.
+    Now,
 }
 
 /// A bound `create`'s row read-back: the committed column values the run stage captures
@@ -236,6 +310,7 @@ fn lower_mutation<'a>(
         inject,
         ret_model,
         binding_refs: &binding_refs,
+        params: &m.params,
     };
     let mut stmts = Vec::new();
     let no_bindings = HashMap::new();
@@ -632,6 +707,9 @@ struct LowerCx<'a> {
     inject: &'a [ScopeInject],
     ret_model: &'a str,
     binding_refs: &'a HashMap<String, Vec<CaptureCol>>,
+    /// The mutation's params — a `create … from $param`'s input shape is resolved through
+    /// the param's declared type.
+    params: &'a [Param],
 }
 
 /// Lower one write statement, pushing its [`LoweredWrite`](s) onto `out`. `id_param`
@@ -654,10 +732,25 @@ fn lower_write<'a>(
         WriteStmt::Create {
             model,
             assigns,
+            from,
             conflict,
             binding,
         } => {
             if let Some(m) = schema.model(&model.node) {
+                // A structured shape-input create (`create Model[]? from $param`): the row
+                // values come from a shape param, materialized as a chunked multi-row
+                // INSERT at run time (sema guarantees eligibility + `-> ok` for the bulk
+                // form; a single `from` may still key its declared re-select on the id).
+                if let Some(cf) = from {
+                    let claims_result = !*ret_taken && m.name == cx.ret_model;
+                    if claims_result {
+                        *ret_taken = true;
+                    }
+                    if let Some(w) = lower_bulk_create(cx, m, cf, claims_result) {
+                        out.push(w);
+                    }
+                    return;
+                }
                 // This create's binding read-back columns (its siblings' `$name.field`),
                 // and whether it claims the declared re-select's DB-generated `:result_id`.
                 let refs = binding
@@ -718,6 +811,8 @@ fn lower_write<'a>(
             creates: false,
             capture: None,
             wipe: false,
+            bulk: None,
+            real_delete: false,
         }),
     }
 }
@@ -891,7 +986,236 @@ fn lower_create<'a>(
         creates: true,
         capture,
         wipe: false,
+        bulk: None,
+        real_delete: false,
     }
+}
+
+// ---------- bulk / structured shape-input create (BW1) ---------------------
+
+/// Resolve a `create … from $param`'s input shape to `(from_model, body)`, via the param's
+/// declared shape type. Sema already validated eligibility; this just re-reads the shape.
+fn resolve_from_shape<'a>(cx: &LowerCx<'a>, param: &str) -> Option<(&'a str, &'a [ShapeField])> {
+    let p = cx.params.iter().find(|p| p.name.node == param)?;
+    let BaseType::Model(name) = &p.ty.as_ref()?.base else {
+        return None;
+    };
+    cx.decls.iter().find_map(|d| match d {
+        Decl::Shape(s) if s.name.node == name.node => {
+            Some((s.from.node.as_str(), s.body.as_slice()))
+        }
+        _ => None,
+    })
+}
+
+/// Lower a structured shape-input `create` (`create Model from $row` / `create Model[] from
+/// $rows`, BW1) to a [`BulkInsert`] column plan. The runtime materializes the chunked,
+/// atomic multi-row INSERT from it — the row count is dynamic. Presence-driven: a column
+/// the input shape names is written verbatim from the payload; an absent engine-managed
+/// column (`id`, `@created`/`@updated`) is filled by the engine; `@scope` is *always*
+/// injected from `$ctx`, even when the shape names it.
+/// The presence-driven INSERT column plan for a structured shape-input create, plus the
+/// DB-generated `serial` id column to `RETURNING` (if any). A column the shape names is
+/// written verbatim from the payload (except a `@scope` column); an absent engine-managed
+/// column is filled (mint / DB-gen / `now()`); `@scope` is always the caller's `$ctx`.
+fn bulk_columns(
+    cx: &LowerCx,
+    model: &RModel,
+    body: &[ShapeField],
+) -> (Vec<BulkCol>, Option<String>) {
+    let scope_terms: Vec<(String, String)> = cx
+        .inject
+        .iter()
+        .find(|si| si.model == model.name)
+        .map_or(Vec::new(), |si| si.terms.clone());
+    let scope_cols: Vec<String> = scope_terms
+        .iter()
+        .map(|(f, _)| physical_col(model, f))
+        .collect();
+
+    // 1. Columns the input shape names — verbatim from the payload (a `@scope` column is
+    //    skipped; step 2 injects it from `$ctx`).
+    let mut columns: Vec<BulkCol> = Vec::new();
+    let mut have: Vec<String> = Vec::new();
+    for f in body {
+        if let Some((col, src)) = named_bulk_col(model, f) {
+            if !scope_cols.contains(&col) {
+                bulk_push(&mut columns, &mut have, col, src);
+            }
+        } else if let ShapeField::Nest { field, .. } = f {
+            if let Some(mem) = model.member(&field.node) {
+                for (fk_col, part) in cx.schema.fk_columns(mem) {
+                    let src = BulkSource::FkPart {
+                        relation: field.node.clone(),
+                        key_field: part.name.clone(),
+                    };
+                    bulk_push(&mut columns, &mut have, fk_col, src);
+                }
+            }
+        }
+    }
+
+    // 2. `@scope` — always the caller's `$ctx.<field>`, identical for every row.
+    for (field, ctx_field) in &scope_terms {
+        let src = BulkSource::Ctx {
+            ctx_field: ctx_field.clone(),
+        };
+        bulk_push(&mut columns, &mut have, physical_col(model, field), src);
+    }
+
+    // 3. The primary key when the shape does not name it: an app-minted `uuid`/`ulid` per
+    //    row, or a DB-generated `serial` (omit — the DB assigns it). A `@key` / keyless
+    //    model has no surrogate id (its key is an ordinary named column).
+    let serial_col = serial_return_col(model, cx.dialect);
+    if !model.no_id && model.key.is_empty() && !have.iter().any(|c| c == "id") {
+        match model.pk_strategy() {
+            Some(PkStrategy::Serial) => { /* DB-generated — omit */ }
+            Some(PkStrategy::Ulid) => {
+                bulk_push(
+                    &mut columns,
+                    &mut have,
+                    "id".to_string(),
+                    BulkSource::MintUlid,
+                );
+            }
+            _ => bulk_push(
+                &mut columns,
+                &mut have,
+                "id".to_string(),
+                BulkSource::MintUuid,
+            ),
+        }
+    }
+
+    // 4. `@created`/`@updated` stamps the shape did not name → `CURRENT_TIMESTAMP`.
+    for col in timestamp_cols(model, &[model.created.as_deref(), model.updated.as_deref()]) {
+        bulk_push(&mut columns, &mut have, col, BulkSource::Now);
+    }
+
+    (columns, serial_col)
+}
+
+/// Append a bulk-insert column unless its physical column is already present (first source
+/// wins — the shape-named value beats a later engine default).
+fn bulk_push(columns: &mut Vec<BulkCol>, have: &mut Vec<String>, col: String, source: BulkSource) {
+    if !have.contains(&col) {
+        have.push(col.clone());
+        columns.push(BulkCol {
+            column: col,
+            source,
+        });
+    }
+}
+
+/// The `(physical_col, BulkSource::Field)` a scalar input-shape field writes — a bare column
+/// or a single-column rename. `None` for a relation nest (handled by the caller's FK
+/// expansion) or any form sema rejected.
+fn named_bulk_col(model: &RModel, f: &ShapeField) -> Option<(String, BulkSource)> {
+    match f {
+        ShapeField::Bare(id) => Some((
+            physical_col(model, &id.node),
+            BulkSource::Field {
+                json_key: id.node.clone(),
+                field: id.node.clone(),
+            },
+        )),
+        ShapeField::Rename {
+            out,
+            value: ShapeValue::Path(p),
+        } if p.segments.len() == 1 => {
+            let field = p.segments[0].node.clone();
+            Some((
+                physical_col(model, &field),
+                BulkSource::Field {
+                    json_key: out.node.clone(),
+                    field,
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn lower_bulk_create(
+    cx: &LowerCx,
+    model: &RModel,
+    cf: &CreateFrom,
+    _claims_result: bool,
+) -> Option<LoweredWrite> {
+    let (_from, body) = resolve_from_shape(cx, &cf.param.node)?;
+    let dialect = cx.dialect;
+    let (columns, serial_col) = bulk_columns(cx, model, body);
+    let bulk = BulkInsert {
+        model: model.name.clone(),
+        table: dialect.quote_table(model.schema.as_deref(), &model.table),
+        param: cf.param.node.clone(),
+        bulk: cf.bulk,
+        columns,
+        returning: serial_col.into_iter().collect(),
+    };
+    Some(LoweredWrite {
+        header: format!(
+            "-- create {}{} from ${} (chunked multi-row INSERT — materialized by the runtime)\n",
+            model.name,
+            if cf.bulk { "[]" } else { "" },
+            cf.param.node
+        ),
+        sql: bulk_review_sql(dialect, &bulk),
+        model: model.name.clone(),
+        gen_id: None,
+        conflict_key: None,
+        read_key: None,
+        serial_col: None,
+        creates: true,
+        capture: None,
+        wipe: false,
+        bulk: Some(bulk),
+        real_delete: false,
+    })
+}
+
+/// A review-only single-row rendering of a bulk insert for `based gen sql` output (the
+/// runtime never executes this — it materializes the real, chunked statement from the
+/// [`BulkInsert`] plan). Placeholders name each column's per-row source.
+fn bulk_review_sql(dialect: Dialect, bulk: &BulkInsert) -> String {
+    let cols: Vec<String> = bulk
+        .columns
+        .iter()
+        .map(|c| dialect.quote(&c.column))
+        .collect();
+    let vals: Vec<String> = bulk
+        .columns
+        .iter()
+        .map(|c| match &c.source {
+            BulkSource::Field { json_key, .. } => format!(":row.{json_key}"),
+            BulkSource::FkPart {
+                relation,
+                key_field,
+            } => format!(":row.{relation}.{key_field}"),
+            BulkSource::MintUuid => ":mint(uuid)".to_string(),
+            BulkSource::MintUlid => ":mint(ulid)".to_string(),
+            BulkSource::Ctx { ctx_field } => format!(":ctx_{ctx_field}"),
+            BulkSource::Now => "CURRENT_TIMESTAMP".to_string(),
+        })
+        .collect();
+    let ret = if bulk.returning.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " RETURNING {}",
+            bulk.returning
+                .iter()
+                .map(|c| dialect.quote(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "INSERT INTO {} ({})\nVALUES ({}){ret};  -- repeated per row, chunked below the driver's bind limit\n",
+        bulk.table,
+        cols.join(", "),
+        vals.join(", "),
+    )
 }
 
 /// Build a create's row read-back plan and the `RETURNING` column list its INSERT carries.
@@ -1248,6 +1572,8 @@ fn lower_update<'a>(
         creates: false,
         capture: None,
         wipe: false,
+        bulk: None,
+        real_delete: false,
     }
 }
 
@@ -1298,6 +1624,8 @@ fn lower_delete(
             creates: false,
             capture: None,
             wipe,
+            bulk: None,
+            real_delete: false,
         };
     }
 
@@ -1333,6 +1661,9 @@ fn lower_delete(
         creates: false,
         capture: None,
         wipe,
+        bulk: None,
+        // A filtered real DELETE ack-checks its zero-rows-affected as a 404; a wipe does not.
+        real_delete: !wipe,
     }
 }
 
@@ -1367,6 +1698,8 @@ fn lower_restore(cx: &LowerCx, model: &RModel, where_: &Predicate) -> LoweredWri
         creates: false,
         capture: None,
         wipe: false,
+        bulk: None,
+        real_delete: false,
     }
 }
 

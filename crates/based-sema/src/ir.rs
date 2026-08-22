@@ -220,6 +220,21 @@ pub mod code {
     pub const CFIELD_CASE_MISMATCH: &str = "E0322"; // a `case`'s branches (`then`/`else`) don't share a common type
     pub const CFIELD_NO_PARAMS: &str = "E0323"; // a `$…` operand in a computed field — a shape declaration has no parameters
     pub const CFIELD_IN_AGG: &str = "E0324"; // a computed field alongside an aggregate field — a group is not a row
+
+    // Bulk / structured insert — `create Model[] from $rows` / `create Model from $row`
+    // (BW1): a `shape` used as the row-input type. Eligibility is checked at the use site.
+    pub const INPUT_PARAM_TYPE: &str = "E0325"; // the `from` param is not a `shape` (single) / `shape[]` (bulk) whose `from` model is the create target
+    pub const INPUT_FIELD_NOT_COLUMN: &str = "E0326"; // an input shape field maps to no settable column of the target model
+    pub const INPUT_COMPUTED_FIELD: &str = "E0327"; // a computed / aggregate / raw field in an input-used shape (no column to write)
+    pub const INPUT_BAD_RELATION: &str = "E0328"; // a relation in an input shape must be an inline nested key block `rel { key }` (bare / reach / named-nest / flatten not settable)
+    pub const INPUT_NESTED_WRITE: &str = "E0329"; // a relation block names non-key payload — a nested write, not yet supported (reserved)
+    pub const INPUT_MISSING_REQUIRED: &str = "E0330"; // a required column is not covered by the input shape
+    pub const INPUT_BULK_UPSERT: &str = "E0331"; // `on conflict` on a structured `create … from` — bulk upsert (BW2) is not supported yet
+    pub const INPUT_BULK_READBACK: &str = "E0332"; // a structured `create … from` must be `-> ok` — shape read-back (single `-> Shape` / bulk `-> Shape[]`) is a follow-on
+
+    // Warnings on an input-used shape naming an engine-managed column (BW1).
+    pub const INPUT_NAMES_TIMESTAMP: &str = "W0112"; // names an `@created`/`@updated` column — the explicit value overrides the auto-timestamp
+    pub const INPUT_NAMES_SCOPE: &str = "W0113"; // names a `@scope` column — the value is ignored (engine-injected from `$ctx`)
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`
