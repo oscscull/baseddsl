@@ -1229,6 +1229,66 @@ fn aggregate_query_sqlite_casts_decimal_sum_to_text() {
     );
 }
 
+const ENUM_HAVING_SCHEMA: &str = r#"
+    enum Status { active, archived, paused }
+    enum Level  { low = 1, mid = 2, high = 3 }
+    @soft_delete(deleted_at)
+    Order {
+      id: Id
+      deleted_at: timestamp?
+      status: Status
+      level: Level
+      total: decimal(12, 2)
+    }
+    shape StatusStats from Order {
+      st = status
+      tier = level
+      revenue = sum(total)
+      n = count()
+    }
+    query stats() -> StatusStats[] {
+      list Order
+        group by (status, level)
+        having (st = active and tier in (mid, high) and revenue > 100);
+    }
+"#;
+
+#[test]
+fn having_renders_enum_group_column_rhs_as_wire_literal() {
+    // A `having` RHS that is a bare enum variant of a (possibly renamed) group column
+    // lowers to the enum's wire value — a string literal for a string enum, the bare int
+    // for an int enum — never a spurious column reference. Mirrors the `where` rendering.
+    for dialect in [Dialect::MariaDb, Dialect::Postgres, Dialect::Sqlite] {
+        let sql = gen_for(ENUM_HAVING_SCHEMA, dialect);
+        let (o, s) = match dialect {
+            Dialect::Postgres => ("\"order\"", "\""),
+            _ => ("`order`", "`"),
+        };
+        // string enum → 'active'; int enum list → bare integers; never `order.active`.
+        assert!(
+            sql.contains(&format!("{o}.{s}status{s} = 'active'")),
+            "{dialect:?}\n{sql}"
+        );
+        assert!(
+            sql.contains(&format!("{o}.{s}level{s} IN (2, 3)")),
+            "{dialect:?}\n{sql}"
+        );
+        assert!(
+            !sql.contains("active\""),
+            "{dialect:?} column-ref leak\n{sql}"
+        );
+        assert!(
+            !sql.contains("active`"),
+            "{dialect:?} column-ref leak\n{sql}"
+        );
+        // the aggregate comparison in the same HAVING is untouched.
+        assert!(
+            sql.contains(&format!("SUM({o}.{s}total{s}) > 100")),
+            "{dialect:?}\n{sql}"
+        );
+    }
+}
+
 // ---------- far-side flattening projection (`courses = enrollments.course { … }`) ----
 
 #[test]

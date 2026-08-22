@@ -403,18 +403,23 @@ fn lower_agg_query<'a>(
     // an ordered comparison.
     let mut cols: Vec<String> = Vec::new();
     let mut expr_map: HashMap<String, String> = HashMap::new();
+    // out-name → the model column path a group (non-aggregate) field projects, so
+    // `having` can render an enum-typed group column's RHS variant as its wire literal.
+    let mut group_col_paths: HashMap<String, Path> = HashMap::new();
     let root_alias = sel.root_alias.clone();
     for f in body {
         let (out, proj, cmp) = match f {
             ShapeField::Bare(id) => {
                 let (a, c) = sel.resolve_from(&single(&id.node), &root_alias, "", root);
                 let q = sel.qcol(&a, &c);
+                group_col_paths.insert(id.node.clone(), single(&id.node));
                 (id.node.clone(), q.clone(), q)
             }
             ShapeField::Rename { out, value } => match value {
                 ShapeValue::Path(p) => {
                     let (a, c) = sel.resolve_from(p, &root_alias, "", root);
                     let q = sel.qcol(&a, &c);
+                    group_col_paths.insert(out.node.clone(), p.clone());
                     (out.node.clone(), q.clone(), q)
                 }
                 ShapeValue::Agg(agg) => {
@@ -462,7 +467,7 @@ fn lower_agg_query<'a>(
             sel.qcol(&a, &c)
         })
         .collect();
-    let having = having_pred.map(|hp| sel.having(hp, root, &expr_map));
+    let having = having_pred.map(|hp| sel.having(hp, root, &expr_map, &group_col_paths));
     let order: Vec<String> = order_terms
         .iter()
         .filter_map(|t| {
@@ -2128,26 +2133,31 @@ impl<'a> Select<'a> {
         p: &Predicate,
         model: &RModel,
         map: &HashMap<String, String>,
+        group_paths: &HashMap<String, Path>,
     ) -> String {
         match p {
             Predicate::And(a, b) => {
                 format!(
                     "({} AND {})",
-                    self.having(a, model, map),
-                    self.having(b, model, map)
+                    self.having(a, model, map, group_paths),
+                    self.having(b, model, map, group_paths)
                 )
             }
             Predicate::Or(a, b) => {
                 format!(
                     "({} OR {})",
-                    self.having(a, model, map),
-                    self.having(b, model, map)
+                    self.having(a, model, map, group_paths),
+                    self.having(b, model, map, group_paths)
                 )
             }
-            Predicate::Not(inner) => format!("NOT ({})", self.having(inner, model, map)),
+            Predicate::Not(inner) => {
+                format!("NOT ({})", self.having(inner, model, map, group_paths))
+            }
             Predicate::Cmp { path, op, value } => {
                 let lhs = self.having_lhs(path, model, map);
-                let rhs = self.value(value, model);
+                let rhs = self
+                    .having_variant_lit(path, model, value, group_paths)
+                    .unwrap_or_else(|| self.value(value, model));
                 match op {
                     Op::In => format!("{lhs} IN ({rhs})"),
                     Op::Has => match self.dialect {
@@ -2159,7 +2169,13 @@ impl<'a> Select<'a> {
             }
             Predicate::InList { path, values } => {
                 let lhs = self.having_lhs(path, model, map);
-                let items: Vec<String> = values.iter().map(|v| self.value(v, model)).collect();
+                let items: Vec<String> = values
+                    .iter()
+                    .map(|v| {
+                        self.having_variant_lit(path, model, v, group_paths)
+                            .unwrap_or_else(|| self.value(v, model))
+                    })
+                    .collect();
                 format!("{lhs} IN ({})", items.join(", "))
             }
             Predicate::Bare(path) => {
@@ -2188,6 +2204,22 @@ impl<'a> Select<'a> {
         }
         let (a, c) = self.resolve(path, model);
         self.qcol(&a, &c)
+    }
+
+    /// A `having` RHS that is a bare variant of an enum-typed group column, as its wire
+    /// literal — the `where`-side enum rendering, applied through the projected out-name's
+    /// underlying column path (so a renamed group column resolves too). `None` (fall back to
+    /// ordinary value lowering) unless the left operand names an enum group column.
+    fn having_variant_lit(
+        &self,
+        path: &Path,
+        model: &RModel,
+        value: &Value,
+        group_paths: &HashMap<String, Path>,
+    ) -> Option<String> {
+        let out = path.segments.first()?;
+        let col_path = group_paths.get(&out.node)?;
+        self.enum_variant_lit(model, col_path, value)
     }
 
     /// The enum a dotted path terminates on, when the terminal column is enum-typed

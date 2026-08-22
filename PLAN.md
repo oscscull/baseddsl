@@ -1340,6 +1340,35 @@ feature-complete per DoD #3 but has rough edges); H5 is cross-cutting.
     insert-vs-conflict read-back keyed on the conflict target; and soft-delete/restore re-select `live`-flag
     correctness — a tombstone reads back (live predicate dropped), a live `get` misses it, and `restore`
     reads it back live (`soft_delete_reads_back_tombstone_then_restore_reads_back_live`).
+  - **Sweep 2026-08-22 — aggregation/`group by`/`having` × `@scope` × soft-delete × `where` × the
+    numeric/type family (decimal/float/int/time/enum). Found + FIXED one real correctness bug:** a
+    `having` predicate comparing a **grouped enum column** against a bare variant lowered the RHS as a
+    *column reference* instead of the enum's wire value — `HAVING "order"."status" = "order"."active"`
+    (a nonexistent column) rather than `= 'active'`, and `HAVING … IN ("order"."active", …)` for a list,
+    on **all three dialects** — invalid SQL that never executes. It bit `=`/`!=`/ordered/`in`/`not`, both
+    enum kinds (string → quoted, int → bare integer), and both a same-named and a **renamed** group column
+    (`st = status` then `having (st = active)`). Root cause: `Select::having` (based-codegen `sql/dml.rs`)
+    rendered every RHS through `self.value(…)`, skipping the `enum_variant_lit` step the `where` path
+    (`Select::predicate`) already runs — a bare variant is an ordinary single-segment `Path` in the AST, so
+    without the enum check it resolved as a column. Sema doesn't type-check a `having` RHS (`check_having`
+    only verifies the LHS names a projected column), so nothing caught it earlier. Fix (contained, all
+    dialects): `lower_agg_query` now records each group (non-aggregate) projected field's underlying model
+    column path (`group_col_paths`, keyed by out-name so a rename resolves); `having`'s `Cmp`/`InList` RHS
+    first tries `having_variant_lit` (enum wire value via that path) before falling back to `self.value`,
+    mirroring `where` exactly. Aggregate-alias operands (`revenue`) aren't in the map, so they fall through
+    unchanged. Regression tests: live SQLite `aggregate_having_on_enum_group_column_end_to_end`
+    (sqlite_integration.rs — string + int enum, renamed column, `in`/`=`, soft-of `where`/`having`/`order`
+    split, exact result) + codegen golden `having_renders_enum_group_column_rhs_as_wire_literal`
+    (based-codegen/tests/dml.rs, all three dialects). No `D#` (plain bug fix; the spec already says a
+    `having` RHS renders "exactly as in `where`"). **Swept clean** (no bug found, `based gen sql` across all
+    three dialects + live SQLite): `@scope` and soft-delete predicates land in `WHERE` (before grouping),
+    never in `HAVING`, so a scoped/soft-deleting model aggregates only its live in-scope rows without the
+    scope/tombstone column being grouped; `SUM`/`AVG`/`COUNT` decode casts by dialect (`SUM(int)` → SIGNED/
+    BIGINT, `AVG` → DOUBLE/DOUBLE PRECISION/REAL, SQLite decimal `SUM` → `CAST(... AS TEXT)` wire string,
+    Postgres/MariaDB decimal `SUM` native numeric); `MIN`/`MAX` keep the column type; a `having` on an
+    aggregate alias inlines the aggregate expression (no unportable alias reference); soft-delete excludes
+    tombstoned rows *before* grouping (an excluded row's measure never enters a `SUM`); and an empty result
+    set returns `[]`.
 - **H6-R1. `$name.<engine-managed-non-scope-column>` tx reference still lowers to a silent `NULL`.**
   Symptom: a `tx` `$name.field` reference to a bound create's field that is neither explicitly assigned,
   nor `id`, nor a `@scope` column (fixed in the 2026-08-21(2) sweep) — i.e. an `@created`/`@updated`
