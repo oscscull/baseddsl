@@ -27,7 +27,11 @@ pub fn to_positional<T>(
     mut resolve: impl FnMut(&str) -> Option<T>,
 ) -> Result<(String, Vec<T>), String> {
     let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
+    // Built as bytes so verbatim SQL text is copied intact: a multi-byte UTF-8 character
+    // (a non-ASCII literal in a raw block, say) must survive byte-for-byte. Every delimiter
+    // the scan tests for is ASCII, and UTF-8 never puts an ASCII byte inside a multi-byte
+    // sequence, so the byte-level quote/placeholder detection is unaffected.
+    let mut out: Vec<u8> = Vec::with_capacity(sql.len());
     let mut params = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -36,10 +40,10 @@ pub fn to_positional<T>(
         // SQL escapes a quote by doubling it (`''`), which this handles naturally —
         // the doubled close is seen as close-then-reopen, leaving us still "inside".
         if c == b'\'' || c == b'"' || c == b'`' {
-            out.push(c as char);
+            out.push(c);
             i += 1;
             while i < bytes.len() {
-                out.push(bytes[i] as char);
+                out.push(bytes[i]);
                 i += 1;
                 if bytes[i - 1] == c {
                     break;
@@ -50,7 +54,7 @@ pub fn to_positional<T>(
         // `::` is not one of our placeholders (it is Postgres's cast operator) — copy
         // both colons and move on so the second `:` cannot start a spurious placeholder.
         if c == b':' && i + 1 < bytes.len() && bytes[i + 1] == b':' {
-            out.push_str("::");
+            out.extend_from_slice(b"::");
             i += 2;
             continue;
         }
@@ -68,8 +72,10 @@ pub fn to_positional<T>(
                     // Anonymous `?` or ordinal `$n` (1-based) per dialect. The ordinal
                     // is the running parameter count, so it matches the bind order.
                     match dialect {
-                        Dialect::Postgres => out.push_str(&format!("${}", params.len())),
-                        _ => out.push('?'),
+                        Dialect::Postgres => {
+                            out.extend_from_slice(format!("${}", params.len()).as_bytes());
+                        }
+                        _ => out.push(b'?'),
                     }
                     i = j;
                     continue;
@@ -77,9 +83,12 @@ pub fn to_positional<T>(
                 None => return Err(name.to_string()),
             }
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
+    // `out` is the original UTF-8 bytes with ASCII placeholders spliced in at char
+    // boundaries — always valid UTF-8.
+    let out = String::from_utf8(out).expect("scan preserves UTF-8");
     Ok((out, params))
 }
 
@@ -152,6 +161,15 @@ mod tests {
     fn double_colon_skipped() {
         let (sql, ps) = go("SELECT x::text, :p");
         assert_eq!(sql, "SELECT x::text, ?");
+        assert_eq!(ps, vec!["p"]);
+    }
+
+    #[test]
+    fn non_ascii_literal_survives_verbatim() {
+        // A multi-byte UTF-8 literal (a raw block can carry one) must be copied
+        // byte-for-byte, not reinterpreted per-byte into mojibake.
+        let (sql, ps) = go("WHERE name = 'café' AND emoji = '🎉' AND x = :p");
+        assert_eq!(sql, "WHERE name = 'café' AND emoji = '🎉' AND x = ?");
         assert_eq!(ps, vec!["p"]);
     }
 
