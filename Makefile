@@ -18,9 +18,11 @@
 # because they need a server; `make ci-live` / `ci-examples` run them once one is up.
 #
 # Two-tier commit gate (one command per tier, so verifying a change never takes several steps):
-#   make check-fast        # iterate: fmt + clippy + full workspace tests. No DB, no examples.
-#   make check             # pre-commit for execution-touching changes: check-fast, then fresh
-#                          # throwaway DBs + both live suites + all three example scenarios.
+#   make check-fast        # iterate: fmt + clippy + workspace tests at infra-free features
+#                          # (sqlite,serve). No DB, no examples, no MariaDB/Postgres driver build.
+#   make check             # pre-commit for execution-touching changes: the FULL workspace at
+#                          # --all-features (driver code compiled + linted), then fresh throwaway
+#                          # DBs + both live suites + all three example scenarios.
 # `check` manages its own throwaway DBs (fresh via dev-db-up) and leaves them running for fast
 # re-runs; `make dev-db-down` cleans up. Front-end-only changes may gate on check-fast alone.
 
@@ -40,7 +42,7 @@ SQLITE_DB    ?= quickstart.db
 # throwaway `redis:7` in dev-db-up; a CI service container overrides it.
 REDIS_URL    ?= redis://127.0.0.1:16379
 
-.PHONY: ci check check-fast ci-workspace ci-coloring ci-extension ci-image ci-live \
+.PHONY: ci check check-fast ci-workspace ci-workspace-full ci-coloring ci-extension ci-image ci-live \
         ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
         ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-down
 
@@ -52,10 +54,11 @@ FRONTEND_CRATES := based-ast based-parser based-fmt based-sema based-codegen bas
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
 ci: ci-workspace ci-extension
 
-## Fast iteration gate: format, lint, full workspace tests. No DB, no examples, no extension.
+## Fast iteration gate: format, lint, workspace tests at infra-free features (sqlite,serve).
+## No DB, no examples, no extension, no MariaDB/Postgres driver build.
 check-fast: ci-workspace
 
-## Full pre-commit gate: check-fast, then everything DB-backed against fresh throwaway servers
+## Full pre-commit gate: the full workspace at --all-features, then everything DB-backed
 ## (started here; left running for fast re-runs — `make dev-db-down` cleans up). Also refreshes
 ## target/debug/based-lsp — the VS Code extension launches it via a PATH symlink pointing there,
 ## so a stale binary means the editor silently runs old LSP code.
@@ -63,7 +66,7 @@ check-fast: ci-workspace
 ## suites reset per test *at start* and leave their last schema/ledger behind, while each
 ## example expects an empty database — the same isolation CI gets from one service
 ## container per job (.github/workflows/ci.yml).
-check: check-fast dev-db-up
+check: ci-workspace-full dev-db-up
 	$(CARGO) build -p based-lsp
 	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
 	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
@@ -74,8 +77,20 @@ check: check-fast dev-db-up
 	$(MAKE) ci-examples
 	@echo "check: all gates green"
 
-## Workspace gate: format, lint, the coloring boundary, and the full test suite.
+## Fast workspace gate: format, lint, coloring, and the full test suite — but only the
+## infra-free features (`sqlite,serve` for the runtime). It deliberately does NOT build the
+## MariaDB/Postgres driver stacks (sqlx's mysql/postgres backends): those pull a large
+## dependency tree, need a live server to actually test, and are covered by `make check`'s
+## live suites + `ci-workspace-full`. Dropping them is what keeps this tier fast.
 ci-workspace: ci-coloring
+	$(CARGO) fmt --check
+	$(CARGO) clippy --workspace --features sqlite,serve -- -D warnings
+	$(CARGO) test --workspace --features sqlite,serve
+
+## Full workspace gate: fmt + coloring + lint/test at `--all-features`, so the MariaDB/Postgres
+## driver code is compiled and linted too. Part of `make check` (the heavy pre-commit gate);
+## the driver *tests* themselves run live under `ci-live` (they skip without a server).
+ci-workspace-full: ci-coloring
 	$(CARGO) fmt --check
 	$(CARGO) clippy --workspace --all-features -- -D warnings
 	$(CARGO) test --workspace --all-features
