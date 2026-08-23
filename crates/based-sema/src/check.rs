@@ -2166,6 +2166,7 @@ fn check_from_creates(m: &Mutation, cx: &Cx, sink: &mut Sink) {
                 cf,
                 m.scoped.as_ref(),
                 m.unscoped.is_some(),
+                conflict.is_some(),
                 cx,
                 sink,
             );
@@ -2415,18 +2416,51 @@ fn resolve_input_shape(
 /// input rules (BW1): every named scalar maps to a settable column; relations are inline
 /// nested key blocks (FK link); no computed/aggregate/raw/reach fields; every required,
 /// non-engine-managed column is covered; and warn on a named engine-managed column.
+#[allow(clippy::too_many_arguments)]
 fn check_input_shape(
     shape: &str,
     mi: usize,
     cf: &CreateFrom,
     scoped: Option<&Scoped>,
     unscoped: bool,
+    has_conflict: bool,
     cx: &Cx,
     sink: &mut Sink,
 ) {
     let Some(body) = cx.shape_bodies.get(shape).copied() else {
         return;
     };
+    let mut seen = vec![shape.to_string()];
+    check_input_body(
+        body,
+        mi,
+        None,
+        cf,
+        scoped,
+        unscoped,
+        has_conflict,
+        &mut seen,
+        cx,
+        sink,
+    );
+}
+
+/// Recursively validate an input shape's body against a create target. `exempt` names a
+/// back-reference relation the body must not cover (a to-many child's FK to its parent,
+/// engine-injected from the parent's created id); `seen` guards a NestRef cycle.
+#[allow(clippy::too_many_arguments)]
+fn check_input_body(
+    body: &[ShapeField],
+    mi: usize,
+    exempt: Option<&str>,
+    cf: &CreateFrom,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    has_conflict: bool,
+    seen: &mut Vec<String>,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let m = cx.model(mi);
     let scope_cols: Vec<String> = crate::scope::resolve_inject(scoped, unscoped, &[mi], cx)
         .into_iter()
@@ -2434,6 +2468,11 @@ fn check_input_shape(
         .map(|(f, _)| f)
         .collect();
     let mut covered: Vec<String> = Vec::new();
+    // A to-many child's back-reference to its parent is engine-injected, so the child
+    // shape neither names nor must cover it.
+    if let Some(e) = exempt {
+        covered.push(e.to_string());
+    }
     for field in body {
         match field {
             ShapeField::Bare(id) => {
@@ -2459,15 +2498,22 @@ fn check_input_shape(
                     "a `create … from` shape may only name settable columns and FK-link blocks",
                 ),
             },
-            ShapeField::Nest { field, body } => {
-                check_input_nest(m, field, body, &mut covered, cx, sink);
-            }
-            ShapeField::NestRef { field, .. } => sink.error_note(
-                code::INPUT_BAD_RELATION,
-                field.span,
-                format!("input relation `{}` uses a named-shape nest", field.node),
-                "link a relation with an inline `rel { key }` block (the target's key)",
+            ShapeField::Nest { field, body } => check_input_nest(
+                m, field, body, None, cf, scoped, unscoped, has_conflict, &mut covered, seen, cx, sink,
             ),
+            ShapeField::NestRef { field, shape } => {
+                match cx.shape_bodies.get(&shape.node).copied() {
+                    Some(nbody) => check_input_nest(
+                        m, field, nbody, Some(&shape.node), cf, scoped, unscoped, has_conflict,
+                        &mut covered, seen, cx, sink,
+                    ),
+                    None => sink.error(
+                        code::INPUT_BAD_RELATION,
+                        shape.span,
+                        format!("`{}` is not a shape", shape.node),
+                    ),
+                }
+            }
             ShapeField::Flatten { out, .. } => sink.error_note(
                 code::INPUT_BAD_RELATION,
                 out.span,
@@ -2545,18 +2591,32 @@ fn warn_managed_input(m: &RModel, field: &str, span: Span, scope_cols: &[String]
     }
 }
 
-/// An input shape's inline relation nest (`rel { key }`) — an FK link to an existing row.
-/// The relation must be a to-one forward edge, and the block must name exactly the
-/// target's key part(s). A block naming any non-key column is a nested write (E0329,
-/// reserved).
+/// An input shape's relation nest. Two meanings, distinguished by its body:
+/// - **FK link** — the block names exactly the target's key part(s) (`rel { id }`): set
+///   the FK column(s) from the payload, pointing at an existing row.
+/// - **Nested write** — the block names non-key payload (`rel { name, email }`): create
+///   the related row too, then link it. A to-one forward edge creates the parent's target
+///   before the parent; a to-many inverse edge creates the children after the parent.
+///
+/// `ref_shape` is `Some(shape_name)` when the nest came from a NestRef (for the cycle
+/// guard); `None` for an inline block.
+#[allow(clippy::too_many_arguments)]
 fn check_input_nest(
     m: &RModel,
     field: &Ident,
     body: &[ShapeField],
+    ref_shape: Option<&str>,
+    cf: &CreateFrom,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    has_conflict: bool,
     covered: &mut Vec<String>,
+    seen: &mut Vec<String>,
     cx: &Cx,
     sink: &mut Sink,
 ) {
+    // Whatever the nest resolves to, treat it as named so coverage doesn't double-report it.
+    covered.push(field.node.clone());
     let Some(mem) = m.member(&field.node) else {
         sink.error(
             code::INPUT_FIELD_NOT_COLUMN,
@@ -2565,18 +2625,73 @@ fn check_input_nest(
         );
         return;
     };
-    // Whatever the nest resolves to, treat it as named so coverage doesn't double-report it.
-    covered.push(field.node.clone());
-    let target = match &mem.kind {
-        MemberKind::Forward { target, .. } => target.clone(),
+    match &mem.kind {
+        MemberKind::Forward {
+            target, custom_on, ..
+        } => {
+            let ti = cx.find(target);
+            let key_fields: Vec<String> = ti
+                .map(|i| {
+                    cx.model(i)
+                        .pk_field_names()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if is_key_link(body, &key_fields) {
+                // FK link: the block names only key parts — require the *whole* key.
+                if !key_fields.is_empty() && body.len() != key_fields.len() {
+                    sink.error_note(
+                        code::INPUT_BAD_RELATION,
+                        field.span,
+                        format!("input relation `{}` names only part of `{}`'s key", field.node, target),
+                        "an FK link names the target's full key; add payload columns for a nested write",
+                    );
+                }
+                return;
+            }
+            // Nested write (to-one forward): create the related row, then set the FK.
+            if custom_on.is_some() {
+                sink.error_note(
+                    code::INPUT_NESTED_WRITE,
+                    field.span,
+                    format!("nested write through custom-join relation `{}` is not supported", field.node),
+                    "a custom-`on:` edge owns no FK column to link the created row; link an existing row by key",
+                );
+                return;
+            }
+            if has_conflict {
+                sink.error_note(
+                    code::INPUT_NESTED_WRITE,
+                    field.span,
+                    format!("nested write in relation `{}` is not supported with `on conflict`", field.node),
+                    "an upsert reads/writes one table; drop `on conflict`, or link the related row by key",
+                );
+                return;
+            }
+            let Some(ti) = ti else { return };
+            recurse_input_nest(
+                body,
+                ti,
+                None,
+                ref_shape,
+                cf,
+                scoped,
+                unscoped,
+                has_conflict,
+                seen,
+                cx,
+                sink,
+            );
+        }
         MemberKind::Inverse { .. } => {
             sink.error_note(
                 code::INPUT_BAD_RELATION,
                 field.span,
                 format!("input relation `{}` is a to-many collection", field.node),
-                "only a to-one relation can be FK-linked in a create input",
+                "only a to-one relation can be written in a create input",
             );
-            return;
         }
         MemberKind::Scalar { .. } => {
             sink.error_note(
@@ -2585,56 +2700,66 @@ fn check_input_nest(
                 format!("`{}` is a column, not a relation to link", field.node),
                 "drop the `{ … }` block — a scalar column is named bare",
             );
-            return;
         }
-    };
-    let key_fields: Vec<String> = cx
-        .find(&target)
-        .map(|ti| {
-            cx.model(ti)
-                .pk_field_names()
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    // Every block field must be one of the target's key parts (a bare key column). Any
-    // other column would create/update the related row — a nested write, reserved.
-    for f in body {
-        let name = match f {
-            ShapeField::Bare(id) => &id.node,
-            ShapeField::Rename {
-                value: ShapeValue::Path(p),
-                ..
-            } if p.segments.len() == 1 => &p.segments[0].node,
-            _ => {
-                nested_write_reserved(field, sink);
-                return;
-            }
-        };
-        if !key_fields.iter().any(|k| k == name) {
-            nested_write_reserved(field, sink);
-            return;
-        }
-    }
-    // The link must name the *whole* key (else it can't identify a row).
-    if !key_fields.is_empty() && body.len() != key_fields.len() {
-        sink.error_note(
-            code::INPUT_NESTED_WRITE,
-            field.span,
-            format!("input relation `{}` names only part of `{}`'s key", field.node, target),
-            "an FK link names the target's full key; a partial / payload block is a nested write (not yet supported)",
-        );
     }
 }
 
-fn nested_write_reserved(field: &Ident, sink: &mut Sink) {
-    sink.error_note(
-        code::INPUT_NESTED_WRITE,
-        field.span,
-        format!("input relation `{}` names non-key columns", field.node),
-        "a relation block may only FK-link an existing row (`rel { key }`) — nested writes are reserved, not yet supported",
+/// Recurse into a nested-write child body, pushing/popping the NestRef cycle guard.
+#[allow(clippy::too_many_arguments)]
+fn recurse_input_nest(
+    body: &[ShapeField],
+    ti: usize,
+    exempt: Option<&str>,
+    ref_shape: Option<&str>,
+    cf: &CreateFrom,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    has_conflict: bool,
+    seen: &mut Vec<String>,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    // A NestRef cycle is separately rejected (E0134, the shape-reference-cycle check), so
+    // here just stop — never recurse forever validating one during the same pass.
+    if let Some(rs) = ref_shape {
+        if seen.iter().any(|s| s == rs) {
+            return;
+        }
+        seen.push(rs.to_string());
+    }
+    check_input_body(
+        body,
+        ti,
+        exempt,
+        cf,
+        scoped,
+        unscoped,
+        has_conflict,
+        seen,
+        cx,
+        sink,
     );
+    if ref_shape.is_some() {
+        seen.pop();
+    }
+}
+
+/// True when every field of a relation block names one of the target's key parts (a bare
+/// column or a single-column rename) — an FK link to an existing row, not a nested write.
+/// An empty block is not a link (a create with all-default/engine-filled columns).
+pub fn is_key_link(body: &[ShapeField], key_fields: &[String]) -> bool {
+    !body.is_empty()
+        && body.iter().all(|f| {
+            let name = match f {
+                ShapeField::Bare(id) => &id.node,
+                ShapeField::Rename {
+                    value: ShapeValue::Path(p),
+                    ..
+                } if p.segments.len() == 1 => &p.segments[0].node,
+                _ => return false,
+            };
+            key_fields.iter().any(|k| k == name)
+        })
 }
 
 /// Required-column coverage for an input shape: every column that is required (NOT NULL, no

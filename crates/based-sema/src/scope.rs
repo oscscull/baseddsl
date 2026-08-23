@@ -508,6 +508,7 @@ pub fn touched_mutation(
     let mut out = Vec::new();
     for stmt in &m.body {
         walk_write_join(stmt, cx, &mut out);
+        walk_write_nested_create(stmt, m, cx, &mut out);
     }
     if let (Some(name), Some(mi)) = (ret_shape, cx.find(ret_model)) {
         if let Some(body) = cx.shape_bodies.get(name) {
@@ -515,6 +516,111 @@ pub fn touched_mutation(
         }
     }
     out
+}
+
+/// A `create Model from $param` writes not only `Model` but every model a nested-write
+/// block in its input shape creates. Those child models are scoped from the same `$ctx`,
+/// so they must join the touched set for scope injection to reach them.
+fn walk_write_nested_create(stmt: &WriteStmt, m: &Mutation, cx: &Cx, out: &mut Vec<usize>) {
+    match stmt {
+        WriteStmt::Create {
+            model,
+            from: Some(cf),
+            ..
+        } => {
+            let Some(mi) = cx.find(&model.node) else {
+                return;
+            };
+            if let Some((shape, body)) = input_shape_body(m, cf, cx) {
+                let mut seen = vec![shape];
+                walk_input_nested(body, mi, cx, &mut seen, out);
+            }
+        }
+        WriteStmt::Tx(inner) => {
+            for s in inner {
+                walk_write_nested_create(s, m, cx, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a `create … from $param`'s input-shape as `(shape_name, body)` via the
+/// mutation's param types.
+fn input_shape_body<'a>(
+    m: &Mutation,
+    cf: &CreateFrom,
+    cx: &'a Cx,
+) -> Option<(String, &'a [ShapeField])> {
+    let param = m.params.iter().find(|p| p.name.node == cf.param.node)?;
+    let BaseType::Model(name) = &param.ty.as_ref()?.base else {
+        return None;
+    };
+    cx.shape_bodies
+        .get(&name.node)
+        .map(|b| (name.node.clone(), *b))
+}
+
+/// Walk an input-shape body, pushing every scoped model a nested-write block creates
+/// (to-one forward *and* to-many inverse), recursing to any depth. `seen` guards a NestRef
+/// cycle — a cyclic shape is separately rejected (E0134), but this walk runs during check,
+/// so it must not recurse forever on one.
+fn walk_input_nested(
+    body: &[ShapeField],
+    mi: usize,
+    cx: &Cx,
+    seen: &mut Vec<String>,
+    out: &mut Vec<usize>,
+) {
+    let m = cx.model(mi);
+    for f in body {
+        let (field_name, nest_body, ref_shape) = match f {
+            ShapeField::Nest { field, body } => (field, body.as_slice(), None),
+            ShapeField::NestRef { field, shape } => match cx.shape_bodies.get(&shape.node) {
+                Some(b) => (field, *b, Some(shape.node.clone())),
+                None => continue,
+            },
+            _ => continue,
+        };
+        if let Some(rs) = &ref_shape {
+            if seen.contains(rs) {
+                continue; // a reference cycle (E0134) — stop, don't recurse forever
+            }
+        }
+        let Some(mem) = m.member(&field_name.node) else {
+            continue;
+        };
+        let ti = match &mem.kind {
+            MemberKind::Forward { target, .. } => {
+                let Some(ti) = cx.find(target) else { continue };
+                let key: Vec<String> = cx
+                    .model(ti)
+                    .pk_field_names()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                if crate::check::is_key_link(nest_body, &key) {
+                    continue; // an FK link, not a nested write
+                }
+                ti
+            }
+            MemberKind::Inverse { target, .. } => match cx.find(target) {
+                Some(ti) => ti,
+                None => continue,
+            },
+            MemberKind::Scalar { .. } => continue,
+        };
+        if is_scoped(cx, ti) {
+            push(out, ti);
+        }
+        if let Some(rs) = ref_shape {
+            seen.push(rs);
+            walk_input_nested(nest_body, ti, cx, seen, out);
+            seen.pop();
+        } else {
+            walk_input_nested(nest_body, ti, cx, seen, out);
+        }
+    }
 }
 
 fn walk_write_join(stmt: &WriteStmt, cx: &Cx, out: &mut Vec<usize>) {

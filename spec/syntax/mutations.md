@@ -135,12 +135,19 @@ mutation import_products(rows: ProductIn[]) -> ok scoped Tenant {
   injected from `$ctx`, never the payload, even when the shape names it (tenant safety).
   Naming an `@updated`/`@created` column is legal but **warned** (`W0112`) — the explicit
   value overrides the auto-stamp; a named `@scope` value is silently overridden (`W0113`).
-- **Relations = inline nested key blocks, one direction: FK link.** `category { id }` names
-  exactly the target's key → sets the FK column(s) from the payload (round-trips: the same
-  `{ id }` an output projection yields). A composite-key target names its key parts
-  (`enrollment { student, course }`). A relation block naming **non-key payload** would
-  create the related row too — a **nested write**, reserved and not yet supported (`E0329`).
-  A bare relation, a named-shape nest, or a flatten as input is `E0328`.
+- **Relations — a nested block is either an FK link or a nested write, by its body.**
+  - **FK link** — the block names exactly the target's key: `category { id }` sets the FK
+    column(s) from the payload (round-trips: the same `{ id }` an output projection yields).
+    A composite-key target names its key parts (`enrollment { student, course }`).
+  - **Nested write** — the block names **non-key payload**: `customer { name, email }`
+    creates the related row too, then links it. A **to-one forward** edge creates the
+    target *before* the parent (its key fills the parent's FK). Nesting composes to any
+    depth; a nested `shape` reference (`customer -> CustomerIn`) works identically. The
+    child's own required columns must be covered (`E0330`, recursively); its `@scope` is
+    injected from the same `$ctx` (never the payload). A nested write through a custom-`on:`
+    join edge, or combined with `on conflict`, is unsupported (`E0329`); a self-referential
+    input shape is rejected as a reference cycle (`E0134`).
+  - A bare relation or a flatten as input is `E0328`.
 - **Chunked + atomic.** The engine emits one `INSERT … VALUES (…),(…),…`, transparently
   chunked above the driver's bind limit (Postgres ~65535 binds — the user never sees the
   cap). The whole insert is all-or-nothing within the surrounding transaction.

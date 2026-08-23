@@ -6256,3 +6256,53 @@ plan), live SQLite `bulk_integration.rs` (round-trip upsert / accumulate mixed b
 read-back via RETURNING) + live MariaDB `mariadb_integration.rs` (ON DUPLICATE KEY + VALUES() +
 LAST_INSERT_ID range read-back). This completes the BW queue (BW1/BW2/BW3 all done); **nested
 writes stay the reserved follow-up (E0329)**.
+
+## D128 — nested writes: to-one forward `create` from a shape naming non-key payload (part 1)
+
+**Owner-approved 2026-08-23** (scope: to-one forward + to-many inverse, single + bulk). This entry
+records **part 1 — to-one forward**, single and bulk; to-many inverse is part 2 (D129). Closes the
+last reserved BW follow-up for the to-one case (E0329 was the reservation).
+
+**The model.** An input shape (D126) relation block is an **FK link** *or* a **nested write**, decided
+by its body: a block naming only the target's key part(s) (`customer { id }`) links an existing row
+(unchanged); a block naming **non-key payload** (`customer { name, email }`) **creates** the related
+row too, then links it. A to-one forward edge creates the target **before** the parent — the child's
+recovered key fills the parent's FK column. Nesting composes to any depth; a NestRef
+(`customer -> CustomerIn`) resolves its shape body and behaves identically (round-trip symmetry with
+the read side). A self-referential input shape is already rejected by the read-side cycle check
+(**E0134**), so no new cycle code is needed (an earlier E0335 draft was dropped as redundant).
+
+**Presence-driven, recursively.** The child body is itself an input shape for the target model: its
+required columns must be covered (**E0330**, recursively), its `id`/`@created`/`@updated` are
+presence-driven exactly as D126, and its **`@scope` is injected from the same `$ctx`** (never the
+payload) — so the nested-write child models join the mutation's `touched` set (`walk_input_nested` in
+`scope.rs`) for scope injection to reach them. The parent's FK column is covered *by* the nested
+write (it is engine-filled from the child's key, not the payload).
+
+**Unsupported positions → E0329** (reworded from "reserved"): a nested write through a custom-`on:`
+join edge (it owns no conventional FK column to link) or combined with `on conflict` (an upsert
+reads/writes one table). A to-one link naming only part of a composite key is `E0328` (name the full
+key, or add payload for a nested write).
+
+**Engine owns the lifecycle (principle 7).** The row count is dynamic, so codegen carries a recursive
+plan, not finished SQL: `BulkInsert` gains `nested_one: Vec<NestedCreate>` (children created first) and
+`pk_parts` (how to recover this insert's key per row), and a new `BulkSource::NestedOneId { nest,
+key_field }` sources a parent FK column from a child's recovered key. The runtime (`plan.rs`
+`build_bulk_step_rows`/`build_nested_one`, `NestedBulk`/`FkSlot`/`PkRecover`; `run.rs` `exec_bulk`
+recursive + `insert_bulk_rows`) creates the children first, recovers each row's key (an app-minted
+`uuid`/`ulid` or natural `@key` read from the written row; a DB-generated `serial` via
+`RETURNING`/`LAST_INSERT_ID()`), splices it into the parent's FK columns per row — bulk keeps per-row
+alignment across chunks — then inserts the parent. All inserts run on the surrounding transaction, so
+the whole nested write is atomic. The declared-shape read-back is unchanged (`project_return` re-selects
+the now-existing nested rows). Client/OpenAPI need no change — the input shape struct is already nested.
+
+**Blast radius.** `based-sema` (`check.rs` recursive `check_input_body`/`check_input_nest`/
+`recurse_input_nest`/`is_key_link` (now `pub`), E0329 reworded; `scope.rs` `walk_input_nested` adds
+nested-write child models to `touched`, with a NestRef guard against a mid-check hang). `based-codegen`
+(`sql/mutations.rs` `BulkInsert.nested_one`/`pk_parts`, `NestedCreate`/`PkPart`,
+`BulkSource::NestedOneId`, `bulk_nest_col`/`build_bulk_insert`/`bulk_pk_parts`, recursive
+`bulk_review_sql`). `based-runtime` (`plan.rs` `BulkStep.nested_one`/`pk_recover`,
+`NestedBulk`/`FkSlot`/`PkRecover`, `build_bulk_step_rows`/`build_nested_one`/`bulk_pk_recover`; `run.rs`
+`exec_bulk`/`insert_bulk_rows`). Spec: `mutations.md`. Tests: sema conformance `bulk_input_errors`
+(E0329-on-conflict, valid nested write, E0134 cycle), live SQLite `bulk_integration.rs` (single nested
+create, bulk with per-row FK alignment, DB-generated serial child via RETURNING).

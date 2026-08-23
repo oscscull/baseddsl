@@ -227,7 +227,7 @@ pub mod code {
     pub const INPUT_FIELD_NOT_COLUMN: &str = "E0326"; // an input shape field maps to no settable column of the target model
     pub const INPUT_COMPUTED_FIELD: &str = "E0327"; // a computed / aggregate / raw field in an input-used shape (no column to write)
     pub const INPUT_BAD_RELATION: &str = "E0328"; // a relation in an input shape must be an inline nested key block `rel { key }` (bare / reach / named-nest / flatten not settable)
-    pub const INPUT_NESTED_WRITE: &str = "E0329"; // a relation block names non-key payload — a nested write, not yet supported (reserved)
+    pub const INPUT_NESTED_WRITE: &str = "E0329"; // a nested write (a relation block naming non-key payload → create the related row) in an unsupported position: through a custom-`on:` join edge, or combined with `on conflict`
     pub const INPUT_MISSING_REQUIRED: &str = "E0330"; // a required column is not covered by the input shape
     pub const INPUT_BULK_UPSERT: &str = "E0331"; // (retired by BW2 / D127 — `on conflict` on a `create … from` is now supported; kept for numbering)
     pub const INPUT_BULK_READBACK: &str = "E0332"; // a structured `create … from`'s return arity mismatches its `[]` — a bulk `Model[] from` reads back `-> Shape[]` (or `-> ok`); a single `Model from` reads back `-> Shape` (or `-> ok`)

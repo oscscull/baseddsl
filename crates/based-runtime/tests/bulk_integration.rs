@@ -100,6 +100,43 @@ shape TicketOut from Ticket { id, subject }
 mutation file_tickets(rows: TicketIn[]) -> TicketOut[] {
   create Ticket[] from $rows;
 }
+
+# Nested writes (to-one forward) — creating the related row from a payload block that
+# names non-key columns. `Customer` is per-tenant (its scope is injected from `$ctx`, not
+# the payload), so a nested write proves child scope injection too.
+@scope Tenant
+Customer {
+  id: Id
+  org: Org
+  name: text
+  email: text
+  @index(org)
+}
+@scope Tenant
+Order {
+  id: Id
+  org: Org
+  customer: Customer
+  total: int
+  @index(org)
+}
+# The input shape reads/writes the customer as a nested object — the round-trip north star.
+shape OrderIn from Order { total, customer { name, email } }
+shape OrderCard from Order { total, customer { name, email } }
+shape CustomerCard from Customer { name, email }
+
+mutation place_order(row: OrderIn) -> ok scoped Tenant { create Order from $row; }
+mutation place_orders(rows: OrderIn[]) -> ok scoped Tenant { create Order[] from $rows; }
+query all_orders() -> OrderCard[] scoped Tenant;
+query all_customers() -> CustomerCard[] scoped Tenant;
+
+# A nested-write child with a DB-generated `serial` id (the parent FK is learned from the
+# INSERT via RETURNING/LAST_INSERT_ID, not the payload).
+Author { id: serial, name: text }
+Book { id: Id, author: Author, title: text }
+shape BookIn from Book { title, author { name } }
+mutation add_books(rows: BookIn[]) -> ok { create Book[] from $rows; }
+query all_books() -> BookIn[];
 "#;
 
 async fn load() -> (Compiled, SqliteBackend) {
@@ -617,14 +654,30 @@ async fn single_from_create_reads_back_one_row_in_shape() {
     let ctx = seed_org(&c, &b, &ids, "Acme").await;
 
     let row = json!({ "sku": "SOLO", "qty": 42, "price": 7 });
-    let r = call(&c, &b, &ids, "/m/add_one_inv", json!({ "row": row }), ctx.clone()).await;
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/add_one_inv",
+        json!({ "row": row }),
+        ctx.clone(),
+    )
+    .await;
     assert_eq!(r.status, 200, "single read-back failed: {:?}", r.body);
     // A single `create Model from $row -> Shape` returns one object (not an array), with the
     // engine-minted id filled in.
-    assert!(r.body.is_object(), "single read-back is one object: {:?}", r.body);
+    assert!(
+        r.body.is_object(),
+        "single read-back is one object: {:?}",
+        r.body
+    );
     assert_eq!(r.body["sku"], json!("SOLO"));
     assert_eq!(r.body["qty"], json!(42));
-    assert!(r.body["id"].is_string(), "the minted id is read back: {:?}", r.body);
+    assert!(
+        r.body["id"].is_string(),
+        "the minted id is read back: {:?}",
+        r.body
+    );
 }
 
 #[tokio::test]
@@ -656,5 +709,133 @@ async fn bulk_read_back_returns_db_generated_serial_ids() {
     assert!(
         id0 < id1 && id1 < id2,
         "distinct, ordered DB-generated ids: {id0},{id1},{id2}"
+    );
+}
+
+fn sorted_by<'a>(mut v: Vec<Value>, key: &'a str) -> Vec<Value> {
+    v.sort_by_key(|r| r[key].as_str().unwrap_or_default().to_string());
+    v
+}
+
+#[tokio::test]
+async fn single_nested_write_creates_the_related_row_and_links_it() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    // One order whose customer is created inline (a to-one nested write).
+    let row = json!({ "total": 100, "customer": { "name": "Ada", "email": "ada@x.io" } });
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/place_order",
+        json!({ "row": row }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "nested create failed: {:?}", r.body);
+
+    // The customer row was created (child insert) …
+    let cust = call(&c, &b, &ids, "/q/all_customers", json!({}), ctx.clone()).await;
+    assert_eq!(cust.body, json!([{ "name": "Ada", "email": "ada@x.io" }]));
+
+    // … and the order links to it — reading the order back nests the created customer.
+    let orders = call(&c, &b, &ids, "/q/all_orders", json!({}), ctx.clone()).await;
+    assert_eq!(
+        orders.body,
+        json!([{ "total": 100, "customer": { "name": "Ada", "email": "ada@x.io" } }])
+    );
+}
+
+#[tokio::test]
+async fn bulk_nested_write_links_each_parent_to_its_own_child() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    let rows = json!([
+        { "total": 10, "customer": { "name": "Ann", "email": "ann@x.io" } },
+        { "total": 20, "customer": { "name": "Bob", "email": "bob@x.io" } },
+        { "total": 30, "customer": { "name": "Cy",  "email": "cy@x.io" } },
+    ]);
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/place_orders",
+        json!({ "rows": rows }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "bulk nested create failed: {:?}", r.body);
+
+    // Three distinct customers created …
+    let cust = call(&c, &b, &ids, "/q/all_customers", json!({}), ctx.clone()).await;
+    assert_eq!(
+        sorted_by(cust.body.as_array().unwrap().clone(), "name"),
+        json!([
+            { "name": "Ann", "email": "ann@x.io" },
+            { "name": "Bob", "email": "bob@x.io" },
+            { "name": "Cy",  "email": "cy@x.io" },
+        ])
+        .as_array()
+        .unwrap()
+        .clone()
+    );
+
+    // … each order linked to the RIGHT customer (per-row FK alignment).
+    let mut got: Vec<Value> = call(&c, &b, &ids, "/q/all_orders", json!({}), ctx.clone())
+        .await
+        .body
+        .as_array()
+        .unwrap()
+        .clone();
+    got.sort_by_key(|r| r["total"].as_i64().unwrap_or(0));
+    assert_eq!(
+        got,
+        json!([
+            { "total": 10, "customer": { "name": "Ann", "email": "ann@x.io" } },
+            { "total": 20, "customer": { "name": "Bob", "email": "bob@x.io" } },
+            { "total": 30, "customer": { "name": "Cy",  "email": "cy@x.io" } },
+        ])
+        .as_array()
+        .unwrap()
+        .clone()
+    );
+}
+
+#[tokio::test]
+async fn nested_write_child_with_db_generated_serial_id() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+
+    // Each book's author is created with a DB-generated serial id; the book's FK is learned
+    // from the INSERT (RETURNING on SQLite) and linked per row.
+    let rows = json!([
+        { "title": "SICP",  "author": { "name": "Sussman" } },
+        { "title": "TAOCP", "author": { "name": "Knuth" } },
+    ]);
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/add_books",
+        json!({ "rows": rows }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(r.status, 200, "serial nested create failed: {:?}", r.body);
+
+    let books = call(&c, &b, &ids, "/q/all_books", json!({}), json!({})).await;
+    assert_eq!(
+        sorted_by(books.body.as_array().unwrap().clone(), "title"),
+        json!([
+            { "title": "SICP",  "author": { "name": "Sussman" } },
+            { "title": "TAOCP", "author": { "name": "Knuth" } },
+        ])
+        .as_array()
+        .unwrap()
+        .clone()
     );
 }

@@ -213,6 +213,40 @@ pub struct BulkInsert {
     /// from the INSERT (`RETURNING` on Postgres/SQLite, the `LAST_INSERT_ID()` range on
     /// MySQL/MariaDB) rather than known from the payload.
     pub readback_serial: bool,
+    /// Nested writes: to-one forward relations whose block names non-key payload create the
+    /// related row *before* this insert; the created row's key feeds this insert's FK
+    /// columns (a [`BulkSource::NestedOneId`] column). Empty for a plain / FK-link create.
+    pub nested_one: Vec<NestedCreate>,
+    /// How to recover this insert's primary key per row, so a *parent* insert can source
+    /// its FK columns from it (used only when this `BulkInsert` is a nested child). Each
+    /// part is either DB-generated (`serial`, learned from the INSERT) or read back from a
+    /// value the insert itself wrote (an app-minted id, a natural `@key`).
+    pub pk_parts: Vec<PkPart>,
+}
+
+/// A nested-write child of a [`BulkInsert`]: the related row(s) created to satisfy a
+/// relation block that named non-key payload. A to-one forward child (`nested_one`) is
+/// created before its parent; the child's key then fills the parent's FK column.
+#[derive(Debug, Clone)]
+pub struct NestedCreate {
+    /// The relation field naming this nest in the parent's input shape — the runtime reads
+    /// each parent row's `row[relation]` as the child payload.
+    pub relation: String,
+    /// The child insert (recursive — a nested write may nest to any depth).
+    pub child: BulkInsert,
+}
+
+/// One primary-key part of a [`BulkInsert`], and how the runtime recovers its per-row value
+/// to link a parent's FK to it.
+#[derive(Debug, Clone)]
+pub struct PkPart {
+    /// The key part's field name — matches a parent [`BulkSource::NestedOneId::key_field`].
+    pub field: String,
+    /// The physical PK column.
+    pub column: String,
+    /// DB-generated (`serial`): learned from the INSERT (`RETURNING` / `LAST_INSERT_ID()`),
+    /// not read from the written row.
+    pub serial: bool,
 }
 
 /// One INSERT column of a structured shape-input create: the physical column and where its
@@ -239,6 +273,13 @@ pub enum BulkSource {
     /// `rel { key }` block in the input shape).
     FkPart {
         relation: String,
+        key_field: String,
+    },
+    /// An FK column whose value is the key of a nested-write child created for `nest` (a
+    /// to-one forward block naming non-key payload). Filled at run time from the child
+    /// insert's recovered key, aligned per row.
+    NestedOneId {
+        nest: String,
         key_field: String,
     },
     /// An app-minted id per row (`uuid` / `ulid`), absent from the shape.
@@ -1175,7 +1216,7 @@ fn bulk_columns(
     cx: &LowerCx,
     model: &RModel,
     body: &[ShapeField],
-) -> (Vec<BulkCol>, Option<String>) {
+) -> (Vec<BulkCol>, Option<String>, Vec<NestedCreate>) {
     let scope_terms: Vec<(String, String)> = cx
         .inject
         .iter()
@@ -1190,21 +1231,22 @@ fn bulk_columns(
     //    skipped; step 2 injects it from `$ctx`).
     let mut columns: Vec<BulkCol> = Vec::new();
     let mut have: Vec<String> = Vec::new();
+    let mut nested_one: Vec<NestedCreate> = Vec::new();
     for f in body {
         if let Some((col, src)) = named_bulk_col(model, f) {
             if !scope_cols.contains(&col) {
                 bulk_push(&mut columns, &mut have, col, src);
             }
-        } else if let ShapeField::Nest { field, .. } = f {
-            if let Some(mem) = model.member(&field.node) {
-                for (fk_col, part) in cx.schema.fk_columns(mem) {
-                    let src = BulkSource::FkPart {
-                        relation: field.node.clone(),
-                        key_field: part.name.clone(),
-                    };
-                    bulk_push(&mut columns, &mut have, fk_col, src);
-                }
-            }
+        } else if let Some((field, nest_body)) = nest_field(cx, f) {
+            bulk_nest_col(
+                cx,
+                model,
+                field,
+                nest_body,
+                &mut columns,
+                &mut have,
+                &mut nested_one,
+            );
         }
     }
 
@@ -1245,7 +1287,126 @@ fn bulk_columns(
         bulk_push(&mut columns, &mut have, col, BulkSource::Now);
     }
 
-    (columns, serial_col)
+    (columns, serial_col, nested_one)
+}
+
+/// A relation nest in an input shape, as `(field, body)` — an inline `Nest` or a resolved
+/// `NestRef`. `None` for a non-nest field.
+fn nest_field<'a>(cx: &LowerCx<'a>, f: &'a ShapeField) -> Option<(&'a Ident, &'a [ShapeField])> {
+    match f {
+        ShapeField::Nest { field, body } => Some((field, body.as_slice())),
+        ShapeField::NestRef { field, shape } => {
+            shape_body_by_name(cx, &shape.node).map(|b| (field, b))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a shape body by name from the raw decls (for a `NestRef`).
+fn shape_body_by_name<'a>(cx: &LowerCx<'a>, name: &str) -> Option<&'a [ShapeField]> {
+    cx.decls.iter().find_map(|d| match d {
+        Decl::Shape(s) if s.name.node == name => Some(s.body.as_slice()),
+        _ => None,
+    })
+}
+
+/// Lower one relation nest of an input shape: an FK link (`rel { key }`) sets the FK
+/// column(s) from the payload; a nested write (`rel { …payload }`) over a to-one forward
+/// edge creates the child first (a [`NestedCreate`]) and sources the parent's FK columns
+/// from the child's recovered key ([`BulkSource::NestedOneId`]).
+fn bulk_nest_col(
+    cx: &LowerCx,
+    model: &RModel,
+    field: &Ident,
+    nest_body: &[ShapeField],
+    columns: &mut Vec<BulkCol>,
+    have: &mut Vec<String>,
+    nested_one: &mut Vec<NestedCreate>,
+) {
+    let Some(mem) = model.member(&field.node) else {
+        return;
+    };
+    let Some(target) = mem.kind.target() else {
+        return;
+    };
+    let Some(child) = cx.schema.model(target) else {
+        return;
+    };
+    let key_fields: Vec<String> = child
+        .pk_field_names()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    // An FK link: the block names only the target's key part(s) → set the FK from payload.
+    if based_sema::is_key_link(nest_body, &key_fields) {
+        for (fk_col, part) in cx.schema.fk_columns(mem) {
+            let src = BulkSource::FkPart {
+                relation: field.node.clone(),
+                key_field: part.name.clone(),
+            };
+            bulk_push(columns, have, fk_col, src);
+        }
+        return;
+    }
+    // A nested write (to-one forward): create the child, link the parent's FK to its key.
+    let child_bulk = build_bulk_insert(cx, child, nest_body, String::new(), false);
+    for (fk_col, part) in cx.schema.fk_columns(mem) {
+        let src = BulkSource::NestedOneId {
+            nest: field.node.clone(),
+            key_field: part.name.clone(),
+        };
+        bulk_push(columns, have, fk_col, src);
+    }
+    nested_one.push(NestedCreate {
+        relation: field.node.clone(),
+        child: child_bulk,
+    });
+}
+
+/// The primary-key parts of a model and how to recover each per row after its insert (so a
+/// parent can link its FK to a nested-write child's key).
+fn bulk_pk_parts(model: &RModel, serial_col: Option<&str>) -> Vec<PkPart> {
+    model
+        .pk_members()
+        .iter()
+        .map(|p| {
+            let column = p.physical_col().to_string();
+            PkPart {
+                field: p.name.clone(),
+                serial: serial_col == Some(column.as_str()),
+                column,
+            }
+        })
+        .collect()
+}
+
+/// Build a [`BulkInsert`] for a model from an input-shape body — the shared core of the
+/// top-level `create … from` and every nested-write child. Conflict/read-back tails are
+/// set by the top-level caller ([`lower_bulk_create`]); a child carries none.
+fn build_bulk_insert(
+    cx: &LowerCx,
+    model: &RModel,
+    body: &[ShapeField],
+    param: String,
+    bulk: bool,
+) -> BulkInsert {
+    let (columns, serial_col, nested_one) = bulk_columns(cx, model, body);
+    let pk_parts = bulk_pk_parts(model, serial_col.as_deref());
+    BulkInsert {
+        model: model.name.clone(),
+        table: cx
+            .dialect
+            .quote_table(model.schema.as_deref(), &model.table),
+        param,
+        bulk,
+        columns,
+        returning: serial_col.into_iter().collect(),
+        conflict_tail: None,
+        readback_key: Vec::new(),
+        readback_serial: false,
+        nested_one,
+        pk_parts,
+    }
 }
 
 /// Append a bulk-insert column unless its physical column is already present (first source
@@ -1297,11 +1458,12 @@ fn lower_bulk_create(
 ) -> Option<LoweredWrite> {
     let (_from, body) = resolve_from_shape(cx, &cf.param.node)?;
     let dialect = cx.dialect;
-    let (columns, serial_col) = bulk_columns(cx, model, body);
+    let mut bulk = build_bulk_insert(cx, model, body, cf.param.node.clone(), cf.bulk);
+    let serial_col = bulk.returning.first().cloned();
 
     // A bulk upsert (BW2): the per-dialect `ON CONFLICT … / ON DUPLICATE KEY UPDATE` tail,
     // with `incoming.<col>` lowered to `excluded`/`VALUES()`. Bound + appended per chunk.
-    let conflict_tail = conflict.map(|oc| {
+    bulk.conflict_tail = conflict.map(|oc| {
         let sets = conflict_update_sets(
             cx.schema, cx.decls, model, oc, dialect, /* incoming = */ true,
         );
@@ -1311,19 +1473,9 @@ fn lower_bulk_create(
     // The declared-shape read-back key (BW1b/BW2): the conflict target for an upsert, else
     // the surrogate id / natural / composite key / a `(unique)` column.
     let (readback_key, readback_serial) =
-        bulk_readback_key(cx, model, conflict, serial_col.as_deref(), &columns);
-
-    let bulk = BulkInsert {
-        model: model.name.clone(),
-        table: dialect.quote_table(model.schema.as_deref(), &model.table),
-        param: cf.param.node.clone(),
-        bulk: cf.bulk,
-        columns,
-        returning: serial_col.into_iter().collect(),
-        conflict_tail,
-        readback_key,
-        readback_serial,
-    };
+        bulk_readback_key(cx, model, conflict, serial_col.as_deref(), &bulk.columns);
+    bulk.readback_key = readback_key;
+    bulk.readback_serial = readback_serial;
     Some(LoweredWrite {
         header: format!(
             "-- create {}{} from ${} (chunked multi-row INSERT — materialized by the runtime)\n",
@@ -1418,6 +1570,7 @@ fn bulk_review_sql(dialect: Dialect, bulk: &BulkInsert) -> String {
             BulkSource::MintUlid => ":mint(ulid)".to_string(),
             BulkSource::Ctx { ctx_field } => format!(":ctx_{ctx_field}"),
             BulkSource::Now => "CURRENT_TIMESTAMP".to_string(),
+            BulkSource::NestedOneId { nest, key_field } => format!(":nested({nest}).{key_field}"),
         })
         .collect();
     let ret = if bulk.returning.is_empty() {
@@ -1433,12 +1586,20 @@ fn bulk_review_sql(dialect: Dialect, bulk: &BulkInsert) -> String {
         )
     };
     let tail = bulk.conflict_tail.as_deref().unwrap_or("");
-    format!(
+    // Nested-write children are created first (their key feeds this insert's FK). Render
+    // them ahead of this INSERT, review-only, so `based gen sql` shows the whole write.
+    let mut out = String::new();
+    for n in &bulk.nested_one {
+        out.push_str(&format!("-- nested write `{}`:\n", n.relation));
+        out.push_str(&bulk_review_sql(dialect, &n.child));
+    }
+    out.push_str(&format!(
         "INSERT INTO {} ({})\nVALUES ({}){tail}{ret};  -- repeated per row, chunked below the driver's bind limit\n",
         bulk.table,
         cols.join(", "),
         vals.join(", "),
-    )
+    ));
+    out
 }
 
 /// Build a create's row read-back plan and the `RETURNING` column list its INSERT carries.

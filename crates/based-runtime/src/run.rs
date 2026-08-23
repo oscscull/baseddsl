@@ -611,13 +611,14 @@ async fn run_writes<D: DbRead + ?Sized>(
         // INSERT from the plan's resolved rows. Returns the DB-generated ids for a `serial`
         // read-back (empty otherwise).
         if let Some(bulk) = &step.bulk {
-            // Only recover the DB-generated ids when a read-back will consume them (a plain
-            // `-> ok` serial insert needs no `RETURNING` / `LAST_INSERT_ID()` round-trip).
-            let want_ids = plan.bulk_readback.is_some();
-            let serial_ids = run_bulk(db, plan.dialect, bulk, &env, want_ids).await?;
+            // Only recover this insert's keys when a read-back will consume them (a plain
+            // `-> ok` insert needs no `RETURNING` / `LAST_INSERT_ID()` round-trip). Nested
+            // children always recover their key — the parent links to it.
+            let want_pk = plan.bulk_readback.is_some();
+            let pk_rows = exec_bulk(db, plan.dialect, bulk, &env, want_pk).await?;
             if plan.bulk_readback.is_some() {
                 readback_keys = if bulk.serial_return.is_some() {
-                    serial_ids.into_iter().map(|id| vec![id]).collect()
+                    pk_rows
                 } else {
                     bulk.key_rows.clone()
                 };
@@ -696,36 +697,98 @@ fn max_binds(dialect: based_codegen::Dialect) -> usize {
     }
 }
 
-/// Execute a structured shape-input create (`create Model[]? from …`, BW1) as one or more
-/// multi-row `INSERT … VALUES (…),(…),…` statements, transparently chunked below the
-/// driver's bind limit. Every chunk runs on the same transaction connection, so the whole
-/// insert is atomic (all-or-nothing) with the surrounding mutation. Zero rows is a no-op.
-async fn run_bulk<D: DbRead + ?Sized>(
+/// Execute a structured shape-input create and its nested-write children (BW1 + nested
+/// writes). To-one forward children are created **first** — each child's recovered key is
+/// spliced into this insert's FK columns — then this insert runs. Returns each written
+/// row's primary key (in `pk_recover` order) when `want_pk`, so a parent can link its FK to
+/// it; an empty vec otherwise. Every insert runs on the same transaction connection, so the
+/// whole nested write is atomic (all-or-nothing) with the surrounding mutation.
+async fn exec_bulk<D: DbRead + ?Sized>(
     db: &mut D,
     dialect: based_codegen::Dialect,
-    bulk: &crate::plan::BulkStep,
+    step: &crate::plan::BulkStep,
     env: &std::collections::HashMap<String, SqlValue>,
-    want_ids: bool,
-) -> Result<Vec<SqlValue>, DbError> {
-    use based_codegen::Dialect;
-    if bulk.rows.is_empty() {
+    want_pk: bool,
+) -> Result<Vec<Vec<SqlValue>>, DbError> {
+    // A fillable copy of the rows — nested-write FK columns are overwritten with the child's
+    // key before this insert executes.
+    let mut rows = step.rows.clone();
+    for nc in &step.nested_one {
+        let child_pks = Box::pin(exec_bulk(&mut *db, dialect, &nc.step, env, true)).await?;
+        for (j, &parent) in nc.parent_of.iter().enumerate() {
+            for slot in &nc.fk_slots {
+                let Some(idx) = nc
+                    .step
+                    .pk_recover
+                    .iter()
+                    .position(|p| p.field == slot.child_field)
+                else {
+                    continue;
+                };
+                if let (Some(prow), Some(cval)) = (
+                    rows.get_mut(parent),
+                    child_pks.get(j).and_then(|pk| pk.get(idx)),
+                ) {
+                    if slot.parent_bind < prow.len() {
+                        prow[slot.parent_bind] = cval.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    let want_serial = want_pk && step.serial_return.is_some();
+    let serial_ids = insert_bulk_rows(db, dialect, step, &rows, env, want_serial).await?;
+
+    if !want_pk {
         return Ok(Vec::new());
     }
-    let col_list = bulk
+    Ok(rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            step.pk_recover
+                .iter()
+                .map(|p| match p.bind {
+                    Some(b) => row[b].clone(),
+                    None => serial_ids.get(i).cloned().unwrap_or(SqlValue::Null),
+                })
+                .collect()
+        })
+        .collect())
+}
+
+/// Insert already-resolved rows as one or more multi-row `INSERT … VALUES (…),(…),…`
+/// statements, transparently chunked below the driver's bind limit. Recovers the
+/// DB-generated `serial` id per row when `want_serial` (`RETURNING` on Postgres/SQLite, the
+/// `LAST_INSERT_ID()` range on MySQL/MariaDB). Zero rows is a no-op.
+async fn insert_bulk_rows<D: DbRead + ?Sized>(
+    db: &mut D,
+    dialect: based_codegen::Dialect,
+    step: &crate::plan::BulkStep,
+    rows: &[Vec<SqlValue>],
+    env: &std::collections::HashMap<String, SqlValue>,
+    want_serial: bool,
+) -> Result<Vec<SqlValue>, DbError> {
+    use based_codegen::Dialect;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let col_list = step
         .columns
         .iter()
         .map(|c| c.quoted.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let per_row = bulk.binds_per_row.max(1);
+    let per_row = step.binds_per_row.max(1);
     // A bulk upsert's tail binds (a param / `$ctx`) repeat once per chunk statement, so they
     // count against the chunk's bind budget alongside the per-row binds.
-    let tail_binds = bulk.conflict_tail.as_ref().map_or(0, |t| count_named(t));
+    let tail_binds = step.conflict_tail.as_ref().map_or(0, |t| count_named(t));
     let chunk_rows = ((max_binds(dialect).saturating_sub(tail_binds)) / per_row).max(1);
-    // The `serial` read-back uses `RETURNING` on Postgres/SQLite; MySQL/MariaDB have none, so
-    // the ids come from the `LAST_INSERT_ID()` range (the first id + a contiguous block).
-    let returning = if want_ids {
-        bulk.serial_return.as_ref()
+    // The `serial` id uses `RETURNING` on Postgres/SQLite; MySQL/MariaDB have none, so the
+    // ids come from the `LAST_INSERT_ID()` range (the first id + a contiguous block).
+    let returning = if want_serial {
+        step.serial_return.as_ref()
     } else {
         None
     };
@@ -733,8 +796,8 @@ async fn run_bulk<D: DbRead + ?Sized>(
         returning.is_some() && matches!(dialect, Dialect::Postgres | Dialect::Sqlite);
     let mut serial_ids: Vec<SqlValue> = Vec::new();
 
-    for chunk in bulk.rows.chunks(chunk_rows) {
-        let mut sql = format!("INSERT INTO {} ({col_list})\nVALUES ", bulk.table);
+    for chunk in rows.chunks(chunk_rows) {
+        let mut sql = format!("INSERT INTO {} ({col_list})\nVALUES ", step.table);
         let mut params: Vec<SqlValue> = Vec::with_capacity(chunk.len() * per_row + tail_binds);
         let mut ord = 0usize;
         for (r, row) in chunk.iter().enumerate() {
@@ -743,7 +806,7 @@ async fn run_bulk<D: DbRead + ?Sized>(
             }
             sql.push('(');
             let mut bind_i = 0usize;
-            for (ci, c) in bulk.columns.iter().enumerate() {
+            for (ci, c) in step.columns.iter().enumerate() {
                 if ci > 0 {
                     sql.push_str(", ");
                 }
@@ -766,7 +829,7 @@ async fn run_bulk<D: DbRead + ?Sized>(
         }
         // Bulk upsert (BW2): the `ON CONFLICT … / ON DUPLICATE KEY UPDATE` tail, its `:name`
         // binds continuing this statement's positional count.
-        if let Some(tail) = &bulk.conflict_tail {
+        if let Some(tail) = &step.conflict_tail {
             let (frag, tparams) =
                 crate::scan::to_positional_from(tail, dialect, ord, |n| env.get(n).cloned())
                     .map_err(|n| {

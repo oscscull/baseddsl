@@ -19,6 +19,7 @@ Product {
   updated_at: timestamp
   @index(org)
   @index(category)
+  @index(org, sku) unique
 }
 
 # Missing the required `name` and `price` columns -> E0330.
@@ -33,9 +34,21 @@ mutation m_computed(rows: Computed[]) -> ok scoped Tenant { create Product[] fro
 shape BareRel from Product { sku, name, price, category }
 mutation m_bare(rows: BareRel[]) -> ok scoped Tenant { create Product[] from $rows; }
 
-# A relation block naming non-key payload is a nested write -> E0329 (reserved).
+# A to-one nested write (`category { id, name }` names non-key payload → create the
+# category too) is supported — but not combined with `on conflict` -> E0329.
 shape NestedWrite from Product { sku, name, price, category { id, name } }
-mutation m_nested(rows: NestedWrite[]) -> ok scoped Tenant { create Product[] from $rows; }
+mutation m_nested(rows: NestedWrite[]) -> ok scoped Tenant {
+  create Product[] from $rows on conflict (org, sku) update { price = incoming.price };
+}
+
+# A plain to-one nested write is valid — no diagnostic (proven live in bulk_integration).
+shape ValidNest from Product { sku, name, price, category { id, name } }
+mutation m_valid_nest(rows: ValidNest[]) -> ok scoped Tenant { create Product[] from $rows; }
+
+# A self-referential input shape (a NestRef cycle) is rejected as a reference cycle -> E0134.
+Node { id: Id, parent: Node?, label: text }
+shape NodeIn from Node { label, parent -> NodeIn }
+mutation m_cycle(rows: NodeIn[]) -> ok { create Node[] from $rows; }
 
 # Naming the engine-managed `@created`/`@updated` timestamps — legal, warned (W0112): the
 # payload value is written verbatim, overriding the automatic now() stamp.

@@ -25,6 +25,7 @@ mod model;
 mod resolve;
 mod scope;
 
+pub use check::is_key_link;
 pub use ir::*;
 
 use based_ast::Decl;
