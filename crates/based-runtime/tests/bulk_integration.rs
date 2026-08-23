@@ -118,7 +118,20 @@ Order {
   org: Org
   customer: Customer
   total: int
+  items: LineItem[]
   @index(org)
+}
+# A to-many child of Order — created after the parent, its `order` back-FK filled from the
+# parent's key.
+@scope Tenant
+LineItem {
+  id: Id
+  org: Org
+  order: Order
+  sku: text
+  qty: int
+  @index(org)
+  @index(order)
 }
 # The input shape reads/writes the customer as a nested object — the round-trip north star.
 shape OrderIn from Order { total, customer { name, email } }
@@ -129,6 +142,14 @@ mutation place_order(row: OrderIn) -> ok scoped Tenant { create Order from $row;
 mutation place_orders(rows: OrderIn[]) -> ok scoped Tenant { create Order[] from $rows; }
 query all_orders() -> OrderCard[] scoped Tenant;
 query all_customers() -> CustomerCard[] scoped Tenant;
+
+# To-many nested write, and a mixed to-one + to-many shape (round-trip north star).
+shape LineIn from LineItem { sku, qty }
+shape OrderFull from Order { total, customer { name, email }, items { sku, qty } }
+mutation place_full(row: OrderFull) -> ok scoped Tenant { create Order from $row; }
+mutation place_fulls(rows: OrderFull[]) -> ok scoped Tenant { create Order[] from $rows; }
+query all_orders_full() -> OrderFull[] scoped Tenant;
+query all_lines() -> LineIn[] scoped Tenant;
 
 # A nested-write child with a DB-generated `serial` id (the parent FK is learned from the
 # INSERT via RETURNING/LAST_INSERT_ID, not the payload).
@@ -833,6 +854,132 @@ async fn nested_write_child_with_db_generated_serial_id() {
         json!([
             { "title": "SICP",  "author": { "name": "Sussman" } },
             { "title": "TAOCP", "author": { "name": "Knuth" } },
+        ])
+        .as_array()
+        .unwrap()
+        .clone()
+    );
+}
+
+// A to-many array's order is unspecified (D57) — sort each order's `items` by sku so the
+// comparison is deterministic.
+fn norm_order(mut o: Value) -> Value {
+    if let Some(items) = o.get_mut("items").and_then(|v| v.as_array_mut()) {
+        items.sort_by_key(|r| r["sku"].as_str().unwrap_or_default().to_string());
+    }
+    o
+}
+
+#[tokio::test]
+async fn single_to_many_nested_write_with_a_to_one_sibling() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    // One order: a nested customer (to-one) AND a nested item collection (to-many).
+    let row = json!({
+        "total": 99,
+        "customer": { "name": "Ada", "email": "ada@x.io" },
+        "items": [ { "sku": "A", "qty": 1 }, { "sku": "B", "qty": 2 } ],
+    });
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/place_full",
+        json!({ "row": row }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "mixed nested create failed: {:?}", r.body);
+
+    // Both line items were created and linked to the order.
+    let lines = call(&c, &b, &ids, "/q/all_lines", json!({}), ctx.clone()).await;
+    assert_eq!(
+        sorted_by(lines.body.as_array().unwrap().clone(), "sku"),
+        json!([{ "sku": "A", "qty": 1 }, { "sku": "B", "qty": 2 }])
+            .as_array()
+            .unwrap()
+            .clone()
+    );
+
+    // The order reads back with its customer nested and its items collection.
+    let orders = call(&c, &b, &ids, "/q/all_orders_full", json!({}), ctx.clone()).await;
+    let got = orders.body.as_array().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        norm_order(got[0].clone()),
+        json!({
+            "total": 99,
+            "customer": { "name": "Ada", "email": "ada@x.io" },
+            "items": [ { "sku": "A", "qty": 1 }, { "sku": "B", "qty": 2 } ],
+        })
+    );
+}
+
+#[tokio::test]
+async fn bulk_to_many_nested_write_fans_children_to_the_right_parent() {
+    let (c, b) = load().await;
+    let ids = SeqIdGen::default();
+    let ctx = seed_org(&c, &b, &ids, "Acme").await;
+
+    // Two orders with different-sized item collections — each child must link to its own
+    // parent (per-parent fan-out across the flattened child insert).
+    let rows = json!([
+        {
+            "total": 10,
+            "customer": { "name": "Ann", "email": "ann@x.io" },
+            "items": [ { "sku": "x1", "qty": 1 } ],
+        },
+        {
+            "total": 20,
+            "customer": { "name": "Bob", "email": "bob@x.io" },
+            "items": [ { "sku": "y1", "qty": 2 }, { "sku": "y2", "qty": 3 } ],
+        },
+    ]);
+    let r = call(
+        &c,
+        &b,
+        &ids,
+        "/m/place_fulls",
+        json!({ "rows": rows }),
+        ctx.clone(),
+    )
+    .await;
+    assert_eq!(
+        r.status, 200,
+        "bulk mixed nested create failed: {:?}",
+        r.body
+    );
+
+    // Three line items total across the two orders.
+    let lines = call(&c, &b, &ids, "/q/all_lines", json!({}), ctx.clone()).await;
+    assert_eq!(lines.body.as_array().unwrap().len(), 3);
+
+    // Each order carries exactly its own items (fan-out correct).
+    let mut got: Vec<Value> = call(&c, &b, &ids, "/q/all_orders_full", json!({}), ctx.clone())
+        .await
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(norm_order)
+        .collect();
+    got.sort_by_key(|r| r["total"].as_i64().unwrap_or(0));
+    assert_eq!(
+        got,
+        json!([
+            {
+                "total": 10,
+                "customer": { "name": "Ann", "email": "ann@x.io" },
+                "items": [ { "sku": "x1", "qty": 1 } ],
+            },
+            {
+                "total": 20,
+                "customer": { "name": "Bob", "email": "bob@x.io" },
+                "items": [ { "sku": "y1", "qty": 2 }, { "sku": "y2", "qty": 3 } ],
+            },
         ])
         .as_array()
         .unwrap()

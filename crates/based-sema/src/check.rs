@@ -2629,52 +2629,11 @@ fn check_input_nest(
         MemberKind::Forward {
             target, custom_on, ..
         } => {
-            let ti = cx.find(target);
-            let key_fields: Vec<String> = ti
-                .map(|i| {
-                    cx.model(i)
-                        .pk_field_names()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if is_key_link(body, &key_fields) {
-                // FK link: the block names only key parts — require the *whole* key.
-                if !key_fields.is_empty() && body.len() != key_fields.len() {
-                    sink.error_note(
-                        code::INPUT_BAD_RELATION,
-                        field.span,
-                        format!("input relation `{}` names only part of `{}`'s key", field.node, target),
-                        "an FK link names the target's full key; add payload columns for a nested write",
-                    );
-                }
-                return;
-            }
-            // Nested write (to-one forward): create the related row, then set the FK.
-            if custom_on.is_some() {
-                sink.error_note(
-                    code::INPUT_NESTED_WRITE,
-                    field.span,
-                    format!("nested write through custom-join relation `{}` is not supported", field.node),
-                    "a custom-`on:` edge owns no FK column to link the created row; link an existing row by key",
-                );
-                return;
-            }
-            if has_conflict {
-                sink.error_note(
-                    code::INPUT_NESTED_WRITE,
-                    field.span,
-                    format!("nested write in relation `{}` is not supported with `on conflict`", field.node),
-                    "an upsert reads/writes one table; drop `on conflict`, or link the related row by key",
-                );
-                return;
-            }
-            let Some(ti) = ti else { return };
-            recurse_input_nest(
+            check_forward_nest(
+                field,
                 body,
-                ti,
-                None,
+                target,
+                custom_on.is_some(),
                 ref_shape,
                 cf,
                 scoped,
@@ -2685,12 +2644,36 @@ fn check_input_nest(
                 sink,
             );
         }
-        MemberKind::Inverse { .. } => {
-            sink.error_note(
-                code::INPUT_BAD_RELATION,
-                field.span,
-                format!("input relation `{}` is a to-many collection", field.node),
-                "only a to-one relation can be written in a create input",
+        MemberKind::Inverse { target, via } => {
+            // A to-many nested write: create the child collection. The child's back-edge to
+            // the parent (`via`) is engine-injected (exempt from coverage); it is never a
+            // link (a to-many block always creates its children).
+            if has_conflict {
+                sink.error_note(
+                    code::INPUT_NESTED_WRITE,
+                    field.span,
+                    format!(
+                        "nested write in relation `{}` is not supported with `on conflict`",
+                        field.node
+                    ),
+                    "an upsert reads/writes one table; drop `on conflict`",
+                );
+                return;
+            }
+            let via = via.clone();
+            let Some(ti) = cx.find(target) else { return };
+            recurse_input_nest(
+                body,
+                ti,
+                Some(&via),
+                ref_shape,
+                cf,
+                scoped,
+                unscoped,
+                has_conflict,
+                seen,
+                cx,
+                sink,
             );
         }
         MemberKind::Scalar { .. } => {
@@ -2702,6 +2685,87 @@ fn check_input_nest(
             );
         }
     }
+}
+
+/// A forward-edge nest: an FK link (`rel { key }`, requiring the whole key) or a to-one
+/// nested write (non-key payload → create the target first). A nested write is unsupported
+/// through a custom-`on:` edge or under `on conflict` (E0329).
+#[allow(clippy::too_many_arguments)]
+fn check_forward_nest(
+    field: &Ident,
+    body: &[ShapeField],
+    target: &str,
+    custom_on: bool,
+    ref_shape: Option<&str>,
+    cf: &CreateFrom,
+    scoped: Option<&Scoped>,
+    unscoped: bool,
+    has_conflict: bool,
+    seen: &mut Vec<String>,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
+    let ti = cx.find(target);
+    let key_fields: Vec<String> = ti
+        .map(|i| {
+            cx.model(i)
+                .pk_field_names()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if is_key_link(body, &key_fields) {
+        // FK link: the block names only key parts — require the *whole* key.
+        if !key_fields.is_empty() && body.len() != key_fields.len() {
+            sink.error_note(
+                code::INPUT_BAD_RELATION,
+                field.span,
+                format!(
+                    "input relation `{}` names only part of `{target}`'s key",
+                    field.node
+                ),
+                "an FK link names the target's full key; add payload columns for a nested write",
+            );
+        }
+        return;
+    }
+    // Nested write (to-one forward): create the related row, then set the FK.
+    if custom_on {
+        sink.error_note(
+            code::INPUT_NESTED_WRITE,
+            field.span,
+            format!("nested write through custom-join relation `{}` is not supported", field.node),
+            "a custom-`on:` edge owns no FK column to link the created row; link an existing row by key",
+        );
+        return;
+    }
+    if has_conflict {
+        sink.error_note(
+            code::INPUT_NESTED_WRITE,
+            field.span,
+            format!(
+                "nested write in relation `{}` is not supported with `on conflict`",
+                field.node
+            ),
+            "an upsert reads/writes one table; drop `on conflict`, or link the related row by key",
+        );
+        return;
+    }
+    let Some(ti) = ti else { return };
+    recurse_input_nest(
+        body,
+        ti,
+        None,
+        ref_shape,
+        cf,
+        scoped,
+        unscoped,
+        has_conflict,
+        seen,
+        cx,
+        sink,
+    );
 }
 
 /// Recurse into a nested-write child body, pushing/popping the NestRef cycle guard.

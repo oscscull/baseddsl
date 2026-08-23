@@ -615,7 +615,7 @@ async fn run_writes<D: DbRead + ?Sized>(
             // `-> ok` insert needs no `RETURNING` / `LAST_INSERT_ID()` round-trip). Nested
             // children always recover their key — the parent links to it.
             let want_pk = plan.bulk_readback.is_some();
-            let pk_rows = exec_bulk(db, plan.dialect, bulk, &env, want_pk).await?;
+            let pk_rows = exec_bulk(db, plan.dialect, bulk, &env, want_pk, &[]).await?;
             if plan.bulk_readback.is_some() {
                 readback_keys = if bulk.serial_return.is_some() {
                     pk_rows
@@ -697,31 +697,50 @@ fn max_binds(dialect: based_codegen::Dialect) -> usize {
     }
 }
 
+/// A per-row override for one FK column of a nested-write step: the column's bind index and
+/// its value in each row (the parent's key, for a to-many child).
+struct ColInject {
+    bind: usize,
+    per_row: Vec<SqlValue>,
+}
+
 /// Execute a structured shape-input create and its nested-write children (BW1 + nested
-/// writes). To-one forward children are created **first** — each child's recovered key is
-/// spliced into this insert's FK columns — then this insert runs. Returns each written
-/// row's primary key (in `pk_recover` order) when `want_pk`, so a parent can link its FK to
-/// it; an empty vec otherwise. Every insert runs on the same transaction connection, so the
-/// whole nested write is atomic (all-or-nothing) with the surrounding mutation.
+/// writes). Order: create **to-one** children first (their key fills this insert's FK), run
+/// this insert, then create **to-many** children (this insert's key fills their back-FK).
+/// `inject` supplies FK values this step's parent computed (a to-many child's back-FK).
+/// Returns each written row's primary key (in `pk_recover` order) when `want_pk`, so a
+/// parent can link to it. Every insert runs on the same transaction connection, so the whole
+/// nested write is atomic with the surrounding mutation.
 async fn exec_bulk<D: DbRead + ?Sized>(
     db: &mut D,
     dialect: based_codegen::Dialect,
     step: &crate::plan::BulkStep,
     env: &std::collections::HashMap<String, SqlValue>,
     want_pk: bool,
+    inject: &[ColInject],
 ) -> Result<Vec<Vec<SqlValue>>, DbError> {
-    // A fillable copy of the rows — nested-write FK columns are overwritten with the child's
-    // key before this insert executes.
+    // A fillable copy of the rows — nested-write FK columns are overwritten before insert.
     let mut rows = step.rows.clone();
+    // Parent-supplied back-FK values (a to-many child links to its parent's key).
+    for ci in inject {
+        for (i, v) in ci.per_row.iter().enumerate() {
+            if let Some(row) = rows.get_mut(i) {
+                if ci.bind < row.len() {
+                    row[ci.bind] = v.clone();
+                }
+            }
+        }
+    }
+    // To-one children first: create each, then splice its key into this insert's FK.
     for nc in &step.nested_one {
-        let child_pks = Box::pin(exec_bulk(&mut *db, dialect, &nc.step, env, true)).await?;
+        let child_pks = Box::pin(exec_bulk(&mut *db, dialect, &nc.step, env, true, &[])).await?;
         for (j, &parent) in nc.parent_of.iter().enumerate() {
-            for slot in &nc.fk_slots {
+            for slot in &nc.link_slots {
                 let Some(idx) = nc
                     .step
                     .pk_recover
                     .iter()
-                    .position(|p| p.field == slot.child_field)
+                    .position(|p| p.field == slot.key_field)
                 else {
                     continue;
                 };
@@ -729,33 +748,79 @@ async fn exec_bulk<D: DbRead + ?Sized>(
                     rows.get_mut(parent),
                     child_pks.get(j).and_then(|pk| pk.get(idx)),
                 ) {
-                    if slot.parent_bind < prow.len() {
-                        prow[slot.parent_bind] = cval.clone();
+                    if slot.bind < prow.len() {
+                        prow[slot.bind] = cval.clone();
                     }
                 }
             }
         }
     }
 
-    let want_serial = want_pk && step.serial_return.is_some();
+    // This insert must expose its key when a caller wants it OR a to-many child links to it.
+    let need_pk = want_pk || !step.nested_many.is_empty();
+    let want_serial = need_pk && step.serial_return.is_some();
     let serial_ids = insert_bulk_rows(db, dialect, step, &rows, env, want_serial).await?;
 
-    if !want_pk {
-        return Ok(Vec::new());
-    }
-    Ok(rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            step.pk_recover
-                .iter()
-                .map(|p| match p.bind {
-                    Some(b) => row[b].clone(),
-                    None => serial_ids.get(i).cloned().unwrap_or(SqlValue::Null),
+    let pk_rows: Vec<Vec<SqlValue>> = if need_pk {
+        rows.iter()
+            .enumerate()
+            .map(|(i, row)| {
+                step.pk_recover
+                    .iter()
+                    .map(|p| match p.bind {
+                        Some(b) => row[b].clone(),
+                        None => serial_ids.get(i).cloned().unwrap_or(SqlValue::Null),
+                    })
+                    .collect()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // To-many children after: this insert's key fills each child's back-FK, per child row.
+    for nm in &step.nested_many {
+        let child_inject: Vec<ColInject> = nm
+            .link_slots
+            .iter()
+            .filter_map(|slot| {
+                let idx = step
+                    .pk_recover
+                    .iter()
+                    .position(|p| p.field == slot.key_field)?;
+                let per_row = nm
+                    .parent_of
+                    .iter()
+                    .map(|&parent| {
+                        pk_rows
+                            .get(parent)
+                            .and_then(|pk| pk.get(idx))
+                            .cloned()
+                            .unwrap_or(SqlValue::Null)
+                    })
+                    .collect();
+                Some(ColInject {
+                    bind: slot.bind,
+                    per_row,
                 })
-                .collect()
-        })
-        .collect())
+            })
+            .collect();
+        Box::pin(exec_bulk(
+            &mut *db,
+            dialect,
+            &nm.step,
+            env,
+            false,
+            &child_inject,
+        ))
+        .await?;
+    }
+
+    if want_pk {
+        Ok(pk_rows)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 /// Insert already-resolved rows as one or more multi-row `INSERT … VALUES (…),(…),…`

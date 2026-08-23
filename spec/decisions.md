@@ -6306,3 +6306,37 @@ nested-write child models to `touched`, with a NestRef guard against a mid-check
 `exec_bulk`/`insert_bulk_rows`). Spec: `mutations.md`. Tests: sema conformance `bulk_input_errors`
 (E0329-on-conflict, valid nested write, E0134 cycle), live SQLite `bulk_integration.rs` (single nested
 create, bulk with per-row FK alignment, DB-generated serial child via RETURNING).
+
+## D129 — nested writes: to-many inverse `create` from a shape naming a child collection (part 2)
+
+**Owner-approved 2026-08-23** (same approval as D128). Completes nested writes: a to-many inverse
+relation block (`order { items { sku, qty } }`) creates the **child collection**, and a shape may mix
+both directions (`order { customer { … }, items { … } }`).
+
+**The model.** An Inverse (to-many) nest is **always a create** (there is no "link existing children"
+form) — the child rows are created **after** the parent, each linked back through the child's forward
+edge (`via`) to the parent's key. The child's back-reference to the parent is engine-injected: the
+child shape neither names nor covers it (coverage exempts `via`), and `on conflict` on the parent with
+a to-many nest is `E0329` (an upsert reads/writes one table). Per-row fan-out: parent *i* owns the
+children in `row_i[relation]`; the flattened child insert carries each child's parent index so the
+parent's key fills the right rows.
+
+**Engine owns the fan-out (principle 7).** Codegen: `BulkInsert.nested_many` + a new
+`BulkSource::ParentId { key_field }` on the child's back-FK column (injected — the child shape never
+names it). Runtime: `build_nested_many` flattens each parent's child array (tracking `parent_of`) and
+records the child's back-FK `link_slots`; `exec_bulk` now runs **to-one children → this insert →
+to-many children**, recovering this insert's per-row key (`need_pk` is forced when there are to-many
+children) and passing each child its parent's key as a per-row `ColInject`. `FkSlot` was generalized to
+a direction-neutral `LinkSlot { bind, key_field }` (the FK-owner is the parent for `nested_one`, the
+child for `nested_many`). Serial parents work (the parent key is learned via RETURNING /
+LAST_INSERT_ID before the children insert). All inserts run on the one transaction — atomic. Read-back,
+client, and OpenAPI are unchanged (the shape's to-many array projects the now-existing children).
+
+**Blast radius.** `based-sema` (`check.rs` Inverse branch of `check_input_nest` recurses with the
+`via` back-edge exempt; `scope.rs` already walked to-many child models into `touched`). `based-codegen`
+(`sql/mutations.rs` `BulkInsert.nested_many`, `BulkSource::ParentId`, `bulk_nest_col` Inverse arm
+injecting the back-FK, review SQL). `based-runtime` (`plan.rs` `BulkStep.nested_many`, `LinkSlot`
+rename, `build_nested_many`, `ParentId` placeholder; `run.rs` `exec_bulk` inject + to-many phase,
+`ColInject`). Spec: `mutations.md`. Tests: live SQLite `bulk_integration.rs` (single mixed to-one +
+to-many, bulk per-parent fan-out with different-sized collections). This completes the nested-writes
+feature (D128 to-one + D129 to-many); the last reserved BW follow-up is closed.

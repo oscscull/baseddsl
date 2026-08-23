@@ -140,13 +140,19 @@ mutation import_products(rows: ProductIn[]) -> ok scoped Tenant {
     column(s) from the payload (round-trips: the same `{ id }` an output projection yields).
     A composite-key target names its key parts (`enrollment { student, course }`).
   - **Nested write** — the block names **non-key payload**: `customer { name, email }`
-    creates the related row too, then links it. A **to-one forward** edge creates the
-    target *before* the parent (its key fills the parent's FK). Nesting composes to any
-    depth; a nested `shape` reference (`customer -> CustomerIn`) works identically. The
-    child's own required columns must be covered (`E0330`, recursively); its `@scope` is
-    injected from the same `$ctx` (never the payload). A nested write through a custom-`on:`
-    join edge, or combined with `on conflict`, is unsupported (`E0329`); a self-referential
-    input shape is rejected as a reference cycle (`E0134`).
+    creates the related row too, then links it.
+    - A **to-one forward** edge (`customer { … }`) creates the target *before* the parent —
+      its key fills the parent's FK.
+    - A **to-many inverse** edge (`items { … }`) creates the child collection *after* the
+      parent — the parent's key fills each child's back-FK. The child's back-reference to the
+      parent is engine-injected (the child shape neither names nor covers it).
+
+    Nesting composes to any depth and mixes both directions in one shape (`order { customer
+    { … }, items { … } }`); a nested `shape` reference (`customer -> CustomerIn`) works
+    identically. The child's own required columns must be covered (`E0330`, recursively); its
+    `@scope` is injected from the same `$ctx` (never the payload). A nested write through a
+    custom-`on:` join edge, or combined with `on conflict`, is unsupported (`E0329`); a
+    self-referential input shape is rejected as a reference cycle (`E0134`).
   - A bare relation or a flatten as input is `E0328`.
 - **Chunked + atomic.** The engine emits one `INSERT … VALUES (…),(…),…`, transparently
   chunked above the driver's bind limit (Postgres ~65535 binds — the user never sees the

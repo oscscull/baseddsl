@@ -228,9 +228,13 @@ pub struct BulkStep {
     /// keys aren't known until the DB assigns them. `None` otherwise.
     pub serial_return: Option<String>,
     /// Nested writes: to-one forward children created *before* this insert. Each child's
-    /// recovered key fills this step's FK columns (its [`NestedBulk::fk_slots`]). Empty for a
-    /// plain / FK-link create.
+    /// recovered key fills this step's FK columns (a [`NestedBulk::link_slots`] indexing this
+    /// step's rows). Empty for a plain / FK-link create.
     pub nested_one: Vec<NestedBulk>,
+    /// Nested writes: to-many inverse children created *after* this insert. Each child's
+    /// back-FK column ([`NestedBulk::link_slots`] indexing the *child's* rows) is filled from
+    /// this insert's key. Empty for a plain / FK-link / to-one create.
+    pub nested_many: Vec<NestedBulk>,
     /// How to recover this insert's primary key per row (for a parent to link its FK to it,
     /// when this step is a nested child). Each part is read from a bound column, or is a
     /// DB-generated `serial` learned from the INSERT (see [`serial_return`](Self::serial_return)).
@@ -238,23 +242,26 @@ pub struct BulkStep {
 }
 
 /// A nested-write child of a [`BulkStep`]: the related insert plus how its rows and key link
-/// back to the parent's rows.
+/// to the parent's rows. In `nested_one` the FK lives on the parent (filled from the child's
+/// key); in `nested_many` the FK lives on the child (filled from the parent's key) — the
+/// `link_slots` bind index indexes whichever step owns the FK.
 #[derive(Debug, Clone)]
 pub struct NestedBulk {
     pub step: BulkStep,
-    /// One entry per child row: the parent row index it belongs to (a to-one child links to
-    /// exactly one parent; multiple parents may be absent when the relation is optional).
+    /// One entry per child row: the parent row index it belongs to. A to-one child links to
+    /// exactly one parent (some parents may be absent — optional relation); a to-many child
+    /// row belongs to the parent whose collection it came from.
     pub parent_of: Vec<usize>,
-    /// The parent columns to fill from each linked child's key.
-    pub fk_slots: Vec<FkSlot>,
+    /// The FK columns to fill and which key field of the *other* side supplies each value.
+    pub link_slots: Vec<LinkSlot>,
 }
 
-/// One FK column of a parent [`BulkStep`] filled from a nested-write child's key: the
-/// parent's per-row bind index, and which of the child's key fields supplies the value.
+/// One FK column linked across a nested write: the per-row bind index of the FK-owning step,
+/// and the key field (of the other side) whose value fills it.
 #[derive(Debug, Clone)]
-pub struct FkSlot {
-    pub parent_bind: usize,
-    pub child_field: String,
+pub struct LinkSlot {
+    pub bind: usize,
+    pub key_field: String,
 }
 
 /// How to recover one primary-key part of a [`BulkStep`] per row: read a bound column
@@ -663,9 +670,11 @@ fn build_bulk_step_rows(
                 BulkSource::Now => {}
                 BulkSource::MintUuid => vals.push(SqlValue::Uuid(id_gen.next_id())),
                 BulkSource::MintUlid => vals.push(SqlValue::Uuid(id_gen.next_ulid())),
-                // A nested-write FK is filled from the child's key at run time — a placeholder
-                // now, overwritten before this insert executes.
-                BulkSource::NestedOneId { .. } => vals.push(SqlValue::Null),
+                // A nested-write FK (to-one child's key, or a to-many child's parent key) is
+                // filled at run time — a placeholder now, overwritten before this insert runs.
+                BulkSource::NestedOneId { .. } | BulkSource::ParentId { .. } => {
+                    vals.push(SqlValue::Null);
+                }
                 BulkSource::Ctx { ctx_field } => {
                     vals.push(
                         env.values
@@ -702,6 +711,7 @@ fn build_bulk_step_rows(
     }
 
     let nested_one = build_nested_one(compiled, id_gen, env, bulk, rows_json)?;
+    let nested_many = build_nested_many(compiled, id_gen, env, bulk, rows_json)?;
     let key_rows = bulk_key_rows(bulk, &rows);
     // A DB-generated `serial` primary-key part is recovered from the INSERT (`RETURNING` /
     // `LAST_INSERT_ID()`), whether for the top-level read-back or a nested-write child link.
@@ -726,6 +736,7 @@ fn build_bulk_step_rows(
         key_rows,
         serial_return,
         nested_one,
+        nested_many,
         pk_recover,
     })
 }
@@ -772,17 +783,17 @@ fn build_nested_one(
     use based_codegen::sql::mutations::BulkSource;
     let mut out = Vec::with_capacity(bulk.nested_one.len());
     for nc in &bulk.nested_one {
-        // The FK columns this child fills, and which of its key fields feeds each.
-        let fk_slots: Vec<FkSlot> = bulk
+        // The parent FK columns this child fills, and which of its key fields feeds each.
+        let link_slots: Vec<LinkSlot> = bulk
             .columns
             .iter()
             .filter(|c| !matches!(c.source, BulkSource::Now))
             .enumerate()
             .filter_map(|(bind, c)| match &c.source {
                 BulkSource::NestedOneId { nest, key_field } if *nest == nc.relation => {
-                    Some(FkSlot {
-                        parent_bind: bind,
-                        child_field: key_field.clone(),
+                    Some(LinkSlot {
+                        bind,
+                        key_field: key_field.clone(),
                     })
                 }
                 _ => None,
@@ -815,7 +826,79 @@ fn build_nested_one(
         out.push(NestedBulk {
             step,
             parent_of,
-            fk_slots,
+            link_slots,
+        });
+    }
+    Ok(out)
+}
+
+/// Build the to-many nested-write children of a bulk insert: for each `nested_many`
+/// relation, flatten every parent row's child array (tracking each child's parent), plan the
+/// child insert, and record the child's back-FK columns (filled from the parent's key).
+fn build_nested_many(
+    compiled: &Compiled,
+    id_gen: &dyn IdGen,
+    env: &Env,
+    bulk: &based_codegen::sql::mutations::BulkInsert,
+    rows_json: &[&serde_json::Map<String, serde_json::Value>],
+) -> Result<Vec<NestedBulk>, PlanError> {
+    use based_codegen::sql::mutations::BulkSource;
+    let mut out = Vec::with_capacity(bulk.nested_many.len());
+    for nc in &bulk.nested_many {
+        // The child's back-FK columns (bind index into the *child* rows) and which parent key
+        // field feeds each.
+        let link_slots: Vec<LinkSlot> = nc
+            .child
+            .columns
+            .iter()
+            .filter(|c| !matches!(c.source, BulkSource::Now))
+            .enumerate()
+            .filter_map(|(bind, c)| match &c.source {
+                BulkSource::ParentId { key_field } => Some(LinkSlot {
+                    bind,
+                    key_field: key_field.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+
+        // Flatten every parent's child array; a missing / null array is an empty collection.
+        let mut child_rows: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::new();
+        let mut parent_of: Vec<usize> = Vec::new();
+        for (i, obj) in rows_json.iter().enumerate() {
+            match obj.get(&nc.relation) {
+                Some(serde_json::Value::Array(a)) => {
+                    for v in a {
+                        let o = v.as_object().ok_or_else(|| {
+                            bad_arg(
+                                &format!("{}.{}", bulk.param, nc.relation),
+                                CoerceError {
+                                    expected: Family::Any,
+                                    got: "a non-object to-many element".to_string(),
+                                },
+                            )
+                        })?;
+                        child_rows.push(o);
+                        parent_of.push(i);
+                    }
+                }
+                None | Some(serde_json::Value::Null) => {}
+                Some(_) => {
+                    return Err(bad_arg(
+                        &format!("{}.{}", bulk.param, nc.relation),
+                        CoerceError {
+                            expected: Family::Any,
+                            got: "a non-array to-many nested-write value".to_string(),
+                        },
+                    ))
+                }
+            }
+        }
+        let step = build_bulk_step_rows(compiled, id_gen, env, &nc.child, &child_rows)?;
+        out.push(NestedBulk {
+            step,
+            parent_of,
+            link_slots,
         });
     }
     Ok(out)

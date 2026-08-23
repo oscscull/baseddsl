@@ -62,13 +62,16 @@ chunking. **Follow-ons / reserved:**
   bulk `create Model[] from $rows -> Shape[]`, an IN-keyed re-select over the written keys reusing
   `project_return` (serial ids via RETURNING / `LAST_INSERT_ID()` range).
 - **Nested writes** (`order { …non-key payload }` creating the related row too) — owner-approved
-  2026-08-23 (to-one forward + to-many inverse, single + bulk). **Part 1 — to-one forward — DONE
-  (D128):** a relation block naming non-key payload creates the related row before the parent and
-  links its recovered key (app-minted / natural `@key` / DB-generated `serial`); recurses to depth;
-  NestRef works; child `@scope` injected from `$ctx`; unsupported through a custom-`on:` edge or with
-  `on conflict` (E0329). Proven live on SQLite (single / bulk per-row FK alignment / serial child via
-  RETURNING). **Part 2 — to-many inverse (`order { items { … } }` creating the child collection) —
-  NEXT.**
+  2026-08-23, **DONE (to-one forward + to-many inverse, single + bulk).**
+  - **Part 1 — to-one forward (D128):** a relation block naming non-key payload creates the related
+    row before the parent and links its recovered key (app-minted / natural `@key` / DB-generated
+    `serial`); recurses to depth; NestRef works; child `@scope` injected from `$ctx`; unsupported
+    through a custom-`on:` edge or with `on conflict` (E0329).
+  - **Part 2 — to-many inverse (D129):** a to-many block creates the child collection after the
+    parent, the parent's key filling each child's back-FK (per-parent fan-out); a shape mixes both
+    directions (`order { customer { … }, items { … } }`).
+  - Proven live on SQLite (single / bulk per-row FK alignment / serial child via RETURNING /
+    single mixed to-one+to-many / bulk fan-out). **The last reserved BW follow-up is closed.**
 - `-> count` read-back form stays out.
 
 ## Autonomous build loop (how this is being built out)
