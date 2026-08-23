@@ -70,8 +70,10 @@ chunking. **Follow-ons / reserved:**
   - **Part 2 — to-many inverse (D129):** a to-many block creates the child collection after the
     parent, the parent's key filling each child's back-FK (per-parent fan-out); a shape mixes both
     directions (`order { customer { … }, items { … } }`).
-  - Proven live on SQLite (single / bulk per-row FK alignment / serial child via RETURNING /
-    single mixed to-one+to-many / bulk fan-out). **The last reserved BW follow-up is closed.**
+  - Proven live on **all three dialects**: SQLite (single / bulk per-row FK alignment / serial
+    child via RETURNING / single mixed to-one+to-many / bulk fan-out), and Postgres + MariaDB
+    (to-one + to-many + per-parent fan-out + serial child — RETURNING on Postgres, the
+    `LAST_INSERT_ID()` range on MariaDB). **The last reserved BW follow-up is closed.**
 - `-> count` read-back form stays out.
 
 ## Autonomous build loop (how this is being built out)

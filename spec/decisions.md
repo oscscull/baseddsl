@@ -6338,5 +6338,8 @@ client, and OpenAPI are unchanged (the shape's to-many array projects the now-ex
 injecting the back-FK, review SQL). `based-runtime` (`plan.rs` `BulkStep.nested_many`, `LinkSlot`
 rename, `build_nested_many`, `ParentId` placeholder; `run.rs` `exec_bulk` inject + to-many phase,
 `ColInject`). Spec: `mutations.md`. Tests: live SQLite `bulk_integration.rs` (single mixed to-one +
-to-many, bulk per-parent fan-out with different-sized collections). This completes the nested-writes
-feature (D128 to-one + D129 to-many); the last reserved BW follow-up is closed.
+to-many, bulk per-parent fan-out with different-sized collections) + live **Postgres**
+(`nested_writes_run_against_live_postgres`) and **MariaDB** (`nested_writes_run_against_live_mariadb`)
+covering to-one + to-many + fan-out + a DB-generated `serial` child (RETURNING on Postgres, the
+`LAST_INSERT_ID()` range on MariaDB). This completes the nested-writes feature (D128 to-one + D129
+to-many), proven live on all three dialects; the last reserved BW follow-up is closed.
