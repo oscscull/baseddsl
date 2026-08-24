@@ -5,6 +5,8 @@ mutations in one small language (`.bsl`); the compiler generates the SQL, a type
 access layer, and a runnable service. MySQL/MariaDB is the primary target; SQLite
 and Postgres are also supported.
 
+**[Language reference →](docs/reference.md)** — every feature and its syntax, on one page.
+
 Wip, for progress, see [`PLAN.md`](PLAN.md) for status.
 
 ## Try it
@@ -18,6 +20,7 @@ cargo run   # from inside an example project
 
 ## Layout
 
+- [`docs/reference.md`](docs/reference.md) — the language reference (what to write).
 - [`spec/`](spec/) — language design docs; start with [`spec/principles.md`](spec/principles.md).
 - [`crates/`](crates/) — the Rust compiler + runtime workspace.
 - [`examples/`](examples/) — runnable quickstart projects.
