@@ -776,7 +776,12 @@ pub enum Mapped<'a> {
 /// relation param may be typed as its target model *or* as its key (`Id`/`Uuid`);
 /// a scalar param must match the column's family. Loose on purpose (family, not
 /// exact primitive) so `Uuid`↔`Id` and the like don't spuriously conflict.
-pub fn check_param_type(ann: &TypeExpr, mapped: Mapped, target_key: Option<Primitive>, sink: &mut Sink) {
+pub fn check_param_type(
+    ann: &TypeExpr,
+    mapped: Mapped,
+    target_key: Option<Primitive>,
+    sink: &mut Sink,
+) {
     match (&ann.base, mapped) {
         (BaseType::Primitive(pann), Mapped::Scalar(pcol)) => {
             if prim_family(*pann) != prim_family(pcol) {

@@ -474,6 +474,39 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
 /// binds every write statement positionally. The generated ids are seeded into the
 /// value environment *before* binding, so a `$name.id` step reference — which lowers to
 /// the bound create's `:id_<step>` — resolves to the same value the INSERT used.
+/// Assemble a mutation's value environment: each scalar param (skipping a bulk `from`
+/// param, whose rows the bulk step reads straight from the request), then the `$ctx`
+/// fields. A param's coercion family is the key of the entity it identifies, else its use
+/// in the write body.
+fn mutation_env(
+    compiled: &Compiled,
+    ast: &Mutation,
+    ctx_requires: &[CtxReq],
+    req: &Request,
+    from_params: &std::collections::HashSet<&str>,
+) -> Result<Env, PlanError> {
+    let entities = based_sema::mutation_param_entities(&compiled.schema, ast);
+    let mut env = Env::new(compiled.dialect);
+    for p in &ast.params {
+        if from_params.contains(p.name.node.as_str()) {
+            continue;
+        }
+        let entity = entities.get(&p.name.node).map(String::as_str);
+        let (family, optional) = mutation_param_family(compiled, ast, p, entity);
+        env.insert(
+            p.name.node.clone(),
+            bind_param(&compiled.schema, p, family, optional, req)?,
+        );
+    }
+    for c in ctx_requires {
+        env.insert(
+            format!("ctx_{}", c.field),
+            bind_ctx(&compiled.schema, c, req)?,
+        );
+    }
+    Ok(env)
+}
+
 pub fn plan_mutation(
     compiled: &Compiled,
     req: &Request,
@@ -503,25 +536,7 @@ pub fn plan_mutation(
         .iter()
         .filter_map(|w| w.bulk.as_ref().map(|b| b.param.as_str()))
         .collect();
-    let entities = based_sema::mutation_param_entities(&compiled.schema, ast);
-    let mut env = Env::new(compiled.dialect);
-    for p in &ast.params {
-        if from_params.contains(p.name.node.as_str()) {
-            continue;
-        }
-        let entity = entities.get(&p.name.node).map(String::as_str);
-        let (family, optional) = mutation_param_family(compiled, ast, p, entity);
-        env.insert(
-            p.name.node.clone(),
-            bind_param(&compiled.schema, p, family, optional, req)?,
-        );
-    }
-    for c in &rm.ctx_requires {
-        env.insert(
-            format!("ctx_{}", c.field),
-            bind_ctx(&compiled.schema, c, req)?,
-        );
-    }
+    let mut env = mutation_env(compiled, ast, &rm.ctx_requires, req, &from_params)?;
 
     // 2. Generate the engine `id` for each create. Record the id of the first create
     //    matching the return model — the row the response identifies. Ids fill uuid

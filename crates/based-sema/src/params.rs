@@ -85,7 +85,11 @@ fn binding_field(p: &Param) -> &str {
     }
 }
 
-fn scan_write(schema: &CheckedSchema, stmt: &based_ast::WriteStmt, map: &mut HashMap<String, String>) {
+fn scan_write(
+    schema: &CheckedSchema,
+    stmt: &based_ast::WriteStmt,
+    map: &mut HashMap<String, String>,
+) {
     use based_ast::WriteStmt;
     match stmt {
         WriteStmt::Create {
