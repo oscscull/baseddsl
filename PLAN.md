@@ -162,7 +162,21 @@ unaffected by container reuse). Highest-leverage, low-risk wins to investigate:
 - Confirm dev-profile `incremental` is on; consider `split-debuginfo = "unpacked"` on macOS.
 - Consider `cargo nextest` for faster test *execution* (not compile).
 Pick the linker first (biggest, cheapest). Measure a before/after on `cargo test -p based-runtime
---features sqlite,serve` recompile.
+--features sqlite,serve` recompile (`ci/measure-incremental.sh`).
+
+**Code-level cost analysis (2026-08-24, read-only audit — no `query!` macros, so no DB-at-compile-time tax):**
+- **#1 structural driver: 23 separate test binaries in `based-runtime`/tests**, each independently compiling
+  + linking the whole runtime + sqlx + tokio + axum. `cargo test -p based-runtime` is 23 "link the world"
+  steps. lld attacks this with zero code change; the structural fix is **consolidating the small unit-style
+  tests** (`mutation.rs`, `query.rs`, `embed.rs`, `cancel_safety.rs`, `streaming.rs`, …) into a handful of
+  binaries (~23 → ~7 roughly thirds the link count). Biggest structural win; chunky refactor.
+- **#2: `reqwest` in dev-deps** (pulls hyper/h2/tower) compiles into every runtime test build but is used by
+  only **3** test files (2 docker-only). Drop it — have `streaming_client.rs` use a lighter client (axum
+  `oneshot` via `tower::ServiceExt`, or raw hyper) — to remove that subtree. Medium effort, low risk.
+- Not offenders: derive density is modest (Debug/Clone/Serialize); no proc-macro-heavy hot code; sqlx is a
+  big lib but we use its runtime API, not the compile-time query macros. 301 crates total.
+- Note: adding `.cargo/config.toml` (rustflags) invalidates the whole cache → one full 301-crate rebuild
+  when toggling the linker. Factor that into the lld keep/revert decision.
 
 ## Autonomous build loop (how this is being built out)
 
