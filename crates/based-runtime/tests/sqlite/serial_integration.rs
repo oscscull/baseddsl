@@ -173,5 +173,9 @@ async fn model_annotated_serial_fk_param_accepts_the_integer_key() {
         json!({ "org": "3f2504e0-4f89-41d3-9a0c-0305e82c3301" }),
     )
     .await;
-    assert_eq!(bad.status, 400, "a uuid string is not a serial key: {:?}", bad.body);
+    assert_eq!(
+        bad.status, 400,
+        "a uuid string is not a serial key: {:?}",
+        bad.body
+    );
 }

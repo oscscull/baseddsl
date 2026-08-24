@@ -24,11 +24,11 @@ use serde_json::json;
 /// compiles (kept current by `embed.rs`'s `generated_client_is_current` gate).
 #[allow(dead_code)]
 mod client {
-    include!("support/embedded_client.rs");
+    include!("../support/embedded_client.rs");
 }
 
 /// The schema the generated client was emitted from (shared with `tests/embed.rs`).
-const SCHEMA: &str = include_str!("support/embedded_client_schema.bsl");
+const SCHEMA: &str = include_str!("../support/embedded_client_schema.bsl");
 
 fn compile() -> Compiled {
     let sf = parse_file(SCHEMA, FileId(0)).expect("parse");

@@ -26,13 +26,13 @@ use serde_json::json;
 /// with `based gen client --embedded` if `SCHEMA` changes.
 #[allow(dead_code)]
 mod client {
-    include!("support/embedded_client.rs");
+    include!("../support/embedded_client.rs");
 }
 
 /// The schema `mod client` was generated from — loaded into the engine so routes and
 /// wire shapes line up on both sides. Shared with `tests/streaming_client.rs` (the
 /// HTTP twin over the same generated client), so the two suites can never drift.
-const SCHEMA: &str = include_str!("support/embedded_client_schema.bsl");
+const SCHEMA: &str = include_str!("../support/embedded_client_schema.bsl");
 
 fn compiled() -> Compiled {
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
@@ -92,7 +92,7 @@ fn generated_client_is_current() {
     }
     assert_eq!(
         generated,
-        include_str!("support/embedded_client.rs"),
+        include_str!("../support/embedded_client.rs"),
         "tests/support/embedded_client.rs is stale — regenerate with `based gen client --embedded`"
     );
 }
