@@ -44,7 +44,7 @@ REDIS_URL    ?= redis://127.0.0.1:16379
 
 .PHONY: ci check check-fast ci-workspace ci-workspace-full ci-coloring ci-extension ci-image ci-live \
         ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
-        ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-down
+        ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-reset dev-db-down
 
 # The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
 # facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
@@ -62,18 +62,16 @@ check-fast: ci-workspace
 ## (started here; left running for fast re-runs — `make dev-db-down` cleans up). Also refreshes
 ## target/debug/based-lsp — the VS Code extension launches it via a PATH symlink pointing there,
 ## so a stale binary means the editor silently runs old LSP code.
-## The servers are re-freshed between the live suites and the example scenarios: the live
-## suites reset per test *at start* and leave their last schema/ledger behind, while each
-## example expects an empty database — the same isolation CI gets from one service
-## container per job (.github/workflows/ci.yml).
+## The databases are emptied (drop+create, not container teardown — `dev-db-reset`) between
+## the live suites and the example scenarios: the live suites reset per test *at start* and
+## leave their last schema/ledger behind, while each example expects an empty database — the
+## same isolation CI gets from one service container per job (.github/workflows/ci.yml).
 check: ci-workspace-full dev-db-up
 	$(CARGO) build -p based-lsp
 	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
 	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
 	$(MAKE) ci-live
-	$(MAKE) dev-db-up
-	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
-	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
+	$(MAKE) dev-db-reset
 	$(MAKE) ci-examples
 	@echo "check: all gates green"
 
@@ -87,13 +85,16 @@ ci-workspace: ci-coloring
 	$(CARGO) clippy --workspace --features sqlite,serve -- -D warnings
 	$(CARGO) test --workspace --features sqlite,serve
 
-## Full workspace gate: fmt + coloring + lint/test at `--all-features`, so the MariaDB/Postgres
-## driver code is compiled and linted too. Part of `make check` (the heavy pre-commit gate);
-## the driver *tests* themselves run live under `ci-live` (they skip without a server).
+## Full workspace gate: fmt + coloring + lint/test with the MariaDB/Postgres driver code
+## compiled and linted too. Part of `make check` (the heavy pre-commit gate). Clippy runs at
+## `--all-features` so the `docker-tests` live-suite code is compile-checked; the test *run*
+## deliberately drops `docker-tests` (uses the driver features directly) so it does NOT spin a
+## throwaway container per live binary here — those live tests execute once, against the shared
+## warm containers, under `ci-live`.
 ci-workspace-full: ci-coloring
 	$(CARGO) fmt --check
 	$(CARGO) clippy --workspace --all-features -- -D warnings
-	$(CARGO) test --workspace --all-features
+	$(CARGO) test --workspace --features mariadb,postgres,sqlite,serve
 
 ## Coloring boundary: every front-end crate's dependency tree must be free of async
 ## runtimes and drivers (tokio/sqlx/futures/async-*). Fails loudly on a leak.
@@ -182,16 +183,26 @@ ci-example-helpdesk: based-cli
 
 ## Local convenience: throwaway mariadb:11.4 + postgres:16 matching the default URLs above.
 ## CI provisions these as service containers instead (see .github/workflows/ci.yml).
-## `docker rm -fv` (not `-f`): the `-v` removes the container's anonymous volumes too, so a
-## fresh DB each run doesn't leak one data-dir volume per run (mariadb/postgres images declare
-## a VOLUME). The `docker run`s below create only such anonymous volumes — no named ones to survive.
+## Idempotent: `db-ensure.sh` reuses an already-running container on the current image and
+## only (re)creates a missing/stopped/stale one — so a warm DB is reused across runs and
+## across `make check`'s two phases (container cold-start is the gate's biggest cost). To get
+## an empty DB between phases we `dev-db-reset` (drop+recreate the database) rather than
+## tearing the container down. `docker rm -fv` (the `-v`) still drops the anonymous data-dir
+## volume when a container *is* recreated, so no per-run volume leak.
 dev-db-up:
-	-docker rm -fv based-ci-maria based-ci-pg based-ci-redis 2>/dev/null
-	docker run --rm -d --name based-ci-maria -p 13306:3306 \
-	  -e MARIADB_ROOT_PASSWORD=based_test_pw -e MARIADB_DATABASE=based_test mariadb:11.4
-	docker run --rm -d --name based-ci-pg -p 15432:5432 \
-	  -e POSTGRES_PASSWORD=based_test_pw -e POSTGRES_DB=based_test postgres:16
-	docker run --rm -d --name based-ci-redis -p 16379:6379 redis:7-alpine
+	@echo "dev-db-up: ensuring throwaway DB containers (reuse if warm)…"
+	@$(ROOT)ci/db-ensure.sh based-ci-maria mariadb:11.4 -p 13306:3306 \
+	  -e MARIADB_ROOT_PASSWORD=based_test_pw -e MARIADB_DATABASE=based_test
+	@$(ROOT)ci/db-ensure.sh based-ci-pg postgres:16 -p 15432:5432 \
+	  -e POSTGRES_PASSWORD=based_test_pw -e POSTGRES_DB=based_test
+	@$(ROOT)ci/db-ensure.sh based-ci-redis redis:7-alpine -p 16379:6379
+
+## Empty the databases between the live suites and the examples without container churn —
+## drop+recreate `based_test` inside the running containers (ci/db-reset.sh).
+dev-db-reset:
+	@echo "dev-db-reset: emptying databases (drop+create, no container churn)…"
+	@$(ROOT)ci/db-reset.sh maria based-ci-maria based_test based_test_pw
+	@$(ROOT)ci/db-reset.sh pg based-ci-pg based_test based_test_pw
 
 dev-db-down:
 	-docker rm -fv based-ci-maria based-ci-pg based-ci-redis 2>/dev/null

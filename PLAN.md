@@ -98,14 +98,30 @@ as the serial int — so one path is right and the other wrong. So this isn't on
 case: a param whose type is a **model reference** (`parent: Parent`) must resolve to that model's *actual*
 key type (serial → int), not the project `id` default.
 
-**The fix (compile-time + correct typing):** a param that references a model (or is compared to an FK
-column) must take that model's resolved key type — `serial` → integer, natural `@key` → its type — never
-the project-default uuid. Where the declared `Id` strategy contradicts it, error (a uuid-typed param vs. an
-int `serial` key). Likely lives near param-type inference / `PARAM_TYPE` (E0152), the model-reference param
-resolver, and the `= $param` comparison typing that already back-infers `Id<Entity>` correctly on the
-bulk-insert path — reuse that path's resolution for plain params. Fix client, OpenAPI, **and** server-side
-coercion together (all three diverge today). Add a golden + a live round-trip proving a `serial`-keyed
-reference param types as integer end-to-end and a uuid annotation against it is rejected.
+**ROOT CAUSE (diagnosed 2026-08-24).** Three consumers derive a param's wire type *independently*, and
+only the **client** resolves the entity a param identifies. The client uses a `param_entities` map
+(client.rs `query_param_entities` / `mutation_param_entities` → `member_entity` / `scan_write`+`scan_pred`):
+a param resolves to the entity named by its **annotation OR its binding/`= $param` comparison**, and its
+type is that entity's key (`id_type` → serial=numeric). OpenAPI and the runtime **don't** consult it:
+- OpenAPI `openapi.rs::param_schema` → a `BaseType::Model` annotation falls to `base_schema` → hardcoded
+  `uuid_schema()` (line ~1015). (The *untyped* path `reach_schema` already resolves correctly via
+  `fk_target_schema` — only the annotated path is wrong.)
+- Runtime `plan.rs::query_param_family` / `mutation_param_family` → `enum_or_uuid(schema, name)` returns
+  `Family::Uuid` for any non-enum model (line ~1094), ignoring the target key. This is the `expected uuid,
+  got number` at runtime. (`target_key_family` already exists and resolves serial→Int — it's just not used
+  for the annotated-model / `Id` case.)
+
+**THE FIX (not a new design — make OpenAPI + runtime agree with the client's existing semantics; principle 4).**
+Centralize "the entity a param identifies" in **based-sema** (it already type-checks these edges) as a
+shared resolver, and have client, OpenAPI, and runtime all consume it → a param's wire type is always that
+entity's resolved key (serial→int, uuid/ulid→string, composite→object). Concretely: OpenAPI routes a
+model/`Id` param through `fk_target_schema`; runtime routes it through `target_key_family`; both via the
+shared resolution (annotation *or* binding/comparison), replacing the client-local `param_entities`. Repro 2
+(`parent: Parent`) is unambiguous. Repro 1 (`column: Id` bound to a serial FK) resolves from the binding,
+exactly as the client already does. A genuinely contradictory explicit annotation (`uuid` param vs. a
+`serial` FK) should then error at `PARAM_TYPE` (E0152) — tighten `check_param_type` (resolve.rs), which is
+family-loose today. Tests: OpenAPI + client goldens (serial-keyed reference param → integer) and a live
+round-trip on all three dialects proving the number is accepted and a uuid annotation is rejected.
 
 ## 🛠 TEST-INFRA — reuse DB containers + visible progress (owner-raised 2026-08-24)
 
