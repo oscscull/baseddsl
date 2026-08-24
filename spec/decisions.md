@@ -117,7 +117,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
 - **Query / shape codegen** — D11 (SQL DML mapping), D55 (nested to-one shape sub-objects),
   D57 (to-many nested arrays: correlated-subquery JSON aggregation + self-ref aliasing),
   D79 (named nested projection: `field -> Shape` references a shape decl — same SQL as inline,
-  one nominal client/OpenAPI type; E0132/E0133/E0134), D87 (ordered to-many nests: relation
+  one nominal client/OpenAPI type; E0132/E0133/E0134), D130 (shape composition: `...Base`
+  splices another same-model shape's fields — a pre-sema expansion pass, E0135–E0139), D87 (ordered to-many nests: relation
   `@sort` > child model `@sort` as ORDER BY inside the JSON aggregate, all three dialects —
   supersedes D57's order-unspecified caveat), D109 (far-side flattening projection
   `out = edge.far { … }` — a two-level correlated IN-subquery skipping a m2m junction to the
@@ -6343,3 +6344,49 @@ to-many, bulk per-parent fan-out with different-sized collections) + live **Post
 covering to-one + to-many + fan-out + a DB-generated `serial` child (RETURNING on Postgres, the
 `LAST_INSERT_ID()` range on MariaDB). This completes the nested-writes feature (D128 to-one + D129
 to-many), proven live on all three dialects; the last reserved BW follow-up is closed.
+
+## D130 — shape composition: `...Base` splices another same-model shape's fields
+
+**Owner-approved 2026-08-24** (syntax fork signed off: spread `...Base`, over `use Base` / bare `Base`).
+Closes the "isn't it a hassle to write it all out in full?" gap: a `shape` may reuse another shape's
+field list instead of re-listing it. This is the **same-model** composition case — cross-model embed
+*through a relation* was already covered by D79's named nest (`placed_by -> UserRef`); a spread has no
+relation, it splices the current model's own columns.
+
+**Syntax.** `...ShapeName` on its own line inside a shape body:
+```
+shape UserBase from User { id, name, email }
+shape UserCard from User {
+  ...UserBase          # splices id, name, email
+  bio
+}
+```
+Lexed as a new `...` token (`Tok::DotDotDot`, before `.` for longest-match); parsed to
+`ShapeField::Spread { shape }`. Recurses (a base may itself spread), works in read *and* write (input)
+shapes uniformly.
+
+**Implementation — a pre-sema expansion pass (principle 4: one source of truth).** `RShape` is only a
+name→model registry; every consumer (SQL projection, client, OpenAPI) reads the field list from the raw
+AST `Shape.body`. Rather than teach each consumer about spreads, `based_sema::expand_spreads(&mut decls)`
+rewrites every `Spread` into the referenced shape's concrete fields (memoized, cycle-guarded) **after
+parse, before sema-check and codegen** — so the parser, that pass, and the formatter are the only code
+that ever observes a `Spread`. The CLI `load_checked` and the LSP compile both run it (the LSP on a
+working copy, keeping the raw `decls` with spreads intact for hover / go-to-definition — `...Base` rides
+the type-reference index like a `-> Base` nest). Downstream match arms are `unreachable!` in codegen (the
+invariant is documented and fails loud) and no-ops in the sema walkers.
+
+**Rules / diagnostics.** A spread's target `from` model must equal the enclosing shape's (`E0136` —
+same-model splice, not a traversal; the note points at `-> Shape` for the cross-model case). Unknown
+target `E0135`; spread cycle `E0137`; a duplicate output field after composition `E0138` (checked only
+for composed shapes, so a hand-written shape's field list is untouched); a spread inside a nest/flatten
+body `E0139` (top level only — inside a nest the surrounding model is a *related* one, so embed by name
+with `-> Shape`). Aggregate misuse needs no new code: expansion is flat, so a spliced aggregate lands
+next to the composed fields and the existing `E0245`/`E0324` aggregate-shape rules fire post-expansion.
+
+**Blast radius.** `based-ast` (`ShapeField::Spread`). `based-parser` (`...` token + `shape_field`).
+`based-sema` (new `spread.rs`; `E0135`–`E0139`; no-op arms in `check.rs`/`indexes.rs`/`scope.rs`).
+`based-codegen` (`unreachable!` arms in `client.rs`/`openapi.rs`/`sql/dml.rs`). `based-fmt` (reprints
+`...Name`). `based-lsp` (expands a working copy; spread rides the type-ref index). CLI `load_checked`
+runs the pass. Spec: `shapes.md`. Tests: parser unit (`shape_spread_composition`), parser +
+sema conformance goldens (happy path + `E0135`–`E0139`), codegen dml golden (SELECT projects the
+composed column set).

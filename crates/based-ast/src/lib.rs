@@ -424,6 +424,12 @@ pub enum ShapeField {
     /// `field -> ShapeName` — expand a relation into a sub-object projected by a
     /// named shape (whose `from` model must equal the relation's target)
     NestRef { field: Ident, shape: Ident },
+    /// `...ShapeName` — splice another shape's fields inline (composition). The
+    /// referenced shape's `from` model must equal this shape's own `from` (same-model
+    /// reuse, not a relation traversal). Expanded away before sema/codegen by
+    /// [`based_sema::expand_spreads`]; only the parser, that pass, and the formatter
+    /// ever observe it.
+    Spread { shape: Ident },
     /// `out = path { body }` — flatten a to-many path through a junction to the far
     /// side, hiding the junction. The first path segment is a to-many inverse edge
     /// (into the junction); the rest are forward edges to the far model, whose

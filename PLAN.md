@@ -76,6 +76,54 @@ chunking. **Follow-ons / reserved:**
     `LAST_INSERT_ID()` range on MariaDB). **The last reserved BW follow-up is closed.**
 - `-> count` read-back form stays out.
 
+## 🐞 URGENT BUG — param `Id` annotation vs. compared FK column type disagree (owner dogfooding, 2026-08-24)
+
+**Next task after the current shape-composition work.** A bare-`Id` param whose type the codegen infers
+one way and the server coerces another, passing `based check` clean and only failing at runtime — a
+soundness hole (the compiler should reject it).
+
+Repro shape: a query param `column: Id` (bare `Id` → resolves to the **project-default** strategy, e.g.
+`uuid`) is then used in `where (column = $column)` against `Column`, whose **primary key is `serial`
+(integer)**. The generated client typed the input as `Id<entity::Column>` (**numeric** — inferred
+correctly from the `= $column` comparison against the serial FK), while the **server-side coercion used
+the `Id` annotation (uuid)**. The two sides disagree; it compiles clean and blows up at runtime.
+
+**Second repro (2026-08-24, same root cause — a param typed as the project-default uuid instead of the
+target's serial key):** `scratchpad/serialparam/` — `Parent { id: serial }`, `Child { parent: Parent }`,
+mutation `clear_children(parent: Parent) -> ok { delete Child where (parent = $parent); }`. `child.parent_id`
+is INTEGER ✓ and `based check` passes ✓, but `based gen openapi` emits `parent: {format: uuid, type: string}`
+✗ and the runtime rejects a number: `400 bad_arg: argument 'parent': expected uuid, got number`. The tell:
+the **bulk-insert FK-link path** (`shape { column { id } }` → `create X[] from`) types the *same* reference
+as the serial int — so one path is right and the other wrong. So this isn't only the `= $param` comparison
+case: a param whose type is a **model reference** (`parent: Parent`) must resolve to that model's *actual*
+key type (serial → int), not the project `id` default.
+
+**The fix (compile-time + correct typing):** a param that references a model (or is compared to an FK
+column) must take that model's resolved key type — `serial` → integer, natural `@key` → its type — never
+the project-default uuid. Where the declared `Id` strategy contradicts it, error (a uuid-typed param vs. an
+int `serial` key). Likely lives near param-type inference / `PARAM_TYPE` (E0152), the model-reference param
+resolver, and the `= $param` comparison typing that already back-infers `Id<Entity>` correctly on the
+bulk-insert path — reuse that path's resolution for plain params. Fix client, OpenAPI, **and** server-side
+coercion together (all three diverge today). Add a golden + a live round-trip proving a `serial`-keyed
+reference param types as integer end-to-end and a uuid annotation against it is rejected.
+
+## 🛠 TEST-INFRA — reuse DB containers + visible progress (owner-raised 2026-08-24)
+
+The gate does too much invisible work and rebuilds too eagerly. Two changes:
+- **Reuse containers if present + up to date; truncate instead of rebuild.** `make check` (and the
+  per-binary `docker-tests` harnesses) should *not* pessimistically spin/rebuild a DB image every run.
+  Detect a running, image-current MariaDB/Postgres (the `dev-db-up` ones, or `TEST_*_URL`) and reuse it;
+  reset state cheaply between suites/tests — **truncate every table, or drop/recreate the particular
+  database** (either is fine; owner: "just deleting the particular database is fine too") — not by tearing
+  the container down and building a fresh one. Only (re)build when the image is missing or stale. **The
+  Docker overhead is the target** — container spin/rebuild is the biggest chunk of gate wall-clock. (Note the current per-test-binary spin: a bare `cargo test --all-features` with no `TEST_*_URL`
+  set makes *each* live binary start its own throwaway container — see the docker_mariadb/docker_postgres
+  support harnesses. Sharing one is the win.)
+- **Visible progress output.** The gate is a black box today — container startup + readiness waits emit
+  nothing to stdout, so a long run looks like a hang (it repeatedly did this session). Add debug/info-level
+  progress: which container is starting, readiness-wait ticks, which suite is running. Enough that a human
+  watching `make check` can see forward motion, not a frozen terminal.
+
 ## Autonomous build loop (how this is being built out)
 
 This roadmap is executed by a self-driving loop. Protocol, for whoever (human or agent)

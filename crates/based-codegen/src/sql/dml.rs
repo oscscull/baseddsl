@@ -442,6 +442,7 @@ fn lower_agg_query<'a>(
             ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. } => {
                 continue
             }
+            ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
         };
         cols.push(format!("  {} AS {}", proj, sel.q(&out)));
         expr_map.insert(out, cmp);
@@ -857,6 +858,7 @@ fn project_body<'a>(
                     cols.push(format!("{arr} AS {}", sel.q(&name)));
                 }
             }
+            ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
         }
     }
 }
@@ -1909,6 +1911,7 @@ impl<'a> Select<'a> {
                         pairs.push(format!("'{}', {}", out.node, arr));
                     }
                 }
+                ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
             }
         }
         format!("{}({})", self.dialect.json_object_fn(), pairs.join(", "))

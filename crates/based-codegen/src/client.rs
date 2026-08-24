@@ -895,6 +895,7 @@ pub fn adopt_{suffix}<'a>(
                         nested.push(sub);
                     }
                 }
+                ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
             }
         }
         OutStruct {

@@ -665,6 +665,7 @@ fn shape_fields(
                     fields.push((alias.node.clone(), arr, true));
                 }
             }
+            ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
         }
     }
     fields

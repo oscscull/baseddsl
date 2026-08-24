@@ -955,8 +955,16 @@ fn load_checked(root: &Path) -> Result<Loaded, CliError> {
         }
     }
 
-    // 3. Semantic analysis over the whole declaration set (only if parsing was
-    //    clean — sema assumes well-formed input).
+    // 3. Expand `...Shape` spreads (composition) into concrete fields, so sema and
+    //    codegen see a flat, spread-free body. Runs on a clean parse only.
+    if errors == 0 {
+        let diags = based_sema::expand_spreads(&mut all_decls);
+        count(&diags, &mut errors, &mut warnings);
+        render::render(&diags, &sources);
+    }
+
+    // 4. Semantic analysis over the whole declaration set (only if parsing + spread
+    //    expansion were clean — sema assumes well-formed input).
     let mut schema = CheckedSchema::default();
     if errors == 0 {
         let (checked, diags) = based_sema::check(&all_decls);

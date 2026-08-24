@@ -47,6 +47,27 @@ and is never referenced this way.
 **Reference for a shared type; inline when you mean to trim.** If one shape is forced
 to serve two consumers with different needs, split it into two shapes.
 
+## Composition — `...Base` (same-model splice)
+A shape may reuse another shape's field list instead of re-listing it, with a `...Base`
+spread. Unlike the named nest above (which embeds a *related* model through a relation),
+a spread has no relation — it splices the **same model's own columns** at the current
+level:
+```
+shape UserBase from User { id, name, email }
+
+shape UserCard from User {
+  ...UserBase          # splices id, name, email
+  bio
+}
+```
+The spread's `from` model must equal this shape's own (compile error otherwise — for the
+cross-model case, nest by name with `-> Shape`). It composes freely: a base may itself
+spread (recurses), and a spread works in read shapes and in write (input) shapes alike. A
+spread is a pure field-list expansion — same rows, same SQL, same client/OpenAPI fields as
+writing the fields out inline; it only saves the re-listing. Errors: unknown target, a
+cross-model spread, a spread cycle, a field the composition would duplicate, and a spread
+anywhere but a shape's top level (inside a nest, embed by name with `-> Shape`).
+
 ## Far-side flattening projection (many-to-many)
 A derived field (`=`) may name a relation **path** through a to-many junction edge and out
 a forward edge to the far side, with a projection body — returning the **distinct** far-side

@@ -152,7 +152,8 @@ shape_field = bare_field                       (* local, same-name             *
             | out_name '=' shape_value          (* reach/raw/agg/computed       *)
             | out_name '=' path shape_body      (* far-side flatten (m2m, D109) *)
             | bare_field shape_body             (* nest a relation into subobj  *)
-            | bare_field '->' upper_ident ;     (* nest via a named shape (D79) *)
+            | bare_field '->' upper_ident        (* nest via a named shape (D79) *)
+            | '...' upper_ident ;               (* splice a same-model shape (D130) *)
 bare_field  = lower_ident ;
 out_name    = lower_ident ;
 (* A lone `path` reaches-and-renames; `raw_sql` / `aggregate` are the escape hatch and  *)

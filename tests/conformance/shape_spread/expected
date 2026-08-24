@@ -1,0 +1,5 @@
+OK
+model User  decorators=[]  fields=4  indexes=0
+shape UserBase from User  fields=3
+shape UserCard from User  fields=2
+query get_user  params=1  ret=UserCard  body=bare

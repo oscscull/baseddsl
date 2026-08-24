@@ -145,6 +145,9 @@ fn check_shape_body(
                     check_shape_body(body, far, cx, stack, sink);
                 }
             }
+            // Composition spreads are expanded to concrete fields before sema runs
+            // (based_sema::expand_spreads), so none reach here.
+            ShapeField::Spread { .. } => {}
         }
     }
 }
@@ -317,7 +320,7 @@ fn walk_body_refs(fields: &[ShapeField], cx: &Cx, stack: &mut Vec<String>, sink:
             ShapeField::NestRef { shape, .. } => {
                 check_ref_cycle(&shape.node, shape.span, cx, stack, sink);
             }
-            ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
+            ShapeField::Bare(_) | ShapeField::Rename { .. } | ShapeField::Spread { .. } => {}
         }
     }
 }
@@ -416,6 +419,8 @@ fn summarize_agg_shape(body: &[ShapeField]) -> (Vec<String>, Vec<GroupCol>) {
                 out_names.push(field.node.clone());
             }
             ShapeField::Flatten { out, .. } => out_names.push(out.node.clone()),
+            // Expanded away before sema (based_sema::expand_spreads).
+            ShapeField::Spread { .. } => {}
         }
     }
     (out_names, group_cols)
@@ -2520,6 +2525,8 @@ fn check_input_body(
                 format!("input field `{}` flattens a many-to-many path", out.node),
                 "a create writes one row's columns — a flatten is not settable",
             ),
+            // Expanded away before sema (based_sema::expand_spreads).
+            ShapeField::Spread { .. } => {}
         }
     }
     check_input_coverage(m, cf, &scope_cols, &covered, sink);

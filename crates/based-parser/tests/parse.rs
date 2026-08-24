@@ -373,6 +373,34 @@ fn shape_nest_by_named_reference() {
 }
 
 #[test]
+fn shape_spread_composition() {
+    // `...UserBase` — splice another shape's fields (composition) parses to `Spread`.
+    let sf = parse_ok(
+        r#"
+        shape UserCard from User {
+          ...UserBase
+          bio
+        }
+        "#,
+    );
+    let shape = match &sf.decls[0] {
+        Decl::Shape(s) => s,
+        other => panic!("expected shape, got {other:?}"),
+    };
+    match &shape.body[0] {
+        ShapeField::Spread { shape } => assert_eq!(shape.node, "UserBase"),
+        other => panic!("expected spread, got {other:?}"),
+    }
+    assert!(matches!(&shape.body[1], ShapeField::Bare(b) if b.node == "bio"));
+}
+
+#[test]
+fn shape_spread_requires_uppercamel_name() {
+    // `...bio` (a lower ident) is not a shape name — a spread targets a shape decl.
+    assert!(parse_file("shape D from User { ...bio }", FileId(0)).is_err());
+}
+
+#[test]
 fn shape_nest_reference_requires_uppercamel_name() {
     // `-> full` (or any lower ident) is not a shape-reference target.
     assert!(parse_file("shape D from Order { placed_by -> full }", FileId(0)).is_err());

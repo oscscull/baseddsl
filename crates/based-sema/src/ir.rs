@@ -44,7 +44,12 @@ pub mod code {
     pub const SHAPE_REF_UNKNOWN: &str = "E0132"; // `field -> Name` names no shape
     pub const SHAPE_REF_MODEL: &str = "E0133"; // referenced shape's model ≠ relation target
     pub const SHAPE_REF_CYCLE: &str = "E0134"; // a shape transitively nests itself by reference
-                                               // queries / mutations
+    pub const SHAPE_SPREAD_UNKNOWN: &str = "E0135"; // `...Name` names no shape
+    pub const SHAPE_SPREAD_MODEL: &str = "E0136"; // spread shape's model ≠ this shape's own model
+    pub const SHAPE_SPREAD_CYCLE: &str = "E0137"; // a shape transitively spreads itself
+    pub const SHAPE_SPREAD_DUP: &str = "E0138"; // a spread introduces a field this shape already has
+    pub const SHAPE_SPREAD_PLACE: &str = "E0139"; // a spread appears inside a nest/flatten body (top level only)
+                                                  // queries / mutations
     pub const UNKNOWN_RETURN: &str = "E0140";
     pub const RETURN_MODEL_MISMATCH: &str = "E0141";
     pub const FULL_NEEDS_MODEL: &str = "E0142";

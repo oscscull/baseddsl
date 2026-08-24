@@ -1,0 +1,11 @@
+DIAGNOSTICS
+  (none)
+SCHEMA
+model User  table=user
+  id: Id
+  name: text
+  email: text
+  bio: text
+shape UserBase from User
+shape UserCard from User
+query get_user  target=User verb=get  shape=UserCard

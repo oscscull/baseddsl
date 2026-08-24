@@ -55,6 +55,9 @@ pub enum Tok {
     Colon,
     #[token(",")]
     Comma,
+    // `...` before `.` so the three-dot spread wins the longest match over three dots.
+    #[token("...")]
+    DotDotDot,
     #[token(".")]
     Dot,
     #[token(";")]

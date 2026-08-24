@@ -24,9 +24,11 @@ mod ir;
 mod model;
 mod resolve;
 mod scope;
+mod spread;
 
 pub use check::is_key_link;
 pub use ir::*;
+pub use spread::expand_spreads;
 
 use based_ast::Decl;
 use based_diagnostics::Diagnostic;

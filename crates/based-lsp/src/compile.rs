@@ -1105,6 +1105,9 @@ impl Snapshot {
                         self.shape_paths(far, body, out);
                     }
                 }
+                // `...Base` is a shape-name (type) reference, not a field path —
+                // navigation to it is handled by `collect_type_refs`.
+                ShapeField::Spread { .. } => {}
             }
         }
     }
@@ -2023,16 +2026,16 @@ fn pred_column_paths<'a>(p: &'a Predicate, from: &'a str, out: &mut Vec<(&'a str
     }
 }
 
-/// The `field -> Shape` references in a shape body (recursing through inline nests) —
-/// each names a shape decl, so it rides the type-reference index (go-to-def,
-/// find-references, rename).
+/// The `field -> Shape` references and `...Shape` spreads in a shape body (recursing
+/// through inline nests) — each names a shape decl, so it rides the type-reference index
+/// (go-to-def, find-references, rename).
 fn collect_shape_body_refs<'a>(body: &'a [ShapeField], out: &mut Vec<&'a Ident>) {
     for f in body {
         match f {
             ShapeField::Nest { body, .. } | ShapeField::Flatten { body, .. } => {
                 collect_shape_body_refs(body, out);
             }
-            ShapeField::NestRef { shape, .. } => out.push(shape),
+            ShapeField::NestRef { shape, .. } | ShapeField::Spread { shape } => out.push(shape),
             ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
         }
     }
@@ -2515,7 +2518,7 @@ fn shape_field_raw<'a>(f: &'a ShapeField, out: &mut Vec<&'a RawSql>) {
                 shape_field_raw(sf, out);
             }
         }
-        ShapeField::Bare(_) | ShapeField::NestRef { .. } => {}
+        ShapeField::Bare(_) | ShapeField::NestRef { .. } | ShapeField::Spread { .. } => {}
     }
 }
 
@@ -3068,7 +3071,11 @@ fn compile_paths(
     let mut facts = Vec::new();
     let mut checked = None;
     if parse_ok {
-        let (mut schema, diags) = based_sema::check(&decls);
+        // Expand `...Shape` spreads on a working copy so sema/facts see a flat body; the
+        // snapshot keeps the raw `decls` (spreads intact) for hover / go-to-definition.
+        let mut expanded = decls.clone();
+        diagnostics.extend(based_sema::expand_spreads(&mut expanded));
+        let (mut schema, diags) = based_sema::check(&expanded);
         based_sema::resolve_pk_default(&mut schema, pk_default);
         diagnostics.extend(diags);
         // Target-specific checks need the manifest's compile target; a loose file
@@ -3079,11 +3086,11 @@ fn compile_paths(
         // FK-convention divergence checks (resolved project `foreign_keys`; a loose file
         // with no project uses the safe `None` default).
         diagnostics.extend(based_sema::check_foreign_keys(&schema, fks));
-        facts = based_facts::facts(&schema, &decls);
+        facts = based_facts::facts(&schema, &expanded);
         // Offline migration-drift diagnostic: if the project has captured migrations and
         // the `.bsl` has structural changes not yet in one, flag them.
         if let Some(root) = migrations_root {
-            diagnostics.extend(drift_diagnostics(root, &schema, &decls, fks));
+            diagnostics.extend(drift_diagnostics(root, &schema, &expanded, fks));
         }
         checked = Some(schema);
     }

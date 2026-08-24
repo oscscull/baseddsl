@@ -1,0 +1,26 @@
+DIAGNOSTICS
+  E0135: `...Nope` names no shape
+  E0136: spread shape `OrgBase` is from `Org`, but this shape is from `User`
+  E0137: shape spread cycle: `A` transitively spreads itself
+  E0138: shape `S3` projects `name` twice after composition
+  E0139: `...UserBase` can only appear at a shape's top level
+SCHEMA
+model User  table=user
+  id: Id
+  name: text
+  email: text
+model Org  table=org
+  id: Id
+  title: text
+model Post  table=post
+  id: Id
+  title: text
+  author: -> User  fk=author_id
+shape UserBase from User
+shape OrgBase from Org
+shape S1 from User
+shape S2 from User
+shape S3 from User
+shape A from User
+shape B from User
+shape PostBad from Post

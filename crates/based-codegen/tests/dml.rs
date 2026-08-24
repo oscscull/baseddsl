@@ -31,6 +31,33 @@ fn gen_for(src: &str, dialect: Dialect) -> String {
 }
 
 #[test]
+fn shape_spread_composition_expands_columns() {
+    // `...UserBase` splices the base shape's columns; the SELECT projects the composed
+    // set (base columns + the local `bio`). Mirrors the real front end: expand, then check.
+    let sf = parse_file(
+        r#"
+        User { id: Id, name: text, email: text, bio: text }
+        shape UserBase from User { id, name, email }
+        shape UserCard from User { ...UserBase, bio }
+        query get_user(id) -> UserCard;
+        "#,
+        FileId(0),
+    )
+    .unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
+    let mut decls = sf.decls;
+    let diags = based_sema::expand_spreads(&mut decls);
+    assert!(diags.is_empty(), "spread errors: {diags:#?}");
+    let (schema, _) = check(&decls);
+    let ddl = sql::dml::dml(&schema, &decls, Dialect::MariaDb);
+    for col in ["id", "name", "email", "bio"] {
+        assert!(
+            ddl.contains(&format!("`user`.`{col}` AS `{col}`")),
+            "missing column {col}:\n{ddl}"
+        );
+    }
+}
+
+#[test]
 fn bare_get_injects_soft_delete_and_maps_param() {
     let ddl = gen(r#"
         @soft_delete(deleted_at)

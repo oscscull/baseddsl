@@ -778,7 +778,8 @@ fn walk_shape_join_in(
                     walk_shape_join_in(body, far, cx, stack, out);
                 }
             }
-            ShapeField::Bare(_) | ShapeField::Rename { .. } => {}
+            // Expanded away before sema (based_sema::expand_spreads).
+            ShapeField::Bare(_) | ShapeField::Rename { .. } | ShapeField::Spread { .. } => {}
         }
     }
 }

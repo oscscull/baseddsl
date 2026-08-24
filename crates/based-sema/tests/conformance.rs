@@ -79,7 +79,12 @@ fn summarize(src: &str) -> String {
             return out;
         }
     };
-    let (schema, mut diags) = check(&sf.decls);
+    // Mirror the real front end: expand `...Shape` spreads before checking, so a
+    // composed shape resolves to its flat field set and spread diagnostics surface.
+    let mut decls = sf.decls;
+    let mut diags = based_sema::expand_spreads(&mut decls);
+    let (schema, check_diags) = check(&decls);
+    diags.extend(check_diags);
 
     let mut out = String::new();
 

@@ -727,6 +727,8 @@ fn shape_demand_in(
                     shape_demand_in(body, far, cx, usage, joins, stack);
                 }
             }
+            // Expanded away before sema (based_sema::expand_spreads).
+            ShapeField::Spread { .. } => {}
         }
     }
 }

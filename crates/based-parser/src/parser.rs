@@ -1061,6 +1061,11 @@ impl<'a> Parser<'a> {
     }
 
     fn shape_field(&mut self) -> PResult<ShapeField> {
+        // `...ShapeName` — splice another shape's fields (composition).
+        if self.eat(Tok::DotDotDot) {
+            let shape = self.upper_ident("shape name")?;
+            return Ok(ShapeField::Spread { shape });
+        }
         let name = self.lower_ident("shape field")?;
         if self.eat(Tok::Eq) {
             if self.is_raw_start() {
