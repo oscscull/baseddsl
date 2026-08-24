@@ -1261,6 +1261,78 @@ fn bulk_upsert_mysql_uses_values_for_incoming() {
     );
 }
 
+const BULK_UPSERT_SPREAD: &str = r#"
+    Org { id: Id, name: text }
+    scope Tenant (org: Org = $ctx.org)
+    @scope Tenant
+    Inventory {
+      id: Id
+      org: Org
+      sku: text
+      qty: int
+      price: int
+      @index(org, sku) unique
+    }
+    shape InvIn from Inventory { sku, qty, price }
+    mutation restock(rows: InvIn[]) -> ok scoped Tenant {
+      create Inventory[] from $rows on conflict (org, sku) update { ...incoming };
+    }
+"#;
+
+#[test]
+fn bulk_upsert_spread_sets_every_payload_col_minus_target() {
+    let lm = lower(BULK_UPSERT_SPREAD, Dialect::Postgres);
+    let tail = lm[0].stmts[0]
+        .bulk
+        .as_ref()
+        .unwrap()
+        .conflict_tail
+        .as_deref()
+        .unwrap();
+    // `...incoming` expands to every inserted payload column except the conflict target
+    // (`org`, `sku`) — here `qty` and `price`, each read from the proposed row.
+    assert_eq!(
+        tail,
+        "\nON CONFLICT (\"org_id\", \"sku\") DO UPDATE SET \"qty\" = excluded.\"qty\", \"price\" = excluded.\"price\""
+    );
+}
+
+#[test]
+fn bulk_upsert_spread_then_override_is_last_write_wins() {
+    let src = BULK_UPSERT_SPREAD.replace(
+        "update { ...incoming }",
+        "update { ...incoming, qty = qty + incoming.qty }",
+    );
+    let tail = lower(&src, Dialect::Postgres)[0].stmts[0]
+        .bulk
+        .as_ref()
+        .unwrap()
+        .conflict_tail
+        .clone()
+        .unwrap();
+    // The explicit `qty` after the spread overrides the spread's `qty` (accumulate), while
+    // `price` keeps the spread's overwrite. One SET per column (no duplicate).
+    assert_eq!(
+        tail,
+        "\nON CONFLICT (\"org_id\", \"sku\") DO UPDATE SET \"qty\" = (\"qty\" + excluded.\"qty\"), \"price\" = excluded.\"price\""
+    );
+}
+
+#[test]
+fn bulk_upsert_spread_mysql_uses_values() {
+    let tail = lower(BULK_UPSERT_SPREAD, Dialect::MySql)[0].stmts[0]
+        .bulk
+        .as_ref()
+        .unwrap()
+        .conflict_tail
+        .clone()
+        .unwrap();
+    assert_eq!(
+        tail,
+        "\nON DUPLICATE KEY UPDATE `qty` = VALUES(`qty`), `price` = VALUES(`price`)"
+    );
+}
+
 #[test]
 fn bulk_read_back_is_an_in_keyed_reselect_of_the_shape() {
     let lm = lower(BULK_UPSERT_SCHEMA, Dialect::Sqlite);

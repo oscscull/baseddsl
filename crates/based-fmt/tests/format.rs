@@ -252,6 +252,18 @@ fn comments_preserved_inside_shape_body() {
 }
 
 #[test]
+fn upsert_spread_round_trips() {
+    let src = "mutation restock(rows: InvIn[]) -> ok scoped Tenant {\n  create Inventory[] from $rows on conflict (org, sku) update { ...incoming };\n}\n";
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
+fn upsert_spread_with_override_keeps_position() {
+    let src = "mutation restock(rows: InvIn[]) -> ok scoped Tenant {\n  create Inventory[] from $rows on conflict (org, sku) update { ...incoming, qty = qty + incoming.qty };\n}\n";
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
 fn raw_query_body_reprints_byte_exactly() {
     // A single-line raw body inlines like a one-clause block; the SQL text between
     // the backticks is opaque and never re-wrapped. Idempotent.

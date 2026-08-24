@@ -50,7 +50,7 @@
 //! has no inline join in a write, so the join `ON` folds into the WHERE). Postgres
 //! also forbids the target alias in `SET`, so a SET column is emitted bare there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use based_ast::*;
 use based_sema::{
@@ -1517,9 +1517,32 @@ fn lower_bulk_create(
 
     // A bulk upsert (BW2): the per-dialect `ON CONFLICT … / ON DUPLICATE KEY UPDATE` tail,
     // with `incoming.<col>` lowered to `excluded`/`VALUES()`. Bound + appended per chunk.
+    // A `...incoming` spread expands to the inserted payload columns (minus the conflict
+    // target) read from the proposed row.
     bulk.conflict_tail = conflict.map(|oc| {
+        let spread_cols: Vec<String> = if oc.spread.is_some() {
+            let target: HashSet<String> = oc
+                .target
+                .iter()
+                .map(|t| physical_col(model, &t.node))
+                .collect();
+            bulk.columns
+                .iter()
+                .filter(|bc| matches!(bc.source, BulkSource::Field { .. }))
+                .map(|bc| bc.column.clone())
+                .filter(|c| !target.contains(c))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let sets = conflict_update_sets(
-            cx.schema, cx.decls, model, oc, dialect, /* incoming = */ true,
+            cx.schema,
+            cx.decls,
+            model,
+            oc,
+            dialect,
+            /* incoming = */ true,
+            &spread_cols,
         );
         upsert_tail(dialect, oc, model, &sets)
     });
@@ -1789,7 +1812,9 @@ fn upsert_tail_and_key(
     let Some(oc) = conflict else {
         return (String::new(), None);
     };
-    let sets = conflict_update_sets(schema, decls, model, oc, dialect, incoming);
+    // The inline-create upsert has no proposed-row spread (sema E0334 rejects `...incoming`
+    // here), so the spread column set is always empty on this path.
+    let sets = conflict_update_sets(schema, decls, model, oc, dialect, incoming, &[]);
     let key: Vec<(String, String)> = oc
         .target
         .iter()
@@ -1948,18 +1973,55 @@ fn conflict_update_sets(
     oc: &OnConflict,
     dialect: Dialect,
     incoming: bool,
+    spread_cols: &[String],
 ) -> Vec<String> {
     let mut sel = Select::new(schema, decls, model, dialect)
         .with_bare_cols(true)
         .with_incoming(incoming);
-    oc.update
-        .iter()
-        .map(|a| {
-            let col = physical_col(model, &a.col.node);
-            let val = sel.assign_rhs(&a.value, model, &a.col.node);
-            format!("{} = {val}", dialect.quote(&col))
-        })
+    let mut render = |a: &Assign| -> (String, String) {
+        (
+            physical_col(model, &a.col.node),
+            sel.assign_rhs(&a.value, model, &a.col.node),
+        )
+    };
+    // Build the (col, rhs) list in lexical order: a `...incoming` spread expands, at its own
+    // position, to every eligible payload column set from the proposed row.
+    let mut items: Vec<(String, String)> = Vec::new();
+    match oc.spread.as_ref().map(|s| s.preceding.min(oc.update.len())) {
+        Some(preceding) => {
+            items.extend(oc.update[..preceding].iter().map(&mut render));
+            items.extend(
+                spread_cols
+                    .iter()
+                    .map(|c| (c.clone(), incoming_col_ref(dialect, c))),
+            );
+            items.extend(oc.update[preceding..].iter().map(&mut render));
+        }
+        None => items.extend(oc.update.iter().map(&mut render)),
+    }
+    // Last-write-wins (JS object-spread): a column set twice keeps its last RHS. SQL's SET
+    // list rejects a duplicate column, so collapse to one assignment per column.
+    let mut order: Vec<String> = Vec::new();
+    let mut vals: HashMap<String, String> = HashMap::new();
+    for (col, val) in items {
+        if !vals.contains_key(&col) {
+            order.push(col.clone());
+        }
+        vals.insert(col, val);
+    }
+    order
+        .into_iter()
+        .map(|col| format!("{} = {}", dialect.quote(&col), vals[&col]))
         .collect()
+}
+
+/// A bare physical column read from the proposed/incoming row of a bulk upsert — the spread
+/// counterpart of an `incoming.<col>` operand.
+fn incoming_col_ref(dialect: Dialect, col: &str) -> String {
+    match dialect {
+        Dialect::Postgres | Dialect::Sqlite => format!("excluded.{}", dialect.quote(col)),
+        Dialect::MariaDb | Dialect::MySql => format!("VALUES({})", dialect.quote(col)),
+    }
 }
 
 /// The per-dialect upsert clause appended to the INSERT: Postgres/SQLite carry the explicit

@@ -297,7 +297,14 @@ create_stmt = 'create' model_ref ( assign_block | create_from )
               [ on_conflict ] [ 'as' binding_name ] ;
 create_from = [ '[]' ] 'from' param_ref ;   (* `[]` = bulk (shape[]); bare = one row (shape) *)
 binding_name = lower_ident ;
-on_conflict = 'on' 'conflict' '(' column_name { ',' column_name } ')' 'update' assign_block ;
+on_conflict = 'on' 'conflict' '(' column_name { ',' column_name } ')' 'update' conflict_update_block ;
+
+(* The upsert update branch: ordinary assigns, plus (bulk `create … from` upsert only) a     *)
+(* single `...incoming` spread — set every inserted payload column (minus the conflict        *)
+(* target) from the proposed row. Last-write-wins with the explicit assigns in lexical order  *)
+(* (JS object-spread), so a column set by both keeps whichever comes last.                     *)
+conflict_update_block = '{' { ( conflict_spread | assign ) sep } [ conflict_spread | assign ] '}' ;
+conflict_spread = '...' 'incoming' ;
 update_stmt = 'update' model_ref where_clause assign_block ;
 restore_stmt= 'restore' model_ref where_clause ;
 

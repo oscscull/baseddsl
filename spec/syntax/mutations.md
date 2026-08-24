@@ -195,6 +195,24 @@ branch — elsewhere it is an ordinary identifier (`E0334` where it is misused).
 naming a non-settable column is `E0333`. The winning rows read back (declared shape) keyed on
 the conflict target, so the same `Shape[]` decodes on both the insert and the update path.
 
+**`...incoming` — overwrite every column from the proposed row.** The common upsert is
+last-write-wins: on a conflict, replace the stored row with the incoming one. Spell it with a
+single `...incoming` spread — it expands to `<col> = incoming.<col>` for every payload column
+the insert writes, minus the conflict target (moving the key is `E0251`):
+```
+create Card[] from $rows on conflict (oracle_id) update { ...incoming };
+```
+Explicit assigns compose with the spread in **lexical order, last-write-wins** (JS object-spread):
+a column set by both keeps whichever comes last, so put the override *after* the spread:
+```
+create Card[] from $rows on conflict (oracle_id)
+  update { ...incoming, hits = hits + incoming.hits };   # overwrite all, but accumulate hits
+create Card[] from $rows on conflict (oracle_id)
+  update { ...incoming, created_at = created_at };        # overwrite all, but keep stored created_at
+```
+`...incoming` is bulk-only (a `create … from`; `E0334` on an inline `create`), may appear at
+most once, and spreads only `incoming` (`...anything-else` is `E0334`).
+
 The **north star** is symmetric round-trip: read a `Vec<Shape>` out with a query, hand it
 straight back to a bulk upsert, and the rows update in place (no duplicates) — zero
 host-language transformation.

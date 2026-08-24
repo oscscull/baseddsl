@@ -1604,16 +1604,58 @@ impl<'a> Parser<'a> {
             self.err("expected `update` after `on conflict (...)`");
             return Err(());
         }
-        let update = self.assign_block()?;
+        let (update, spread) = self.conflict_update_block()?;
         Ok(Some(OnConflict {
             target,
             update,
+            spread,
             span: Span {
                 file: self.file,
                 start,
                 end: self.prev_end(),
             },
         }))
+    }
+
+    /// The `update { … }` branch of an `on conflict`. Like an ordinary assign block, but it
+    /// also accepts a single `...incoming` spread (bulk upsert) among the assigns; the spread
+    /// and the explicit assigns are returned separately, the spread carrying its lexical
+    /// position for last-write-wins ordering.
+    fn conflict_update_block(&mut self) -> PResult<(Vec<Assign>, Option<ConflictSpread>)> {
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut assigns = Vec::new();
+        let mut spread: Option<ConflictSpread> = None;
+        loop {
+            self.skip_seps();
+            if self.at(Tok::RBrace) || self.peek().is_none() {
+                break;
+            }
+            if self.at(Tok::DotDotDot) {
+                if spread.is_some() {
+                    self.err("duplicate `...incoming` in an `on conflict update` branch");
+                    return Err(());
+                }
+                let start = self.here().start;
+                self.bump(); // `...`
+                let source = self.lower_ident("`incoming`")?;
+                spread = Some(ConflictSpread {
+                    source,
+                    preceding: assigns.len(),
+                    span: Span {
+                        file: self.file,
+                        start,
+                        end: self.prev_end(),
+                    },
+                });
+                continue;
+            }
+            let col = self.lower_ident("column")?;
+            self.expect(Tok::Eq, "`=`")?;
+            let value = self.assign_rhs()?;
+            assigns.push(Assign { col, value });
+        }
+        self.expect(Tok::RBrace, "`}`")?;
+        Ok((assigns, spread))
     }
 
     fn assign_block(&mut self) -> PResult<Vec<Assign>> {

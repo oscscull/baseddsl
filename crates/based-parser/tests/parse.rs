@@ -873,6 +873,38 @@ fn upsert_parses_conflict_target_and_update_branch() {
 }
 
 #[test]
+fn upsert_update_branch_parses_incoming_spread_with_position() {
+    let sf = parse_ok(
+        r#"
+        mutation restock(rows: InvIn[]) -> ok {
+          create Inventory[] from $rows
+            on conflict (org, sku) update { qty = qty + incoming.qty, ...incoming, price = 0 };
+        }
+        "#,
+    );
+    let Decl::Mutation(mu) = &sf.decls[0] else {
+        panic!("expected mutation")
+    };
+    let WriteStmt::Create { conflict, .. } = &mu.body[0] else {
+        panic!("expected create")
+    };
+    let oc = conflict.as_ref().expect("on conflict");
+    // Two explicit assigns kept in the `update` vec; the spread is separate and records that
+    // one explicit assign (`qty = …`) preceded it.
+    assert_eq!(oc.update.len(), 2);
+    let sp = oc.spread.as_ref().expect("spread");
+    assert_eq!(sp.source.node, "incoming");
+    assert_eq!(sp.preceding, 1);
+}
+
+#[test]
+fn duplicate_incoming_spread_is_a_parse_error() {
+    parse_err(
+        "mutation m(rows: I[]) -> ok { create M[] from $rows on conflict (k) update { ...incoming, ...incoming }; }",
+    );
+}
+
+#[test]
 fn plain_create_has_no_conflict() {
     let sf = parse_ok("mutation m() -> R { create Page { hits = 1 } }");
     let Decl::Mutation(mu) = &sf.decls[0] else {

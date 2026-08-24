@@ -3937,6 +3937,50 @@ fn upsert_scoped_target_omits_scope_col_is_e0254() {
     assert!(errors(&d).contains(&"E0254"), "{:?}", codes(&d));
 }
 
+const SPREAD_SCHEMA: &str = r#"
+    Org { id: Id, name: text }
+    scope Tenant (org: Org = $ctx.org)
+    @scope Tenant
+    Inventory { id: Id, org: Org, sku: text, qty: int, price: int, @index(org, sku) unique }
+    shape InvIn from Inventory { sku, qty, price }
+"#;
+
+#[test]
+fn bulk_upsert_spread_incoming_is_ok() {
+    let (_, d) = analyze(&format!(
+        "{SPREAD_SCHEMA}
+        mutation restock(rows: InvIn[]) -> ok scoped Tenant {{
+          create Inventory[] from $rows on conflict (org, sku) update {{ ...incoming }};
+        }}"
+    ));
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn spread_on_inline_create_is_e0334() {
+    let (_, d) = analyze(
+        r#"
+        Page { id: Id, path: text (unique), hits: int }
+        shape PageRow from Page { path, hits }
+        mutation record_hit(path: text) -> PageRow {
+          create Page { path = $path, hits = 1 } on conflict (path) update { ...incoming };
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0334"), "{:?}", codes(&d));
+}
+
+#[test]
+fn spread_of_non_incoming_source_is_e0334() {
+    let (_, d) = analyze(&format!(
+        "{SPREAD_SCHEMA}
+        mutation restock(rows: InvIn[]) -> ok scoped Tenant {{
+          create Inventory[] from $rows on conflict (org, sku) update {{ ...nope }};
+        }}"
+    ));
+    assert!(errors(&d).contains(&"E0334"), "{:?}", codes(&d));
+}
+
 // ---------- opaque `raw(…)` columns + exotic indexes -----------------------
 
 const PLACE: &str = r#"

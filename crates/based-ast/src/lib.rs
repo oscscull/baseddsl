@@ -768,6 +768,22 @@ pub struct OnConflict {
     /// The `update` branch assigns, applied to the existing row on a conflict — an
     /// ordinary update assign block (plain values + self-referential arithmetic).
     pub update: Vec<Assign>,
+    /// `...incoming` in the update branch (bulk `create … from` upsert only): set every
+    /// payload column the insert writes (minus the conflict target) from the proposed row,
+    /// with the explicit `update` assigns overriding it. `None` when the branch has no spread.
+    pub spread: Option<ConflictSpread>,
+    pub span: Span,
+}
+
+/// `...incoming` inside a bulk upsert's `update` branch — splice every inserted payload
+/// column (minus the conflict target) from the proposed row. `preceding` is the count of
+/// explicit `update` assigns lexically before it, so JS object-spread last-write-wins order
+/// resolves a column set by both the spread and an explicit assign (the later one wins).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictSpread {
+    /// The spread source — must be `incoming` (sema `E0334` otherwise).
+    pub source: Ident,
+    pub preceding: usize,
     pub span: Span,
 }
 

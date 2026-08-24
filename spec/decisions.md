@@ -93,6 +93,8 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D126 (bulk / structured shape-input create `create Model[] from $rows` / `create Model
   from $row` — a `shape` doubles as the row-input type, chunked atomic multi-row INSERT,
   presence-driven columns, `@scope` always `$ctx`-injected; E0325-E0332, W0112/W0113; BW1),
+  D131 (bulk-upsert `...incoming` spread: overwrite every payload column from the proposed
+  row, minus the conflict target; JS last-write-wins with explicit assigns; bulk-only, once, E0334),
   D127 (bulk upsert `create … from … on conflict update` + bulk read-back `-> Shape`/`-> Shape[]`
   — `incoming.<col>` = proposed row → `excluded`/`VALUES()`, bare col = stored; IN-keyed
   re-select read-back keyed on conflict-target / key / serial-via-RETURNING·LAST_INSERT_ID;
@@ -6390,3 +6392,33 @@ next to the composed fields and the existing `E0245`/`E0324` aggregate-shape rul
 runs the pass. Spec: `shapes.md`. Tests: parser unit (`shape_spread_composition`), parser +
 sema conformance goldens (happy path + `E0135`–`E0139`), codegen dml golden (SELECT projects the
 composed column set).
+
+## D131 — bulk-upsert `...incoming` spread: overwrite every payload column from the proposed row
+
+**Owner-approved 2026-08-24.** The common upsert is last-write-wins — on a conflict, replace the stored
+row with the incoming one — but the only spelling was one explicit `col = incoming.col` per column (D127),
+tedious and typo-prone for wide tables. Add a single `...incoming` spread in the `on conflict update`
+branch: it expands to `<col> = incoming.<col>` for every payload column the insert writes, **minus the
+conflict target** (moving the key is `E0251`). So `create Card[] from $rows on conflict (oracle_id)
+update { ...incoming };` overwrites the record.
+
+**Ordering — JS object-spread, last-write-wins (owner-chosen over "spread must be first").** Explicit
+assigns compose with the spread in lexical order; a column set by both keeps whichever comes last, so an
+override goes *after* the spread: `{ ...incoming, hits = hits + incoming.hits }` overwrites all but
+accumulates `hits`; `{ ...incoming, created_at = created_at }` keeps the stored `created_at`. Codegen
+collapses to one SET per column (SQL rejects a duplicate column in the SET list) keeping the last RHS.
+
+**Scope + restrictions.** `...incoming` is bulk-only — it needs a proposed row, which only a
+`create … from` upsert has; on an inline `create` it is `E0334`. It spreads only `incoming`
+(`...anything-else` is `E0334`), and may appear **at most once** (a second spread is a parse error: it
+could only be redundant or silently kill an explicit assign between the two — reject over surprise,
+principle 1). Reuses the existing `incoming` contextual keyword and the `...` spread token already used
+for shape composition (D130).
+
+**Representation (minimal blast radius).** `OnConflict.update: Vec<Assign>` stays the explicit assigns
+(so the 6+ crates that read it for param/variant/ref analysis are untouched — a spread carries none of
+those); a new `OnConflict.spread: Option<ConflictSpread>` holds the `...incoming` and its `preceding`
+count (explicit assigns lexically before it) to drive last-write-wins. Blast radius: `based-ast`
+(`ConflictSpread`), `based-parser` (`conflict_update_block`), `based-sema` (`E0334` guards in
+`check_upsert` / `check_bulk_upsert`), `based-codegen` (`conflict_update_sets` expands, minus target, via
+`excluded`/`VALUES`), `based-fmt` (reprints the spread in position). Spec: `mutations.md`, `grammar.ebnf`.

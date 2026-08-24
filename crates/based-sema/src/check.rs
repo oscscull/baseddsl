@@ -2289,6 +2289,22 @@ fn check_bulk_upsert(
             );
         }
     }
+
+    // `...incoming` spreads the proposed row's payload columns (minus the target) — the only
+    // spreadable source is `incoming`.
+    if let Some(sp) = &oc.spread {
+        if sp.source.node != "incoming" {
+            sink.error_note(
+                code::INPUT_INCOMING_CONTEXT,
+                sp.source.span,
+                format!(
+                    "`...{}` is not a valid spread — only `...incoming` is allowed here",
+                    sp.source.node
+                ),
+                "`...incoming` splices the proposed row's columns into the update",
+            );
+        }
+    }
 }
 
 /// Validate every `incoming.<col>` operand of an assign RHS: `<col>` must be a settable
@@ -2912,6 +2928,18 @@ fn check_upsert(
 ) {
     let target: Vec<&str> = oc.target.iter().map(|t| t.node.as_str()).collect();
     check_conflict_target(oc, &target, mi, create_assigns, scoped, unscoped, cx, sink);
+
+    // `...incoming` needs a proposed row to spread — only a bulk `create … from` upsert has
+    // one; an inline `create` does not.
+    if let Some(sp) = &oc.spread {
+        sink.error_note(
+            code::INPUT_INCOMING_CONTEXT,
+            sp.span,
+            "`...incoming` is only valid in a bulk `create … from … on conflict update` branch"
+                .to_string(),
+            "an inline `create` has no proposed row to spread — set the columns explicitly",
+        );
+    }
 
     // The update branch is an ordinary update — check its assigns — but it may not assign
     // a conflict column (moving the key would break the conflict + the read-back).

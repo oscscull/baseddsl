@@ -917,7 +917,7 @@ fn write_line(w: &WriteStmt) -> String {
                         .map(|t| t.node.clone())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    assign_block(&oc.update)
+                    conflict_update_block(oc)
                 ));
             }
             if let Some(b) = binding {
@@ -949,6 +949,27 @@ fn write_line(w: &WriteStmt) -> String {
         WriteStmt::Raw(r) => raw_sql(r),
         // Tx is handled by the caller (it spans multiple lines).
         WriteStmt::Tx(_) => String::new(),
+    }
+}
+
+/// An `on conflict … update { … }` branch: the explicit assigns plus a `...incoming` spread
+/// reprinted at its original lexical position (bulk upsert).
+fn conflict_update_block(oc: &OnConflict) -> String {
+    let mut parts: Vec<String> = oc
+        .update
+        .iter()
+        .map(|a| format!("{} = {}", a.col.node, assign_rhs(&a.value)))
+        .collect();
+    if let Some(sp) = &oc.spread {
+        parts.insert(
+            sp.preceding.min(parts.len()),
+            format!("...{}", sp.source.node),
+        );
+    }
+    if parts.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", parts.join(", "))
     }
 }
 
