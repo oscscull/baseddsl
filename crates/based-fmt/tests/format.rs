@@ -231,6 +231,27 @@ fn comments_preserved_including_between_decorators() {
 }
 
 #[test]
+fn comments_preserved_inside_model_body_including_trailing() {
+    // A comment before the first field, between fields, and after the last field (before the
+    // closing brace) all survive, re-indented to the body.
+    // Field types align (`id:` pads to `name:`'s width); the comments interleave unchanged.
+    let src = "M {\n  # leading\n  id:   Id\n  # between\n  name: text\n  # trailing\n}\n";
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
+fn comments_preserved_inside_mutation_body_including_trailing() {
+    let src = "mutation m(name: text) -> ok {\n  # leading\n  create M { name = $name };\n  # trailing\n}\n";
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
+fn comments_preserved_inside_shape_body() {
+    let src = "shape S from M {\n  # leading\n  aaaaaaaaaaaaaaaaaaaaaaa\n  bbbbbbbbbbbbbbbbbbbbbbb\n  # trailing\n}\n";
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
 fn raw_query_body_reprints_byte_exactly() {
     // A single-line raw body inlines like a one-clause block; the SQL text between
     // the backticks is opaque and never re-wrapped. Idempotent.

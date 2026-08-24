@@ -6,9 +6,12 @@
 //! re-parsing the output yields the same declarations.
 //!
 //! Comments are lexer-skipped, so the printer recovers them from the source text
-//! directly. Every `.bsl` comment is a full line at column 0 (before a declaration
-//! or between a model's decorators), never inside a body; the printer reproduces
-//! each verbatim in its original slot.
+//! directly: a `.bsl` comment is a full-line `#` comment, reproduced verbatim in its
+//! original slot — before a declaration, between a model's decorators, or between the
+//! members of a body (a model's fields, a mutation's statements, a shape's fields),
+//! re-indented to the body. Comments interior to a construct the printer renders on a
+//! single line (an inline `{ a = 1, b = 2 }` assign block) may reflow to the nearest
+//! member boundary rather than staying mid-line.
 
 use based_ast::*;
 use based_diagnostics::Diagnostic;
@@ -102,6 +105,18 @@ impl Printer {
         }
     }
 
+    /// Emit the comment lines on `[from, to)` re-indented to a body at `indent` levels
+    /// (blank lines between body members are dropped). Used to reproduce comments that sit
+    /// between — or after — the members of a model / mutation / shape body.
+    fn emit_body_comments(&mut self, from: usize, to: usize, indent: usize) {
+        let pad = INDENT.repeat(indent);
+        for i in from..to.min(self.lines.len()) {
+            if let LineKind::Comment(c) = &self.lines[i] {
+                self.out.push(format!("{pad}{c}"));
+            }
+        }
+    }
+
     fn file(mut self, decls: &[Decl]) -> String {
         let mut cursor = 0usize;
         for decl in decls {
@@ -169,7 +184,13 @@ impl Printer {
             .map(|f| type_expr(&f.ty).len())
             .max()
             .unwrap_or(0);
+        let close = self.line_of((m.span.end as usize).saturating_sub(1));
+        let mut cursor = self.line_of(m.name.span.start as usize) + 1;
         for member in &m.members {
+            let sp = member_span(member);
+            let ml = self.line_of(sp.start as usize);
+            self.emit_body_comments(cursor, ml.max(cursor), 1);
+            cursor = self.line_of((sp.end as usize).saturating_sub(1)) + 1;
             self.out.push(match member {
                 Member::Field(f) => format!("{INDENT}{}", field(f, name_w, inverse_w)),
                 Member::Index(ix) => format!("{INDENT}{}", index_decl(ix)),
@@ -178,6 +199,7 @@ impl Printer {
                 }
             });
         }
+        self.emit_body_comments(cursor, close, 1);
         self.out.push("}".to_string());
     }
 
@@ -216,10 +238,18 @@ impl Printer {
             })
             .max()
             .unwrap_or(0);
+        let close = self.line_of((s.span.end as usize).saturating_sub(1));
+        let mut cursor = self.line_of(s.name.span.start as usize) + 1;
         for f in &s.body {
+            if let Some(st) = shape_field_start(f) {
+                let fl = self.line_of(st as usize);
+                self.emit_body_comments(cursor, fl.max(cursor), 1);
+                cursor = fl + 1;
+            }
             self.out
                 .push(format!("{INDENT}{}", shape_field_block(f, rename_w)));
         }
+        self.emit_body_comments(cursor, close, 1);
         self.out.push("}".to_string());
     }
 
@@ -304,24 +334,83 @@ impl Printer {
             ret_type(&m.ret),
             scope_ack(m.scoped.as_ref(), m.unscoped.as_ref()),
         ));
-        for w in &m.body {
-            self.write_stmt(w, 1);
-        }
+        let open = self.line_of(m.name.span.start as usize);
+        let close = self.line_of((m.span.end as usize).saturating_sub(1));
+        self.write_body(&m.body, open, close, 1);
         self.out.push("}".to_string());
     }
 
-    fn write_stmt(&mut self, w: &WriteStmt, indent: usize) {
+    /// Render a sequence of write statements (a mutation body or a `tx` block), reproducing
+    /// the comments that sit between them and after the last one. Statement start lines come
+    /// from each write's model ident (`write_start`); a non-`tx` statement prints on a single
+    /// line, so its start line is also its extent.
+    fn write_body(
+        &mut self,
+        writes: &[WriteStmt],
+        open_line: usize,
+        close_line: usize,
+        indent: usize,
+    ) {
         let pad = INDENT.repeat(indent);
-        match w {
-            WriteStmt::Tx(inner) => {
-                self.out.push(format!("{pad}tx {{"));
-                for w in inner {
-                    self.write_stmt(w, indent + 1);
-                }
-                self.out.push(format!("{pad}}}"));
+        let mut cursor = open_line + 1;
+        for w in writes {
+            if let Some(st) = write_start(w) {
+                let wl = self.line_of(st as usize);
+                self.emit_body_comments(cursor, wl.max(cursor), indent);
+                cursor = wl + 1;
             }
-            _ => self.out.push(format!("{pad}{};", write_line(w))),
+            match w {
+                WriteStmt::Tx(inner) => {
+                    self.out.push(format!("{pad}tx {{"));
+                    let inner_open = inner
+                        .first()
+                        .and_then(write_start)
+                        .map_or(cursor, |s| self.line_of(s as usize));
+                    let inner_close = inner
+                        .last()
+                        .and_then(write_start)
+                        .map_or(inner_open, |s| self.line_of(s as usize) + 1);
+                    self.write_body(inner, inner_open.saturating_sub(1), inner_close, indent + 1);
+                    self.out.push(format!("{pad}}}"));
+                    cursor = inner_close;
+                }
+                _ => self.out.push(format!("{pad}{};", write_line(w))),
+            }
         }
+        self.emit_body_comments(cursor, close_line, indent);
+    }
+}
+
+/// A representative start byte offset for a write statement — its model ident (or the raw
+/// span / first inner write), used to place body comments relative to it.
+fn write_start(w: &WriteStmt) -> Option<u32> {
+    match w {
+        WriteStmt::Create { model, .. }
+        | WriteStmt::Update { model, .. }
+        | WriteStmt::Delete { model, .. }
+        | WriteStmt::Restore { model, .. }
+        | WriteStmt::HardDelete { model, .. } => Some(model.span.start),
+        WriteStmt::Raw(r) => Some(r.span.start),
+        WriteStmt::Tx(inner) => inner.first().and_then(write_start),
+    }
+}
+
+/// The leading ident's start byte of a shape field, used to place comments between the
+/// fields of a block-form shape body.
+fn shape_field_start(f: &ShapeField) -> Option<u32> {
+    Some(match f {
+        ShapeField::Bare(id) => id.span.start,
+        ShapeField::Rename { out, .. } | ShapeField::Flatten { out, .. } => out.span.start,
+        ShapeField::Nest { field, .. } | ShapeField::NestRef { field, .. } => field.span.start,
+        ShapeField::Spread { shape } => shape.span.start,
+    })
+}
+
+fn member_span(m: &Member) -> Span {
+    match m {
+        Member::Field(f) => f.span,
+        Member::Index(i) => i.span,
+        Member::SoftOverride(s) => s.raw.span,
     }
 }
 
