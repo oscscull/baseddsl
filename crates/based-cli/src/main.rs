@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "based", version, about = "based DSL compiler")]
+#[command(name = "based", version = based_version::LONG, about = "based DSL compiler")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

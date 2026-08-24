@@ -18,6 +18,7 @@ based-fmt = { workspace = true }
 based-sema = { workspace = true }
 based-codegen = { workspace = true }
 based-facts = { workspace = true }
+based-version = { workspace = true }
 # The runtime, with the HTTP listener + all three concrete drivers, so `based serve` can
 # stand the schema up as a live RPC service and `based migrate apply` can apply migrations
 # against whichever dialect the manifest targets (MariaDB/SQLite/Postgres). The front-end

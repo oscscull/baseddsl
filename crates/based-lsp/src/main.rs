@@ -156,7 +156,7 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "based-lsp".into(),
-                version: Some(env!("CARGO_PKG_VERSION").into()),
+                version: Some(based_version::LONG.into()),
             }),
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(

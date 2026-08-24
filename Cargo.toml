@@ -9,6 +9,7 @@ members = [
     "crates/based-sema",
     "crates/based-codegen",
     "crates/based-facts",
+    "crates/based-version",
     "crates/based-runtime",
     "crates/based-lsp",
     "crates/based-cli",
@@ -20,7 +21,7 @@ members = [
 exclude = ["examples"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"
@@ -35,6 +36,7 @@ based-fmt = { path = "crates/based-fmt" }
 based-sema = { path = "crates/based-sema" }
 based-codegen = { path = "crates/based-codegen" }
 based-facts = { path = "crates/based-facts" }
+based-version = { path = "crates/based-version" }
 # external
 logos = "0.14"
 ariadne = "0.5"
