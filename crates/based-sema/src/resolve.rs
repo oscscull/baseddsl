@@ -776,7 +776,7 @@ pub enum Mapped<'a> {
 /// relation param may be typed as its target model *or* as its key (`Id`/`Uuid`);
 /// a scalar param must match the column's family. Loose on purpose (family, not
 /// exact primitive) so `Uuid`↔`Id` and the like don't spuriously conflict.
-pub fn check_param_type(ann: &TypeExpr, mapped: Mapped, sink: &mut Sink) {
+pub fn check_param_type(ann: &TypeExpr, mapped: Mapped, target_key: Option<Primitive>, sink: &mut Sink) {
     match (&ann.base, mapped) {
         (BaseType::Primitive(pann), Mapped::Scalar(pcol)) => {
             if prim_family(*pann) != prim_family(pcol) {
@@ -801,6 +801,22 @@ pub fn check_param_type(ann: &TypeExpr, mapped: Mapped, sink: &mut Sink) {
                         prim_name(*pann)
                     ),
                 );
+            } else if let Some(key) = target_key {
+                // `Id` resolves to whatever the target's key is; an explicit concrete key
+                // type must match it — a `serial` (integer-keyed) target rejects a `uuid`
+                // param (the runtime would coerce it as a string and reject the number).
+                if *pann != Primitive::Id && prim_family(*pann) != prim_family(key) {
+                    sink.error(
+                        code::PARAM_TYPE,
+                        ann.span,
+                        format!(
+                            "param typed `{}` binds relation `{target}`, whose key is `{}` — annotate `Id` or `{}`",
+                            prim_name(*pann),
+                            prim_name(key),
+                            prim_name(key)
+                        ),
+                    );
+                }
             }
         }
         (BaseType::Model(m), Mapped::Relation(target)) => {

@@ -154,6 +154,21 @@ fn check_shape_body(
 
 /// The model a nested field points at: its member must exist and be a relation.
 /// Reports the missing-field / not-a-relation case and returns `None`.
+/// The single-column primary-key primitive of a relation's target model — what an explicit
+/// key annotation on a param binding it must agree with. `None` for a composite-key or
+/// keyless target (nothing single to contradict). Runs pre-`resolve_pk_default`, so a bare
+/// `id: Id` reads as `Id` (uuid-family); an explicit `serial`/`uuid`/`ulid` reads as itself.
+fn target_key_primitive(cx: &Cx, target: &str) -> Option<Primitive> {
+    let m = cx.model(cx.find(target)?);
+    if m.is_composite_key() {
+        return None;
+    }
+    match m.pk_member().map(|mm| &mm.kind) {
+        Some(MemberKind::Scalar { ty, .. }) => Some(*ty),
+        _ => None,
+    }
+}
+
 fn nest_target<'a>(field: &Ident, mi: usize, cx: &'a Cx, sink: &mut Sink) -> Option<&'a str> {
     match cx.model(mi).member(&field.node).map(|m| &m.kind) {
         Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
@@ -1048,7 +1063,14 @@ fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
     };
 
     if let (Some(ann), Some(mapped)) = (&p.ty, mapped) {
-        resolve::check_param_type(ann, mapped, sink);
+        // For a relation binding, resolve the target's single-column key type so an explicit
+        // concrete annotation (`uuid`) that contradicts a `serial` key is caught here rather
+        // than silently mis-coercing at runtime.
+        let target_key = match &mapped {
+            resolve::Mapped::Relation(t) => target_key_primitive(cx, t),
+            resolve::Mapped::Scalar(_) => None,
+        };
+        resolve::check_param_type(ann, mapped, target_key, sink);
     }
     if let Some(d) = &p.default {
         resolve::check_default(d, sink);

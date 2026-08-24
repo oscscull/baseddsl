@@ -76,9 +76,18 @@ chunking. **Follow-ons / reserved:**
     `LAST_INSERT_ID()` range on MariaDB). **The last reserved BW follow-up is closed.**
 - `-> count` read-back form stays out.
 
-## 🐞 URGENT BUG — param `Id` annotation vs. compared FK column type disagree (owner dogfooding, 2026-08-24)
+## 🐞 URGENT BUG — param `Id`/model annotation vs. compared FK column type disagree — ✅ RESOLVED (2026-08-24)
 
-**Next task after the current shape-composition work.** A bare-`Id` param whose type the codegen infers
+**Fixed:** one shared resolver `based_sema::{query,mutation}_param_entities` (crates/based-sema/src/params.rs)
+maps each param to the entity whose key it carries (annotation *or* binding/`= $param`), and all three
+codegens consume it — OpenAPI via `fk_target_schema`, runtime via `target_key_family`, client via `id_type`
+(its ~160 lines of duplicate logic deleted). A model/`Id` reference param now types as the target's real key
+(serial→integer) everywhere instead of the project-default uuid. Plus a compile-time guard (E0152): an
+explicit `uuid` param on a `serial`-keyed FK now errors instead of silently mis-coercing. Proven live
+(serial_integration.rs: a serial-FK param accepts the integer, rejects a uuid string) + OpenAPI golden.
+Original diagnosis + repros retained below for reference.
+
+A bare-`Id` param whose type the codegen infers
 one way and the server coerces another, passing `based check` clean and only failing at runtime — a
 soundness hole (the compiler should reject it).
 
@@ -138,7 +147,22 @@ The gate does too much invisible work and rebuilds too eagerly. Two changes:
 - **Visible progress output.** The gate is a black box today — container startup + readiness waits emit
   nothing to stdout, so a long run looks like a hang (it repeatedly did this session). Add debug/info-level
   progress: which container is starting, readiness-wait ticks, which suite is running. Enough that a human
-  watching `make check` can see forward motion, not a frozen terminal.
+  watching `make check` can see forward motion, not a frozen terminal. **[DONE 2026-08-24, commit 8a3cda4:
+  container reuse + drop/create reset + progress lines. Container Docker phase only.]**
+
+### Build/compile velocity (owner 2026-08-24: keep cycle times within sane limits; fix before they spiral)
+
+The DB-reuse work above sped `make check`'s Docker phase, but **plain `cargo test` compile time is the real
+per-iteration cost** (~1–1.5 min to recompile based-sema/codegen/runtime + their test binaries, and it's
+unaffected by container reuse). Highest-leverage, low-risk wins to investigate:
+- **Faster linker.** No `.cargo/config.toml`, no lld/mold/sccache installed. On macOS, `brew install lld`
+  + `[target.'cfg(all())'] rustflags = ["-Clink-arg=-fuse-ld=lld"]` (or the new `-Clinker-features=+lld`)
+  typically cuts link time materially — link is a big chunk of the driver-stack rebuild.
+- **sccache** for cross-invocation caching of unchanged crates.
+- Confirm dev-profile `incremental` is on; consider `split-debuginfo = "unpacked"` on macOS.
+- Consider `cargo nextest` for faster test *execution* (not compile).
+Pick the linker first (biggest, cheapest). Measure a before/after on `cargo test -p based-runtime
+--features sqlite,serve` recompile.
 
 ## Autonomous build loop (how this is being built out)
 

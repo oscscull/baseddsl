@@ -66,6 +66,11 @@ struct Callable<'a> {
     /// model the params resolve against (query target / mutation return model);
     /// `None` when it could not be resolved.
     root: Option<&'a RModel>,
+    /// Each param resolved to the entity (model) whose primary key it carries on the wire —
+    /// its annotation, or its binding / `= $param` comparison against an FK / id. Absent for
+    /// plain scalar / enum / shape params. Sourced from `based_sema` so the schema matches
+    /// the client type and the runtime coercion (a `serial` reference is an integer, not uuid).
+    param_entities: std::collections::HashMap<String, String>,
     /// The response schema for the `200` body, as a JSON-Schema value.
     response: Value,
     /// The output *object* schema to register in `components.schemas`, deduped by
@@ -331,6 +336,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     route: format!("/q/{}", q.name.node),
                     params: &q.params,
                     root,
+                    param_entities: based_sema::query_param_entities(schema, root, &q.params),
                     response: query_response(rq, &os, page_with_count(q)),
                     out_schema: os,
                     is_mutation: false,
@@ -370,6 +376,7 @@ fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>
                     route: format!("/m/{}", m.name.node),
                     params: &m.params,
                     root,
+                    param_entities: based_sema::mutation_param_entities(schema, m),
                     response,
                     out_schema: os,
                     is_mutation: true,
@@ -825,7 +832,8 @@ fn input_schema(schema: &CheckedSchema, c: &Callable) -> Value {
     let mut required = Vec::new();
     for p in c.params {
         let optional = p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional);
-        let ty = param_schema(schema, c.root, p);
+        let entity = c.param_entities.get(&p.name.node).map(String::as_str);
+        let ty = param_schema(schema, c.root, p, entity);
         props.insert(p.name.node.clone(), ty);
         if !optional {
             required.push(Value::String(p.name.node.clone()));
@@ -890,7 +898,19 @@ fn page_with_count(q: &Query) -> bool {
 /// A param's JSON-Schema type. Explicit annotation wins — an enum name is that
 /// enum's constrained schema, a model type the `uuid` FK string the wire carries —
 /// otherwise infer from the bound/same-named column. To-many -> an array.
-fn param_schema(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> Value {
+fn param_schema(
+    schema: &CheckedSchema,
+    root: Option<&RModel>,
+    p: &Param,
+    entity: Option<&str>,
+) -> Value {
+    // A param that identifies a model carries that model's primary key on the wire — resolve
+    // it (serial → integer, uuid/ulid → string, composite → object), never a blanket uuid.
+    // Enum/shape annotations identify no entity and fall through to their own schemas below.
+    if let Some(e) = entity {
+        let many = p.ty.as_ref().is_some_and(|t| t.many);
+        return wrap(fk_target_schema(schema, e), many);
+    }
     match &p.ty {
         Some(te) => {
             if let BaseType::Model(name) = &te.base {

@@ -22,12 +22,14 @@ mod enums;
 mod indexes;
 mod ir;
 mod model;
+mod params;
 mod resolve;
 mod scope;
 mod spread;
 
 pub use check::is_key_link;
 pub use ir::*;
+pub use params::{mutation_param_entities, query_param_entities};
 pub use spread::expand_spreads;
 
 use based_ast::Decl;

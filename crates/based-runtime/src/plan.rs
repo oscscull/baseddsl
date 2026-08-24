@@ -412,9 +412,11 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     //    binding against the target model, so a typed (binary-parameter) driver knows
     //    the value's primitive at the bind site.
     let root = compiled.schema.model(&rq.target);
+    let entities = based_sema::query_param_entities(&compiled.schema, root, &ast.params);
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
-        let (family, optional) = query_param_family(&compiled.schema, root, p);
+        let entity = entities.get(&p.name.node).map(String::as_str);
+        let (family, optional) = query_param_family(&compiled.schema, root, p, entity);
         env.insert(
             p.name.node.clone(),
             bind_param(&compiled.schema, p, family, optional, req)?,
@@ -501,12 +503,14 @@ pub fn plan_mutation(
         .iter()
         .filter_map(|w| w.bulk.as_ref().map(|b| b.param.as_str()))
         .collect();
+    let entities = based_sema::mutation_param_entities(&compiled.schema, ast);
     let mut env = Env::new(compiled.dialect);
     for p in &ast.params {
         if from_params.contains(p.name.node.as_str()) {
             continue;
         }
-        let (family, optional) = mutation_param_family(compiled, ast, p);
+        let entity = entities.get(&p.name.node).map(String::as_str);
+        let (family, optional) = mutation_param_family(compiled, ast, p, entity);
         env.insert(
             p.name.node.clone(),
             bind_param(&compiled.schema, p, family, optional, req)?,
@@ -1048,15 +1052,27 @@ fn bind_param(
 /// `op col` binding, else the same-named member of the target model) — the same
 /// inference the generated client types the input by. Unresolvable (raw SQL) params
 /// stay `Any`: shape-coerced, a plain text bind.
-fn query_param_family(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) -> (Family, bool) {
+fn query_param_family(
+    schema: &CheckedSchema,
+    root: Option<&RModel>,
+    p: &Param,
+    entity: Option<&str>,
+) -> (Family, bool) {
+    // A param that identifies a model (its annotation, or its binding / `= $param`
+    // comparison against an FK / id) carries that model's key family — serial → int, not the
+    // project-default uuid. This is the single resolution the client/OpenAPI also use.
+    if let Some(e) = entity {
+        let optional = p.ty.as_ref().is_some_and(|t| t.optional) || p.default.is_some();
+        return (target_key_family(schema, e), optional);
+    }
     if let Some(t) = &p.ty {
         let family = match &t.base {
             BaseType::Primitive(prim) => Family::of(*prim),
             // An opaque `raw(…)` value binds as plain text (sema keeps it out of
             // params, so this is only reached through a hand-built plan).
             BaseType::Raw(_) => Family::Text,
-            // An UpperCamel annotation: an enum param carries the enum's wire value
-            // (its storage family); a relation param carries the target's key (uuid).
+            // An UpperCamel annotation that is not a model reference: an enum param carries
+            // the enum's wire value (its storage family).
             BaseType::Model(name) => enum_or_uuid(schema, &name.node),
         };
         return (family, t.optional || p.default.is_some());
@@ -1071,7 +1087,18 @@ fn query_param_family(schema: &CheckedSchema, root: Option<&RModel>, p: &Param) 
 /// The coercion family + nullability of a mutation param: an explicit annotation wins;
 /// an untyped param takes the family of the first column its `$name` fills or filters
 /// in the write body. Unresolvable stays `Any`.
-fn mutation_param_family(compiled: &Compiled, ast: &Mutation, p: &Param) -> (Family, bool) {
+fn mutation_param_family(
+    compiled: &Compiled,
+    ast: &Mutation,
+    p: &Param,
+    entity: Option<&str>,
+) -> (Family, bool) {
+    // A param identifying a model (annotation, or a `col = $param` write-body use against an
+    // FK / id) carries that model's key family — serial → int, not the project-default uuid.
+    if let Some(e) = entity {
+        let optional = p.ty.as_ref().is_some_and(|t| t.optional) || p.default.is_some();
+        return (target_key_family(&compiled.schema, e), optional);
+    }
     if let Some(t) = &p.ty {
         let family = match &t.base {
             BaseType::Primitive(prim) => Family::of(*prim),

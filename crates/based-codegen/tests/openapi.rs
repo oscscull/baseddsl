@@ -135,6 +135,37 @@ fn list_query_response_is_array() {
 }
 
 #[test]
+fn reference_param_takes_the_target_key_type_not_the_project_default() {
+    // A param that identifies a serial-keyed model carries that model's *integer* key on
+    // the wire — via a model annotation (`org: Org`) or a bare `Id` bound to the FK — never
+    // the project-default uuid (regression: both defaulted to uuid, diverging from the
+    // client and the runtime coercion).
+    let doc = gen(r#"
+        Org { id: serial, name: text }
+        Item { id: serial, org: Org, @index org }
+        mutation clear_by_model(org: Org) -> ok { delete Item where (org = $org); }
+        mutation clear_by_id(org: Id) -> ok { delete Item where (org = $org); }
+        "#);
+    for op in ["ClearByModelInput", "ClearByIdInput"] {
+        let input = &doc["components"]["schemas"][op];
+        assert_eq!(
+            input["properties"]["org"]["type"], "integer",
+            "{op} org should be an integer serial key, got {}",
+            input["properties"]["org"]
+        );
+    }
+
+    // A uuid-keyed reference is unaffected — still a uuid string.
+    let doc = gen(r#"
+        Org { id: uuid, name: text }
+        Item { id: uuid, org: Org, @index org }
+        mutation clear(org: Org) -> ok { delete Item where (org = $org); }
+        "#);
+    let input = &doc["components"]["schemas"]["ClearInput"];
+    assert_eq!(input["properties"]["org"]["format"], "uuid");
+}
+
+#[test]
 fn paginated_query_response_is_page_envelope() {
     let doc = gen(r#"
         @soft_delete(deleted_at)

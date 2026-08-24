@@ -470,7 +470,7 @@ pub fn adopt_{suffix}<'a>(
                         param_entities: if matches!(q.body, QueryBody::Raw(_)) {
                             std::collections::HashMap::new()
                         } else {
-                            query_param_entities(root, &q.params)
+                            based_sema::query_param_entities(schema, root, &q.params)
                         },
                         for_update: matches!(&q.body, QueryBody::Block(s) if s.for_update.is_some()),
                     });
@@ -523,7 +523,7 @@ pub fn adopt_{suffix}<'a>(
                         out_struct: os,
                         ctx_requires: &rm.ctx_requires,
                         page: PageInput::None,
-                        param_entities: mutation_param_entities(schema, m),
+                        param_entities: based_sema::mutation_param_entities(schema, m),
                         for_update: false,
                     });
                 }
@@ -569,166 +569,6 @@ pub fn adopt_{suffix}<'a>(
         }
         s.push_str("}\n");
         s
-    }
-
-    /// The model a member identifies as an id: a Forward FK's target, or the model's own
-    /// single-column primary key (whatever its generation strategy). `None` for any other
-    /// scalar, an inverse edge, or a composite-key model's individual key part (its parts
-    /// are ordinary typed fields; the whole id is the `<M>Id` struct, reached via a FK).
-    fn member_entity(model: &RModel, field: &str) -> Option<String> {
-        match model.member(field).map(|m| &m.kind)? {
-            MemberKind::Forward { target, .. } => Some(target.clone()),
-            MemberKind::Scalar { .. }
-                if !model.is_composite_key() && model.pk_field() == Some(field) =>
-            {
-                Some(model.name.clone())
-            }
-            _ => None,
-        }
-    }
-
-    /// Resolve each query param to the entity it identifies, from its binding (`-> edge`
-    /// / `op col`) or same-named column on the target model. Params that identify no
-    /// entity (plain scalars) are absent from the map.
-    fn query_param_entities(
-        root: Option<&RModel>,
-        params: &[Param],
-    ) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        let Some(root) = root else { return map };
-        for p in params {
-            let field = match &p.binding {
-                Some(ParamBinding::Edge(e)) => e.node.as_str(),
-                Some(ParamBinding::ColOp { col, .. }) => col.node.as_str(),
-                None => p.name.node.as_str(),
-            };
-            if let Some(entity) = member_entity(root, field) {
-                map.insert(p.name.node.clone(), entity);
-            }
-        }
-        map
-    }
-
-    /// Resolve each mutation param to the entity it identifies, by walking the write
-    /// body: a param assigned to a Forward FK / `id`, or compared against one in a
-    /// `where`, identifies that member's model. This is the front end's own resolution
-    /// (the same edges sema type-checks), surfaced instead of discarded.
-    fn mutation_param_entities(
-        schema: &CheckedSchema,
-        m: &Mutation,
-    ) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        for stmt in &m.body {
-            scan_write(schema, stmt, &mut map);
-        }
-        map
-    }
-
-    fn scan_write(
-        schema: &CheckedSchema,
-        stmt: &WriteStmt,
-        map: &mut std::collections::HashMap<String, String>,
-    ) {
-        match stmt {
-            WriteStmt::Create {
-                model,
-                assigns,
-                from: _,
-                conflict,
-                binding: _,
-            } => {
-                // A `create … from $param` carries its ids inside the shape param, typed
-                // by the shape struct — no `col = $param` id entity to record here.
-                let m = schema.model(&model.node);
-                for a in assigns {
-                    scan_assign(m, a, map);
-                }
-                if let Some(oc) = conflict {
-                    for a in &oc.update {
-                        scan_assign(m, a, map);
-                    }
-                }
-            }
-            WriteStmt::Update {
-                model,
-                where_,
-                assigns,
-            } => {
-                let m = schema.model(&model.node);
-                for a in assigns {
-                    scan_assign(m, a, map);
-                }
-                scan_pred(m, where_, map);
-            }
-            WriteStmt::Restore { model, where_ } => {
-                scan_pred(schema.model(&model.node), where_, map);
-            }
-            WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
-                if let Some(p) = where_ {
-                    scan_pred(schema.model(&model.node), p, map);
-                }
-            }
-            WriteStmt::Tx(stmts) => {
-                for s in stmts {
-                    scan_write(schema, s, map);
-                }
-            }
-            WriteStmt::Raw(_) => {}
-        }
-    }
-
-    /// Record `col = $param` when `col` is a Forward FK / `id` on `model`.
-    fn scan_assign(
-        model: Option<&RModel>,
-        a: &Assign,
-        map: &mut std::collections::HashMap<String, String>,
-    ) {
-        if let Some(Value::Param(pr)) = a.value.as_value() {
-            if pr.path.is_empty() {
-                if let Some(entity) = model.and_then(|m| member_entity(m, &a.col.node)) {
-                    map.insert(pr.name.node.clone(), entity);
-                }
-            }
-        }
-    }
-
-    /// Record `col = $param` comparisons in a `where` where `col` is an id member.
-    fn scan_pred(
-        model: Option<&RModel>,
-        pred: &Predicate,
-        map: &mut std::collections::HashMap<String, String>,
-    ) {
-        match pred {
-            Predicate::And(a, b) | Predicate::Or(a, b) => {
-                scan_pred(model, a, map);
-                scan_pred(model, b, map);
-            }
-            Predicate::Not(p) => scan_pred(model, p, map),
-            Predicate::Cmp {
-                path,
-                value: Value::Param(pr),
-                ..
-            } if path.segments.len() == 1 && pr.path.is_empty() => {
-                if let Some(entity) = model.and_then(|m| member_entity(m, &path.segments[0].node)) {
-                    map.insert(pr.name.node.clone(), entity);
-                }
-            }
-            // A `$param` listed in `col in (…)` binds one key, same as `col = $param`.
-            Predicate::InList { path, values } if path.segments.len() == 1 => {
-                for v in values {
-                    if let Value::Param(pr) = v {
-                        if pr.path.is_empty() {
-                            if let Some(entity) =
-                                model.and_then(|m| member_entity(m, &path.segments[0].node))
-                            {
-                                map.insert(pr.name.node.clone(), entity);
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 
     /// A query's return wrapper: stream -> `RowStream<T>`, paginated -> `Page<T>`,
