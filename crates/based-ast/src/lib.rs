@@ -569,6 +569,10 @@ pub enum QueryBody {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: Ident,
+    /// `name?` — an optional filter param (queries.md). Absent at the call site drops
+    /// the predicate; a JSON `null` matches `col IS NULL`; a value is an equality. Only
+    /// on an equality-binding query param; distinct from a nullable *type* (`ty.optional`).
+    pub optional: bool,
     pub ty: Option<TypeExpr>,
     pub binding: Option<ParamBinding>,
     pub default: Option<DefaultVal>,

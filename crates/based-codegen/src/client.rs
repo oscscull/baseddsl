@@ -241,6 +241,9 @@ mod rust {
             }
         }
 
+        // The `Filter<T>` helper for `?` optional filter params — only when one exists.
+        push_optional_filter(&mut out, &callables);
+
         // Output structs first (deduped by name; a shape shared by two queries is one
         // struct). Emitted in first-seen order for deterministic output. An `-> ok`
         // mutation has no output struct; the shared `Ack` decodes its empty body.
@@ -318,6 +321,18 @@ mod rust {
             emit_embedded_bridge(&mut out, &callables, opts, has_stream, has_mutation);
         }
         out
+    }
+
+    /// Emit the `Filter<T>` helper once, iff any callable declares a `?` optional filter
+    /// param — a schema without one stays byte-identical (like the streaming/keyed surfaces).
+    fn push_optional_filter(out: &mut String, callables: &[Callable]) {
+        if callables
+            .iter()
+            .any(|c| c.params.iter().any(|p| p.optional))
+        {
+            out.push_str("\n// ---------- optional filters ----------\n");
+            out.push_str(FILTER);
+        }
     }
 
     /// The in-process bridge over `based_runtime::Engine`, emitted only for an embedded
@@ -903,29 +918,39 @@ pub fn adopt_{suffix}<'a>(
     /// becomes `Option<T>` — the client may omit it and let the engine apply the
     /// default.
     fn param_type(schema: &CheckedSchema, c: &Callable, p: &Param) -> String {
-        let optional = p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional);
+        // A `name?` optional filter param (queries.md) is the tri-state `Filter<T>` (skip /
+        // `Null` / `Eq(v)`); a `(default)`/`type?` param is `Option<T>` (omit → the engine
+        // applies the default). `wrap_opt` picks the wrapper from the param.
+        let wrap_opt = |base: String| -> String {
+            if p.optional {
+                // The value inside `Filter` is never itself optional — `Filter::Null`
+                // carries the null case, so a nullable column's `Option<…>` is stripped
+                // (`Filter<Option<T>>` would re-introduce the ambiguity `Filter` removes).
+                let inner = base
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .unwrap_or(&base);
+                format!("Filter<{inner}>")
+            } else if (p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional))
+                && !base.starts_with("Option<")
+            {
+                format!("Option<{base}>")
+            } else {
+                base
+            }
+        };
         // An UpperCamel annotation names an *enum* when it resolves to one:
         // `status: Status` takes the enum's own generated type, never `Id<entity::…>`.
         if let Some(te) = &p.ty {
             if let BaseType::Model(name) = &te.base {
                 if schema.enum_(&name.node).is_some() {
-                    let base = wrap(&name.node, false, te.many);
-                    return if optional {
-                        format!("Option<{base}>")
-                    } else {
-                        base
-                    };
+                    return wrap_opt(wrap(&name.node, false, te.many));
                 }
                 // A shape-typed param — the row input of a `create … from $p` (BW1). Its
                 // Rust type is the shape's own struct (`Vec<Shape>` for the bulk form),
                 // reusing the same struct a query returning that shape emits.
                 if schema.shapes.iter().any(|s| s.name == name.node) {
-                    let base = wrap(&name.node, false, te.many);
-                    return if optional {
-                        format!("Option<{base}>")
-                    } else {
-                        base
-                    };
+                    return wrap_opt(wrap(&name.node, false, te.many));
                 }
             }
         }
@@ -938,11 +963,7 @@ pub fn adopt_{suffix}<'a>(
                 None => infer_param(schema, c.root, p),
             }
         };
-        if optional && !base.starts_with("Option<") {
-            format!("Option<{base}>")
-        } else {
-            base
-        }
+        wrap_opt(base)
     }
 
     /// The entity a param identifies, if any: an explicit model annotation, else the
@@ -1243,6 +1264,10 @@ pub fn adopt_{suffix}<'a>(
         for (f, ty) in fields {
             if ty.starts_with("Option<") {
                 s.push_str("    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
+            } else if ty.starts_with("Filter<") {
+                // A `?` optional filter (queries.md): `Filter::Any` (skip) serializes to an
+                // absent field; `Filter::Null` → JSON `null`; `Filter::Eq(v)` → the value.
+                s.push_str("    #[serde(default, skip_serializing_if = \"Filter::is_any\")]\n");
             }
             s.push_str(&format!("    pub {}: {ty},\n", field_ident(f)));
         }
@@ -1794,6 +1819,54 @@ impl std::error::Error for ClientError {
 /// a real DELETE leaves no row to return). Methods decode it and return `()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {}
+"#;
+
+    /// The `Filter<T>` tri-state a `?` optional filter param takes (queries.md). Emitted
+    /// once, only when a query declares such a param, so a schema without them is
+    /// byte-identical. On the wire: `Any` → the field is absent, `Null` → JSON `null`,
+    /// `Eq(v)` → the value — the three states codegen's guarded predicate distinguishes.
+    const FILTER: &str = r#"
+/// An optional query filter (a `name?` param): `Any` drops the filter, `Null` matches
+/// `col IS NULL`, `Eq(v)` matches equality. `Default` is `Any`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Filter<T> {
+    Any,
+    Null,
+    Eq(T),
+}
+
+impl<T> Default for Filter<T> {
+    fn default() -> Self {
+        Filter::Any
+    }
+}
+
+impl<T> Filter<T> {
+    fn is_any(&self) -> bool {
+        matches!(self, Filter::Any)
+    }
+}
+
+impl<T: Serialize> Serialize for Filter<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // `Any` is dropped by `skip_serializing_if`; if ever reached it is a null.
+            Filter::Any | Filter::Null => s.serialize_none(),
+            Filter::Eq(v) => s.serialize_some(v),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Filter<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // An absent field is `#[serde(default)]` → `Any`; a present `null` arrives as
+        // `None` → `Null`; a value → `Eq`.
+        Ok(match Option::<T>::deserialize(d)? {
+            None => Filter::Null,
+            Some(v) => Filter::Eq(v),
+        })
+    }
+}
 "#;
 
     /// The abstract transport's head: doc, trait open, and the one `call` every schema

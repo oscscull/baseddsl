@@ -952,11 +952,12 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
         // `user -> author`: equality on the named relation's FK column.
         Some(ParamBinding::Edge(edge)) => {
             let (alias, col) = sel.resolve(&single(&edge.node), root);
-            format!("{} = {ph}", sel.qcol(&alias, &col))
+            optional_guard(sel.dialect, p, &sel.qcol(&alias, &col), &ph)
         }
         // `since: timestamp > created_at`: explicit column + operator. The collection
         // ops mirror the predicate lowering — `in` takes a value list, `has` is JSON
         // containment (Postgres `col @> value`, MySQL-family `value MEMBER OF(col)`).
+        // (`?` is rejected on this form by sema, E0337 — the guard below is equality-only.)
         Some(ParamBinding::ColOp { op, col }) => {
             let (alias, c) = sel.resolve(&single(&col.node), root);
             let lhs = sel.qcol(&alias, &c);
@@ -972,9 +973,22 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
         // same-name equality on the mapped column (a relation field maps to its FK).
         None => {
             let (alias, col) = sel.resolve(&single(&p.name.node), root);
-            format!("{} = {ph}", sel.qcol(&alias, &col))
+            optional_guard(sel.dialect, p, &sel.qcol(&alias, &col), &ph)
         }
     }
+}
+
+/// An equality param's condition: plain `col = :p` normally, but a `?` optional param
+/// (queries.md) becomes a guarded 3-state predicate driven by a companion `:p__present`
+/// flag the runtime binds — `0` when the arg is absent (the whole clause is a no-op, so
+/// the filter drops), `1` when supplied. When present, NULL-safe equality lets a `null`
+/// argument match `col IS NULL` and a value match equality.
+fn optional_guard(dialect: Dialect, p: &Param, col: &str, ph: &str) -> String {
+    if !p.optional {
+        return format!("{col} = {ph}");
+    }
+    let present = format!(":{}__present", p.name.node);
+    format!("({present} = 0 OR {})", dialect.null_safe_eq(col, ph))
 }
 
 // ---------- sort cascade ---------------------------------------------------

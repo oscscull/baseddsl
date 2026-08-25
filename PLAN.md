@@ -278,9 +278,15 @@ transactions). It is slice 2 of the transaction seam (D118 slice 1). **Computed 
 (per-dialect `Dialect::concat`), and `case when … then … else … end`; a dedicated `ShapeExpr` AST +
 `ShapeValue::Computed`, type inferred (numeric promotion / text / unified CASE branch), reaches governed
 like a `Path` (scope/soft-delete walked), projection-only + param-free; E0320–E0324; runtime unchanged;
-proven live on SQLite. **Tier-2 now has no remaining language items** — the SQLite incremental-FK rebuild
-and a `bytes` field inside a to-many array on SQLite are the explicit deferrals. Batch-by-batch history is
-in `PLAN-archive.md`.
+proven live on SQLite. **Optional filter params `name?` are done (D132, owner-raised 2026-08-25)** — a `?`
+on an equality param makes it a 3-state optional filter: absent drops the predicate, JSON `null` matches
+`col IS NULL`, a value matches equality. Client type is the named `Filter<T>` (`Any`/`Null`/`Eq(v)`), not
+`Option<T>` (owner-chosen for read-clarity); lowers to a static `(:p__present = 0 OR col <null-safe-eq> :p)`
+guard (`Dialect::null_safe_eq` per dialect) with the runtime binding a companion presence flag — no dynamic
+SQL. Equality/list-only, no `= default`, bare/inline-only (E0335–E0338), still index-linted. Proven live on
+SQLite (drop / `IS NULL` / equality / two-param composition) + generated-client compilation via the
+embedded golden. **Tier-2's remaining explicit deferrals** — the SQLite incremental-FK rebuild and a
+`bytes` field inside a to-many array on SQLite. Batch-by-batch history is in `PLAN-archive.md`.
 
 ## URGENT — production-readiness / onboarding gaps (owner-raised 2026-07-24) — ✅ CLOSED
 

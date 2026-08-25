@@ -508,6 +508,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
     for p in &q.params {
         check_param(p, ti, infer, cx, sink);
     }
+    check_optional_params(q, verb, infer, sink);
 
     // An aggregate return shape turns the query into an aggregate query: `group by` /
     // `having` become legal (and required for consistency), and the `get`/sort/pagination
@@ -1015,6 +1016,51 @@ fn resolve_return(
 
 /// Validate a param's binding + default against the target model. When `infer` is
 /// set (bare/inline query), an unbound param must name a same-named column.
+/// Validate every `?` optional filter param on a query (queries.md). An optional filter is
+/// equality-only, list/aggregate-only, must not also carry a default, and only acts on a
+/// bare/inline query (a block/raw query references params via `$`, so a guard can't wrap
+/// them). Each violation is its own diagnostic; the param is otherwise checked normally.
+fn check_optional_params(q: &Query, verb: Verb, infer: bool, sink: &mut Sink) {
+    for p in q.params.iter().filter(|p| p.optional) {
+        if !infer {
+            sink.error_note(
+                code::OPT_PARAM_UNFILTERED,
+                p.name.span,
+                format!("`?` on param `{}` has no effect here", p.name.node),
+                "an optional filter applies only to a bare/inline query param; a block/raw query references params via `$`",
+            );
+            continue;
+        }
+        if matches!(verb, Verb::Get) {
+            sink.error_note(
+                code::OPT_PARAM_GET,
+                p.name.span,
+                format!(
+                    "`?` optional filter on param `{}` needs a list query",
+                    p.name.node
+                ),
+                "a `get` is keyed on a unique field; return `[]` (a list), or drop the `?`",
+            );
+        }
+        if p.default.is_some() {
+            sink.error_note(
+                code::OPT_PARAM_DEFAULT,
+                p.name.span,
+                format!("param `{}` is both optional (`?`) and defaulted", p.name.node),
+                "skip-when-absent and fill-when-absent contradict — keep the `?` or the `= default`, not both",
+            );
+        }
+        if matches!(&p.binding, Some(ParamBinding::ColOp { .. })) {
+            sink.error_note(
+                code::OPT_PARAM_BINDING,
+                p.name.span,
+                format!("`?` optional filter on param `{}` must be an equality", p.name.node),
+                "an optional filter is equality-only (same-name, typed, or `-> edge`); an operator binding like `> col` can't be null-guarded",
+            );
+        }
+    }
+}
+
 fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
     let m = cx.model(ti);
     // The column/edge this param maps onto — its type is what an explicit
@@ -1509,6 +1555,15 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
     for p in &m.params {
         if let Some(d) = &p.default {
             resolve::check_default(d, sink);
+        }
+        // `?` optional filter is a query-only concept — a mutation param drives a write.
+        if p.optional {
+            sink.error_note(
+                code::OPT_PARAM_UNFILTERED,
+                p.name.span,
+                format!("`?` on mutation param `{}` is not supported", p.name.node),
+                "the optional filter (`name?`) is a query-only concept; a mutation param drives a write",
+            );
         }
     }
     let ret = if m.ret.ack {

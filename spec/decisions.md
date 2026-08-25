@@ -54,7 +54,9 @@ relevant entries instead of scanning. A decision may appear under more than one 
   D94 (whole-query raw bodies: `{ sql`…`; }` is the statement — param-binding + shape-typed
   results survive, W0102 lints the soft-delete gap, un-composable combinations rejected E0210–E0214),
   D96 (raw marker renamed `sql` → `raw` — one spelling with the feature name and the `.mig`
-  `raw(dialect)` step; no alias)
+  `raw(dialect)` step; no alias),
+  D132 (optional filter params `name?`: 3-state skip/`IS NULL`/equality, `Filter<T>` client type,
+  `(:p__present = 0 OR col <null-safe-eq> :p)` guard; equality/list-only; E0335–E0338)
 - **Transactions (read-decide-write seam)** — D118 (host-language `transaction(closure)` seam,
   embedded-only, slice 1 of 3: `TxOptions`/`Isolation`/`AccessMode` applied per dialect via the
   `Dialect` seam, rung 1 managed closure `client::transaction`/`transaction_retrying` + rung 2
@@ -6422,3 +6424,48 @@ count (explicit assigns lexically before it) to drive last-write-wins. Blast rad
 (`ConflictSpread`), `based-parser` (`conflict_update_block`), `based-sema` (`E0334` guards in
 `check_upsert` / `check_bulk_upsert`), `based-codegen` (`conflict_update_sets` expands, minus target, via
 `excluded`/`VALUES`), `based-fmt` (reprints the spread in position). Spec: `mutations.md`, `grammar.ebnf`.
+
+## D132 — optional filter params: `name?` (skip / null / value)
+
+**Owner-approved 2026-08-25 (two forks signed off: `?` surface syntax + `Filter<T>` client type, 3-state
+skip/null/value semantics).** Every query param was mandatory and always contributed its predicate — the
+dynamic-facet search endpoint (filter by a field *only when supplied*) was unspellable, forcing one `raw`
+query per combination or N separate queries. A representability gap (principle 9). Close it with a `?` on
+the param name: `query search_orders(status?, customer?) -> OrderCard[];`.
+
+**Three states, forced by the wire.** A `?` param is optional and its predicate is applied per-call:
+**absent** → the predicate is dropped (the filter widens); JSON **`null`** → `col IS NULL`; a **value** →
+equality `col = value`. These map one-to-one to what JSON carries (field absent / present-`null` /
+present-value), so the tri-state is native, not invented. Match-`NULL` becomes reachable through a param
+(it was only a fixed body-level `where (col = null)` before).
+
+**Client type is `Filter<T>`, not `Option<T>` (owner-chosen for readability).** `Option`'s `None` can't say
+whether it means "skip the filter" or "match a null column"; a named `Filter<T>` (`Any` / `Null` / `Eq(v)`,
+`Default = Any`) reads unambiguously — `Filter::Any` is "no constraint," `Filter::Null` is `IS NULL`.
+Custom `Serialize`/`Deserialize`: `Any` → the field is dropped (`skip_serializing_if`), `Null` →
+JSON `null`, `Eq(v)` → the value. Emitted once, only when a schema declares an optional param (a schema
+without one is byte-identical). A nullable column's `Option<…>` is stripped inside `Filter` (`Filter<T>`,
+never `Filter<Option<T>>` — `Null` already carries the null case). Distinct from a `(default)`/`type?` param,
+which stays `Option<T>` (omit → the engine fills the default).
+
+**Lowering — static template, no dynamic SQL (fits the architecture).** codegen emits a guarded predicate
+`(:p__present = 0 OR col <null-safe-eq> :p)`; the runtime binds a companion `:p__present` flag (0 absent /
+1 supplied) beside the value. NULL-safe equality per dialect (`Dialect::null_safe_eq`): `IS NOT DISTINCT
+FROM` (Postgres), `<=>` (MySQL/MariaDB), `IS` (SQLite) — so `present + null` → `col IS NULL`, `present +
+value` → equality, `absent` → the whole clause is a no-op. The param is still index-linted as an equality
+filter (E0260 applies).
+
+**Restrictions (each its own diagnostic).** Equality-only — same-name / typed / `-> edge`; an operator
+binding (`> col`) is `E0337` (`> null` is meaningless). `list`/aggregate only — `E0335` on a `get` (an
+optional key would return any row). Mutually exclusive with `= default` — `E0336` (skip-when-absent and
+fill-when-absent contradict). Only on a bare/inline query — `E0338` on a block/raw query (params are
+`$`-referenced) or a mutation param (a mutation param drives a write). `@scope` is orthogonal: a dropped
+optional filter never drops the injected scope predicate.
+
+**Blast radius.** `based-ast` (`Param.optional`), `based-parser` (eat `?` after the name), `based-fmt`
+(reprint `?`), `based-sema` (`check_optional_params` + E0335–E0338, `ir::code`), `based-codegen`
+(`Dialect::null_safe_eq`; `optional_guard` in `sql/dml.rs`; `Filter<T>` emission + `param_type` wrap in
+`client.rs`; `nullable` + not-required in `openapi.rs`), `based-runtime` (`plan.rs` bind loop binds the
+`__present` flag + value across the three states). Spec: `queries.md`, `calling.md`, `grammar.ebnf`,
+`docs/reference.md`. Proven live on SQLite (drop / `IS NULL` / equality / two-param composition) +
+generated-client compilation via the embedded golden.

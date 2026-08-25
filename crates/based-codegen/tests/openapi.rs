@@ -763,3 +763,30 @@ fn computed_shape_fields_carry_inferred_schemas() {
     assert!(required.contains(&"label"), "{required:?}");
     assert!(!required.contains(&"maybe"), "{required:?}");
 }
+
+#[test]
+fn optional_filter_param_is_not_required_and_nullable() {
+    // A `?` optional filter param is non-`required` (absent = drop) and null-accepting
+    // (a JSON `null` means `col IS NULL`).
+    let doc = gen(r#"
+        Product { id: Id, name: text, status: text? }
+        shape Card from Product { name }
+        query search(status?) -> Card[];
+        "#);
+    let input = &doc["components"]["schemas"]["SearchInput"];
+    // The type admits both the value and null.
+    assert_eq!(
+        input["properties"]["status"]["type"],
+        serde_json::json!(["string", "null"])
+    );
+    // Not in the required list (absent is a valid call).
+    assert!(
+        input.get("required").is_none()
+            || !input["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "status"),
+        "status must not be required: {input}"
+    );
+}

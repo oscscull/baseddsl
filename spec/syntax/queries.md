@@ -32,6 +32,31 @@ query posts(user -> author, since: timestamp > created_at) -> PostShape[];
 ```
 `->` = "binds via" (consistent with relation-arrow: "connects to"). In the `op column` form the **column is the left operand**: `since: timestamp > created_at` binds `created_at > $since` — rows created *after* `$since`. Ceiling: one binding per param, equality-AND across params. Anything needing `or`, a cross-param condition, ordering, pagination, or a non-default projection -> drop to the body.
 
+## Optional filter params (`name?`)
+A `?` on a param name makes it an **optional filter** — the dynamic-facet search pattern.
+Each param contributes a predicate only when the caller supplies it; omit it and that
+predicate drops from the `WHERE`. Three call-site states, each a distinct SQL:
+```
+query search_orders(status?, customer?) -> OrderCard[];
+```
+- **absent** — the predicate is not applied (the filter widens).
+- **`null`** — matches `col IS NULL` (rows with no value).
+- **a value** — ordinary equality `col = value`.
+
+The three map one-to-one to what JSON carries: a field **absent** / present-`null` /
+present-value. On the typed client the param is `Filter<T>` — `Filter::Any` (skip) /
+`Filter::Null` / `Filter::Eq(v)`, defaulting to `Any` (calling.md). It lowers to a static
+guarded predicate — `(:p__present = 0 OR col <null-safe => :p)` — so a caller can never
+send a bare `col = NULL` (which is never true). To ask for *only* the null rows as a fixed
+query, write it in the body instead: `where (status = null)` → `IS NULL`.
+
+Rules (each its own diagnostic): equality-only — same-name, typed same-name, or `-> edge`;
+an operator binding (`since?: timestamp > created_at`) is `E0337` (`> null` is meaningless).
+List/aggregate only (`E0335` on a `get` — an optional key would return any row). Mutually
+exclusive with `= default` (`E0336` — skip-when-absent and fill-when-absent contradict).
+Only on a bare/inline query (`E0338` — a block/raw query references params via `$`). `@scope`
+is unaffected: a dropped optional filter never drops the injected scope predicate.
+
 ## Full body form
 ```
 query products(org: Id, active: bool = true) -> OrderCard[] {

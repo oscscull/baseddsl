@@ -10,10 +10,12 @@ Order {
     status: text,
     total: int,
     @index(org)
+    @index(status)
 }
 shape OrderCard from Order { status, total }
 
 query order_by_id(id) -> OrderCard;
+query find_orders(status?) -> OrderCard[];
 query order_for_update(id) -> OrderCard { get Order where (id = $id) for update; }
 query orders_in_org(org) -> OrderCard[];
 query export_orders(org) -> stream OrderCard;

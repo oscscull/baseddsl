@@ -1154,3 +1154,36 @@ fn computed_shape_fields_type_by_inferred_expression() {
     assert!(out.contains("pub tier: String,"), "\n{out}");
     assert!(out.contains("pub maybe: Option<String>,"), "\n{out}");
 }
+
+#[test]
+fn optional_filter_param_is_filter_type() {
+    let out = gen(r#"
+        Product {
+          id: Id
+          name: text
+          status: text?
+          @index(status)
+        }
+        shape ProductName from Product { name }
+        query search(status?) -> ProductName[] order (name);
+        "#);
+    // The tri-state helper is emitted, and the param field takes it (not Option<T>).
+    assert!(out.contains("pub enum Filter<T>"), "\n{out}");
+    assert!(out.contains("pub status: Filter<String>,"), "\n{out}");
+    // Absent (Any) is dropped from the wire; null/value are carried.
+    assert!(
+        out.contains("skip_serializing_if = \"Filter::is_any\""),
+        "\n{out}"
+    );
+}
+
+#[test]
+fn no_optional_param_omits_filter_type() {
+    // A schema without a `?` param must not carry the helper (byte-identical guarantee).
+    let out = gen(r#"
+        Product { id: Id, name: text }
+        shape ProductName from Product { name }
+        query by_id(id) -> ProductName;
+        "#);
+    assert!(!out.contains("enum Filter<T>"), "\n{out}");
+}

@@ -159,6 +159,8 @@ query name(params) -> RetType [scoped Name] ;            # or { body } or inline
 **Param binding:** `(id)` same-name eq · `(user: User)` typed · `(user -> author)` bind through an edge ·
 `(since: timestamp > created_at)` explicit column + operator.
 
+**Optional filter (`name?`):** a `?` makes an equality param an optional filter — `query search(status?, customer?) -> OrderCard[];`. Three states: **absent** drops the predicate, **`null`** matches `col IS NULL`, a **value** matches equality. Client type is `Filter<T>` (`Any`/`Null`/`Eq(v)`, default `Any`). Equality-only, `list`-only, no `= default` (E0335–E0338).
+
 **Filter operators:** `= != > < >= <=`, `~` (LIKE, pattern verbatim), `in`, `has` (array/json contains).
 Compose with `and` (binds tighter), `or`, `not`, parentheses. Bare bool column: `where (active)`.
 Lists: `status in (open, waiting, $other)`.

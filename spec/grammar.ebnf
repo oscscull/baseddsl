@@ -232,8 +232,12 @@ scoped_clause   = 'scoped' scope_name { ',' scope_name } ;   (* mirrors `guard n
 unscoped_clause = 'unscoped' '(' STRING ')' ;
 
 (* Bare/per-param/full all share the param list; binding rides each param.     *)
+(* `name?` = an OPTIONAL filter param (queries.md): absent -> the predicate is    *)
+(* dropped; JSON `null` -> `col IS NULL`; a value -> equality. Equality-only      *)
+(* (same-name / typed / `-> edge`), list/aggregate-only, no `= default`, on a     *)
+(* bare/inline query. E0335-E0338. The `?` rides the name, before the `:` type.   *)
 params      = param { ',' param } ;
-param       = param_name [ ':' type_expr ] [ param_binding ] [ '=' default_val ] ;
+param       = param_name [ '?' ] [ ':' type_expr ] [ param_binding ] [ '=' default_val ] ;
 param_name  = lower_ident ;
 (* binding forms: (queries.md)
      (id)                         same-name equality, type inferred

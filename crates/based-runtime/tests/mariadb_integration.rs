@@ -1638,3 +1638,67 @@ fn sort_items(mut o: serde_json::Value) -> serde_json::Value {
     }
     o
 }
+
+/// A `?` optional filter param, live on MariaDB — proving the guarded predicate
+/// `(:p__present = 0 OR col <=> :p)` executes correctly with a bound NULL param under the
+/// null-safe `<=>` operator. Absent drops the filter; JSON null → `IS NULL`; a value → equality.
+#[tokio::test]
+async fn optional_filter_three_states_live_mariadb() {
+    const SCHEMA: &str = r#"
+        Product { id: text, name: text, status: text?, @index(status) }
+        shape ProductName from Product { name }
+        query search(status?) -> ProductName[] order (name);
+    "#;
+    let Some((c, router, container)) = live_schema(SCHEMA).await else {
+        return;
+    };
+    container
+        .exec_batch(
+            "INSERT INTO `product` (`id`, `name`, `status`) VALUES \
+             ('p1', 'Widget', 'active'), ('p2', 'Hammer', 'active'), \
+             ('p3', 'Apple', NULL), ('p4', 'Banana', NULL), ('p5', 'Nail', 'shipped');",
+        )
+        .await;
+
+    let names = |b: &serde_json::Value| -> Vec<String> {
+        b.as_array()
+            .expect("array")
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // absent → no status predicate → every row.
+    let all = call(&c, &router, "POST", "/q/search", json!({}), json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        names(&all.body),
+        ["Apple", "Banana", "Hammer", "Nail", "Widget"]
+    );
+
+    // JSON null → `status IS NULL`.
+    let nulls = call(
+        &c,
+        &router,
+        "POST",
+        "/q/search",
+        json!({ "status": null }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(nulls.status, 200, "{:?}", nulls.body);
+    assert_eq!(names(&nulls.body), ["Apple", "Banana"]);
+
+    // a value → equality (NULLs excluded).
+    let active = call(
+        &c,
+        &router,
+        "POST",
+        "/q/search",
+        json!({ "status": "active" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(active.status, 200, "{:?}", active.body);
+    assert_eq!(names(&active.body), ["Hammer", "Widget"]);
+}

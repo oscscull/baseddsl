@@ -39,6 +39,23 @@ OpenAPI advertises the shared empty `Ack` object schema. Its keyed twin returns 
 A DELETE matching no row (absent, or another scope's) is the standard `404 not_found` error, so a
 caller always gets a verdict, never an empty success for a miss.
 
+## Optional filters (`Filter<T>`)
+An optional filter param (`status?`, queries.md) is `Filter<T>` on the typed input, not
+`Option<T>` — the three states are named so a reader can't misread them:
+```
+client.search_orders(SearchOrders {
+    status:   Filter::Null,          // WHERE status IS NULL
+    customer: Filter::Eq(cust_id),   // WHERE customer = :customer
+    ..Default::default()             // every unset filter defaults to Filter::Any (skip)
+}).await?;
+```
+`Filter<T>` (`Any` / `Null` / `Eq(T)`, `Default = Any`) serializes to exactly the three
+wire states — `Any` → the field is **absent**, `Null` → JSON `null`, `Eq(v)` → the value
+— so the server's guarded predicate distinguishes drop / `IS NULL` / equality. The helper
+type is emitted once, only when the schema declares an optional filter (a schema without one
+is byte-identical). OpenAPI marks the property not-`required` and null-accepting. Distinct
+from a defaulted/`type?` param, which stays `Option<T>` (omit → the engine fills the default).
+
 ## Pagination envelope
 A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque cursor for the next page. Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).
 

@@ -873,6 +873,9 @@ fn params(ps: &[Param]) -> String {
 
 fn param(p: &Param) -> String {
     let mut s = p.name.node.clone();
+    if p.optional {
+        s.push('?');
+    }
     if let Some(ty) = &p.ty {
         s.push_str(&format!(": {}", type_expr(ty)));
     }

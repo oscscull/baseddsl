@@ -417,10 +417,26 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     for p in &ast.params {
         let entity = entities.get(&p.name.node).map(String::as_str);
         let (family, optional) = query_param_family(&compiled.schema, root, p, entity);
-        env.insert(
-            p.name.node.clone(),
-            bind_param(&compiled.schema, p, family, optional, req)?,
-        );
+        if p.optional {
+            // A `?` optional filter param (queries.md): bind a `__present` flag codegen's
+            // guard reads, plus the value. Absent → flag 0 (predicate drops); JSON `null` →
+            // flag 1 + NULL (matches `col IS NULL`); a value → flag 1 + equality.
+            let value = match req.args.get(&p.name.node) {
+                Some(v) => coerce(v, family, true).map_err(|e| bad_arg(&p.name.node, e))?,
+                None => SqlValue::Null,
+            };
+            let present = req.args.contains_key(&p.name.node);
+            env.insert(
+                format!("{}__present", p.name.node),
+                SqlValue::Int(if present { 1 } else { 0 }),
+            );
+            env.insert(p.name.node.clone(), value);
+        } else {
+            env.insert(
+                p.name.node.clone(),
+                bind_param(&compiled.schema, p, family, optional, req)?,
+            );
+        }
     }
     for c in &rq.ctx_requires {
         env.insert(

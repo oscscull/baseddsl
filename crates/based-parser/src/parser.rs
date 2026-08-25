@@ -1720,6 +1720,8 @@ impl<'a> Parser<'a> {
 
     fn param(&mut self) -> PResult<Param> {
         let name = self.lower_ident("parameter name")?;
+        // `name?` — an optional filter param (sits on the name, before the `:` type).
+        let optional = self.eat(Tok::Question);
         let ty = if self.eat(Tok::Colon) {
             Some(self.type_expr()?)
         } else {
@@ -1742,6 +1744,7 @@ impl<'a> Parser<'a> {
         };
         Ok(Param {
             name,
+            optional,
             ty,
             binding,
             default,

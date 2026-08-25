@@ -239,6 +239,12 @@ pub mod code {
     pub const INPUT_INCOMING_FIELD: &str = "E0333"; // `incoming.<col>` in a bulk `on conflict update` branch names a column that is not a settable column of the model
     pub const INPUT_INCOMING_CONTEXT: &str = "E0334"; // `incoming.<col>` used outside a `create … from … on conflict update` branch — the incoming-row keyword is contextual to bulk/from upsert
 
+    // `?` optional filter param (queries.md).
+    pub const OPT_PARAM_GET: &str = "E0335"; // `?` on a `get` query param — a get is keyed on a unique field; an optional key would make it return any row. List/aggregate only
+    pub const OPT_PARAM_DEFAULT: &str = "E0336"; // `?` combined with a `= default` — skip-when-absent and fill-when-absent contradict; pick one
+    pub const OPT_PARAM_BINDING: &str = "E0337"; // `?` on an operator-bound param (`op col`) — an optional filter is equality-only (same-name, typed, or `-> edge`); `> null` is meaningless
+    pub const OPT_PARAM_UNFILTERED: &str = "E0338"; // `?` where the param is not an auto-applied filter — a block/raw query (params are `$`-referenced) or a mutation param
+
     // Warnings on an input-used shape naming an engine-managed column (BW1).
     pub const INPUT_NAMES_TIMESTAMP: &str = "W0112"; // names an `@created`/`@updated` column — the explicit value overrides the auto-timestamp
     pub const INPUT_NAMES_SCOPE: &str = "W0113"; // names a `@scope` column — the value is ignored (engine-injected from `$ctx`)
