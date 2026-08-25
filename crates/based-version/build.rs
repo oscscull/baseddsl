@@ -26,12 +26,19 @@ fn main() {
     println!("cargo:rustc-env=BASED_VERSION_LONG={long}");
 
     // Rebuild when the checked-out commit moves so the embedded SHA stays current.
+    // Only emit rerun-if-changed for paths that EXIST: cargo treats a missing declared path as
+    // perpetually stale, which would re-run this script (and rebuild every downstream crate) on
+    // every build. `packed-refs` is absent in a repo with only loose refs.
     if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
-        println!("cargo:rerun-if-changed={git_dir}/HEAD");
+        let mut watch = vec![format!("{git_dir}/HEAD"), format!("{git_dir}/packed-refs")];
         if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
-            println!("cargo:rerun-if-changed={git_dir}/{reference}");
+            watch.push(format!("{git_dir}/{reference}"));
         }
-        println!("cargo:rerun-if-changed={git_dir}/packed-refs");
+        for path in watch {
+            if std::path::Path::new(&path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
     }
 }
 

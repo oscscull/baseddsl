@@ -19,6 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Prebuilt nextest binary, so `ensure-nextest` in the Makefile doesn't compile it from source.
+      - uses: taiki-e/install-action@nextest
       - run: make ci-workspace
 
   # Build + package the VS Code extension so it never rots.

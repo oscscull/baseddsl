@@ -51,6 +51,20 @@ walkdir = "2"
 # lives in the CLI/process layer, so the runtime library stays signal-free.
 ctrlc = { version = "3", features = ["termination"] }
 
+[profile.dev]
+# Full DWARF (the default `debug = 2`) is the biggest per-edit relink cost on macOS and bloats
+# target/. Line tables keep panic/backtrace line numbers at most of the saving. (`unpacked` is
+# already the macOS default; set explicitly to lock it.)
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+# Optimize build scripts + proc-macros only: they compile once but RUN on every build, so paying
+# optimization here speeds every later compile. Dependencies stay at opt-level 0 — optimizing
+# their runtime buys nothing when the tests they serve execute in seconds, and cost ~36min of
+# cold build when it was tried.
+[profile.dev.build-override]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 
