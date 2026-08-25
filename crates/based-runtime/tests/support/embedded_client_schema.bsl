@@ -30,3 +30,7 @@ mutation place_order(org: Id, status, total: int) -> OrderCard {
 mutation purge_order(id: Id) -> ok {
     hard delete Order where (id = $id);
 }
+
+Feature { id: Id, enabled: bool, beta: bool? }
+shape FeatureView from Feature { enabled, beta }
+query feature_by_id(id) -> FeatureView;

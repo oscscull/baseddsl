@@ -1258,10 +1258,30 @@ pub fn adopt_{suffix}<'a>(
         }
         s.push_str(" {\n");
         for (f, ty) in fields {
+            if let Some(de) = bool_deserialize_with(ty) {
+                s.push_str(&format!("    #[serde(deserialize_with = \"{de}\")]\n"));
+            }
             s.push_str(&format!("    pub {}: {ty},\n", field_ident(f)));
         }
         s.push_str("}\n");
         s
+    }
+
+    /// The lenient bool deserializer for a `bool`-typed read field, keyed by its full type
+    /// string (the closed vocabulary [`wrap`] produces for a `Primitive::Bool`). A boolean
+    /// column rides the wire as a real JSON bool on Postgres but as `0`/`1` on MySQL and
+    /// SQLite — where the type is lost at the value level (a stored bool reads back as an
+    /// integer), so the runtime cannot re-type it. The generated client knows the field is
+    /// boolean, so it reconciles: accept either form, land a Rust `bool`. `None` for any
+    /// non-bool type (which keeps its plain `#[derive(Deserialize)]`).
+    fn bool_deserialize_with(ty: &str) -> Option<&'static str> {
+        match ty {
+            "bool" => Some("de_bool"),
+            "Option<bool>" => Some("de_bool_opt"),
+            "Vec<bool>" => Some("de_bool_vec"),
+            "Option<Vec<bool>>" => Some("de_bool_opt_vec"),
+            _ => None,
+        }
     }
 
     /// One typed client method: `POST` the input to the route, carry the typed
@@ -1439,6 +1459,55 @@ pub type Time = String;
 // A `bytes` value is base64-encoded on the wire — carried as its base64 string.
 pub type Bytes = String;
 pub type Json = serde_json::Value;
+
+/// A wire boolean. A `bool` column rides the wire as a real JSON `true`/`false` on
+/// Postgres, but as the `0`/`1` of its backing integer on MySQL and SQLite (which lose the
+/// boolean type at the value level). This accepts either form so the same client decodes a
+/// response from any dialect; it serializes back as a real JSON bool.
+struct BoolWire(bool);
+
+impl<'de> Deserialize<'de> for BoolWire {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = bool;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a boolean or 0/1")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<bool, E> {
+                Ok(v)
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<bool, E> {
+                Ok(v != 0)
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<bool, E> {
+                Ok(v != 0)
+            }
+        }
+        d.deserialize_any(V).map(BoolWire)
+    }
+}
+
+fn de_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    BoolWire::deserialize(d).map(|b| b.0)
+}
+
+fn de_bool_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(Option::<BoolWire>::deserialize(d)?.map(|b| b.0))
+}
+
+fn de_bool_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<bool>, D::Error> {
+    Ok(Vec::<BoolWire>::deserialize(d)?
+        .into_iter()
+        .map(|b| b.0)
+        .collect())
+}
+
+fn de_bool_opt_vec<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<bool>>, D::Error> {
+    Ok(Option::<Vec<BoolWire>>::deserialize(d)?.map(|v| v.into_iter().map(|b| b.0).collect()))
+}
 
 /// A typed id: the primary key of entity `E`. The wire repr is honest to the entity's
 /// key strategy — a `uuid`/`ulid` id is a JSON string, a `serial` id a JSON number — so

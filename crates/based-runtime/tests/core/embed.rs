@@ -1039,6 +1039,67 @@ async fn explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite() {
     );
 }
 
+/// A `bool` column round-trips through the typed client on live SQLite, where a boolean is
+/// stored as an integer and reads back as the JSON `0`/`1` of that integer — the type is
+/// lost at the value level, so the runtime cannot re-type it (unlike Postgres, which sends a
+/// real JSON bool). The generated `FeatureView` reconciles: `enabled: bool` and the nullable
+/// `beta: Option<bool>` both decode from `0`/`1`, so `1` lands as `true`, `0` as `false`, and
+/// SQL `NULL` as `None`. This is the regression guard for the dialect-split bool decode bug.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn bool_column_round_trips_from_integer_wire_on_live_sqlite() {
+    use based_codegen::{sql, Dialect};
+    use based_runtime::SqliteBackend;
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `feature` (`id`, `enabled`, `beta`) VALUES
+                ('f-on', 1, 0),
+                ('f-off', 0, NULL);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    // `1`/`0` on the wire decode into Rust bools; a nullable bool's `NULL` is `None`.
+    let on = api
+        .feature_by_id(
+            client::FeatureByIdInput {
+                id: client::Id::from_raw("f-on"),
+            },
+            (),
+        )
+        .await
+        .expect("call ok")
+        .expect("a row");
+    assert!(on.enabled, "wire 1 decodes to true");
+    assert_eq!(on.beta, Some(false), "wire 0 decodes to Some(false)");
+
+    let off = api
+        .feature_by_id(
+            client::FeatureByIdInput {
+                id: client::Id::from_raw("f-off"),
+            },
+            (),
+        )
+        .await
+        .expect("call ok")
+        .expect("a row");
+    assert!(!off.enabled, "wire 0 decodes to false");
+    assert_eq!(off.beta, None, "SQL NULL decodes to None");
+}
+
 /// `for update` is **compile-time-confined to transaction clients** (transactions.md slice 2):
 /// the generated `order_for_update` method lives in `impl<T: Transport + TxBound> Client<T>`, and
 /// only `TxTransport` carries `TxBound`. This test is the positive half — it **compiles and runs**

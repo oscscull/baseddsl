@@ -20,6 +20,53 @@ pub type Time = String;
 pub type Bytes = String;
 pub type Json = serde_json::Value;
 
+/// A wire boolean. A `bool` column rides the wire as a real JSON `true`/`false` on
+/// Postgres, but as the `0`/`1` of its backing integer on MySQL and SQLite (which lose the
+/// boolean type at the value level). This accepts either form so the same client decodes a
+/// response from any dialect; it serializes back as a real JSON bool.
+struct BoolWire(bool);
+
+impl<'de> Deserialize<'de> for BoolWire {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = bool;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a boolean or 0/1")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<bool, E> {
+                Ok(v)
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<bool, E> {
+                Ok(v != 0)
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<bool, E> {
+                Ok(v != 0)
+            }
+        }
+        d.deserialize_any(V).map(BoolWire)
+    }
+}
+
+fn de_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    BoolWire::deserialize(d).map(|b| b.0)
+}
+
+fn de_bool_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(Option::<BoolWire>::deserialize(d)?.map(|b| b.0))
+}
+
+fn de_bool_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<bool>, D::Error> {
+    Ok(Vec::<BoolWire>::deserialize(d)?
+        .into_iter()
+        .map(|b| b.0)
+        .collect())
+}
+
+fn de_bool_opt_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<bool>>, D::Error> {
+    Ok(Option::<Vec<BoolWire>>::deserialize(d)?.map(|v| v.into_iter().map(|b| b.0).collect()))
+}
+
 /// A typed id: the primary key of entity `E`. The wire repr is honest to the entity's
 /// key strategy — a `uuid`/`ulid` id is a JSON string, a `serial` id a JSON number — so
 /// this (de)serializes transparently as either (`numeric` records which). The `E` marker
@@ -491,6 +538,7 @@ pub struct Client<T> {
 pub mod entity {
     pub enum Org {}
     pub enum Order {}
+    pub enum Feature {}
 }
 
 // ---------- output types ----------
@@ -504,6 +552,14 @@ pub struct Ack {}
 pub struct OrderCard {
     pub status: String,
     pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureView {
+    #[serde(deserialize_with = "de_bool")]
+    pub enabled: bool,
+    #[serde(deserialize_with = "de_bool_opt")]
+    pub beta: Option<bool>,
 }
 
 // ---------- inputs + routes ----------
@@ -578,6 +634,13 @@ pub struct PurgeOrderInput {
 }
 /// Wire route for `purge_order`.
 pub const PURGE_ORDER_ROUTE: &str = "/m/purge_order";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureByIdInput {
+    pub id: Id<entity::Feature>,
+}
+/// Wire route for `feature_by_id`.
+pub const FEATURE_BY_ID_ROUTE: &str = "/q/feature_by_id";
 
 // ---------- client ----------
 
@@ -674,6 +737,14 @@ impl<T: Transport> Client<T> {
             .call_with_key(PURGE_ORDER_ROUTE, &input, &ctx, key)
             .await?;
         Ok(())
+    }
+    /// `POST /q/feature_by_id`
+    pub async fn feature_by_id(
+        &self,
+        input: FeatureByIdInput,
+        ctx: (),
+    ) -> Result<Option<FeatureView>, ClientError> {
+        self.transport.call(FEATURE_BY_ID_ROUTE, &input, &ctx).await
     }
 }
 
