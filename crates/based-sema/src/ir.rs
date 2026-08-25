@@ -242,7 +242,7 @@ pub mod code {
     // `?` optional filter param (queries.md).
     pub const OPT_PARAM_GET: &str = "E0335"; // `?` on a `get` query param — a get is keyed on a unique field; an optional key would make it return any row. List/aggregate only
     pub const OPT_PARAM_DEFAULT: &str = "E0336"; // `?` combined with a `= default` — skip-when-absent and fill-when-absent contradict; pick one
-    pub const OPT_PARAM_BINDING: &str = "E0337"; // `?` on an operator-bound param (`op col`) — an optional filter is equality-only (same-name, typed, or `-> edge`); `> null` is meaningless
+                                                 // E0337 retired: `?` now works with any operator (was "optional filter is equality-only").
     pub const OPT_PARAM_UNFILTERED: &str = "E0338"; // `?` where the param is not an auto-applied filter — a block/raw query (params are `$`-referenced) or a mutation param
 
     // Warnings on an input-used shape naming an engine-managed column (BW1).

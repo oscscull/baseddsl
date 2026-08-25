@@ -232,18 +232,6 @@ impl Dialect {
         }
     }
 
-    /// NULL-safe equality `lhs <op> rhs` — true when both sides are NULL, unlike plain `=`.
-    /// Drives an optional filter param's guarded predicate (queries.md): a `null` argument
-    /// then matches `col IS NULL`, a value matches equality. Spelled per dialect:
-    /// `IS NOT DISTINCT FROM` (Postgres), `<=>` (MySQL/MariaDB), `IS` (SQLite).
-    pub fn null_safe_eq(self, lhs: &str, rhs: &str) -> String {
-        match self {
-            Self::Postgres => format!("{lhs} IS NOT DISTINCT FROM {rhs}"),
-            Self::MariaDb | Self::MySql => format!("{lhs} <=> {rhs}"),
-            Self::Sqlite => format!("{lhs} IS {rhs}"),
-        }
-    }
-
     /// String concatenation of `parts` (a computed shape field's `a || b`). SQLite and
     /// Postgres take the SQL-standard `||` operator; the MySQL/MariaDB family has no string
     /// `||` (there it is a logical OR), so it uses `CONCAT(…)`. Routed through this seam so

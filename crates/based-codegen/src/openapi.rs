@@ -834,11 +834,9 @@ fn input_schema(schema: &CheckedSchema, c: &Callable) -> Value {
         let optional =
             p.optional || p.default.is_some() || p.ty.as_ref().is_some_and(|t| t.optional);
         let entity = c.param_entities.get(&p.name.node).map(String::as_str);
-        let mut ty = param_schema(schema, c.root, p, entity);
-        // A `?` optional filter accepts a JSON `null` (→ `col IS NULL`) as well as a value.
-        if p.optional {
-            ty = nullable(ty);
-        }
+        // A `?` optional filter is 2-state (skip / value): not `required`, but not nullable —
+        // null-matching is a body concern, not a param state (queries.md).
+        let ty = param_schema(schema, c.root, p, entity);
         props.insert(p.name.node.clone(), ty);
         if !optional {
             required.push(Value::String(p.name.node.clone()));
@@ -931,33 +929,6 @@ fn param_schema(
             wrap(base_schema(&te.base), te.many)
         }
         None => infer_param(schema, root, p),
-    }
-}
-
-/// Widen a schema to also admit JSON `null` — for a `?` optional filter param, whose
-/// `null` argument means `col IS NULL`. A plain `{type: X}` becomes `{type: [X, "null"]}`
-/// (the array form the cursor schema already uses); a `$ref`/`oneOf` is wrapped in
-/// `anyOf` with a null branch.
-fn nullable(schema: Value) -> Value {
-    match &schema {
-        Value::Object(obj) => match obj.get("type") {
-            Some(Value::String(t)) => {
-                let mut obj = obj.clone();
-                obj.insert("type".into(), json!([t, "null"]));
-                Value::Object(obj)
-            }
-            Some(Value::Array(ts)) => {
-                let mut ts = ts.clone();
-                if !ts.iter().any(|v| v == "null") {
-                    ts.push(json!("null"));
-                }
-                let mut obj = obj.clone();
-                obj.insert("type".into(), Value::Array(ts));
-                Value::Object(obj)
-            }
-            _ => json!({ "anyOf": [schema, { "type": "null" }] }),
-        },
-        _ => json!({ "anyOf": [schema, { "type": "null" }] }),
     }
 }
 

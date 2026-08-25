@@ -39,22 +39,22 @@ OpenAPI advertises the shared empty `Ack` object schema. Its keyed twin returns 
 A DELETE matching no row (absent, or another scope's) is the standard `404 not_found` error, so a
 caller always gets a verdict, never an empty success for a miss.
 
-## Optional filters (`Filter<T>`)
-An optional filter param (`status?`, queries.md) is `Filter<T>` on the typed input, not
-`Option<T>` — the three states are named so a reader can't misread them:
+## Optional filters (`Option<T>`)
+An optional filter param (`status?`, queries.md) is `Option<T>` on the typed input — omit it
+(skip the predicate) or supply a value (apply it), with whatever operator the query binds:
 ```
 client.search_orders(SearchOrders {
-    status:   Filter::Null,          // WHERE status IS NULL
-    customer: Filter::Eq(cust_id),   // WHERE customer = :customer
-    ..Default::default()             // every unset filter defaults to Filter::Any (skip)
+    status: Some(status),            // WHERE status = :status
+    since:  Some(cutoff),            // WHERE created_at > :since  (from a `since?: … > …` param)
+    ..Default::default()             // every unset filter is None (skipped)
 }).await?;
 ```
-`Filter<T>` (`Any` / `Null` / `Eq(T)`, `Default = Any`) serializes to exactly the three
-wire states — `Any` → the field is **absent**, `Null` → JSON `null`, `Eq(v)` → the value
-— so the server's guarded predicate distinguishes drop / `IS NULL` / equality. The helper
-type is emitted once, only when the schema declares an optional filter (a schema without one
-is byte-identical). OpenAPI marks the property not-`required` and null-accepting. Distinct
-from a defaulted/`type?` param, which stays `Option<T>` (omit → the engine fills the default).
+`Option<T>` serializes to the two wire states — `None` → the field is **absent** (skip),
+`Some(v)` → the value — so the server's present-guard drops the predicate when the field is
+absent and applies the bound operator when present. OpenAPI marks the property not-`required`
+(and not nullable — null is not a param state). Same type as a defaulted/`type?` param; there
+is no bespoke filter type. To match null rows, do it in the body (`where status = null`) or
+with a `bool` facet param.
 
 ## Pagination envelope
 A query with `page (N)` returns `{ rows, cursor }`: the rows plus an opaque cursor for the next page. Codegen knows this from the body. Next page = same call + `cursor`; threading is generated, client never assembles keyset mechanics (pagination.md).

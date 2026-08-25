@@ -4305,10 +4305,21 @@ fn optional_filter_with_default_is_e0336() {
 }
 
 #[test]
-fn optional_filter_on_operator_binding_is_e0337() {
+fn optional_filter_with_operator_binding_is_clean() {
+    // `?` works with any operator now (E0337 retired) — the guard drops the whole predicate
+    // when the arg is absent, regardless of operator.
     let src = format!("{OPT_MODEL}\nquery search(since?: timestamp > created_at) -> Card[];");
     let (_, d) = analyze(&src);
-    assert!(errors(&d).contains(&"E0337"), "{:?}", codes(&d));
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn optional_filter_with_like_and_range_is_clean() {
+    let src = format!(
+        "{OPT_MODEL}\nquery search(pat?: text ~ status, after?: timestamp > created_at) -> Card[];"
+    );
+    let (_, d) = analyze(&src);
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
 }
 
 #[test]

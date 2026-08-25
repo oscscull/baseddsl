@@ -6469,3 +6469,40 @@ optional filter never drops the injected scope predicate.
 `__present` flag + value across the three states). Spec: `queries.md`, `calling.md`, `grammar.ebnf`,
 `docs/reference.md`. Proven live on SQLite (drop / `IS NULL` / equality / two-param composition) +
 generated-client compilation via the embedded golden.
+
+**SUPERSEDED IN PART by D133 (2026-08-26):** the tri-state `Filter<T>` and the equality-only
+restriction (E0337) are retired — optional filters now work with any operator and the client type
+is uniform `Option<T>` (2-state). Null-matching moved out of the param layer into the body.
+
+## D133 — optional filters: any operator, uniform `Option<T>` (supersedes D132's tri-state)
+
+**Owner-approved 2026-08-26.** Two forks resolved: (1) generalize `?` optional filters beyond
+equality, (2) retire `Filter<T>`.
+
+**Problem.** D132's skip-or-apply was `col = value` only (E0337 rejected an operator binding); a
+skippable `~` / range / `in` / `has` / or-composed filter was unspellable — the dynamic-facet gap
+for anything but equality.
+
+**Any operator.** The present-guard is operator-agnostic: each atomic predicate referencing an
+optional param lowers to `(:p__present = 0 OR <predicate>)`. An absent arg widens the leaf to
+TRUE, so it composes correctly through `and`/`or`/`not` for `= != > < >= <=`, `~`, `in`, `has`.
+E0337 retired; `check_optional_params` drops the equality-only branch (E0335/E0336/E0338 kept).
+codegen `optional_guard` → operator-agnostic `present_guard` in `sql/dml.rs`, and the `ColOp` arm
+of `param_condition` (never guarded before — E0337 blocked it) now routes through it.
+
+**`Filter<T>` retired for `Option<T>`.** The tri-state (skip / null / value) only had a meaningful
+third state for `=`/`!=` (`> NULL` / `LIKE NULL` / `IN (NULL)` never match), so a uniform 3-state
+either split the client type by operator or became a footgun. Resolved by dropping the null state:
+every optional filter param is `Option<T>` (2-state: `None` skips, `Some(v)` applies), for all
+operators. Rust has no built-in tri-state without an enum (`Option<Option<T>>` is the `Some(None)`
+ugliness), so removing the third state removes the need for the bespoke `Filter` type entirely.
+
+**Null-matching leaves the param layer.** No `col IS NULL` via a param value. Static null-match
+stays in the body (`where col = null`); a dynamic null facet is a plain `bool` param composed in
+the body, or a dedicated query — never `raw`. `Dialect::null_safe_eq` removed; `openapi.rs` drops
+the `nullable` wrap (property not-required but not null-accepting); `plan.rs` still binds the
+`__present` flag + value (a present explicit `null` now yields `= NULL`, matching nothing).
+
+**Scope (this commit).** The signature per-param form only (`search(status?)`, `search(since?: …
+> created_at)`). Optional `$param`s inside a body `where` (the `or`-composed case) still hit E0338
+and are a follow-up.

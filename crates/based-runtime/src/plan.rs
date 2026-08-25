@@ -419,8 +419,9 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         let (family, optional) = query_param_family(&compiled.schema, root, p, entity);
         if p.optional {
             // A `?` optional filter param (queries.md): bind a `__present` flag codegen's
-            // guard reads, plus the value. Absent → flag 0 (predicate drops); JSON `null` →
-            // flag 1 + NULL (matches `col IS NULL`); a value → flag 1 + equality.
+            // guard reads, plus the value. Absent → flag 0 (the predicate drops); a value →
+            // flag 1 + the value, applied by whatever operator the query used. 2-state —
+            // null is no longer a param state (null-matching lives in the body).
             let value = match req.args.get(&p.name.node) {
                 Some(v) => coerce(v, family, true).map_err(|e| bad_arg(&p.name.node, e))?,
                 None => SqlValue::Null,

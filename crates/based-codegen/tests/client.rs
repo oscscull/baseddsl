@@ -1156,7 +1156,7 @@ fn computed_shape_fields_type_by_inferred_expression() {
 }
 
 #[test]
-fn optional_filter_param_is_filter_type() {
+fn optional_filter_param_is_option_type() {
     let out = gen(r#"
         Product {
           id: Id
@@ -1167,23 +1167,28 @@ fn optional_filter_param_is_filter_type() {
         shape ProductName from Product { name }
         query search(status?) -> ProductName[] order (name);
         "#);
-    // The tri-state helper is emitted, and the param field takes it (not Option<T>).
-    assert!(out.contains("pub enum Filter<T>"), "\n{out}");
-    assert!(out.contains("pub status: Filter<String>,"), "\n{out}");
-    // Absent (Any) is dropped from the wire; null/value are carried.
+    // A `?` optional filter is uniform `Option<T>` (2-state: omit → skip, value → apply).
+    assert!(out.contains("pub status: Option<String>,"), "\n{out}");
     assert!(
-        out.contains("skip_serializing_if = \"Filter::is_any\""),
+        out.contains("skip_serializing_if = \"Option::is_none\""),
         "\n{out}"
     );
+    // No bespoke Filter type any more.
+    assert!(!out.contains("enum Filter"), "\n{out}");
 }
 
 #[test]
-fn no_optional_param_omits_filter_type() {
-    // A schema without a `?` param must not carry the helper (byte-identical guarantee).
+fn optional_filter_with_operator_is_option_type() {
+    // `?` works with a non-equality operator now, still surfaced as `Option<T>`.
     let out = gen(r#"
-        Product { id: Id, name: text }
+        Product {
+          id: Id
+          name: text
+          @index(name)
+        }
         shape ProductName from Product { name }
-        query by_id(id) -> ProductName;
+        query search(pat?: text ~ name) -> ProductName[] order (name);
         "#);
-    assert!(!out.contains("enum Filter<T>"), "\n{out}");
+    assert!(out.contains("pub pat: Option<String>,"), "\n{out}");
+    assert!(!out.contains("enum Filter"), "\n{out}");
 }

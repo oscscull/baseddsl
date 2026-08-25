@@ -1016,8 +1016,8 @@ fn resolve_return(
 
 /// Validate a param's binding + default against the target model. When `infer` is
 /// set (bare/inline query), an unbound param must name a same-named column.
-/// Validate every `?` optional filter param on a query (queries.md). An optional filter is
-/// equality-only, list/aggregate-only, must not also carry a default, and only acts on a
+/// Validate every `?` optional filter param on a query (queries.md). An optional filter works
+/// with any operator, is list/aggregate-only, must not also carry a default, and only acts on a
 /// bare/inline query (a block/raw query references params via `$`, so a guard can't wrap
 /// them). Each violation is its own diagnostic; the param is otherwise checked normally.
 fn check_optional_params(q: &Query, verb: Verb, infer: bool, sink: &mut Sink) {
@@ -1048,14 +1048,6 @@ fn check_optional_params(q: &Query, verb: Verb, infer: bool, sink: &mut Sink) {
                 p.name.span,
                 format!("param `{}` is both optional (`?`) and defaulted", p.name.node),
                 "skip-when-absent and fill-when-absent contradict — keep the `?` or the `= default`, not both",
-            );
-        }
-        if matches!(&p.binding, Some(ParamBinding::ColOp { .. })) {
-            sink.error_note(
-                code::OPT_PARAM_BINDING,
-                p.name.span,
-                format!("`?` optional filter on param `{}` must be an equality", p.name.node),
-                "an optional filter is equality-only (same-name, typed, or `-> edge`); an operator binding like `> col` can't be null-guarded",
             );
         }
     }

@@ -35,27 +35,26 @@ query posts(user -> author, since: timestamp > created_at) -> PostShape[];
 ## Optional filter params (`name?`)
 A `?` on a param name makes it an **optional filter** — the dynamic-facet search pattern.
 Each param contributes a predicate only when the caller supplies it; omit it and that
-predicate drops from the `WHERE`. Three call-site states, each a distinct SQL:
+predicate drops from the `WHERE`. It works with **any operator**, not just equality:
 ```
-query search_orders(status?, customer?) -> OrderCard[];
+query search_orders(status?, since?: timestamp > created_at) -> OrderCard[];
 ```
 - **absent** — the predicate is not applied (the filter widens).
-- **`null`** — matches `col IS NULL` (rows with no value).
-- **a value** — ordinary equality `col = value`.
+- **a value** — the predicate applies with whatever operator the binding uses (`col = v`,
+  `col > v`, `col LIKE v`, `col IN …`, `col @> …`).
 
-The three map one-to-one to what JSON carries: a field **absent** / present-`null` /
-present-value. On the typed client the param is `Filter<T>` — `Filter::Any` (skip) /
-`Filter::Null` / `Filter::Eq(v)`, defaulting to `Any` (calling.md). It lowers to a static
-guarded predicate — `(:p__present = 0 OR col <null-safe => :p)` — so a caller can never
-send a bare `col = NULL` (which is never true). To ask for *only* the null rows as a fixed
-query, write it in the body instead: `where (status = null)` → `IS NULL`.
+Two states, one-to-one with what the typed client carries: a field **absent** / present-value.
+On the typed client the param is `Option<T>` — `None` skips, `Some(v)` applies (calling.md). It
+lowers to a present-guarded predicate — `(:p__present = 0 OR <predicate>)` — so an absent arg
+widens the leaf to TRUE, composing correctly through `and`/`or`. Null-matching is **not** a
+param state: to filter on null rows, write it in the body (`where (status = null)` → `IS NULL`)
+or gate it with a `bool` facet param (`where (status = $s or ($unset and status = null))`).
 
-Rules (each its own diagnostic): equality-only — same-name, typed same-name, or `-> edge`;
-an operator binding (`since?: timestamp > created_at`) is `E0337` (`> null` is meaningless).
-List/aggregate only (`E0335` on a `get` — an optional key would return any row). Mutually
-exclusive with `= default` (`E0336` — skip-when-absent and fill-when-absent contradict).
-Only on a bare/inline query (`E0338` — a block/raw query references params via `$`). `@scope`
-is unaffected: a dropped optional filter never drops the injected scope predicate.
+Rules (each its own diagnostic): any operator is allowed. List/aggregate only (`E0335` on a
+`get` — an optional key would return any row). Mutually exclusive with `= default` (`E0336` —
+skip-when-absent and fill-when-absent contradict). Only on a bare/inline query (`E0338` — a
+block/raw query references params via `$`). `@scope` is unaffected: a dropped optional filter
+never drops the injected scope predicate.
 
 ## Full body form
 ```

@@ -1,9 +1,9 @@
 //! End-to-end proof of `?` optional filter params against a **real** SQLite engine — no
-//! mock. A `status?` param is a three-state filter (queries.md): absent drops the predicate,
-//! a JSON `null` matches `col IS NULL`, a value matches equality. This runs the verbatim
-//! `based gen sql` DDL + the runtime's lowered guarded predicate against a live in-memory
-//! database, so a passing run means the drop / `IS NULL` / equality behavior actually
-//! executes in the DB — including two optional params composing (one skipped, one applied).
+//! mock. A `?` param is a two-state filter (queries.md): absent drops the predicate, a value
+//! applies it — with ANY operator, not just equality. This runs the verbatim `based gen sql`
+//! DDL + the runtime's lowered present-guarded predicate against a live in-memory database, so
+//! a passing run means the skip/apply behavior actually executes in the DB — for equality, a
+//! `~` LIKE, a `>` range, and two optional params composing (one skipped, one applied).
 
 #![cfg(feature = "sqlite")]
 
@@ -21,27 +21,34 @@ Product {
   id: Id
   name: text
   category: text
+  rank: int
   status: text?
+  @index(name)
   @index(status)
   @index(category)
+  @index(rank)
 }
 
 shape ProductName from Product { name }
 
-# one optional filter, three states
+# one optional equality filter
 query search(status?) -> ProductName[] order (name);
 
 # two optional filters compose with AND; either may be skipped independently
 query search2(status?, category?) -> ProductName[] order (name);
+
+# optional non-equality filters — the generalized capability
+query search_like(pat?: text ~ name) -> ProductName[] order (name);
+query search_gt(min?: int > rank) -> ProductName[] order (name);
 "#;
 
-// Five products: two `active`, one `shipped`, two with NULL status; across two categories.
+// Five products across two categories, with ascending ranks; two carry a NULL status.
 const SEED: &str = r#"
-INSERT INTO `product` (`id`, `name`, `category`, `status`) VALUES ('p1', 'Widget', 'tools', 'active');
-INSERT INTO `product` (`id`, `name`, `category`, `status`) VALUES ('p2', 'Hammer', 'tools', 'active');
-INSERT INTO `product` (`id`, `name`, `category`, `status`) VALUES ('p3', 'Apple', 'food', NULL);
-INSERT INTO `product` (`id`, `name`, `category`, `status`) VALUES ('p4', 'Banana', 'food', NULL);
-INSERT INTO `product` (`id`, `name`, `category`, `status`) VALUES ('p5', 'Nail', 'tools', 'shipped');
+INSERT INTO `product` (`id`, `name`, `category`, `rank`, `status`) VALUES ('p1', 'Widget', 'tools', 10, 'active');
+INSERT INTO `product` (`id`, `name`, `category`, `rank`, `status`) VALUES ('p2', 'Hammer', 'tools', 20, 'active');
+INSERT INTO `product` (`id`, `name`, `category`, `rank`, `status`) VALUES ('p3', 'Apple', 'food', 30, NULL);
+INSERT INTO `product` (`id`, `name`, `category`, `rank`, `status`) VALUES ('p4', 'Banana', 'food', 40, NULL);
+INSERT INTO `product` (`id`, `name`, `category`, `rank`, `status`) VALUES ('p5', 'Nail', 'tools', 50, 'shipped');
 "#;
 
 async fn backend() -> (Compiled, SqliteBackend) {
@@ -109,21 +116,52 @@ async fn absent_optional_filter_drops_the_predicate() {
 }
 
 #[tokio::test]
-async fn null_optional_filter_matches_is_null() {
-    let (c, backend) = backend().await;
-    // Explicit JSON null → `status IS NULL` → only the two NULL-status rows.
-    let r = call(&c, &backend, "/q/search", json!({ "status": null })).await;
-    assert_eq!(r.status, 200, "{:?}", r.body);
-    assert_eq!(names(&r.body), ["Apple", "Banana"]);
-}
-
-#[tokio::test]
 async fn value_optional_filter_matches_equality() {
     let (c, backend) = backend().await;
     // A value → ordinary equality, NULL rows excluded.
     let r = call(&c, &backend, "/q/search", json!({ "status": "active" })).await;
     assert_eq!(r.status, 200, "{:?}", r.body);
     assert_eq!(names(&r.body), ["Hammer", "Widget"]);
+}
+
+#[tokio::test]
+async fn explicit_null_value_matches_nothing_under_2state() {
+    let (c, backend) = backend().await;
+    // 2-state: null is no longer a param state. The client's `Option<T>` never sends null
+    // (None omits the field); a raw caller that sends an explicit `null` gets present=1 with
+    // a NULL value → `status = NULL` → matches nothing. Null-matching lives in the body now.
+    let r = call(&c, &backend, "/q/search", json!({ "status": null })).await;
+    assert_eq!(r.status, 200, "{:?}", r.body);
+    assert!(names(&r.body).is_empty(), "{:?}", r.body);
+}
+
+#[tokio::test]
+async fn optional_like_filter_skips_or_matches() {
+    let (c, backend) = backend().await;
+    // Absent → every row.
+    let all = call(&c, &backend, "/q/search_like", json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        names(&all.body),
+        ["Apple", "Banana", "Hammer", "Nail", "Widget"]
+    );
+    // Present → `name LIKE 'Ha%'` → just Hammer.
+    let hit = call(&c, &backend, "/q/search_like", json!({ "pat": "Ha%" })).await;
+    assert_eq!(hit.status, 200, "{:?}", hit.body);
+    assert_eq!(names(&hit.body), ["Hammer"]);
+}
+
+#[tokio::test]
+async fn optional_range_filter_skips_or_matches() {
+    let (c, backend) = backend().await;
+    // Absent → every row.
+    let all = call(&c, &backend, "/q/search_gt", json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(all.body.as_array().expect("array").len(), 5);
+    // Present → `rank > 25` → Apple(30), Banana(40), Nail(50).
+    let hit = call(&c, &backend, "/q/search_gt", json!({ "min": 25 })).await;
+    assert_eq!(hit.status, 200, "{:?}", hit.body);
+    assert_eq!(names(&hit.body), ["Apple", "Banana", "Nail"]);
 }
 
 #[tokio::test]
@@ -146,14 +184,14 @@ async fn two_optional_filters_compose_and_skip_independently() {
     assert_eq!(cat_only.status, 200, "{:?}", cat_only.body);
     assert_eq!(names(&cat_only.body), ["Hammer", "Nail", "Widget"]);
 
-    // Null status + a category: `status IS NULL` AND in food.
-    let null_and_cat = call(
+    // A different value + a category: shipped AND tools → just Nail.
+    let shipped_tools = call(
         &c,
         &backend,
         "/q/search2",
-        json!({ "status": null, "category": "food" }),
+        json!({ "status": "shipped", "category": "tools" }),
     )
     .await;
-    assert_eq!(null_and_cat.status, 200, "{:?}", null_and_cat.body);
-    assert_eq!(names(&null_and_cat.body), ["Apple", "Banana"]);
+    assert_eq!(shipped_tools.status, 200, "{:?}", shipped_tools.body);
+    assert_eq!(names(&shipped_tools.body), ["Nail"]);
 }

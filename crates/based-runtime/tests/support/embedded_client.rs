@@ -541,50 +541,6 @@ pub mod entity {
     pub enum Feature {}
 }
 
-// ---------- optional filters ----------
-
-/// An optional query filter (a `name?` param): `Any` drops the filter, `Null` matches
-/// `col IS NULL`, `Eq(v)` matches equality. `Default` is `Any`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Filter<T> {
-    Any,
-    Null,
-    Eq(T),
-}
-
-impl<T> Default for Filter<T> {
-    fn default() -> Self {
-        Filter::Any
-    }
-}
-
-impl<T> Filter<T> {
-    fn is_any(&self) -> bool {
-        matches!(self, Filter::Any)
-    }
-}
-
-impl<T: Serialize> Serialize for Filter<T> {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            // `Any` is dropped by `skip_serializing_if`; if ever reached it is a null.
-            Filter::Any | Filter::Null => s.serialize_none(),
-            Filter::Eq(v) => s.serialize_some(v),
-        }
-    }
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Filter<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        // An absent field is `#[serde(default)]` → `Any`; a present `null` arrives as
-        // `None` → `Null`; a value → `Eq`.
-        Ok(match Option::<T>::deserialize(d)? {
-            None => Filter::Null,
-            Some(v) => Filter::Eq(v),
-        })
-    }
-}
-
 // ---------- output types ----------
 
 /// The empty acknowledgement a `-> ok` mutation answers with (`{}` on the wire —
@@ -617,8 +573,8 @@ pub const ORDER_BY_ID_ROUTE: &str = "/q/order_by_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindOrdersInput {
-    #[serde(default, skip_serializing_if = "Filter::is_any")]
-    pub status: Filter<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 /// Wire route for `find_orders`.
 pub const FIND_ORDERS_ROUTE: &str = "/q/find_orders";
