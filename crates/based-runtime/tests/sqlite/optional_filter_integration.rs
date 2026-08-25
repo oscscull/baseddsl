@@ -40,6 +40,10 @@ query search2(status?, category?) -> ProductName[] order (name);
 # optional non-equality filters — the generalized capability
 query search_like(pat?: text ~ name) -> ProductName[] order (name);
 query search_gt(min?: int > rank) -> ProductName[] order (name);
+
+# block `where` + or-composition: each `?` leaf present-guards independently, so an absent
+# arg widens just its branch (an absent `q` makes the whole or-group TRUE).
+query search_or(q?, min?) -> ProductName[] { list Product where ((name ~ $q or category ~ $q) and rank >= $min) order (name); }
 "#;
 
 // Five products across two categories, with ascending ranks; two carry a NULL status.
@@ -194,4 +198,39 @@ async fn two_optional_filters_compose_and_skip_independently() {
     .await;
     assert_eq!(shipped_tools.status, 200, "{:?}", shipped_tools.body);
     assert_eq!(names(&shipped_tools.body), ["Nail"]);
+}
+
+#[tokio::test]
+async fn block_or_composition_skips_and_applies() {
+    let (c, backend) = backend().await;
+
+    // Both absent → the or-group and the range both widen → every row.
+    let all = call(&c, &backend, "/q/search_or", json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        names(&all.body),
+        ["Apple", "Banana", "Hammer", "Nail", "Widget"]
+    );
+
+    // `q` present → `name LIKE 'tool%' OR category LIKE 'tool%'` — category "tools" matches the
+    // three tools rows; the range widens (min absent).
+    let tools = call(&c, &backend, "/q/search_or", json!({ "q": "tool%" })).await;
+    assert_eq!(tools.status, 200, "{:?}", tools.body);
+    assert_eq!(names(&tools.body), ["Hammer", "Nail", "Widget"]);
+
+    // `min` present → `rank >= 30` applies; the or-group widens (q absent).
+    let min = call(&c, &backend, "/q/search_or", json!({ "min": 30 })).await;
+    assert_eq!(min.status, 200, "{:?}", min.body);
+    assert_eq!(names(&min.body), ["Apple", "Banana", "Nail"]);
+
+    // Both → (name/category LIKE 'tool%') AND rank >= 30 → only Nail (tools, rank 50).
+    let both = call(
+        &c,
+        &backend,
+        "/q/search_or",
+        json!({ "q": "tool%", "min": 30 }),
+    )
+    .await;
+    assert_eq!(both.status, 200, "{:?}", both.body);
+    assert_eq!(names(&both.body), ["Nail"]);
 }

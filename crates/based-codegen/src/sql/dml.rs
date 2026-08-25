@@ -52,7 +52,7 @@
 //! an ORDER BY inside the JSON aggregate (all three dialects support the ordered form);
 //! with neither declared the order stays unspecified.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use based_ast::*;
 use based_sema::{
@@ -927,6 +927,12 @@ fn out_alias(prefix: &str, name: &str) -> String {
 /// same-name equality (or its per-param binding); block/inline queries also carry
 /// explicit `where` clauses referencing params via `$`.
 fn collect_filter(sel: &mut Select, q: &Query, root: &RModel, out: &mut Vec<String>) {
+    sel.optional_params = q
+        .params
+        .iter()
+        .filter(|p| p.optional)
+        .map(|p| p.name.node.clone())
+        .collect();
     let is_block = matches!(q.body, QueryBody::Block(_) | QueryBody::Raw(_));
     if !is_block {
         for p in &q.params {
@@ -1346,6 +1352,10 @@ pub(crate) struct Select<'a> {
     /// to `excluded.<col>`, MySQL/MariaDB to `VALUES(<col>)`. Set only for a bulk upsert's SET
     /// clause; off everywhere else (there `incoming` is an ordinary path — sema forbids it).
     incoming: bool,
+    /// Names of the query's `?` optional filter params. A `where` comparison whose RHS is one
+    /// of these is present-guarded (`:{name}__present`) so an absent arg widens the leaf to
+    /// TRUE (queries.md), composing correctly through `and`/`or`.
+    optional_params: HashSet<String>,
 }
 
 /// A reachable `create … as name` tx step binding: the model it created, so a
@@ -1402,6 +1412,7 @@ impl<'a> Select<'a> {
             sub_counter: 0,
             bare_cols: false,
             incoming: false,
+            optional_params: HashSet::new(),
         }
     }
 
@@ -1669,6 +1680,7 @@ impl<'a> Select<'a> {
             sub_counter: self.sub_counter,
             bare_cols: false,
             incoming: false,
+            optional_params: self.optional_params.clone(),
         };
         let elem = sub.json_object_expr(body, child, &child_alias, "");
         // Sort cascade for the traversal: relation `@sort` on the edge beats the child
@@ -1735,6 +1747,7 @@ impl<'a> Select<'a> {
             sub_counter: self.sub_counter,
             bare_cols: false,
             incoming: false,
+            optional_params: self.optional_params.clone(),
         }
     }
 
@@ -2202,6 +2215,18 @@ impl<'a> Select<'a> {
 
     // ---------- predicate lowering (where / @scope) -----------------------
 
+    /// Wrap a body predicate in its optional-filter present-guard when its RHS is a `?` param.
+    /// An absent arg sets `:{name}__present` = 0, widening the leaf to TRUE so the filter drops
+    /// and composes through `and`/`or` (queries.md). A non-optional RHS is returned verbatim.
+    fn guard_optional(&self, value: &Value, pred: String) -> String {
+        if let Value::Param(pr) = value {
+            if pr.path.is_empty() && self.optional_params.contains(pr.name.node.as_str()) {
+                return format!("(:{}__present = 0 OR {pred})", pr.name.node);
+            }
+        }
+        pred
+    }
+
     pub(crate) fn predicate(&mut self, p: &Predicate, model: &RModel) -> String {
         match p {
             Predicate::And(a, b) => {
@@ -2227,7 +2252,7 @@ impl<'a> Select<'a> {
                 let rhs = self
                     .enum_variant_lit(model, path, value)
                     .unwrap_or_else(|| self.value(value, model));
-                match op {
+                let pred = match op {
                     // Collection ops don't fit plain infix: `in` needs a value list,
                     // `has` is JSON-array containment — MySQL's `value MEMBER OF(arr)`
                     // vs. Postgres's `arr @> value` (the JSONB containment operator).
@@ -2237,7 +2262,10 @@ impl<'a> Select<'a> {
                         _ => format!("{rhs} MEMBER OF({lhs})"),
                     },
                     _ => format!("{lhs} {} {rhs}", sql_op(*op)),
-                }
+                };
+                // A `?` optional param on the RHS present-guards this leaf so it drops when
+                // the arg is absent — the piece that makes an or-composed optional filter work.
+                self.guard_optional(value, pred)
             }
             // `path in (v, v, …)`: each element lowers like an equality RHS — an
             // enum variant to its wire value, a `$param` to its own placeholder

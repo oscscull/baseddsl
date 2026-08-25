@@ -4323,9 +4323,31 @@ fn optional_filter_with_like_and_range_is_clean() {
 }
 
 #[test]
-fn optional_filter_on_block_query_is_e0338() {
+fn optional_filter_in_block_where_is_clean() {
+    // A `?` param referenced in a block `where` is present-guarded — allowed now (was E0338).
     let src = format!(
         "{OPT_MODEL}\nquery search(status?) -> Card[] {{ list Product where (status = $status); }}"
+    );
+    let (_, d) = analyze(&src);
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn optional_filter_or_composed_in_block_is_clean() {
+    // The point of the feature: an optional `?` param inside an or-composed block filter checks
+    // clean; each leaf present-guards independently, so an absent arg widens its `or` branch.
+    let src = format!(
+        "{OPT_MODEL}\nquery search(q?) -> Card[] {{ list Product where (name ~ $q or status ~ $q); }}"
+    );
+    let (_, d) = analyze(&src);
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn optional_filter_on_raw_query_is_e0338() {
+    // A raw body is verbatim SQL — a `?` can't be present-guarded, so it's rejected.
+    let src = format!(
+        "{OPT_MODEL}\nquery search(status?: text) -> Card[] {{ raw`SELECT name FROM product WHERE status = ${{status}}`; }}"
     );
     let (_, d) = analyze(&src);
     assert!(errors(&d).contains(&"E0338"), "{:?}", codes(&d));

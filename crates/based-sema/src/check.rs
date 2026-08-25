@@ -508,7 +508,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
     for p in &q.params {
         check_param(p, ti, infer, cx, sink);
     }
-    check_optional_params(q, verb, infer, sink);
+    check_optional_params(q, verb, sink);
 
     // An aggregate return shape turns the query into an aggregate query: `group by` /
     // `having` become legal (and required for consistency), and the `get`/sort/pagination
@@ -1017,17 +1017,18 @@ fn resolve_return(
 /// Validate a param's binding + default against the target model. When `infer` is
 /// set (bare/inline query), an unbound param must name a same-named column.
 /// Validate every `?` optional filter param on a query (queries.md). An optional filter works
-/// with any operator, is list/aggregate-only, must not also carry a default, and only acts on a
-/// bare/inline query (a block/raw query references params via `$`, so a guard can't wrap
-/// them). Each violation is its own diagnostic; the param is otherwise checked normally.
-fn check_optional_params(q: &Query, verb: Verb, infer: bool, sink: &mut Sink) {
+/// with any operator, is list/aggregate-only, and must not also carry a default. It applies to a
+/// signature param (bare/inline) or a `$`-referenced comparison in a block `where` — both are
+/// present-guarded — but not to a raw body, whose SQL is verbatim. Each violation is its own
+/// diagnostic; the param is otherwise checked normally.
+fn check_optional_params(q: &Query, verb: Verb, sink: &mut Sink) {
     for p in q.params.iter().filter(|p| p.optional) {
-        if !infer {
+        if matches!(&q.body, QueryBody::Raw(_)) {
             sink.error_note(
                 code::OPT_PARAM_UNFILTERED,
                 p.name.span,
-                format!("`?` on param `{}` has no effect here", p.name.node),
-                "an optional filter applies only to a bare/inline query param; a block/raw query references params via `$`",
+                format!("`?` on param `{}` has no effect in a raw query", p.name.node),
+                "a raw query's SQL is verbatim, so a `?` param can't be present-guarded; write the optionality into the raw SQL or use a non-raw query",
             );
             continue;
         }

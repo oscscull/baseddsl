@@ -52,9 +52,20 @@ or gate it with a `bool` facet param (`where (status = $s or ($unset and status 
 
 Rules (each its own diagnostic): any operator is allowed. List/aggregate only (`E0335` on a
 `get` — an optional key would return any row). Mutually exclusive with `= default` (`E0336` —
-skip-when-absent and fill-when-absent contradict). Only on a bare/inline query (`E0338` — a
-block/raw query references params via `$`). `@scope` is unaffected: a dropped optional filter
-never drops the injected scope predicate.
+skip-when-absent and fill-when-absent contradict). Works in a signature param **or** a
+block-query `where` — both are present-guarded — but not in a raw body (`E0338` — its SQL is
+verbatim). `@scope` is unaffected: a dropped optional filter never drops the injected scope
+predicate.
+
+An optional `?` param may also be referenced by `$` inside a block-query `where`, including
+`or`-composition — each comparison against it is present-guarded independently, so an absent arg
+widens just that leaf:
+```
+query search(q?, min?) -> ProductName[] {
+  where (name ~ $q or memo ~ $q) and rank >= $min
+} order (name);
+```
+Absent `q` widens the whole `or`-group to TRUE (the filter drops); a value applies both `LIKE`s.
 
 ## Full body form
 ```

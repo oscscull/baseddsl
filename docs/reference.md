@@ -159,7 +159,7 @@ query name(params) -> RetType [scoped Name] ;            # or { body } or inline
 **Param binding:** `(id)` same-name eq · `(user: User)` typed · `(user -> author)` bind through an edge ·
 `(since: timestamp > created_at)` explicit column + operator.
 
-**Optional filter (`name?`):** a `?` makes a param an optional filter, with **any operator** — `query search(status?, since?: timestamp > created_at) -> OrderCard[];`. Two states: **absent** drops the predicate, a **value** applies it (`=`, `~`, `>`, `in`, `has`, …). Client type is `Option<T>` (`None` skips). `list`-only, no `= default` (E0335, E0336, E0338). Null-matching is a body concern (`where col = null`), not a param state.
+**Optional filter (`name?`):** a `?` makes a param an optional filter, with **any operator** — `query search(status?, since?: timestamp > created_at) -> OrderCard[];`. Two states: **absent** drops the predicate, a **value** applies it (`=`, `~`, `>`, `in`, `has`, …). Client type is `Option<T>` (`None` skips). Works as a signature param or a `$`-ref inside a block `where` (incl. `or`-composition); `list`-only, no `= default`, not in a raw body (E0335, E0336, E0338). Null-matching is a body concern (`where col = null`), not a param state.
 
 **Filter operators:** `= != > < >= <=`, `~` (LIKE, pattern verbatim), `in`, `has` (array/json contains).
 Compose with `and` (binds tighter), `or`, `not`, parentheses. Bare bool column: `where (active)`.

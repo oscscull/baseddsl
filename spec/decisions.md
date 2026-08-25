@@ -6503,6 +6503,10 @@ the body, or a dedicated query — never `raw`. `Dialect::null_safe_eq` removed;
 the `nullable` wrap (property not-required but not null-accepting); `plan.rs` still binds the
 `__present` flag + value (a present explicit `null` now yields `= NULL`, matching nothing).
 
-**Scope (this commit).** The signature per-param form only (`search(status?)`, `search(since?: …
-> created_at)`). Optional `$param`s inside a body `where` (the `or`-composed case) still hit E0338
-and are a follow-up.
+**Scope.** Both forms. The signature per-param form (`search(status?)`, `search(since?: … >
+created_at)`), and optional `$param`s inside a block-query `where` — including `or`-composition.
+`check_optional_params`'s E0338 now fires only for a raw body (a block `where` guards its own
+params); `Select` carries the query's optional-param names and `predicate()`'s `Cmp` arm wraps a
+comparison whose RHS is a `?` param in its `:{name}__present` guard. Mutations still reject `?`
+(the separate mutation check), so a `?` can't widen a write. The runtime already binds the
+`__present` flag per optional param, so no runtime change.
