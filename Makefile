@@ -142,6 +142,15 @@ ci-image:
 based-cli:
 	$(CARGO) build -p based-cli
 
+## Update the locally-installed dev tools to the current tree: the `based` CLI (release, into
+## ~/.cargo/bin) and a fresh `based-lsp` (target/debug — the VS Code extension launches it via a
+## PATH symlink pointing there). Reload the VS Code window afterward so the editor picks up the
+## new LSP binary (Cmd/Ctrl+Shift+P -> "Developer: Reload Window").
+install-dev:
+	$(CARGO) install --path crates/based-cli --force
+	$(CARGO) build -p based-lsp
+	@echo "install-dev: based (CLI) + based-lsp updated. Reload the VS Code window to pick up the new LSP."
+
 ## All live-DB proof (both dialects). Assumes both servers are up (see dev-db-up).
 ci-live: ci-live-mariadb ci-live-postgres ci-live-sqlx
 
