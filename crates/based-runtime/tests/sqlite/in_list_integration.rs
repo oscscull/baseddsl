@@ -186,7 +186,7 @@ async fn non_array_arg_for_array_param_is_bad_arg() {
     // A scalar where an array is expected is a boundary error (400), not a silent match.
     let r = call(&c, &backend, "/q/find_in", json!({ "vals": "R" })).await;
     assert_eq!(r.status, 400, "{:?}", r.body);
-    assert_eq!(r.body["error"], "bad_arg");
+    assert_eq!(r.body["error"]["code"], "bad_arg", "{:?}", r.body);
 }
 
 #[tokio::test]
@@ -195,5 +195,5 @@ async fn wrong_typed_element_is_bad_arg() {
     // A non-text element in a `text[]` list fails coercion at the boundary (400).
     let r = call(&c, &backend, "/q/find_in", json!({ "vals": ["R", 5] })).await;
     assert_eq!(r.status, 400, "{:?}", r.body);
-    assert_eq!(r.body["error"], "bad_arg");
+    assert_eq!(r.body["error"]["code"], "bad_arg", "{:?}", r.body);
 }
