@@ -72,6 +72,8 @@ fn bind_all<'q>(
             // would take (the value never reaches the DB well-formed).
             SqlValue::Bytes(s) => q.bind(crate::value::b64_decode(s).unwrap_or_default()),
             SqlValue::Json(j) => q.bind(j.to_string()),
+            // A list is expanded to per-element binds by `to_positional` before this point.
+            SqlValue::List(_) => unreachable!("list values are expanded before binding"),
         };
     }
     q

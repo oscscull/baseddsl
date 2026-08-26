@@ -125,6 +125,8 @@ fn bind_all<'q>(
                     .map_err(|e| DbError::new(format!("invalid base64 bytes: {e}")))?,
             ),
             SqlValue::Json(j) => q.bind(j.clone()),
+            // A list is expanded to per-element binds by `to_positional` before this point.
+            SqlValue::List(_) => unreachable!("list values are expanded before binding"),
         };
     }
     Ok(q)

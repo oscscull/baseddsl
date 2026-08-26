@@ -15,6 +15,8 @@ mod computed_integration;
 mod distinct_integration;
 #[path = "sqlite/idempotency_db.rs"]
 mod idempotency_db;
+#[path = "sqlite/in_list_integration.rs"]
+mod in_list_integration;
 #[path = "sqlite/key_composite_integration.rs"]
 mod key_composite_integration;
 #[path = "sqlite/key_integration.rs"]

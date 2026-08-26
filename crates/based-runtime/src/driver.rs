@@ -93,6 +93,8 @@ fn bind_all<'q>(
             // (a malformed base64 string binds as empty, as a bad literal would).
             SqlValue::Bytes(s) => q.bind(crate::value::b64_decode(s).unwrap_or_default()),
             SqlValue::Json(j) => q.bind(j.to_string()),
+            // A list is expanded to per-element binds by `to_positional` before this point.
+            SqlValue::List(_) => unreachable!("list values are expanded before binding"),
         };
     }
     q

@@ -597,8 +597,10 @@ async fn run_writes<D: DbRead + ?Sized>(
     // every step is bound late, from this growing environment (D124).
     let mut env = plan.env0.clone();
     let bind = |sql: &str, env: &std::collections::HashMap<String, SqlValue>| {
-        to_positional(sql, plan.dialect, |name| env.get(name).cloned())
-            .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (planner mismatch)")))
+        to_positional(sql, plan.dialect, |name| {
+            env.get(name).cloned().map(SqlValue::expand)
+        })
+        .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (planner mismatch)")))
     };
 
     // A structured `create … from` with a declared shape return (BW1b/BW2) reads its written
@@ -895,11 +897,10 @@ async fn insert_bulk_rows<D: DbRead + ?Sized>(
         // Bulk upsert (BW2): the `ON CONFLICT … / ON DUPLICATE KEY UPDATE` tail, its `:name`
         // binds continuing this statement's positional count.
         if let Some(tail) = &step.conflict_tail {
-            let (frag, tparams) =
-                crate::scan::to_positional_from(tail, dialect, ord, |n| env.get(n).cloned())
-                    .map_err(|n| {
-                        DbError::new(format!("unbound placeholder `:{n}` (upsert tail)"))
-                    })?;
+            let (frag, tparams) = crate::scan::to_positional_from(tail, dialect, ord, |n| {
+                env.get(n).cloned().map(SqlValue::expand)
+            })
+            .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (upsert tail)")))?;
             sql.push_str(&frag);
             params.extend(tparams);
         }
@@ -937,8 +938,10 @@ async fn insert_bulk_rows<D: DbRead + ?Sized>(
 /// Count the `:name` placeholders in a SQL fragment (quote-aware via [`to_positional`]) —
 /// how many binds a bulk upsert's tail contributes to each chunk statement.
 fn count_named(sql: &str) -> usize {
-    crate::scan::to_positional(sql, based_codegen::Dialect::Postgres, |_| Some(()))
-        .map_or(0, |(_, v)| v.len())
+    crate::scan::to_positional(sql, based_codegen::Dialect::Postgres, |_| {
+        Some(crate::scan::Bound::One(()))
+    })
+    .map_or(0, |(_, v)| v.len())
 }
 
 /// A read-back key value from a fetched JSON scalar: an integer id stays an `Int`, anything
@@ -997,7 +1000,10 @@ async fn run_bulk_readback<D: DbRead + ?Sized>(
         &tuples.join(", "),
     );
     let (bound_sql, params) = crate::scan::to_positional(&sql, plan.dialect, |n| {
-        env.get(n).or_else(|| binds.get(n)).cloned()
+        env.get(n)
+            .or_else(|| binds.get(n))
+            .cloned()
+            .map(SqlValue::expand)
     })
     .map_err(|n| DbError::new(format!("unbound placeholder `:{n}` (bulk read-back)")))?;
     let rows = fetch_all(db.fetch(&bound_sql, &params)).await?;
