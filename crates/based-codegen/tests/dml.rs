@@ -1681,3 +1681,30 @@ fn keyset_nullable_sort_key_is_null_aware_per_dialect() {
         "\n{pg}"
     );
 }
+
+#[test]
+fn null_comparison_lowers_to_is_null() {
+    // `= null` / `!= null` are null tests, not value comparisons — SQL `col = NULL` never
+    // matches. Covers the `where` body and a computed `case when` null-test.
+    let sql = gen(r#"
+        Order { id: Id  assignee: text?  @index(assignee) }
+        shape Card from Order {
+          id
+          unassigned = case when assignee = null then true else false end
+        }
+        query only_unassigned() -> Card[] { list Order where (assignee = null) order (id); }
+        query has_owner() -> Card[] { list Order where (assignee != null) order (id); }
+        "#);
+    assert!(
+        sql.contains("`assignee` IS NULL"),
+        "`where = null` must lower to IS NULL\n{sql}"
+    );
+    assert!(
+        sql.contains("`assignee` IS NOT NULL"),
+        "`where != null` must lower to IS NOT NULL\n{sql}"
+    );
+    assert!(
+        sql.contains("`assignee` IS NULL THEN"),
+        "a computed `case when col = null` must null-test (`… IS NULL THEN …`), not `= NULL`\n{sql}"
+    );
+}

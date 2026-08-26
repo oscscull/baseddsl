@@ -2247,21 +2247,34 @@ impl<'a> Select<'a> {
             Predicate::Cmp { path, op, value } => {
                 let (alias, col) = self.resolve(path, model);
                 let lhs = self.qcol(&alias, &col);
-                // An enum column compares against a bare variant, which lowers to its
-                // wire string literal (not a column reference).
-                let rhs = self
-                    .enum_variant_lit(model, path, value)
-                    .unwrap_or_else(|| self.value(value, model));
-                let pred = match op {
-                    // Collection ops don't fit plain infix: `in` needs a value list,
-                    // `has` is JSON-array containment — MySQL's `value MEMBER OF(arr)`
-                    // vs. Postgres's `arr @> value` (the JSONB containment operator).
-                    Op::In => format!("{lhs} IN ({rhs})"),
-                    Op::Has => match self.dialect {
-                        Dialect::Postgres => format!("{lhs} @> {rhs}"),
-                        _ => format!("{rhs} MEMBER OF({lhs})"),
-                    },
-                    _ => format!("{lhs} {} {rhs}", sql_op(*op)),
+                let pred = if matches!(value, Value::Lit(Literal::Null))
+                    && matches!(op, Op::Eq | Op::Ne)
+                {
+                    // `col = null` / `col != null` are null tests, not value comparisons:
+                    // SQL `col = NULL` is always NULL (never matches), so lower to IS [NOT] NULL.
+                    let nullness = if *op == Op::Eq {
+                        "IS NULL"
+                    } else {
+                        "IS NOT NULL"
+                    };
+                    format!("{lhs} {nullness}")
+                } else {
+                    // An enum column compares against a bare variant, which lowers to its
+                    // wire string literal (not a column reference).
+                    let rhs = self
+                        .enum_variant_lit(model, path, value)
+                        .unwrap_or_else(|| self.value(value, model));
+                    match op {
+                        // Collection ops don't fit plain infix: `in` needs a value list,
+                        // `has` is JSON-array containment — MySQL's `value MEMBER OF(arr)`
+                        // vs. Postgres's `arr @> value` (the JSONB containment operator).
+                        Op::In => format!("{lhs} IN ({rhs})"),
+                        Op::Has => match self.dialect {
+                            Dialect::Postgres => format!("{lhs} @> {rhs}"),
+                            _ => format!("{rhs} MEMBER OF({lhs})"),
+                        },
+                        _ => format!("{lhs} {} {rhs}", sql_op(*op)),
+                    }
                 };
                 // A `?` optional param on the RHS present-guards this leaf so it drops when
                 // the arg is absent — the piece that makes an or-composed optional filter work.
@@ -2341,16 +2354,26 @@ impl<'a> Select<'a> {
             }
             Predicate::Cmp { path, op, value } => {
                 let lhs = self.having_lhs(path, model, map);
-                let rhs = self
-                    .having_variant_lit(path, model, value, group_paths)
-                    .unwrap_or_else(|| self.value(value, model));
-                match op {
-                    Op::In => format!("{lhs} IN ({rhs})"),
-                    Op::Has => match self.dialect {
-                        Dialect::Postgres => format!("{lhs} @> {rhs}"),
-                        _ => format!("{rhs} MEMBER OF({lhs})"),
-                    },
-                    _ => format!("{lhs} {} {rhs}", sql_op(*op)),
+                if matches!(value, Value::Lit(Literal::Null)) && matches!(op, Op::Eq | Op::Ne) {
+                    // A null test on a group column / aggregate: IS [NOT] NULL, not `= NULL`.
+                    let nullness = if *op == Op::Eq {
+                        "IS NULL"
+                    } else {
+                        "IS NOT NULL"
+                    };
+                    format!("{lhs} {nullness}")
+                } else {
+                    let rhs = self
+                        .having_variant_lit(path, model, value, group_paths)
+                        .unwrap_or_else(|| self.value(value, model));
+                    match op {
+                        Op::In => format!("{lhs} IN ({rhs})"),
+                        Op::Has => match self.dialect {
+                            Dialect::Postgres => format!("{lhs} @> {rhs}"),
+                            _ => format!("{rhs} MEMBER OF({lhs})"),
+                        },
+                        _ => format!("{lhs} {} {rhs}", sql_op(*op)),
+                    }
                 }
             }
             Predicate::InList { path, values } => {
