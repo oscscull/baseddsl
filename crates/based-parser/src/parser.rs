@@ -56,6 +56,37 @@ pub fn parse(src: &str, file: FileId) -> Result<SchemaFile, Vec<Diagnostic>> {
     }
 }
 
+/// Parse a standalone shape / generated-column expression (`price - discount`, `a || b`,
+/// `case when … then … else … end`). Used to re-lower a persisted generated-column
+/// expression per dialect at migration time. `Err` iff the input is not exactly one
+/// expression (a lex error, a parse error, or trailing tokens).
+pub fn parse_expr(src: &str, file: FileId) -> Result<ShapeExpr, Vec<Diagnostic>> {
+    let lexing = lex(src);
+    let mut p = Parser {
+        src,
+        file,
+        toks: lexing.tokens,
+        pos: 0,
+        diags: Vec::new(),
+    };
+    for (start, end) in lexing.errors {
+        p.diags
+            .push(Diagnostic::error("E0001", "unexpected character").at(Span { file, start, end }));
+    }
+    match p.shape_expr() {
+        Ok(e) if p.diags.is_empty() && p.peek().is_none() => Ok(e),
+        Ok(_) => {
+            if p.peek().is_some() {
+                p.diags.push(
+                    Diagnostic::error("E0002", "trailing tokens after expression").at(p.here()),
+                );
+            }
+            Err(p.diags)
+        }
+        Err(()) => Err(p.diags),
+    }
+}
+
 struct Parser<'a> {
     src: &'a str,
     file: FileId,

@@ -6539,8 +6539,10 @@ concat through the dialect seam (`||` PG/SQLite, `CONCAT(…)` MySQL family). Be
 column, project / `where` / `order` / `@index` / keyset fall out with no special-casing (the IR
 models it as a `MemberKind::Scalar` carrying its `ShapeExpr`).
 
-**Migrations.** The neutral snapshot records the expression (`generated=(…)`, Postgres spelling)
-so add/drop/expression-change diff; an expression change lowers to **drop + re-add** (no dialect
-alters a generation expression in place). Known gap: the migration renderer re-emits the neutral
-(PG-form) string, so a `||`-concat generated column needs a manual `CONCAT(…)` fix on the MySQL
-family in a migration; `based gen sql` is correct on all three.
+**Migrations.** The neutral snapshot records the expression as **dialect-neutral, re-parseable
+DSL** (`generated=(first || " " || last)` — bare column names, `||` concat, DSL literals, enum
+variants pre-resolved to literals), so the migration renderer **re-parses and re-lowers it per
+target dialect** exactly like `based gen sql` (`||` on Postgres/SQLite, `CONCAT(…)` on the MySQL
+family — never `||`, which is logical-OR there). add/drop/expression-change all diff; an
+expression change lowers to **drop + re-add** (no dialect alters a generation expression in
+place), and a same-name replace never trips the `@was` rename hint.

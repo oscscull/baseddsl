@@ -252,10 +252,16 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
                 }),
                 unique: *unique,
                 fk: None,
-                // A generated column records its expression in a fixed neutral form (the
-                // Postgres spelling — `||` for concat), so add/drop/expression-change diffs.
+                // A generated column records its expression in a dialect-neutral, re-parseable
+                // form (bare column names, `||` concat, DSL literals), so the migrate renderer
+                // re-lowers it per target dialect — and add/drop/expression-change all diff.
                 generated: generated.as_ref().map(|e| {
-                    crate::sql::generated_expr_sql(schema, model, e, crate::Dialect::Postgres)
+                    crate::sql::generated_expr(
+                        Some(schema),
+                        Some(model),
+                        e,
+                        crate::sql::Emit::Neutral,
+                    )
                 }),
             }),
             MemberKind::Forward {

@@ -909,13 +909,18 @@ fn drop_index_sql(dialect: Dialect, schema: Option<&str>, table: &str, name: &st
 /// `CREATE TABLE` bodies, `ADD COLUMN`, and MariaDB's `MODIFY COLUMN`. Matches
 /// `sql::column_line` so an `add column` reads identically to a `create table` column.
 fn column_ddl(c: &ColumnSnap, dialect: Dialect) -> String {
-    // A generated column carries its `GENERATED ALWAYS AS (<expr>) STORED` clause instead of
-    // a nullability/default. The stored expression is neutral (Postgres spelling: `||` for
-    // concat); correct on Postgres/SQLite, and on the MySQL family for arithmetic/case —
-    // a concat (`||`) generated column needs a manual `CONCAT(…)` fix there for now.
+    // A generated column carries its `GENERATED ALWAYS AS (<expr>) STORED` clause instead of a
+    // nullability/default. The snapshot stores the expression in dialect-neutral DSL, so it is
+    // re-parsed and re-lowered here per target dialect — concat becomes `||` on Postgres/SQLite
+    // and `CONCAT(…)` on the MySQL family, exactly like `based gen sql`. A snapshot too corrupt
+    // to parse falls back to the stored text verbatim (a hand-edit; parse/verify guards it).
     if let Some(g) = &c.generated {
+        let expr_sql = based_parser::parse_expr(g, based_ast::FileId(0)).map_or_else(
+            |_| g.clone(),
+            |expr| crate::sql::generated_expr(None, None, &expr, crate::sql::Emit::Sql(dialect)),
+        );
         return format!(
-            "{} {} GENERATED ALWAYS AS ({g}) STORED",
+            "{} {} GENERATED ALWAYS AS ({expr_sql}) STORED",
             dialect.quote(&c.name),
             neutral_sql_type(&c.ty, dialect),
         );
