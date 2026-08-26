@@ -20,11 +20,11 @@ Enrollment {
   sessions: Session[]
 }
 
+@sort(id asc)
 Session {
   id:         Id
   enrollment: Enrollment
   note:       text
-  @sort(id asc)
   @index enrollment
 }
 

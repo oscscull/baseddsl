@@ -3136,6 +3136,9 @@ fn compile_paths(
         // (no project) has none, so they are skipped there.
         if let Some(d) = dialect {
             diagnostics.extend(based_sema::check_target(&schema, d.name()));
+            diagnostics.extend(based_codegen::ordered_nest_diagnostics(
+                &schema, &expanded, d,
+            ));
         }
         // FK-convention divergence checks (resolved project `foreign_keys`; a loose file
         // with no project uses the safe `None` default).
@@ -3326,6 +3329,67 @@ mod tests {
         let orphan = TempWorkspace::new("orphan");
         orphan.write("loose.bsl", "Order { name: text }\n");
         assert_eq!(find_manifest_root(&orphan.path("loose.bsl")), None);
+    }
+
+    /// The MySQL ordered-nest error (`E0350`) must reach the editor: it needs the
+    /// resolved compile target, so it only fires on the manifest-project path, and it
+    /// must carry a span + an explanatory message the IDE can show inline.
+    #[test]
+    fn mysql_ordered_nest_surfaces_e0350() {
+        let ws = TempWorkspace::new("mysql_ordered_nest");
+        ws.write("based.toml", "dialect = \"mysql\"\n");
+        ws.write(
+            "schema.bsl",
+            "@sort(created_at asc)\n\
+             Comment { id: Id, body: text, created_at: timestamp, post: Post, @index(post) }\n\
+             Post { id: Id, comments: Comment[] (Comment.post) }\n\
+             shape PostDetail from Post { id, comments { id, body } }\n\
+             query get_post(id) -> PostDetail;\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let d = snap
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0350")
+            .unwrap_or_else(|| panic!("expected E0350, got {:?}", snap.diagnostics));
+        assert!(d.span.is_some(), "E0350 must carry a span for the editor");
+        assert!(d.message.contains("JSON_ARRAYAGG"), "{}", d.message);
+
+        // The same schema on MariaDB has no such error.
+        let ws2 = TempWorkspace::new("mariadb_ordered_nest");
+        ws2.write("based.toml", "dialect = \"mariadb\"\n");
+        ws2.write(
+            "schema.bsl",
+            "@sort(created_at asc)\n\
+             Comment { id: Id, body: text, created_at: timestamp, post: Post, @index(post) }\n\
+             Post { id: Id, comments: Comment[] (Comment.post) }\n\
+             shape PostDetail from Post { id, comments { id, body } }\n\
+             query get_post(id) -> PostDetail;\n",
+        );
+        let snap2 = compile_manifest(&ws2.root, &HashMap::new());
+        assert!(
+            !snap2.diagnostics.iter().any(|d| d.code == "E0350"),
+            "MariaDB must permit an ordered nest: {:?}",
+            snap2.diagnostics
+        );
+    }
+
+    /// The misplaced field-`@sort` error (`E0348`) must reach the editor with a span.
+    #[test]
+    fn misplaced_field_sort_surfaces_e0348() {
+        let ws = TempWorkspace::new("misplaced_sort");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Post { id: Id, created_at: timestamp @sort(created_at desc) }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        let d = snap
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0348")
+            .unwrap_or_else(|| panic!("expected E0348, got {:?}", snap.diagnostics));
+        assert!(d.span.is_some(), "E0348 must carry a span for the editor");
     }
 
     /// Opening the repo root (no `based.toml` there) and editing a file whose model

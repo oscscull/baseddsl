@@ -6546,3 +6546,36 @@ target dialect** exactly like `based gen sql` (`||` on Postgres/SQLite, `CONCAT(
 family — never `||`, which is logical-OR there). add/drop/expression-change all diff; an
 expression change lowers to **drop + re-add** (no dialect alters a generation expression in
 place), and a same-name replace never trips the `@was` rename hint.
+
+## D135 — no silent failures: misplaced `@sort` + MySQL can't order a to-many nest
+
+Owner principle 2026-08-26 (issue #8): **nothing silently fails.** A construct that is
+accepted-but-ignored, or unsupported for the compile target, must ERROR at `check` — never
+emit best-effort / no-op / invalid SQL. Extends principle 9 (never mislead; a silent no-op
+misleads). Two instances fixed:
+
+- **Misplaced field-`@sort` (`E0348`).** A field-level `@sort` orders a to-many relation's
+  nested collection (D87). The parser attaches a trailing `@sort` to the *preceding field*,
+  so `@sort` after a scalar column (a common attempt to set the model default from *inside*
+  the body — it belongs *before* the model) was consumed and then dropped, since a scalar /
+  to-one edge has no collection to order. Now a field `@sort` is legal **only on a to-many
+  relation field**; anywhere else is `E0348` (sema, dialect-free), pointing at the field.
+
+- **Ordered to-many nest / m2m flatten on MySQL (`E0350`).** D87 lowered nest order to
+  `ORDER BY` *inside* the JSON aggregate and claimed "all three dialects" — meaning the three
+  it verified: Postgres `json_agg(… ORDER BY …)`, MariaDB `JSON_ARRAYAGG(… ORDER BY …)`,
+  SQLite ≥ 3.44. **MySQL is a distinct compile target** (`dialect = "mysql"`), and codegen
+  shares the MariaDB branch — but **MySQL's `JSON_ARRAYAGG` has no `ORDER BY` clause at all**
+  (verified on MySQL 8.0.46: `JSON_ARRAYAGG(x ORDER BY y)` → `ERROR 1064` syntax error; the
+  plain form works). So an ordered nest targeting MySQL emitted invalid SQL that failed at
+  runtime. Resolution: `check` rejects an ordered to-many nest / flatten when the target is
+  MySQL (`E0350`, a target check like the E027x family), pointing at the nest field — target
+  MariaDB, or leave the traversal unordered. An unordered nest works on every target. A
+  native MySQL ordering workaround (no reliable one exists in 8.0) is deferred; representing
+  it as a hard `check` error is the safe, non-misleading behavior.
+
+**Architecture.** The dialect-aware pass already existed (`based_sema::check_target`, plus a
+new `based_codegen::ordered_nest_diagnostics` that walks the shape/nest graph reusing the
+same to-many/sort-cascade decision codegen lowers with — one source of truth). The CLI and
+LSP run it after `check_target` once the manifest dialect is resolved; the front end / sema
+core stay dialect-agnostic.

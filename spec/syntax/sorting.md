@@ -15,7 +15,11 @@ Post { ... }
 ```
 
 ## Relation default (overrides model, for that traversal)
-"This entity when reached this way" may sort differently than globally.
+"This entity when reached this way" may sort differently than globally. A field-level
+`@sort` is valid **only on a to-many relation field** — it orders that relation's nested
+collection. Placed on a scalar or a to-one relation (or inside the model body expecting to
+set the model default — that spelling goes *before* the model) it orders nothing, so it is
+rejected (`E0348`) rather than silently dropped.
 ```
 User {
   posts: Post[] (Post.author) @sort(pinned desc, created_at desc)
@@ -27,6 +31,12 @@ A shape's to-many nest (`items { ... }`) is a traversal, so its array follows th
 cascade minus the query tier: relation `@sort` > target model `@sort` > unspecified.
 Query `order` never reaches inside a nest — it orders the query's own rows. (Shapes still
 carry no sort; the order is a property of the traversed rows, declared on the data model.)
+
+The nest's order lowers to an `ORDER BY` *inside* the JSON aggregate. MariaDB, Postgres,
+and SQLite (≥ 3.44) all honor an ordered aggregate; **MySQL's `JSON_ARRAYAGG` has no
+`ORDER BY` clause** (it is a syntax error, not a silent no-op). So an ordered to-many nest
+(or m2m flatten) targeting MySQL cannot be generated and is rejected at `check` (`E0350`) —
+target MariaDB, or leave the traversal unordered. An *unordered* nest works on every target.
 
 ## Query override (most specific)
 ```

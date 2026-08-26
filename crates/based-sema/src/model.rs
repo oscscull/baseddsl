@@ -1647,20 +1647,42 @@ pub fn resolve_exprs(ast: &Model, cx: &resolve::Cx, sink: &mut Sink) {
         }
     }
 
-    // Relation `@sort` sorts the *target* rows; resolve terms against the target.
+    // A field-level `@sort` orders the target's rows when reached via this edge — which
+    // only exists for a to-many relation (its nested array). On a scalar or a to-one
+    // relation there is no collection to order, so codegen drops it; reject the misplaced
+    // form (E0348) instead of silently ignoring it. On a valid to-many edge the terms
+    // resolve against the target model.
     for mem in &ast.members {
         let Member::Field(f) = mem else { continue };
         let Some(terms) = &f.sort else { continue };
-        let ctx = match cx.model(mi).member(&f.name.node).map(|m| &m.kind) {
-            Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
-                cx.find(target)
-            }
-            _ => Some(mi),
+        let target = match cx.model(mi).member(&f.name.node).map(|m| &m.kind) {
+            // To-many inverse edge (its paired forward FK is not unique): a genuine
+            // collection. Resolve the sort terms against the target model.
+            Some(MemberKind::Inverse { target, via }) => match cx.find(target) {
+                Some(ti) if !cx.model(ti).is_unique(via) => Some(ti),
+                // A to-one inverse (has-one) has no collection to order.
+                Some(_) => None,
+                // Unresolved target: a relation error was already reported — don't pile on.
+                None => continue,
+            },
+            // A scalar or forward (to-one) relation: nothing to order.
+            _ => None,
         };
-        if let Some(ci) = ctx {
-            for t in terms {
-                resolve::check_sort_term(t, ci, cx, sink);
+        match target {
+            Some(ti) => {
+                for t in terms {
+                    resolve::check_sort_term(t, ti, cx, sink);
+                }
             }
+            None => sink.error_note(
+                code::SORT_MISPLACED,
+                f.name.span,
+                format!(
+                    "`@sort` on `{0}` has no effect: a field `@sort` orders a to-many relation's nested collection, and `{0}` is a scalar or to-one relation (nothing to order)",
+                    f.name.node
+                ),
+                "a field `@sort` is valid only on a to-many relation field; the model-wide default `@sort(…)` goes before the model, not inside its body",
+            ),
         }
     }
 }

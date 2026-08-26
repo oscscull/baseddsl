@@ -198,6 +198,8 @@ order (assignee asc nulls last)            # explicit NULL placement (nullable k
 
 `nulls first` / `nulls last` (default: the dialect's own — Postgres nulls-last on asc, MySQL/MariaDB/SQLite nulls-first) pins where NULLs fall, portably: native `NULLS FIRST|LAST` on Postgres/SQLite, a leading `col IS NULL` term on MySQL/MariaDB. Also valid in `@sort`. Keyset pagination follows the chosen placement.
 
+A field-level `@sort` is valid only on a **to-many relation** (it orders that nested collection); on a scalar or to-one relation it is `E0348` (the model-wide default `@sort` goes *before* the model). An **ordered to-many nest / m2m flatten targeting MySQL** is `E0350` — MySQL's `JSON_ARRAYAGG` has no `ORDER BY` clause (MariaDB/Postgres/SQLite do), so the ordered array has no valid SQL form; target MariaDB or leave the nest unordered.
+
 ## Pagination
 
 ```
