@@ -320,6 +320,7 @@ async fn data_survives_a_sqlite_table_rebuild() {
         default: default.map(str::to_string),
         unique: false,
         fk: None,
+        generated: None,
     };
     let bare = |name: &str, columns: Vec<ColumnSnap>| TableSnap {
         name: name.to_string(),
