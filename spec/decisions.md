@@ -6510,3 +6510,37 @@ params); `Select` carries the query's optional-param names and `predicate()`'s `
 comparison whose RHS is a `?` param in its `:{name}__present` guard. Mutations still reject `?`
 (the separate mutation check), so a `?` can't widen a write. The runtime already binds the
 `__present` flag per optional param, so no runtime change.
+
+## D134 — generated columns: `name = <expr>` model field → native STORED generated column
+
+Owner-approved 2026-08-26 (issue #6). A derived value could only be a shape *computed field*
+(projection-only — not filterable/sortable). To filter/sort/index by a derived value you now
+declare a **generated column** on the model.
+
+**Spelling.** Reuse the shape computed-field form `name = <expr>` as a model field (no new
+keyword) — `:` starts an ordinary field, `=` a generated one. Consistent with shape computed
+fields and reuses the existing `ShapeExpr` AST (`Value`/`Arith`/`Concat`/`Case`) + its type
+inference. **STORED** (a real, indexable column); VIRTUAL out of scope for v1 (a possible later
+per-column toggle).
+
+**Same-row only.** A STORED generated column can reference only the row's own columns —
+`E0340` (relation reach), `E0341` (unknown column), `E0342` (parameter), `E0346` (another
+generated column — Postgres forbids it and it needs an ordering the engine won't impose).
+Operand typing reuses the computed-field families: `E0343` (non-numeric arithmetic), `E0344`
+(non-text concat), `E0345` (case branches don't unify). Type + nullability are **inferred** from
+the expression (numeric promotion decimal > float > int, concat → text, case unifies branches).
+
+**Read-only.** Its value is derived, so a create/update assigning it is `E0347`, and a create
+never requires it (excluded from the required-column set even though NOT NULL, no default).
+
+**Lowering.** `col TYPE GENERATED ALWAYS AS (<expr>) STORED` on all three targets; operands are
+referenced **bare** (unqualified — the form every dialect accepts in a generation clause),
+concat through the dialect seam (`||` PG/SQLite, `CONCAT(…)` MySQL family). Because it is a real
+column, project / `where` / `order` / `@index` / keyset fall out with no special-casing (the IR
+models it as a `MemberKind::Scalar` carrying its `ShapeExpr`).
+
+**Migrations.** The neutral snapshot records the expression (`generated=(…)`, Postgres spelling)
+so add/drop/expression-change diff; an expression change lowers to **drop + re-add** (no dialect
+alters a generation expression in place). Known gap: the migration renderer re-emits the neutral
+(PG-form) string, so a `||`-concat generated column needs a manual `CONCAT(…)` fix on the MySQL
+family in a migration; `based gen sql` is correct on all three.

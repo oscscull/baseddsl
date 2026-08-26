@@ -194,6 +194,9 @@ fn column_spec(c: &ColumnSnap) -> String {
     if let Some(fk) = &c.fk {
         let _ = write!(s, " fk={fk}");
     }
+    if let Some(g) = &c.generated {
+        let _ = write!(s, " generated=({g})");
+    }
     s
 }
 

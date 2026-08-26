@@ -149,6 +149,23 @@ pub enum Member {
     Field(Field),
     Index(IndexDecl),
     SoftOverride(SoftOverride),
+    /// `net = price - discount` — a **generated column**: a stored derived column whose
+    /// value is a same-row expression (arithmetic / concat / `case`), lowered to a SQL
+    /// native `GENERATED ALWAYS AS (<expr>) STORED` column. Reuses the shape
+    /// computed-field expression grammar ([`ShapeExpr`]); its type and nullability are
+    /// inferred from the expression. Because it is a real column, project/filter/sort/
+    /// index all treat it like any scalar.
+    Generated(GeneratedField),
+}
+
+/// A model's generated-column declaration: `name = <expr>`. The expression is restricted
+/// (in sema) to the row's own columns — no relation reaches, aggregates, or parameters —
+/// so it lowers to a stored `GENERATED ALWAYS AS (…) STORED` column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedField {
+    pub name: Ident,
+    pub expr: ShapeExpr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

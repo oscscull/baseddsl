@@ -33,8 +33,9 @@
 //! `(unique)` constraints stay inline in all three. Identifiers are backtick-quoted on
 //! MariaDB/SQLite and double-quoted on Postgres ([`Dialect::quote`]).
 
-use based_ast::{DefaultVal, Literal, Primitive, RawSpec};
+use based_ast::{DefaultVal, Literal, Path, Predicate, Primitive, RawSpec, ShapeExpr, Value};
 use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel};
+use std::fmt::Write as _;
 
 use crate::Dialect;
 
@@ -267,6 +268,7 @@ fn column_lines(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec
                 enum_name,
                 raw_type,
                 unique: _,
+                generated,
             } => {
                 let en = enum_name.as_deref().and_then(|n| schema.enum_(n));
                 // An opaque column's DB type is the literal the author wrote.
@@ -277,14 +279,24 @@ fn column_lines(schema: &CheckedSchema, model: &RModel, dialect: Dialect) -> Vec
                         .to_string(),
                     None => sql_type(*ty, *many, dialect),
                 };
-                lines.push(column_line(
-                    column,
-                    &col_ty,
-                    *optional,
-                    default.as_ref(),
-                    en,
-                    dialect,
-                ));
+                // A generated column carries a `GENERATED ALWAYS AS (<expr>) STORED` clause
+                // in place of a nullability/default; its value is derived, never stored by hand.
+                if let Some(expr) = generated {
+                    lines.push(format!(
+                        "{} {col_ty} GENERATED ALWAYS AS ({}) STORED",
+                        dialect.quote(column),
+                        generated_expr_sql(schema, model, expr, dialect),
+                    ));
+                } else {
+                    lines.push(column_line(
+                        column,
+                        &col_ty,
+                        *optional,
+                        default.as_ref(),
+                        en,
+                        dialect,
+                    ));
+                }
             }
             MemberKind::Forward { optional, .. } => {
                 // FK column(s) mirror the target's primary key: one column for a
@@ -467,6 +479,161 @@ fn physical_col(model: &RModel, field: &str) -> String {
         Some(MemberKind::Forward { fk_col, .. }) => fk_col.clone(),
         _ => field.to_string(),
     }
+}
+
+/// Lower a **generated column** expression to per-dialect SQL over the row's own columns,
+/// referenced **bare** (unqualified) — the form every dialect accepts inside a
+/// `GENERATED ALWAYS AS (…)` clause. The expression is same-row-only (sema-enforced), so no
+/// joins are involved: arithmetic lowers to `(a op b)`, concat through the dialect's seam,
+/// and a `case` to `CASE WHEN … THEN … ELSE … END`.
+pub(crate) fn generated_expr_sql(
+    schema: &CheckedSchema,
+    model: &RModel,
+    expr: &ShapeExpr,
+    dialect: Dialect,
+) -> String {
+    match expr {
+        ShapeExpr::Value(v) => gen_value_sql(model, v, dialect),
+        ShapeExpr::Arith { lhs, op, rhs, .. } => format!(
+            "({} {} {})",
+            generated_expr_sql(schema, model, lhs, dialect),
+            dml::arith_op_sql(*op),
+            generated_expr_sql(schema, model, rhs, dialect),
+        ),
+        ShapeExpr::Concat { .. } => {
+            let mut parts = Vec::new();
+            gen_collect_concat(schema, model, expr, dialect, &mut parts);
+            dialect.concat(&parts)
+        }
+        ShapeExpr::Case { arms, else_, .. } => {
+            let mut s = String::from("CASE");
+            for arm in arms {
+                let _ = write!(
+                    s,
+                    " WHEN {} THEN {}",
+                    gen_predicate_sql(schema, model, &arm.when, dialect),
+                    generated_expr_sql(schema, model, &arm.then, dialect)
+                );
+            }
+            let _ = write!(
+                s,
+                " ELSE {} END",
+                generated_expr_sql(schema, model, else_, dialect)
+            );
+            s
+        }
+    }
+}
+
+fn gen_collect_concat(
+    schema: &CheckedSchema,
+    model: &RModel,
+    expr: &ShapeExpr,
+    dialect: Dialect,
+    parts: &mut Vec<String>,
+) {
+    match expr {
+        ShapeExpr::Concat { lhs, rhs, .. } => {
+            gen_collect_concat(schema, model, lhs, dialect, parts);
+            gen_collect_concat(schema, model, rhs, dialect, parts);
+        }
+        other => parts.push(generated_expr_sql(schema, model, other, dialect)),
+    }
+}
+
+/// A generated-column leaf value as bare SQL: a same-row column as its quoted physical name,
+/// a literal via the shared literal renderer.
+fn gen_value_sql(model: &RModel, v: &Value, dialect: Dialect) -> String {
+    match v {
+        Value::Path(p) => dialect.quote(&physical_col(model, &p.segments[0].node)),
+        Value::Lit(l) => dml::render_lit(dialect, l),
+        Value::Func(f) => dml::render_func(f),
+        // Sema (E0342) rejects a parameter operand before codegen.
+        Value::Param(_) => String::new(),
+    }
+}
+
+/// Lower a generated-column CASE `when` predicate with bare column references.
+fn gen_predicate_sql(
+    schema: &CheckedSchema,
+    model: &RModel,
+    pred: &Predicate,
+    dialect: Dialect,
+) -> String {
+    match pred {
+        Predicate::And(a, b) => format!(
+            "({} AND {})",
+            gen_predicate_sql(schema, model, a, dialect),
+            gen_predicate_sql(schema, model, b, dialect)
+        ),
+        Predicate::Or(a, b) => format!(
+            "({} OR {})",
+            gen_predicate_sql(schema, model, a, dialect),
+            gen_predicate_sql(schema, model, b, dialect)
+        ),
+        Predicate::Not(inner) => {
+            format!("NOT ({})", gen_predicate_sql(schema, model, inner, dialect))
+        }
+        Predicate::Cmp { path, op, value } => {
+            let lhs = dialect.quote(&physical_col(model, &path.segments[0].node));
+            if matches!(value, Value::Lit(Literal::Null))
+                && matches!(op, based_ast::Op::Eq | based_ast::Op::Ne)
+            {
+                let nullness = if *op == based_ast::Op::Eq {
+                    "IS NULL"
+                } else {
+                    "IS NOT NULL"
+                };
+                return format!("{lhs} {nullness}");
+            }
+            let rhs = gen_cmp_rhs(schema, model, path, value, dialect);
+            format!("{lhs} {} {rhs}", dml::sql_op(*op))
+        }
+        Predicate::InList { path, values } => {
+            let lhs = dialect.quote(&physical_col(model, &path.segments[0].node));
+            let items: Vec<String> = values
+                .iter()
+                .map(|v| gen_cmp_rhs(schema, model, path, v, dialect))
+                .collect();
+            format!("{lhs} IN ({})", items.join(", "))
+        }
+        Predicate::Bare(path) => format!(
+            "{} = {}",
+            dialect.quote(&physical_col(model, &path.segments[0].node)),
+            dialect.bool_lit(true)
+        ),
+        // Named filters / raw are rejected in a generated column's condition (sema E0340).
+        Predicate::FilterCall { .. } | Predicate::Raw(_) => dialect.bool_lit(true).to_string(),
+    }
+}
+
+/// A generated-column comparison RHS: an enum column's bare variant lowers to its wire
+/// literal, a same-row column to its bare physical name, a literal to its SQL form.
+fn gen_cmp_rhs(
+    schema: &CheckedSchema,
+    model: &RModel,
+    path: &Path,
+    value: &Value,
+    dialect: Dialect,
+) -> String {
+    if let Value::Path(rp) = value {
+        if rp.segments.len() == 1 {
+            // An enum column compared to a bare variant → the variant's wire literal.
+            if let Some(MemberKind::Scalar {
+                enum_name: Some(en),
+                ..
+            }) = model.member(&path.segments[0].node).map(|m| &m.kind)
+            {
+                if let Some(v) = schema
+                    .enum_(en)
+                    .and_then(|e| e.wire_of(&rp.segments[0].node))
+                {
+                    return enum_value_sql(v);
+                }
+            }
+        }
+    }
+    gen_value_sql(model, value, dialect)
 }
 
 /// A single enum wire value rendered as a SQL literal: a string quoted, an int bare.

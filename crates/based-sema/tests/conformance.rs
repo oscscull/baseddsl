@@ -202,6 +202,7 @@ fn member(name: &str, kind: &MemberKind) -> String {
             default,
             enum_name,
             raw_type,
+            generated,
         } => {
             let mut s = format!(
                 "{name}: {}{}{}",
@@ -221,6 +222,9 @@ fn member(name: &str, kind: &MemberKind) -> String {
             }
             if let Some(d) = default {
                 s.push_str(&format!("  default={}", default_val(d)));
+            }
+            if generated.is_some() {
+                s.push_str("  generated");
             }
             s
         }

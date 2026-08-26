@@ -909,6 +909,17 @@ fn drop_index_sql(dialect: Dialect, schema: Option<&str>, table: &str, name: &st
 /// `CREATE TABLE` bodies, `ADD COLUMN`, and MariaDB's `MODIFY COLUMN`. Matches
 /// `sql::column_line` so an `add column` reads identically to a `create table` column.
 fn column_ddl(c: &ColumnSnap, dialect: Dialect) -> String {
+    // A generated column carries its `GENERATED ALWAYS AS (<expr>) STORED` clause instead of
+    // a nullability/default. The stored expression is neutral (Postgres spelling: `||` for
+    // concat); correct on Postgres/SQLite, and on the MySQL family for arithmetic/case —
+    // a concat (`||`) generated column needs a manual `CONCAT(…)` fix there for now.
+    if let Some(g) = &c.generated {
+        return format!(
+            "{} {} GENERATED ALWAYS AS ({g}) STORED",
+            dialect.quote(&c.name),
+            neutral_sql_type(&c.ty, dialect),
+        );
+    }
     let mut s = format!(
         "{} {} {}",
         dialect.quote(&c.name),

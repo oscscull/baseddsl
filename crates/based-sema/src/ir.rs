@@ -239,6 +239,19 @@ pub mod code {
     pub const INPUT_INCOMING_FIELD: &str = "E0333"; // `incoming.<col>` in a bulk `on conflict update` branch names a column that is not a settable column of the model
     pub const INPUT_INCOMING_CONTEXT: &str = "E0334"; // `incoming.<col>` used outside a `create … from … on conflict update` branch — the incoming-row keyword is contextual to bulk/from upsert
 
+    // Generated columns (E034x): a stored derived column `name = <expr>` on a model. The
+    // expression reuses the computed-field grammar (arithmetic / concat / case) but is
+    // restricted to the row's own columns — it lowers to a `GENERATED ALWAYS AS (…) STORED`
+    // column, so no relation reaches, aggregates, or parameters.
+    pub const GEN_REACH: &str = "E0340"; // an operand reaches through a relation (a stored generated column sees only its own row's columns)
+    pub const GEN_UNKNOWN_COL: &str = "E0341"; // an operand names a column the model does not declare
+    pub const GEN_PARAM: &str = "E0342"; // a `$…` operand in a generated column — a model has no parameters
+    pub const GEN_ARITH_OPERAND: &str = "E0343"; // an arithmetic (`+ - * /`) operand is not numeric
+    pub const GEN_CONCAT_OPERAND: &str = "E0344"; // a `||` concatenation operand is not text
+    pub const GEN_CASE_MISMATCH: &str = "E0345"; // a `case`'s branches don't share a common type
+    pub const GEN_ON_GENERATED: &str = "E0346"; // an operand names another generated column (unportable — a stored generated column may not depend on one)
+    pub const GEN_ASSIGN: &str = "E0347"; // a create/update assigns a generated column (its value is derived, never written)
+
     // `?` optional filter param (queries.md).
     pub const OPT_PARAM_GET: &str = "E0335"; // `?` on a `get` query param — a get is keyed on a unique field; an optional key would make it return any row. List/aggregate only
     pub const OPT_PARAM_DEFAULT: &str = "E0336"; // `?` combined with a `= default` — skip-when-absent and fill-when-absent contradict; pick one
@@ -836,6 +849,12 @@ pub enum MemberKind {
         /// carry, the value is opaque to the client, and filtering/sorting/assigning it
         /// is rejected. `ty` is `Text` so the value rides the ordinary text path.
         raw_type: Option<RawSpec>,
+        /// `net = price - discount` — the same-row expression of a **generated column**.
+        /// `Some` marks a stored derived column: DDL emits `GENERATED ALWAYS AS (<expr>)
+        /// STORED`, the value is read-only (a create/update may not assign it), and it is
+        /// excluded from a create's required-column set. `ty`/`optional` are inferred from
+        /// the expression. `None` for an ordinary stored column.
+        generated: Option<based_ast::ShapeExpr>,
     },
     /// To-one relation: FK lives on this table (`<field>_id`, or a custom join).
     Forward {
@@ -876,6 +895,18 @@ impl MemberKind {
             Self::Scalar { raw_type, .. } => raw_type.as_ref(),
             _ => None,
         }
+    }
+    /// The same-row expression of a generated column, when this member is one.
+    pub fn generated(&self) -> Option<&based_ast::ShapeExpr> {
+        match self {
+            Self::Scalar { generated, .. } => generated.as_ref(),
+            _ => None,
+        }
+    }
+    /// Is this a generated (stored derived) column? Its value is read-only — a
+    /// create/update may not assign it, and a create never requires it.
+    pub fn is_generated(&self) -> bool {
+        self.generated().is_some()
     }
     pub fn is_relation(&self) -> bool {
         !matches!(self, Self::Scalar { .. })

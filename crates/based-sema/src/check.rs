@@ -2006,6 +2006,17 @@ fn check_assign(
         unknown_field(cx, mi, &a.col, sink);
         return;
     };
+    // A generated column's value is derived from the row by the database — never written by
+    // a create/update (`E0347`).
+    if member.kind.is_generated() {
+        sink.error_note(
+            code::GEN_ASSIGN,
+            a.col.span,
+            format!("cannot write `{}` — it is a generated column", a.col.node),
+            "a generated column's value is derived from the row's own columns",
+        );
+        return;
+    }
     // An opaque column holds a value the engine cannot construct or validate, so it is
     // excluded from every write (`E0273`); the DB or a raw migration owns it.
     if let Some(spec) = member.kind.opaque() {
@@ -3131,6 +3142,11 @@ fn is_unique_key(m: &RModel, target: &[&str]) -> bool {
 /// set, so it is excluded).
 fn is_required(kind: &MemberKind) -> bool {
     match kind {
+        // A generated column is derived by the DB — never supplied on create, even though it
+        // is NOT NULL and carries no default.
+        MemberKind::Scalar {
+            generated: Some(_), ..
+        } => false,
         MemberKind::Scalar {
             optional, default, ..
         } => !*optional && default.is_none(),

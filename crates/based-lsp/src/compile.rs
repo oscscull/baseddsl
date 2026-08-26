@@ -2599,6 +2599,7 @@ fn member_start(m: &Member) -> Option<u32> {
     match m {
         Member::Field(f) => Some(f.span.start),
         Member::Index(i) => Some(i.span.start),
+        Member::Generated(g) => Some(g.span.start),
         Member::SoftOverride(_) => None,
     }
 }
