@@ -33,6 +33,13 @@ pub fn is_formatted(src: &str) -> Result<bool, Vec<Diagnostic>> {
     Ok(format_source(src)? == src)
 }
 
+/// Reprint a computed/generated-column expression in canonical form (minimal
+/// parentheses), e.g. `price - discount`. Used by editor surfaces (hover) to echo a
+/// generated column's defining expression.
+pub fn reprint_expr(e: &ShapeExpr) -> String {
+    shape_expr(e, 0)
+}
+
 #[derive(Clone)]
 enum LineKind {
     Blank,
