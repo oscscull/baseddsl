@@ -973,12 +973,15 @@ fn load_checked(root: &Path) -> Result<Loaded, CliError> {
         // Target-specific checks: what can only be judged once the manifest's compile
         // target is known (an opaque `raw({…})` map missing it, an index access method
         // it lacks).
-        let target = based_sema::check_target(
-            &checked,
-            based_codegen::Dialect::parse(&project.manifest.dialect).name(),
-        );
+        let dialect = based_codegen::Dialect::parse(&project.manifest.dialect);
+        let target = based_sema::check_target(&checked, dialect.name());
         count(&target, &mut errors, &mut warnings);
         render::render(&target, &sources);
+        // Dialect-gated constructs codegen can't emit for this target (an ordered to-many
+        // nest on MySQL) — rejected here, never emitted as invalid SQL.
+        let nests = based_codegen::ordered_nest_diagnostics(&checked, &all_decls, dialect);
+        count(&nests, &mut errors, &mut warnings);
+        render::render(&nests, &sources);
         // FK-convention checks: the divergence-reason rule, judged against the manifest's
         // `foreign_keys` value (a decorator flipping FK presence against it needs a reason).
         let fk = based_sema::check_foreign_keys(

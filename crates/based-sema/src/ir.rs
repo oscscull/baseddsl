@@ -261,6 +261,15 @@ pub mod code {
     // Warnings on an input-used shape naming an engine-managed column (BW1).
     pub const INPUT_NAMES_TIMESTAMP: &str = "W0112"; // names an `@created`/`@updated` column — the explicit value overrides the auto-timestamp
     pub const INPUT_NAMES_SCOPE: &str = "W0113"; // names a `@scope` column — the value is ignored (engine-injected from `$ctx`)
+
+    // Misplaced field-level `@sort` (E0348): a field `@sort` orders a to-many relation's
+    // nested collection. On a scalar or a to-one relation there is nothing to order, so
+    // codegen would drop it — reject it instead of silently ignoring it.
+    pub const SORT_MISPLACED: &str = "E0348"; // `@sort` on a scalar / to-one relation field — a field `@sort` is valid only on a to-many relation; a model-wide default goes before the model
+
+    // Dialect-gated construct with no compile-target equivalent (E035x): checked once the
+    // manifest's target is known (like the E027x target checks), never silently emitted.
+    pub const NEST_ORDER_UNSUPPORTED: &str = "E0350"; // an ordered to-many nest / m2m flatten targeting MySQL — its `JSON_ARRAYAGG` rejects `ORDER BY` (MariaDB/Postgres/SQLite honor it), so the ordered nested array can't be generated
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

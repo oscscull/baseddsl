@@ -12,7 +12,7 @@ model Enrollment  table=enrollment  key=(course, student)
   student: -> Student  fk=student_id
   grade: int
   sessions: <- Session via enrollment
-model Session  table=session
+model Session  table=session  sort=[id asc]
   id: Id
   enrollment: -> Enrollment  fk=enrollment_id
   note: text
