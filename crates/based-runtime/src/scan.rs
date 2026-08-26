@@ -17,14 +17,26 @@
 
 use based_codegen::Dialect;
 
+/// How one resolved placeholder fills the positional query: a single bind, or a
+/// variable-length list expanded into one placeholder per element (`col IN (?, ?, …)`) —
+/// the mechanism behind `col in $arr` for an array-typed param. `resolve` returns this so
+/// the scan emits the right number of positional markers; the empty-list-to-`NULL` decision
+/// is made by the caller (see [`crate::value::SqlValue::expand`]).
+pub enum Bound<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
 /// Rewrite `:name` placeholders to the dialect's positional form (`?` for
 /// MySQL/MariaDB/SQLite, `$n` for Postgres), calling `resolve` for each in appearance
-/// order to collect the bound values. `resolve` returns `None` for an unknown
-/// placeholder; the scan then returns `Err(name)` so the caller reports it.
+/// order to collect the bound values. A placeholder may resolve to a [`Bound::Many`] list,
+/// which expands to one positional marker per element (variable-length `IN (…)`). `resolve`
+/// returns `None` for an unknown placeholder; the scan then returns `Err(name)` so the
+/// caller reports it.
 pub fn to_positional<T>(
     sql: &str,
     dialect: Dialect,
-    resolve: impl FnMut(&str) -> Option<T>,
+    resolve: impl FnMut(&str) -> Option<Bound<T>>,
 ) -> Result<(String, Vec<T>), String> {
     to_positional_from(sql, dialect, 0, resolve)
 }
@@ -37,7 +49,7 @@ pub fn to_positional_from<T>(
     sql: &str,
     dialect: Dialect,
     offset: usize,
-    mut resolve: impl FnMut(&str) -> Option<T>,
+    mut resolve: impl FnMut(&str) -> Option<Bound<T>>,
 ) -> Result<(String, Vec<T>), String> {
     let bytes = sql.as_bytes();
     // Built as bytes so verbatim SQL text is copied intact: a multi-byte UTF-8 character
@@ -80,15 +92,28 @@ pub fn to_positional_from<T>(
             }
             let name = &sql[start..j];
             match resolve(name) {
-                Some(v) => {
-                    params.push(v);
-                    // Anonymous `?` or ordinal `$n` (1-based) per dialect. The ordinal
-                    // is the running parameter count, so it matches the bind order.
-                    match dialect {
-                        Dialect::Postgres => {
-                            out.extend_from_slice(format!("${}", offset + params.len()).as_bytes());
+                // One value → one marker; a list → one marker per element (`(?, ?, …)`), so a
+                // variable-length `col in $arr` binds each element positionally.
+                Some(bound) => {
+                    let values = match bound {
+                        Bound::One(v) => vec![v],
+                        Bound::Many(vs) => vs,
+                    };
+                    for (k, v) in values.into_iter().enumerate() {
+                        if k > 0 {
+                            out.extend_from_slice(b", ");
                         }
-                        _ => out.push(b'?'),
+                        params.push(v);
+                        // Anonymous `?` or ordinal `$n` (1-based) per dialect. The ordinal
+                        // is the running parameter count, so it matches the bind order.
+                        match dialect {
+                            Dialect::Postgres => {
+                                out.extend_from_slice(
+                                    format!("${}", offset + params.len()).as_bytes(),
+                                );
+                            }
+                            _ => out.push(b'?'),
+                        }
                     }
                     i = j;
                     continue;
@@ -118,11 +143,11 @@ mod tests {
     use super::*;
 
     fn go(sql: &str) -> (String, Vec<String>) {
-        to_positional(sql, Dialect::MariaDb, |n| Some(n.to_string())).unwrap()
+        to_positional(sql, Dialect::MariaDb, |n| Some(Bound::One(n.to_string()))).unwrap()
     }
 
     fn go_pg(sql: &str) -> (String, Vec<String>) {
-        to_positional(sql, Dialect::Postgres, |n| Some(n.to_string())).unwrap()
+        to_positional(sql, Dialect::Postgres, |n| Some(Bound::One(n.to_string()))).unwrap()
     }
 
     #[test]
@@ -190,5 +215,39 @@ mod tests {
     fn unknown_placeholder_errors() {
         let err = to_positional::<String>("a = :nope", Dialect::MariaDb, |_| None).unwrap_err();
         assert_eq!(err, "nope");
+    }
+
+    #[test]
+    fn list_param_expands_to_one_marker_per_element() {
+        // `col in $arr` keeps a single `:arr` placeholder; a `Many` bound expands it to one
+        // positional marker per element, in order, alongside the surrounding scalars.
+        let (sql, ps) =
+            to_positional(
+                "WHERE org = :org AND c IN (:arr)",
+                Dialect::MariaDb,
+                |n| match n {
+                    "arr" => Some(Bound::Many(vec!["R".to_string(), "U".to_string()])),
+                    other => Some(Bound::One(other.to_string())),
+                },
+            )
+            .unwrap();
+        assert_eq!(sql, "WHERE org = ? AND c IN (?, ?)");
+        assert_eq!(ps, vec!["org", "R", "U"]);
+    }
+
+    #[test]
+    fn list_param_expands_ordinals_on_postgres() {
+        // Postgres ordinals keep counting across the expanded elements and the trailing scalar.
+        let (sql, ps) = to_positional("c IN (:arr) AND d = :d", Dialect::Postgres, |n| match n {
+            "arr" => Some(Bound::Many(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ])),
+            other => Some(Bound::One(other.to_string())),
+        })
+        .unwrap();
+        assert_eq!(sql, "c IN ($1, $2, $3) AND d = $4");
+        assert_eq!(ps, vec!["a", "b", "c", "d"]);
     }
 }

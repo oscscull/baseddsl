@@ -417,12 +417,19 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     for p in &ast.params {
         let entity = entities.get(&p.name.node).map(String::as_str);
         let (family, optional) = query_param_family(&compiled.schema, root, p, entity);
+        // An array-typed param (`text[]`, `Order[]`, …) binds to a variable-length list for
+        // `col in $arr` — each element coerced against the column's scalar `family`, expanded
+        // to `(?, ?, …)` at bind time. `family` is already the element (scalar) family.
+        let is_list = p.ty.as_ref().is_some_and(|t| t.many);
         if p.optional {
             // A `?` optional filter param (queries.md): bind a `__present` flag codegen's
             // guard reads, plus the value. Absent → flag 0 (the predicate drops); a value →
             // flag 1 + the value, applied by whatever operator the query used. 2-state —
             // null is no longer a param state (null-matching lives in the body).
             let value = match req.args.get(&p.name.node) {
+                Some(v) if is_list => {
+                    coerce_list(v, family).map_err(|e| bad_arg(&p.name.node, e))?
+                }
                 Some(v) => coerce(v, family, true).map_err(|e| bad_arg(&p.name.node, e))?,
                 None => SqlValue::Null,
             };
@@ -431,6 +438,12 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
                 format!("{}__present", p.name.node),
                 SqlValue::Int(if present { 1 } else { 0 }),
             );
+            env.insert(p.name.node.clone(), value);
+        } else if is_list {
+            let value = match req.args.get(&p.name.node) {
+                Some(v) => coerce_list(v, family).map_err(|e| bad_arg(&p.name.node, e))?,
+                None => return Err(PlanError::MissingArg(p.name.node.clone())),
+            };
             env.insert(p.name.node.clone(), value);
         } else {
             env.insert(
@@ -510,6 +523,17 @@ fn mutation_env(
         }
         let entity = entities.get(&p.name.node).map(String::as_str);
         let (family, optional) = mutation_param_family(compiled, ast, p, entity);
+        // An array-typed param used in a write `where (col in $arr)` binds a variable-length
+        // list, the same expansion as a query.
+        if p.ty.as_ref().is_some_and(|t| t.many) {
+            let value = match req.args.get(&p.name.node) {
+                Some(v) => coerce_list(v, family).map_err(|e| bad_arg(&p.name.node, e))?,
+                None if optional => SqlValue::Null,
+                None => return Err(PlanError::MissingArg(p.name.node.clone())),
+            };
+            env.insert(p.name.node.clone(), value);
+            continue;
+        }
         env.insert(
             p.name.node.clone(),
             bind_param(&compiled.schema, p, family, optional, req)?,
@@ -1049,8 +1073,10 @@ impl Env {
     /// environment. An unresolved name is an internal invariant break, not a user
     /// error (every declared bind was inserted above).
     fn bind(&self, sql: &str) -> Result<Stmt, PlanError> {
-        let (sql, params) = to_positional(sql, self.dialect, |name| self.values.get(name).cloned())
-            .map_err(PlanError::UnboundPlaceholder)?;
+        let (sql, params) = to_positional(sql, self.dialect, |name| {
+            self.values.get(name).cloned().map(SqlValue::expand)
+        })
+        .map_err(PlanError::UnboundPlaceholder)?;
         Ok(Stmt { sql, params })
     }
 }
@@ -1076,6 +1102,27 @@ fn bind_param(
             return Ok(SqlValue::Null);
         }
         Err(PlanError::MissingArg(p.name.node.clone()))
+    }
+}
+
+/// Coerce an array-typed arg (`col in $arr`) into a bind [`SqlValue::List`]: the arg must be a
+/// JSON array, each element coerced against the column's scalar `family`. A non-array arg is a
+/// boundary error; a `null` element is rejected (an `IN (NULL)` never matches, so a null in the
+/// list is meaningless). An empty array is valid — it lowers to `col IN (NULL)` (matches
+/// nothing) at expansion time.
+fn coerce_list(v: &serde_json::Value, family: Family) -> Result<SqlValue, CoerceError> {
+    match v {
+        serde_json::Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(coerce(it, family, false)?);
+            }
+            Ok(SqlValue::List(out))
+        }
+        other => Err(CoerceError {
+            expected: family,
+            got: format!("{} (expected an array)", json_kind(other)),
+        }),
     }
 }
 
