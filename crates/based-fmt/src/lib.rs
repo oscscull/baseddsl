@@ -1150,10 +1150,16 @@ fn literal(l: &Literal) -> String {
 }
 
 fn sort_term(s: &SortTerm) -> String {
-    match s.dir {
+    let mut out = match s.dir {
         SortDir::Desc => format!("{} desc", path(&s.path)),
         SortDir::Asc => path(&s.path),
+    };
+    match s.nulls {
+        Some(NullsPlacement::First) => out.push_str(" nulls first"),
+        Some(NullsPlacement::Last) => out.push_str(" nulls last"),
+        None => {}
     }
+    out
 }
 
 // ---------- types / raw sql ------------------------------------------------

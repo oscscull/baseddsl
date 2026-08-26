@@ -677,12 +677,22 @@ pub struct PageClause {
 pub struct SortTerm {
     pub path: Path,
     pub dir: SortDir,
+    /// Where NULLs sort relative to non-NULL values for this key. `None` = the dialect
+    /// default; `Some` forces a portable placement, lowered per dialect.
+    pub nulls: Option<NullsPlacement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDir {
     Asc,
     Desc,
+}
+
+/// Explicit NULL placement for a sort key (`nulls first` / `nulls last`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullsPlacement {
+    First,
+    Last,
 }
 
 #[derive(Debug, Clone, PartialEq)]

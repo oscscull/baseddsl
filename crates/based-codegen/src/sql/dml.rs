@@ -264,7 +264,7 @@ fn lower_query(
     let order_keys = build_order(&mut sel, q, root);
     let order: Vec<String> = order_keys
         .iter()
-        .map(|k| format!("{} {}", k.col_ref, dir(k.dir)))
+        .map(|k| order_by_term(&k.col_ref, k.dir, k.nullable, k.nulls, sel.dialect))
         .collect();
 
     // 4. Keyset pagination: a `page` without `offset` compares against
@@ -477,7 +477,10 @@ fn lower_agg_query<'a>(
                 .get(&seg.node)
                 .cloned()
                 .unwrap_or_else(|| sel.q(&seg.node));
-            Some(format!("{expr} {}", dir(t.dir)))
+            // The agg sort expr may be a group column or an aggregate; nullability isn't cleanly
+            // available here, so pass `true` — the NULLS clause / `IS NULL` prefix is a harmless
+            // no-op on a non-null operand.
+            Some(order_by_term(&expr, t.dir, true, t.nulls, sel.dialect))
         })
         .collect();
 
@@ -650,8 +653,16 @@ fn keyset_after(key: &OrderKey, i: usize, dialect: Dialect) -> String {
     // Where NULLs fall in this key's direction: NULL is lowest on MariaDB/SQLite, highest
     // on Postgres, and the direction flips that. `nulls_first` = NULLs sort before the
     // non-NULL values in this key's own order.
-    let nulls_low = matches!(dialect, Dialect::MariaDb | Dialect::MySql | Dialect::Sqlite);
-    let nulls_first = (key.dir == SortDir::Asc) == nulls_low;
+    // An explicit `nulls first|last` on the key pins the placement; otherwise the cursor
+    // follows the dialect default (NULL is lowest on MariaDB/MySQL/SQLite, highest on Postgres).
+    let nulls_first = match key.nulls {
+        Some(NullsPlacement::First) => true,
+        Some(NullsPlacement::Last) => false,
+        None => {
+            let nulls_low = matches!(dialect, Dialect::MariaDb | Dialect::MySql | Dialect::Sqlite);
+            (key.dir == SortDir::Asc) == nulls_low
+        }
+    };
     // Parenthesized as a unit: it is ANDed behind the preceding keys' equality prefix, so
     // its inner `OR` must not escape the conjunction.
     if nulls_first {
@@ -1010,6 +1021,8 @@ struct OrderKey {
     dir: SortDir,
     prim: Primitive,
     nullable: bool,
+    /// Explicit `nulls first|last` on this key; `None` = the dialect's default placement.
+    nulls: Option<NullsPlacement>,
 }
 
 /// query `order (...)` > model `@sort` > none (sema already lints the empty case).
@@ -1065,6 +1078,7 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
             dir: t.dir,
             prim,
             nullable: path_nullable(sel.schema, root, &t.path),
+            nulls: t.nulls,
         });
     }
     if let Some(page) = query_page(q) {
@@ -1083,6 +1097,7 @@ fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<OrderKey> {
                     dir: SortDir::Asc,
                     prim: *prim,
                     nullable: false,
+                    nulls: None,
                 });
             }
         }
@@ -1695,7 +1710,8 @@ impl<'a> Select<'a> {
             .iter()
             .map(|t| {
                 let (a, col) = sub.resolve_from(&t.path, &child_alias, "", child);
-                format!("{} {}", sub.qcol(&a, &col), dir(t.dir))
+                let nullable = path_nullable(sub.schema, child, &t.path);
+                order_by_term(&sub.qcol(&a, &col), t.dir, nullable, t.nulls, sub.dialect)
             })
             .collect();
         let order = (!order_keys.is_empty()).then(|| order_keys.join(", "));
@@ -1849,7 +1865,14 @@ impl<'a> Select<'a> {
             .iter()
             .map(|t| {
                 let (a, col) = far_sel.resolve_from(&t.path, &far_alias, "", far_model);
-                format!("{} {}", far_sel.qcol(&a, &col), dir(t.dir))
+                let nullable = path_nullable(far_sel.schema, far_model, &t.path);
+                order_by_term(
+                    &far_sel.qcol(&a, &col),
+                    t.dir,
+                    nullable,
+                    t.nulls,
+                    far_sel.dialect,
+                )
             })
             .collect();
         let order = (!order_keys.is_empty()).then(|| order_keys.join(", "));
@@ -2868,6 +2891,39 @@ fn dir(d: SortDir) -> &'static str {
     match d {
         SortDir::Asc => "ASC",
         SortDir::Desc => "DESC",
+    }
+}
+
+/// One ORDER BY term. An explicit `nulls first|last` on a nullable key is realized per dialect:
+/// Postgres/SQLite emit native `NULLS FIRST|LAST`; MySQL/MariaDB (which have no such clause)
+/// prepend a `col IS NULL` term — `IS NULL` is 0 for non-NULL and 1 for NULL, so ASC trails the
+/// NULLs (`DESC` leads them). Without an explicit placement the dialect default stands.
+fn order_by_term(
+    col_or_expr: &str,
+    sort_dir: SortDir,
+    nullable: bool,
+    nulls: Option<NullsPlacement>,
+    dialect: Dialect,
+) -> String {
+    let base = format!("{col_or_expr} {}", dir(sort_dir));
+    let Some(placement) = nulls.filter(|_| nullable) else {
+        return base;
+    };
+    match dialect {
+        Dialect::Postgres | Dialect::Sqlite => {
+            let nl = match placement {
+                NullsPlacement::First => "NULLS FIRST",
+                NullsPlacement::Last => "NULLS LAST",
+            };
+            format!("{base} {nl}")
+        }
+        Dialect::MariaDb | Dialect::MySql => {
+            let null_dir = match placement {
+                NullsPlacement::Last => "",
+                NullsPlacement::First => " DESC",
+            };
+            format!("{col_or_expr} IS NULL{null_dir}, {base}")
+        }
     }
 }
 

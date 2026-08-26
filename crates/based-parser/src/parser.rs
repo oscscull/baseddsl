@@ -2218,7 +2218,17 @@ impl<'a> Parser<'a> {
             self.eat_kw("asc");
             SortDir::Asc
         };
-        Ok(SortTerm { path, dir })
+        let nulls = if self.eat_kw("nulls") {
+            if self.eat_kw("first") {
+                Some(NullsPlacement::First)
+            } else {
+                self.eat_kw("last");
+                Some(NullsPlacement::Last)
+            }
+        } else {
+            None
+        };
+        Ok(SortTerm { path, dir, nulls })
     }
 
     // ---------- raw SQL ----------------------------------------------------

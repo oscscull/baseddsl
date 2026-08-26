@@ -50,7 +50,7 @@ fn model_decorators_fields_index_inverse() {
     assert!(matches!(m.decorators[0].args[0], DecoArg::Ident(_)));
     assert_eq!(m.decorators[1].name.node, "sort");
     match &m.decorators[1].args[0] {
-        DecoArg::Sort(SortTerm { path, dir }) => {
+        DecoArg::Sort(SortTerm { path, dir, .. }) => {
             assert_eq!(path.segments[0].node, "placed_at");
             assert_eq!(*dir, SortDir::Desc);
         }
