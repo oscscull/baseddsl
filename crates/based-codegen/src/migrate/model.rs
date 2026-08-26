@@ -148,6 +148,10 @@ pub struct ColumnSnap {
     pub unique: bool,
     /// The related model when this column is a forward relation's FK (`fk=<Model>`).
     pub fk: Option<String>,
+    /// A **generated column**'s expression in neutral form (`generated=(price - discount)`),
+    /// or `None` for an ordinary stored column. Recorded so adding, dropping, or changing a
+    /// generated column's expression shows up as a diff.
+    pub generated: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +234,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
                 default,
                 enum_name,
                 raw_type,
+                generated,
             } => columns.push(ColumnSnap {
                 name: column.clone(),
                 // An enum column captures its variants as `enum(v1,v2,…)` so a variant
@@ -247,6 +252,11 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
                 }),
                 unique: *unique,
                 fk: None,
+                // A generated column records its expression in a fixed neutral form (the
+                // Postgres spelling — `||` for concat), so add/drop/expression-change diffs.
+                generated: generated.as_ref().map(|e| {
+                    crate::sql::generated_expr_sql(schema, model, e, crate::Dialect::Postgres)
+                }),
             }),
             MemberKind::Forward {
                 target,
@@ -263,6 +273,7 @@ fn table_snap(schema: &CheckedSchema, model: &RModel, fks: ForeignKeys) -> Table
                 default: None,
                 unique: false,
                 fk: Some(target.clone()),
+                generated: None,
             }),
             // Inverse edges own no column — they emit no DDL, so no snapshot row.
             MemberKind::Inverse { .. } => {}
@@ -727,6 +738,11 @@ fn render_table(out: &mut String, t: &TableSnap) {
         if let Some(fk) = &c.fk {
             let _ = write!(line, " fk={fk}");
         }
+        // A generated column trails its neutral expression in balanced parens; it may hold
+        // spaces, so the parser pulls it out as one token (like a `raw(…)` type).
+        if let Some(g) = &c.generated {
+            let _ = write!(line, " generated=({g})");
+        }
         line.push('\n');
         out.push_str(&line);
     }
@@ -1140,6 +1156,18 @@ fn parse_column(rest: &str, line: usize) -> Result<ColumnSnap, ParseError> {
         }
     }
 
+    // A generated column's `generated=(<expr>)` body holds spaces; pull it out as one
+    // balanced token (from the opening paren) before whitespace-splitting.
+    let mut generated = None;
+    if let Some(pos) = remainder.find("generated=(") {
+        let open = pos + "generated=".len(); // index of the `(`
+        if let Some(end) = balanced_end(&remainder[open..]) {
+            let inner = &remainder[open + 1..open + end - 1]; // strip the parens
+            generated = Some(inner.to_string());
+            remainder = format!("{}{}", &remainder[..pos], &remainder[open + end..]);
+        }
+    }
+
     let mut toks = remainder.split_whitespace();
     let name = toks.next().ok_or_else(|| ParseError {
         line,
@@ -1191,6 +1219,7 @@ fn parse_column(rest: &str, line: usize) -> Result<ColumnSnap, ParseError> {
         default,
         unique,
         fk,
+        generated,
     })
 }
 

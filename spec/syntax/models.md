@@ -81,6 +81,43 @@ into it.
 
 Indexing an opaque column is `@index … using <method>` / `@index raw("…")` — indexing.md.
 
+### Generated columns — `name = <expr>`
+A **generated column** is a stored, derived row property. It is written as a model field with
+`=` instead of `:`, reusing the shape computed-expression language — arithmetic (`+ - * /`),
+string concat (`||`), and `case when … then … else … end`:
+
+```
+Product {
+  price:    decimal
+  discount: decimal
+  net = price - discount
+}
+# → net DECIMAL GENERATED ALWAYS AS (price - discount) STORED
+```
+
+It lowers to a SQL **native generated column** (`GENERATED ALWAYS AS (<expr>) STORED` — Postgres
+12+, MySQL 5.7+/MariaDB, SQLite 3.31+). Because it becomes a **real column**, everything downstream
+just works with no special-casing: **project** it (a bare shape field), **filter** it
+(`where (net > 10)`), **sort** it (`order (net desc)`), **`@index`** it, keyset-paginate on it.
+
+- **STORED** by default (a real, indexable column). VIRTUAL is out of scope for v1.
+- **Type + nullability are inferred** from the expression: arithmetic promotes over the numeric
+  family (decimal > float > int), `||` is text, a `case` unifies its branches; a column operand
+  carries its own type and nullability.
+- The expression sees only the **row's own columns** — no relation reaches (`E0340`), no other
+  generated column (`E0346`), no aggregates, no parameters (`E0342`). A stored generated column
+  can only depend on the row it belongs to.
+- Operand typing: an arithmetic operand must be numeric (`E0343`), a `||` operand text (`E0344`),
+  a `case`'s branches must unify (`E0345`); an unknown column is `E0341`.
+- Its **value is derived, never written**: assigning it in a `create`/`update` is `E0347`, and a
+  `create` never requires it (even though it is NOT NULL and carries no default).
+- Migrations: a generated column adds, drops, and — because no dialect can alter a generation
+  expression in place — **re-derives (drop + re-add)** when its expression changes.
+
+Pick the form by whether you need to filter/sort/index by the value: a **shape computed field**
+(shapes.md) is a query-local, projection-only derived *output* (never stored); a **model generated
+column** is stored derived *data*.
+
 ## Qualifiers
 - Type-intrinsic ride the type: `?` = nullable/optional, `[]` = to-many. (`User?`, `text[]`, `Order[]`)
 - Behavioral go in parens: `(unique)`, `(default "x")`, `(default now())`

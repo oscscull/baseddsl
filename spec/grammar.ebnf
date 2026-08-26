@@ -32,7 +32,12 @@ sep         = NEWLINE | ',' ;          (* item separator inside blocks/files   *
 model       = { model_deco } model_name '{' { member sep } [ member ] '}' ;
 model_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
 
-member      = field | index_decl | soft_override ;
+member      = field | generated_col | index_decl | soft_override ;
+
+(* Generated column (models.md): a stored derived column, `name = <expr>` over the     *)
+(* row's own columns — the shape computed-expression grammar. Lowers to a native        *)
+(* GENERATED ALWAYS AS (<expr>) STORED column; type/nullability inferred, same-row only. *)
+generated_col = field_name '=' shape_expr ;
 
 (* A model header stacks decorators, one per line. `@scope Name` is a distinct    *)
 (* form (D46): it references a top-level `scope` decl by name, no parenthesized    *)

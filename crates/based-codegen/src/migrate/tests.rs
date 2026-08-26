@@ -10,6 +10,7 @@ fn col(name: &str, ty: &str, nullable: bool) -> ColumnSnap {
         default: None,
         unique: false,
         fk: None,
+        generated: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn render_then_parse_round_trips_every_attribute() {
                     default: Some("\"pending\"".to_string()),
                     unique: false,
                     fk: None,
+                    generated: None,
                 },
                 ColumnSnap {
                     name: "org_id".to_string(),
@@ -74,6 +76,7 @@ fn render_then_parse_round_trips_every_attribute() {
                     default: None,
                     unique: false,
                     fk: Some("Org".to_string()),
+                    generated: None,
                 },
             ],
             indexes: vec![IndexSnap {

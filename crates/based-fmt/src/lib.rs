@@ -197,6 +197,9 @@ impl Printer {
                 Member::SoftOverride(so) => {
                     format!("{INDENT}{}: {}", soft_op(so.op), raw_sql(&so.raw))
                 }
+                Member::Generated(g) => {
+                    format!("{INDENT}{} = {}", g.name.node, shape_expr(&g.expr, 0))
+                }
             });
         }
         self.emit_body_comments(cursor, close, 1);
@@ -411,6 +414,7 @@ fn member_span(m: &Member) -> Span {
         Member::Field(f) => f.span,
         Member::Index(i) => i.span,
         Member::SoftOverride(s) => s.raw.span,
+        Member::Generated(g) => g.span,
     }
 }
 

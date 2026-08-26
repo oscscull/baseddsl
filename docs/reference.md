@@ -6,7 +6,7 @@ For *why* the language is shaped this way, see [`spec/`](../spec/); this page is
 ## Index
 
 - [Project](#project) — files, `based.toml`, no implicit fields
-- [Models & fields](#models--fields) — types, `?`, modifiers, `Id`, table naming
+- [Models & fields](#models--fields) — types, `?`, modifiers, `Id`, table naming, generated columns
 - [Decorators](#decorators) — `@scope` `@index` `@created` `@soft_delete` `@fk` `@was` `@key` `@table`
 - [Enums](#enums) — string & numeric
 - [Relations](#relations) — to-one, to-many, inverse, custom join, composite, m2m
@@ -58,6 +58,26 @@ Order {
 
 **Table naming:** `snake_case(ModelName)`, never pluralized (`OrderItem` → `order_item`). A relation FK
 column is `<field>_id`. Override with `@table("…")` (table) or `(column "…")` (column).
+
+**Generated columns** — a stored derived column, written with `=` (not `:`) over the row's own columns:
+
+```
+Product {
+  price:    decimal
+  discount: decimal
+  net = price - discount                     # → net … GENERATED ALWAYS AS (price - discount) STORED
+  label = name || " (" || sku || ")"         # concat
+  tier  = case when (qty > 100) then "bulk" else "unit" end
+}
+```
+
+- Reuses the shape computed-expression language (`+ - * /`, `||`, `case`); STORED, so it is a real,
+  **indexable** column — project / `where` / `order` / `@index` / keyset all just work.
+- Type + nullability are **inferred** from the expression. Same-row only: no relation reaches, no
+  aggregates, no params, no depending on another generated column. Its value is derived — assigning
+  it in a create/update is an error, and a create never requires it.
+- vs a shape [computed field](#shapes): that is query-local, projection-only (not stored/filterable);
+  a generated column is stored data you can filter and sort by.
 
 ## Decorators
 

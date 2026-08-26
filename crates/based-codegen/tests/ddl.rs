@@ -83,6 +83,75 @@ fn renamed_pk_column_is_the_primary_key_on_every_dialect() {
 }
 
 #[test]
+fn generated_column_arithmetic_is_a_stored_generated_column() {
+    // `net = price - discount` lowers to a native `GENERATED ALWAYS AS (…) STORED` column
+    // whose type is inferred from the expression (decimal - decimal -> decimal). On the
+    // MySQL family a bare column reference in the clause is unqualified.
+    let src = r#"Product { id: Id, price: decimal, discount: decimal, net = price - discount }"#;
+    let maria = gen(src);
+    assert!(
+        maria.contains("`net` DECIMAL(38, 9) GENERATED ALWAYS AS ((`price` - `discount`)) STORED"),
+        "\n{maria}"
+    );
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#""net" NUMERIC(38, 9) GENERATED ALWAYS AS (("price" - "discount")) STORED"#),
+        "\n{pg}"
+    );
+    // No nullability/default clause rides a generated column.
+    assert!(!pg.contains(r#""net" NUMERIC(38, 9) NOT NULL"#), "\n{pg}");
+}
+
+#[test]
+fn generated_column_concat_uses_the_dialect_concat_seam() {
+    // `||` concatenation lowers to `CONCAT(…)` on the MySQL family and `… || …` on
+    // Postgres/SQLite; the result column is text.
+    let src = r#"Person { id: Id, first: text, last: text, full = first || " " || last }"#;
+    let maria = gen(src);
+    assert!(
+        maria.contains("GENERATED ALWAYS AS (CONCAT(`first`, ' ', `last`)) STORED"),
+        "\n{maria}"
+    );
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#"GENERATED ALWAYS AS (("first" || ' ' || "last")) STORED"#),
+        "\n{pg}"
+    );
+    let lite = gen_sqlite(src);
+    assert!(
+        lite.contains("`full` TEXT GENERATED ALWAYS AS ((`first` || ' ' || `last`)) STORED"),
+        "\n{lite}"
+    );
+}
+
+#[test]
+fn generated_column_case_lowers_to_case_when() {
+    // A `case` generated column lowers to `CASE WHEN … THEN … ELSE … END`; a same-row
+    // comparison references its column bare.
+    let src =
+        r#"Item { id: Id, qty: int, tier = case when (qty > 100) then "bulk" else "unit" end }"#;
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(
+            r#""tier" TEXT GENERATED ALWAYS AS (CASE WHEN "qty" > 100 THEN 'bulk' ELSE 'unit' END) STORED"#
+        ),
+        "\n{pg}"
+    );
+}
+
+#[test]
+fn generated_column_is_indexable_and_a_real_column() {
+    // The payoff: a generated column is a real column, so `@index` on it emits an index and
+    // it needs no special-casing anywhere downstream.
+    let src = r#"Product { id: Id, price: decimal, discount: decimal, net = price - discount  @index (net) }"#;
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains(r#"CREATE INDEX "idx_product_net" ON "product" ("net")"#),
+        "\n{pg}"
+    );
+}
+
+#[test]
 fn fk_targeting_a_renamed_pk_references_the_real_column() {
     // A relation to a model whose PK is renamed must reference that physical column, not
     // a phantom `id`, in the FK constraint.

@@ -502,6 +502,19 @@ impl<'a> Parser<'a> {
             return self.index_decl().map(Member::Index);
         }
         let name = self.lower_ident("field name")?;
+        // `name = <expr>` — a generated column: a stored derived value over the row's own
+        // columns, reusing the shape computed-expression grammar. `:` starts an ordinary
+        // field; `=` starts a generated one.
+        if self.at(Tok::Eq) {
+            let start = name.span.start;
+            self.bump();
+            let expr = self.shape_expr()?;
+            return Ok(Member::Generated(GeneratedField {
+                name,
+                expr,
+                span: self.span_from(start),
+            }));
+        }
         self.expect(Tok::Colon, "`:`")?;
         // `restore:`/`delete:`/`read:` followed by raw SQL is a soft-delete override.
         if self.is_raw_start() {

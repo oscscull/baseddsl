@@ -389,6 +389,22 @@ fn diff_columns(prev: &TableSnap, now: &TableSnap, renames: &[Rename], steps: &m
             continue;
         }
         if let Some(old) = prev.column(&c.name) {
+            // A generated column's expression can't be altered in place on any target (nor can
+            // a column be turned into/out of a generated one), so an expression change lowers
+            // to a drop + re-add of the column.
+            if old.generated != c.generated {
+                steps.push(Step::DropColumn {
+                    table: now.name.clone(),
+                    schema: now.schema.clone(),
+                    column: c.name.clone(),
+                });
+                steps.push(Step::AddColumn {
+                    table: now.name.clone(),
+                    schema: now.schema.clone(),
+                    column: c.clone(),
+                });
+                continue;
+            }
             let changes = column_changes(old, c);
             if !changes.is_empty() {
                 steps.push(Step::AlterColumn {
