@@ -241,6 +241,11 @@ pub fn rename_hints(prev: &Snapshot, now: &Snapshot) -> Vec<RenameHint> {
         }
         let x = dropped[0];
         let y = added[0];
+        // A same-name drop+add is never a rename (a rename changes the name) — it is a
+        // replace-in-place, e.g. a generated column whose expression changed. No `@was` hint.
+        if *x == y.name {
+            continue;
+        }
         let dropped_ty = prev.table(table).and_then(|t| t.column(x)).map(|c| &c.ty);
         if dropped_ty == Some(&y.ty) {
             out.push(RenameHint {

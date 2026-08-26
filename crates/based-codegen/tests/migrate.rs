@@ -879,3 +879,68 @@ fn composite_key_snapshot_round_trips_with_multi_column_pk_and_fk() {
         "\n{pg}"
     );
 }
+
+#[test]
+fn generated_column_snapshot_relowers_concat_per_dialect() {
+    // A generated column is stored in the snapshot as dialect-neutral, re-parseable DSL, and
+    // re-lowered per target dialect at migrate time — so a `||`-concat column becomes `||` on
+    // Postgres/SQLite and `CONCAT(…)` on the MySQL family (never `||`, which is logical-OR on
+    // MySQL). This is the whole point of not freezing one dialect's SQL in the snapshot.
+    let src = r#"Person { id: Id, first: text, last: text, full = first || " " || last }"#;
+    let schema = checked(src);
+
+    // The snapshot carries the neutral form (bare columns, `||`, DSL string literal) and
+    // round-trips through parse.
+    let text = migrate::snapshot(&schema);
+    assert!(
+        text.contains(r#"generated=((first || " " || last))"#),
+        "\n{text}"
+    );
+    let parsed = Snapshot::parse(&text).expect("round-trip parse");
+    assert_eq!(Snapshot::from_schema(&schema), parsed);
+
+    // From-scratch migration re-lowers per dialect.
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    let pg = migrate::render_sql(&steps, Dialect::Postgres);
+    assert!(
+        pg.contains(r#"GENERATED ALWAYS AS (("first" || ' ' || "last")) STORED"#),
+        "\n{pg}"
+    );
+    let maria = migrate::render_sql(&steps, Dialect::MariaDb);
+    assert!(
+        maria.contains("GENERATED ALWAYS AS (CONCAT(`first`, ' ', `last`)) STORED"),
+        "\n{maria}"
+    );
+    assert!(
+        !maria.contains("||"),
+        "MySQL family must not emit `||`\n{maria}"
+    );
+}
+
+#[test]
+fn generated_column_expression_change_is_drop_readd_without_was_hint() {
+    // No dialect can alter a generation expression in place, so an expression change lowers to
+    // drop + re-add of the same-named column. A same-name drop+add is never a rename, so it
+    // must NOT trip the `@was` teach hint.
+    let base = r#"Product { id: Id, price: decimal, discount: decimal, net = price - discount }"#;
+    let next = r#"Product { id: Id, price: decimal, discount: decimal, net = price * discount }"#;
+    let prev = Snapshot::from_schema(&checked(base));
+    let now = Snapshot::from_schema(&checked(next));
+
+    let steps = migrate::diff_snapshots(&prev, &now);
+    let drops = steps
+        .iter()
+        .filter(|s| matches!(s, migrate::Step::DropColumn { column, .. } if column == "net"))
+        .count();
+    let adds = steps
+        .iter()
+        .filter(|s| matches!(s, migrate::Step::AddColumn { column, .. } if column.name == "net"))
+        .count();
+    assert_eq!((drops, adds), (1, 1), "expected a drop + re-add of `net`");
+
+    // The same-name replace must not be reported as a possible rename.
+    assert!(
+        migrate::rename_hints(&prev, &now).is_empty(),
+        "a same-name generated-column replace must not emit a @was rename hint"
+    );
+}

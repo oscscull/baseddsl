@@ -209,11 +209,11 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "based-ast"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "based-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-codegen",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "based-codegen"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -243,14 +243,14 @@ dependencies = [
 
 [[package]]
 name = "based-diagnostics"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
 ]
 
 [[package]]
 name = "based-facts"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "based-fmt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "based-lsp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-codegen",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "based-manifest"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "based-parser"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "based-runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "based-sema"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "based-version"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "beef"
