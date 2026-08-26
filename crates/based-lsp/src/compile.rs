@@ -13,10 +13,10 @@
 //! fallback.
 
 use based_ast::{
-    AggCall, Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, Ident, Member,
-    Model, Modifier, Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef, Predicate,
-    Primitive, Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeExpr, ShapeField,
-    ShapeValue, Span, TypeExpr, Value, VariantValue, WriteStmt,
+    AggCall, Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, GeneratedField,
+    Ident, Member, Model, Modifier, Mutation, NamedFilter, Op, Param, ParamBinding, ParamRef,
+    Predicate, Primitive, Query, QueryBody, RawPart, RawSql, ScopeDecl, Shape, ShapeExpr,
+    ShapeField, ShapeValue, Span, TypeExpr, Value, VariantValue, WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
@@ -1411,6 +1411,46 @@ impl Snapshot {
         })
     }
 
+    /// Hover for a generated (stored derived) column: `name: <inferred type> = <expr>`.
+    /// The type is the one sema inferred from the expression; the expression is
+    /// reprinted from the AST. Falls back to just `name = <expr>` if the schema has no
+    /// checked type (an unparseable / unchecked buffer).
+    fn generated_hover(&self, model: &str, g: &GeneratedField) -> String {
+        let expr = based_fmt::reprint_expr(&g.expr);
+        let sig = match self.generated_type(model, &g.name.node) {
+            Some(ty) => format!("{}: {ty} = {expr}", g.name.node),
+            None => format!("{} = {expr}", g.name.node),
+        };
+        format!(
+            "```based\n{sig}\n```\ngenerated column — a stored column derived from the row; \
+             read-only (never assigned)"
+        )
+    }
+
+    /// The inferred type of a generated column (`text`, `decimal(…)`, an enum name, …),
+    /// with a trailing `?` when nullable, read from the checked schema. `None` when the
+    /// column isn't a checked scalar (no schema, unknown model/field).
+    fn generated_type(&self, model: &str, field: &str) -> Option<String> {
+        let mem = self.schema.as_ref()?.model(model)?.member(field)?;
+        let based_sema::MemberKind::Scalar {
+            ty,
+            optional,
+            enum_name,
+            ..
+        } = &mem.kind
+        else {
+            return None;
+        };
+        let mut s = match enum_name {
+            Some(name) => name.clone(),
+            None => primitive_str(*ty),
+        };
+        if *optional {
+            s.push('?');
+        }
+        Some(s)
+    }
+
     /// Hover for a declaration's own name (the cursor sits on the thing being
     /// declared, not a reference to it): the model/field/shape/callable/scope it
     /// introduces.
@@ -1425,10 +1465,12 @@ impl Snapshot {
                         return Some(model_hover(m));
                     }
                     for mem in &m.members {
-                        if let Member::Field(f) = mem {
-                            if under(&f.name) {
-                                return Some(field_hover(f));
+                        match mem {
+                            Member::Field(f) if under(&f.name) => return Some(field_hover(f)),
+                            Member::Generated(g) if under(&g.name) => {
+                                return Some(self.generated_hover(&m.name.node, g));
                             }
+                            _ => {}
                         }
                     }
                 }
@@ -1462,6 +1504,9 @@ impl Snapshot {
                         .filter_map(|mem| match mem {
                             Member::Field(f) => {
                                 Some(symbol(&f.name, SymbolKind::FIELD, f.span, idx, None))
+                            }
+                            Member::Generated(g) => {
+                                Some(symbol(&g.name, SymbolKind::FIELD, g.span, idx, None))
                             }
                             _ => None,
                         })
@@ -1534,8 +1579,14 @@ impl Snapshot {
                 Decl::Model(m) => {
                     push(&m.name, SymbolKind::STRUCT, None);
                     for mem in &m.members {
-                        if let Member::Field(f) = mem {
-                            push(&f.name, SymbolKind::FIELD, Some(&m.name.node));
+                        match mem {
+                            Member::Field(f) => {
+                                push(&f.name, SymbolKind::FIELD, Some(&m.name.node));
+                            }
+                            Member::Generated(g) => {
+                                push(&g.name, SymbolKind::FIELD, Some(&m.name.node));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1621,6 +1672,8 @@ impl Snapshot {
             .iter()
             .filter_map(|m| match m {
                 Member::Field(f) => Some(item(&f.name.node, CompletionItemKind::FIELD)),
+                // A generated column is a real column — offer it like any scalar.
+                Member::Generated(g) => Some(item(&g.name.node, CompletionItemKind::FIELD)),
                 _ => None,
             })
             .collect()
@@ -3751,6 +3804,57 @@ mod tests {
         assert!(h.contains("-> ok"), "{h}");
         let ok_off = (src.find("-> ok").unwrap() + 3) as u32;
         assert!(snap.hover_at(fid, ok_off).is_none());
+    }
+
+    /// A generated column (`net = price - discount`) is a real column to the editor:
+    /// hover on its declaration shows `name: <inferred type> = <expr>`, dot-completion
+    /// through a relation offers it, and it appears as a document symbol.
+    #[test]
+    fn generated_column_surfaces_in_hover_completion_and_symbols() {
+        let ws = TempWorkspace::new("generated_col");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Product { id: Id  price: decimal  discount: decimal  net = price - discount }\n\
+             Line { id: Id  product: Product }\n\
+             shape LineCard from Line { x = product.net }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = &snap.sources[fid].1;
+
+        // Hover on the generated column's declaration: name + inferred type + expr.
+        let decl = (src.find("net = price").unwrap() + 1) as u32;
+        let h = snap.hover_at(fid, decl).expect("generated column hover");
+        assert!(h.contains("net: decimal"), "type not shown: {h}");
+        assert!(h.contains("= price - discount"), "expr not shown: {h}");
+        assert!(
+            h.contains("generated column"),
+            "not labelled generated: {h}"
+        );
+
+        // Dot-completion through `product.` (root Line → Product) offers `net`.
+        let dot = src.find("product.").unwrap() + "product.".len();
+        let items = snap.completions(fid, dot as u32);
+        assert!(
+            items
+                .iter()
+                .any(|c| c.label == "net" && c.kind == Some(CompletionItemKind::FIELD)),
+            "net not offered in completion: {:?}",
+            items.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+
+        // Document symbols nest the generated column as a field child of the model.
+        let syms = snap.document_symbols(fid);
+        let product = syms.iter().find(|s| s.name == "Product").expect("Product");
+        let children = product.children.as_ref().expect("model children");
+        assert!(
+            children
+                .iter()
+                .any(|c| c.name == "net" && c.kind == SymbolKind::FIELD),
+            "net missing from document symbols"
+        );
     }
 
     /// Field-reference go-to-def reaches beyond shapes: a query block's `where`/`order`
