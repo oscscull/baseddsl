@@ -1032,10 +1032,12 @@ fn deco_sort_term(a: &DecoArg) -> Option<SortTerm> {
                 segments: vec![id.clone()],
             },
             dir: SortDir::Asc,
+            nulls: None,
         }),
         DecoArg::Path(p) => Some(SortTerm {
             path: p.clone(),
             dir: SortDir::Asc,
+            nulls: None,
         }),
         DecoArg::Pred(_) | DecoArg::Lit(_) => None,
     }

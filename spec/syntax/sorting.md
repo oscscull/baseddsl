@@ -33,5 +33,19 @@ carry no sort; the order is a property of the traversed rows, declared on the da
 query recent(user -> author) -> PostShape[] order (updated_at desc);
 ```
 
+## NULL placement (`nulls first` / `nulls last`)
+Where NULLs fall relative to non-NULL values, per sort key. Without it, the placement is the
+**dialect default** — and that default differs (Postgres: nulls last on `asc`; MariaDB/MySQL/
+SQLite: nulls first) — so a portable query needs the modifier to pin it.
+```
+query q() -> Card[] order (assignee asc nulls last);
+User { posts: Post[] (Post.author) @sort(pinned desc, edited_at desc nulls last) }
+```
+Valid in query `order` and in `@sort`, after the direction. Lowered portably: native
+`NULLS FIRST|LAST` on Postgres/SQLite; a leading `col IS NULL` term on MariaDB/MySQL (which have
+no such clause — `col IS NULL` is 0 for non-NULL, 1 for NULL, so `asc` trails NULLs). Meaningful
+only on a nullable key (a no-op elsewhere). Keyset pagination's cursor follows the chosen
+placement, so a paginated `nulls last` list stays consistent across pages.
+
 ## Lint
 A `list` with no sort at any tier returns nondeterministic order -> warn ("results nondeterministic; add @sort or order"). Same cheap-lint-prevents-prod-surprise pattern as `unindexed`. (Keyset pagination already forces a sort; this mainly catches non-paginated lists.)

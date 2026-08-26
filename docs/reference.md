@@ -172,8 +172,11 @@ Lists: `status in (open, waiting, $other)`.
 Precedence: query `order (…)` > relation `@sort` > model `@sort` > none (lint).
 
 ```
-order (placed_at desc, id)      # per-term asc (default) / desc
+order (placed_at desc, id)                 # per-term asc (default) / desc
+order (assignee asc nulls last)            # explicit NULL placement (nullable keys)
 ```
+
+`nulls first` / `nulls last` (default: the dialect's own — Postgres nulls-last on asc, MySQL/MariaDB/SQLite nulls-first) pins where NULLs fall, portably: native `NULLS FIRST|LAST` on Postgres/SQLite, a leading `col IS NULL` term on MySQL/MariaDB. Also valid in `@sort`. Keyset pagination follows the chosen placement.
 
 ## Pagination
 

@@ -1708,3 +1708,57 @@ fn null_comparison_lowers_to_is_null() {
         "a computed `case when col = null` must null-test (`… IS NULL THEN …`), not `= NULL`\n{sql}"
     );
 }
+
+#[test]
+fn nulls_placement_lowers_per_dialect() {
+    let src = r#"
+        Order { id: Id  assignee: text?  @index(assignee) }
+        shape Card from Order { id }
+        query q_last() -> Card[] { list Order order (assignee asc nulls last); }
+        query q_first() -> Card[] { list Order order (assignee asc nulls first); }
+    "#;
+    // MariaDB/MySQL have no NULLS clause → a leading `col IS NULL` term (ASC trails NULLs,
+    // `DESC` leads them).
+    let my = gen(src);
+    assert!(
+        my.contains("`assignee` IS NULL, `order`.`assignee` ASC"),
+        "nulls last (MariaDB)\n{my}"
+    );
+    assert!(
+        my.contains("`assignee` IS NULL DESC, `order`.`assignee` ASC"),
+        "nulls first (MariaDB)\n{my}"
+    );
+    // Postgres: native NULLS LAST / NULLS FIRST.
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains("\"assignee\" ASC NULLS LAST"),
+        "nulls last (Postgres)\n{pg}"
+    );
+    assert!(
+        pg.contains("\"assignee\" ASC NULLS FIRST"),
+        "nulls first (Postgres)\n{pg}"
+    );
+}
+
+#[test]
+fn nulls_placement_honored_in_a_to_many_nest() {
+    // A to-many nest orders by the child model's `@sort`, which may carry `nulls last`; the
+    // nest's ORDER BY (inside the JSON aggregate) must honor it, not just the top-level order.
+    let src = r#"
+        Order { id: Id  items: Item[] (Item.order) }
+        @sort(note asc nulls last)
+        Item { id: Id  order: Order  note: text?  @index(note) }
+        shape OrderDetail from Order { id  items { id } }
+        query q() -> OrderDetail[];
+    "#;
+    let my = gen(src);
+    assert!(
+        my.contains("`note` IS NULL, "),
+        "nest nulls last (MariaDB)\n{my}"
+    );
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains("\"note\" ASC NULLS LAST"),
+        "nest nulls last (Postgres)\n{pg}"
+    );
+}

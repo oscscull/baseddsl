@@ -356,7 +356,7 @@ clause      = where_clause | order_clause | page_clause | unindexed_clause
             | group_clause | having_clause ;
 where_clause= 'where' '(' predicate ')' ;
 order_clause= 'order' '(' sort_term { ',' sort_term } ')' ;
-sort_term   = path [ 'asc' | 'desc' ] ;
+sort_term   = path [ 'asc' | 'desc' ] [ 'nulls' ( 'first' | 'last' ) ] ;
 
 (* Aggregation (queries.md): legal only on an aggregate-shape query. `group by` lists      *)
 (* the grouping columns; every non-aggregate projected column must appear here (E0242).    *)
