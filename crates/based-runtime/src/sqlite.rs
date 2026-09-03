@@ -19,7 +19,10 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use sqlx::pool::PoolConnection;
 use sqlx::query::Query;
-use sqlx::sqlite::{Sqlite, SqliteArguments, SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    Sqlite, SqliteArguments, SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
+    SqliteSynchronous,
+};
 use sqlx::{Column, Row as SqlxRow, TypeInfo, ValueRef};
 
 use crate::run::{Backend, Db, DbError, DbErrorKind, DbRead, Row, RowStream, Tx};
@@ -30,6 +33,13 @@ use crate::value::SqlValue;
 /// on a file DB) a statement would otherwise fail instantly; the busy timeout lets it wait
 /// a bounded moment, and a genuine timeout then surfaces as a retryable deadlock.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Default connection-pool size for a **file** backend. A file database persists on its
+/// own, so — unlike the in-memory backend, which must pin one connection — it serves a
+/// small bounded pool: with WAL, readers run concurrently with each other and with a
+/// writer, so a single connection was a needless throughput ceiling. Override via
+/// [`SqliteBackend::open_with_pool`].
+const DEFAULT_FILE_POOL: u32 = 5;
 
 /// Map a sqlx error to the runtime's [`DbError`] (→ the wire's retryable `503`). A
 /// `SQLITE_BUSY` (5) / `SQLITE_LOCKED` (6) — a writer lost the lock race after the busy
@@ -285,18 +295,31 @@ impl SqliteBackend {
         Ok(Self { pool })
     }
 
-    /// A backend over a file database at `path` (created if absent). A file database
-    /// persists on its own, so an ordinary bounded pool serves it.
+    /// A backend over a file database at `path` (created if absent), in **WAL** mode over
+    /// a bounded pool of [`DEFAULT_FILE_POOL`] connections. A file database persists on its
+    /// own — no single-connection pin is needed (that constraint is the in-memory backend's
+    /// alone) — so it runs a real pool, and WAL lets readers proceed concurrently with each
+    /// other and with a writer. Use [`open_with_pool`](Self::open_with_pool) to size the
+    /// pool.
     pub fn open(path: &str) -> Result<Self, DbError> {
+        Self::open_with_pool(path, DEFAULT_FILE_POOL)
+    }
+
+    /// [`open`](Self::open) with an explicit maximum pool size (clamped to at least 1). A
+    /// read-heavy embedding host raises this to run more reads in parallel under WAL.
+    pub fn open_with_pool(path: &str, max_connections: u32) -> Result<Self, DbError> {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .foreign_keys(true)
+            // WAL + NORMAL: readers don't block a writer (or each other), and the write is
+            // still durable across an application crash (only a power loss can lose the
+            // last commits — the standard, documented WAL trade-off).
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(BUSY_TIMEOUT);
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .idle_timeout(None)
-            .max_lifetime(None)
+            .max_connections(max_connections.max(1))
             .connect_lazy_with(opts);
         Ok(Self { pool })
     }
@@ -526,5 +549,47 @@ mod tests {
         let mut db = backend.checkout("").await.unwrap();
         let rows = fetch_all(db.fetch("SELECT id FROM t", &[])).await.unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    /// A unique file path in the OS temp dir for a file-backend test (cleaned by the OS).
+    fn temp_db_path(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("based_sqlite_{tag}_{n}.db"));
+        p.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn file_backend_opens_in_wal() {
+        // The file backend must open in WAL journal mode — that is what lets readers run
+        // concurrently with a writer. `PRAGMA journal_mode` reports the live mode.
+        let path = temp_db_path("wal");
+        let backend = SqliteBackend::open(&path).unwrap();
+        let mut db = backend.checkout("").await.unwrap();
+        let rows = fetch_all(db.fetch("PRAGMA journal_mode", &[])).await.unwrap();
+        assert_eq!(rows[0]["journal_mode"], json!("wal"));
+    }
+
+    #[tokio::test]
+    async fn file_backend_pool_exceeds_one() {
+        // The file pool is bounded but > 1: two connections check out and read at the same
+        // time. Under the old `max_connections(1)` the second checkout would block on the
+        // first — this holds both live and reads through each.
+        let path = temp_db_path("pool");
+        let backend = SqliteBackend::open(&path).unwrap();
+        backend
+            .execute_batch("CREATE TABLE t (id TEXT); INSERT INTO t (id) VALUES ('x');")
+            .await
+            .unwrap();
+
+        let mut a = backend.checkout("").await.unwrap();
+        let mut b = backend.checkout("").await.unwrap(); // would deadlock at pool size 1
+        let ra = fetch_all(a.fetch("SELECT id FROM t", &[])).await.unwrap();
+        let rb = fetch_all(b.fetch("SELECT id FROM t", &[])).await.unwrap();
+        assert_eq!(ra[0]["id"], json!("x"));
+        assert_eq!(rb[0]["id"], json!("x"));
     }
 }
