@@ -280,7 +280,13 @@ async fn a_destructive_migration_needs_the_allow_flag() {
     let err = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
         .await
         .unwrap_err();
-    assert!(matches!(err, MigrateError::Destructive { .. }), "{err}");
+    // The error names the offending migration and carries the safe ones committed before it,
+    // so the caller can report the partial state (#18).
+    let MigrateError::Destructive { id, applied } = &err else {
+        panic!("expected Destructive, got {err}");
+    };
+    assert_eq!(id, "0003_drop_name");
+    assert_eq!(applied, &["0001_init".to_string(), "0002_add_size".to_string()]);
     // 0001 + 0002 (the safe ones) still applied before hitting the gate.
     assert_eq!(count_ledger(&backend).await, 2);
 
