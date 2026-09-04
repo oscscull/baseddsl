@@ -323,7 +323,13 @@ pub fn run_query_stream(
         let mut rows = db.fetch(&plan.main.sql, &plan.main.params);
         while let Some(item) = rows.next().await {
             match item {
-                Ok(row) => yield Ok(nest_row(row)),
+                Ok(row) => {
+                    let mut v = nest_row(row);
+                    if !plan.json_paths.is_empty() {
+                        normalize_json(&mut v, &plan.json_paths);
+                    }
+                    yield Ok(v);
+                }
                 // A mid-stream failure is the stream's last item.
                 Err(e) => {
                     yield Err(e);
@@ -670,7 +676,11 @@ async fn run_writes<D: DbRead + ?Sized>(
             let (sql, params) = bind(sql, &env)?;
             let rows = fetch_all(db.fetch(&sql, &params)).await?;
             match rows.into_iter().next() {
-                Some(row) => nest_row(row),
+                Some(row) => {
+                    let mut v = nest_row(row);
+                    normalize_json(&mut v, &plan.json_paths);
+                    v
+                }
                 None => return Ok(TxOutcome::NotFound),
             }
         }
@@ -1017,7 +1027,9 @@ async fn run_bulk_readback<D: DbRead + ?Sized>(
         for c in 0..rb.key_count {
             kparts.push(row.remove(&format!("{alias_prefix}{c}")).unwrap_or(J::Null));
         }
-        by_key.insert(norm_key(&kparts), nest_row(row));
+        let mut v = nest_row(row);
+        normalize_json(&mut v, &plan.json_paths);
+        by_key.insert(norm_key(&kparts), v);
     }
     let mut out: Vec<J> = Vec::with_capacity(keys.len());
     for key in keys {
@@ -1134,6 +1146,51 @@ fn parse_array(val: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Normalize every `json`-typed leaf named by `paths` in one already-nested result row.
+/// A `json` column stores JSON as text (SQLite/MariaDB), so a driver reads it back as a
+/// JSON *string*; parsing it here yields the structured object/array it holds, so a `json`
+/// field round-trips as what was written, not a double-encoded string. A value already
+/// structured (a driver that decodes json natively) is left untouched, and a string that
+/// does not parse as JSON is left as-is (never a panic).
+fn normalize_json(row: &mut serde_json::Value, paths: &[String]) {
+    for path in paths {
+        let segs: Vec<&str> = path.split(based_codegen::sql::NEST_SEP).collect();
+        parse_json_at(row, &segs);
+    }
+}
+
+/// Descend `value` along `segs` (a `.`-split json path; a `field[]` segment is an array to
+/// recurse into per element) and, at the leaf, parse a JSON string into structured JSON.
+fn parse_json_at(value: &mut serde_json::Value, segs: &[&str]) {
+    use serde_json::Value as J;
+    let Some((head, rest)) = segs.split_first() else {
+        if let J::String(s) = value {
+            if let Ok(parsed) = serde_json::from_str::<J>(s) {
+                *value = parsed;
+            }
+        }
+        return;
+    };
+    match head.strip_suffix(ARRAY_MARK) {
+        Some(key) => {
+            if let J::Object(map) = value {
+                if let Some(J::Array(arr)) = map.get_mut(key) {
+                    for elem in arr.iter_mut() {
+                        parse_json_at(elem, rest);
+                    }
+                }
+            }
+        }
+        None => {
+            if let J::Object(map) = value {
+                if let Some(child) = map.get_mut(*head) {
+                    parse_json_at(child, rest);
+                }
+            }
+        }
+    }
+}
+
 /// Insert `val` at a possibly-dotted `key` into `obj`, creating intermediate objects for
 /// each `NEST_SEP` segment (`buyer.org.name` → `{buyer:{org:{name:val}}}`). A leaf key
 /// suffixed with `ARRAY_MARK` (`items[]`) is a to-many array: its string value is parsed
@@ -1190,11 +1247,21 @@ async fn shape<D: DbRead + ?Sized>(
 ) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
     let mut rows = fetch_all(db.fetch(&plan.main.sql, &plan.main.params)).await?;
+    // Nest a flat row into the response object, then normalize its `json` leaves (a json
+    // column read back as a text string → structured JSON).
+    let paths = &plan.json_paths;
+    let nest = |row: Row| {
+        let mut v = nest_row(row);
+        if !paths.is_empty() {
+            normalize_json(&mut v, paths);
+        }
+        v
+    };
     Ok(match plan.envelope {
         // `get`: the first row, or JSON null (Option<T>).
-        Envelope::One => rows.into_iter().next().map_or(J::Null, nest_row),
+        Envelope::One => rows.into_iter().next().map_or(J::Null, nest),
         // `list`: every row as an array.
-        Envelope::Many => J::Array(rows.into_iter().map(nest_row).collect()),
+        Envelope::Many => J::Array(rows.into_iter().map(nest).collect()),
         // paginated `list`: the { rows, cursor } envelope. For a keyset page, mint the
         // next cursor from the last row's hidden sort-key columns and strip them from
         // the response; `total` rides along when the query asked for a count.
@@ -1206,10 +1273,7 @@ async fn shape<D: DbRead + ?Sized>(
                 }
             }
             let mut obj = serde_json::Map::new();
-            obj.insert(
-                "rows".into(),
-                J::Array(rows.into_iter().map(nest_row).collect()),
-            );
+            obj.insert("rows".into(), J::Array(rows.into_iter().map(nest).collect()));
             obj.insert("cursor".into(), cursor.map_or(J::Null, J::String));
             if with_count {
                 if let Some(count) = &plan.count {

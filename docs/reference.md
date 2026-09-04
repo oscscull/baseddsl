@@ -51,7 +51,8 @@ Order {
 
 - `Id` resolves to the project default id strategy; put `id: Id` on every model.
 - `decimal(p,s)` — `1 ≤ s ≤ p ≤ 38`; bare `decimal` = `decimal(38, 9)`. Rides the wire as a JSON string.
-- `ulid` / `serial` are id-generation strategies (valid as `id`; `serial` = DB-generated sequential int).
+- `json` rides the wire as **structured JSON** (the object/array itself, at any nesting) and round-trips: read a value out, write it back unchanged. Client type `serde_json::Value`.
+- `bytes` rides the wire as a base64 string. `ulid` / `serial` are id-generation strategies (valid as `id`; `serial` = DB-generated sequential int).
 
 **Field modifiers** (parentheses): `(unique)`, `(default <value>)`, `(default now())`,
 `(default <enum-variant>)`, `(column "legacy_name")`.

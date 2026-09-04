@@ -58,7 +58,8 @@ use based_sema::{
 };
 
 use crate::sql::dml::{
-    bref_name, physical_col, project_return, push_joins, render_raw, soft_pred, BackCtx, Select,
+    bref_name, json_output_paths, physical_col, project_return, push_joins, render_raw, soft_pred,
+    BackCtx, Select,
 };
 use crate::Dialect;
 
@@ -87,6 +88,11 @@ pub struct LoweredMutation {
     /// for a from-create that returns a shape; `None` for a `-> ok` insert / any ordinary
     /// mutation.
     pub bulk_readback: Option<BulkReadback>,
+    /// Output field-paths of every `json`-typed leaf in the return shape (same basis as a
+    /// query's [`LoweredQuery::json_paths`](crate::sql::LoweredQuery::json_paths)), so a
+    /// written `json` value reads back structured — the write round-trips what it stored.
+    /// Empty for an `-> ok` mutation with no shape re-select.
+    pub json_paths: Vec<String>,
 }
 
 /// The read-back for a structured `create … from` (BW1b/BW2). After the chunked INSERT
@@ -513,11 +519,22 @@ fn lower_mutation<'a>(
         ))
     });
 
+    // A shape-returning mutation reads its written row back through `project_return`, so
+    // its `json` leaves need the same structured-JSON normalization a read gets.
+    let json_paths = rm
+        .and_then(|rm| {
+            schema
+                .model(&rm.ret_model)
+                .map(|root| json_output_paths(schema, decls, rm.ret_shape.as_deref(), &rm.ret_model, root))
+        })
+        .unwrap_or_default();
+
     LoweredMutation {
         name: m.name.node.clone(),
         stmts,
         ret_select,
         bulk_readback,
+        json_paths,
     }
 }
 
