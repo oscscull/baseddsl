@@ -52,6 +52,13 @@ Uniform for columns and relations: `name: Type (modifiers)`
   source spelling for a blob) — that is `E0314`; set it from a raw migration or a DB default, or make
   it nullable (`?`). A `bytes` field inside a **to-many array** projection is unsupported on SQLite
   (its JSON functions cannot carry a `BLOB`) — project it as a flat/top-level field there.
+- **`json`** is a structured JSON value (an object, array, or scalar). It rides the wire as that
+  **structured JSON** — the object/array itself, at any depth (top-level, a to-one nest, or inside a
+  to-many array) — and the client carries it as a `serde_json::Value`. A write accepts the same
+  structured value, so a `json` field **round-trips** byte-for-byte: read one out, write it back
+  unchanged, no client-side `JSON.parse`/`stringify`. Stored as `JSON` (MariaDB) / `JSONB` (Postgres,
+  the `has` → `@>` containment form) / `TEXT` (SQLite — no native JSON type, so the engine parses the
+  stored text back to structured JSON on read). Equality/containment only.
 
 ### Opaque columns — `raw("…")`
 The primitive set is closed. A column whose DB type the engine does not model — PostGIS

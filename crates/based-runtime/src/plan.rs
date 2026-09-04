@@ -119,6 +119,11 @@ pub struct QueryPlan {
     /// the last row's hidden `__keyset_<i>` columns to mint the next cursor and strips them
     /// from the response.
     pub keyset: Option<KeysetPlan>,
+    /// Output field-paths of every `json`-typed leaf in the result (codegen's
+    /// [`based_codegen::sql::LoweredQuery::json_paths`]). The run stage parses the value at
+    /// each — a `json` column read back as a text string — into structured JSON, so a
+    /// `json` field round-trips as the object/array it holds, not a double-encoded string.
+    pub json_paths: Vec<String>,
 }
 
 /// What the run stage needs to finish a keyset page: how many sort-key columns the
@@ -168,6 +173,11 @@ pub struct MutationPlan {
     /// returns them in input order (one object for `-> Shape`, an array for `-> Shape[]`).
     /// Replaces [`ret_select`](Self::ret_select) for a from-create; `None` otherwise.
     pub bulk_readback: Option<BulkReadbackPlan>,
+    /// Output field-paths of every `json`-typed leaf in the return shape (codegen's
+    /// [`based_codegen::sql::LoweredMutation::json_paths`]). The run stage parses the value
+    /// at each in the write's read-back, so a written `json` value round-trips as the
+    /// object/array it holds. Empty for an `-> ok` mutation.
+    pub json_paths: Vec<String>,
 }
 
 /// The runtime read-back plan for a structured `create … from` (BW1b/BW2).
@@ -496,6 +506,7 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         count,
         envelope,
         keyset,
+        json_paths: low.json_paths.clone(),
     })
 }
 
@@ -662,6 +673,7 @@ pub fn plan_mutation(
         ret_select: low.ret_select.clone(),
         ack_check,
         bulk_readback,
+        json_paths: low.json_paths.clone(),
     })
 }
 

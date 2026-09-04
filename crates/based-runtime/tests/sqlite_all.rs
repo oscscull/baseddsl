@@ -17,6 +17,8 @@ mod distinct_integration;
 mod idempotency_db;
 #[path = "sqlite/in_list_integration.rs"]
 mod in_list_integration;
+#[path = "sqlite/json_roundtrip.rs"]
+mod json_roundtrip;
 #[path = "sqlite/key_composite_integration.rs"]
 mod key_composite_integration;
 #[path = "sqlite/key_integration.rs"]
