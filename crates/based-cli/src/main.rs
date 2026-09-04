@@ -618,9 +618,14 @@ async fn cmd_migrate_apply(
         match migrate::apply(&*backend, dialect, &migrations, &opts).await {
             Ok(report) => report_apply(&report, &redact(url)),
             Err(e) => {
-                // At the destructive gate, teach `@was`: the refused migration may be a
-                // rename spelled as a drop+add (D105).
-                if let migrate::MigrateError::Destructive { id } = &e {
+                // At the destructive gate, surface the partial state: which migrations were
+                // applied before it stopped (so the operator sees the DB is partially
+                // migrated, not that nothing happened), and teach `@was` — the refused
+                // migration may be a rename spelled as a drop+add (D105).
+                if let migrate::MigrateError::Destructive { id, applied } = &e {
+                    for aid in applied {
+                        println!("  applied {aid}");
+                    }
                     if let Some(m) = migrations.iter().find(|m| &m.id == id) {
                         for hint in &m.rename_hints {
                             eprintln!("hint: {hint}");

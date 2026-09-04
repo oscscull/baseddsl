@@ -126,8 +126,10 @@ pub enum MigrateError {
     /// and would otherwise silently ignore. Edit the schema and re-run `based migrate gen`,
     /// or (for SQL the neutral vocabulary can't express) use a `raw(<dialect>)` line.
     UpMigDrift { id: String },
-    /// A pending migration is destructive and no `--allow-destructive` ack was given.
-    Destructive { id: String },
+    /// A pending migration is destructive and no `--allow-destructive` ack was given. Carries
+    /// the migrations applied *before* the gate was hit (committed, roll-forward), so the
+    /// caller can report the database's partial state — it stopped here, later ones pending.
+    Destructive { id: String, applied: Vec<String> },
     /// A rollback target has no `down.mig` — that migration is roll-forward only.
     NoDown { id: String },
     /// The ledger and the `migrations/` tree disagree in a way that can't be reconciled
@@ -158,10 +160,22 @@ impl std::fmt::Display for MigrateError {
                  structural steps derive from schema.snap — edit the schema and re-run \
                  `based migrate gen`, or use a raw(<dialect>) line for SQL the steps can't express"
             ),
-            Self::Destructive { id } => write!(
-                f,
-                "migration `{id}` has destructive step(s); re-run with --allow-destructive to apply"
-            ),
+            Self::Destructive { id, applied } => {
+                let progress = if applied.is_empty() {
+                    "no migrations were applied".to_string()
+                } else {
+                    format!(
+                        "{} earlier migration(s) applied — this and any later ones are left pending \
+                         (the database is partially migrated)",
+                        applied.len()
+                    )
+                };
+                write!(
+                    f,
+                    "migration `{id}` has destructive step(s); {progress}; \
+                     re-run with --allow-destructive to apply"
+                )
+            }
             Self::NoDown { id } => {
                 write!(f, "migration `{id}` has no down.mig — it is roll-forward only")
             }
@@ -501,9 +515,13 @@ pub async fn apply(
         .collect();
     forward.sort_by_key(|m| m.number);
     for m in forward {
-        // Gate destructive steps before touching the database.
+        // Gate destructive steps before touching the database. The safe migrations already
+        // committed ride along in the error, so the caller can report the partial state.
         if m.destructive && !opts.allow_destructive {
-            return Err(MigrateError::Destructive { id: m.id.clone() });
+            return Err(MigrateError::Destructive {
+                id: m.id.clone(),
+                applied: report.applied.clone(),
+            });
         }
         run_in_tx(
             backend,
