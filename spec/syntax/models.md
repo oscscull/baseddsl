@@ -154,7 +154,7 @@ written in the `id` type (its generation is consequential, so it is visible, not
 A bare `int` (or other numeric) as the `id` is `E0266` — a DB-generated integer key must be
 spelled `serial` so its generation is visible; an app-owned key stays a string. `serial` and
 `ulid` are strategies, not column types: on any non-`id` column they are `E0267`. **Wire
-honesty:** a `serial` id is a JSON *number* (OpenAPI `{type: integer}`), a uuid/ulid id a
+representation:** a `serial` id is a JSON *number* (OpenAPI `{type: integer}`), a uuid/ulid id a
 string; a relation's FK column mirrors the target PK type (a serial parent → a `BIGINT` FK).
 Heterogeneous strategies across one schema are allowed. A serial-created row's id is unknown
 until the INSERT runs, but a bound create re-selects its written row, so a `tx` step **can**

@@ -210,7 +210,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
   renderer), D42 (apply + `_based_migrations` ledger), D67 (`@was` renames + offline drift diagnostic
   + `raw(dialect)` up step — Track E5, DoD #5 fully met), D105 (`@was` lifecycle: `gen` self-consumes
   the spent `@was` from source + teach-at-checkpoint rename hint in gen/`W0108`/destructive-gate;
-  editor-rename insert already D80), D106 (`up.mig` snapshot-authoritative: honest header +
+  editor-rename insert already D80), D106 (`up.mig` snapshot-authoritative: accurate header +
   apply-time drift **refusal** `MigrateError::UpMigDrift` + multi-line `raw` blocks + prefilled
   `down.mig` + `.mig` grammar + raw/snapshot boundary doc + `W0109`)
 - **Example projects** — D60 (`examples/` outside the workspace; SQLite quickstart: build-time
@@ -291,7 +291,7 @@ Handles 1 & 2). `$ctx.org` is a path into it.
 - **There is no single "ctx type."** `$ctx` is per-*request* — the caller builds one context bag per
   call. Correspondingly there is no global declaration: each **callable requires exactly the
   `$ctx.<field>`s it reads** (its `where`, its target model's `@scope`, expanded filter bodies,
-  `create`/`update` assigns). A public query requires none. This is the honest unit — "the ctx *this
+  `create`/`update` assigns). A public query requires none. This is the correct unit — "the ctx *this
   request* needs" — not "the ctx." (An earlier iteration put a `[ctx]` table in `based.toml`; that
   encoded the "one global ctx" fallacy and was removed.)
 - **A field's type is inferred from use, not declared** (implemented, `based-sema::ctx`; sema resume
@@ -665,7 +665,7 @@ and the predicate restriction. The original open axes, for the record:
    not shippable.
 4. **What the compiler guarantees vs cannot.** It can guarantee the predicate is injected
    everywhere (kills accidental cross-scope leaks); it cannot verify the role matrix is correct
-   (that lives in host guards). Document this honestly so `@scope` is not mistaken for a checked
+   (that lives in host guards). Document this clearly so `@scope` is not mistaken for a checked
    authorization model.
 
 ## D20 — runtime serving model: sync + bounded pools, single-shard scale-out
@@ -1075,7 +1075,7 @@ inference exactly.
 - **The method carries `$ctx` as a typed argument.** `fn <name>(&self, input: <Name>Input, ctx:
   <Name>Ctx | ())` — the context sits *next to* the input, never merged into it, because `$ctx` is
   request context an upstream sets, not a caller-supplied body field (auth.md/D7). So the generated
-  signature is now the honest contract: reading it tells you both the arguments *and* the context the
+  signature is now the complete contract: reading it tells you both the arguments *and* the context the
   callable requires.
 - **`Transport` carries the context generically.** `call<I, C, O>(route, input, ctx)` grows a
   `C: Serialize` context parameter alongside `I: Serialize`. The concrete `Transport` serializes `ctx`
@@ -1457,7 +1457,7 @@ shape as E2's TODOs).
   (`fk=<Model>` records the target so a retyped/dropped relation diffs as an add/drop/alter of
   `<field>_id`, D3). The default `id` (uuid/not-null/not-unique, D2) is **elided** and carried as an
   invariant; a non-default `id` records itself. Soft-delete/`@created`/`@updated` roles + `@scope`/
-  `@sort` ride the table header (they emit no column step but must round-trip so drift stays honest).
+  `@sort` ride the table header (they emit no column step but must round-trip so drift stays accurate).
   `schema.snap` is **timestamp-free** — a migration timestamp, if ever wanted, is CLI-layer metadata,
   never snapshot content (keeps `schema.snap` byte-stable across runs).
 - **Round-trippable.** `Snapshot::render`/`Snapshot::parse` are inverses, so the stored baseline parses
@@ -1558,7 +1558,7 @@ plus `based-codegen::migrate::{sql_statements, content_hash}` (the offline halve
   comments) so `Db::execute` runs them one at a time. Both go through one `step_statements` seam, so the SQL
   *applied* is exactly the SQL *reviewed* (P4). This resolves D41's deferred "up.mig parser": there is none —
   the neutral `up.mig`/`down.mig` text is **not** losslessly parseable back to `Step`s (render_up drops each
-  index step's table and each `alter column`'s resulting `after` state), and the snapshot chain is the honest
+  index step's table and each `alter column`'s resulting `after` state), and the snapshot chain is the authoritative
   source of truth. Consequence (documented): a *hand-edited* `up.mig` still isn't honored on the up path — its
   steps come from the snapshots; the edit is caught by `verify` (below) and the tamper hash.
 - **The `_based_migrations` ledger** (id text PK + content_hash + applied_at, dialect-typed) is created on
@@ -1881,7 +1881,7 @@ editor-facing string. Closes Track G. Rename across scope refs stays deferred to
   as `Step::ScopeChange(ScopeChange::{Add,Drop,Alter,Table})` — a neutral, non-destructive step that renders
   as an `up.mig` note / an SQL comment and produces zero executable statements, but *does* advance the
   snapshot so `based migrate gen` captures a scope change and `verify`'s full-snapshot-equality drift check
-  stays honest (without it, a scope-only change would deadlock: gen writes nothing, verify sees drift). A
+  stays accurate (without it, a scope-only change would deadlock: gen writes nothing, verify sees drift). A
   from-scratch `0001_init` (empty prior) emits **no** `ScopeChange` steps — the scopes ride `schema.snap`
   and each table's `scope_alts` rides its `CreateTable`, so init stays create-only (its `up.mig` still
   matches `based gen sql` from scratch, which emits no scope SQL). Commerce golden re-blessed (single-scope
@@ -2254,7 +2254,7 @@ in-process `Engine`** against a live bundled-SQLite database — no socket, no s
   consumer crate). This is the documented Tier-1 in-process door (`embed.rs`), now shown against a real
   `SqliteDb` instead of a `MockDb`. The engine is built over one `rusqlite::Connection` (open → run the
   generated DDL → `SqliteDb::new` → `Engine::new`); SQLite is embedded, so depending on `rusqlite`
-  directly to open the connection is honest, not a leak.
+  directly to open the connection is legitimate, not a leak.
 - **No checked-in generated code — `build.rs` regenerates it.** The build step runs the compiler front
   end as a library (`based_runtime::Compiled::load` — the same discover→parse→check `based check`/`based
   serve` use) and emits the typed client (`based_codegen::client::client`) + SQLite DDL
@@ -3297,7 +3297,7 @@ directly. So only the *decode* seam changed; the client is the sole place a deci
 **Diagnostics:** one new code **`E0159`** — a `decimal(p, s)` out of range (`1 ≤ s ≤ p ≤ 38`) *or* a decimal
 column's `default` that isn't a decimal literal (an integer or fractional literal).
 
-**Used in the example (honest money).** Commerce `Order.total` `int` → `decimal(12, 2)` (+ the `place_order`
+**Used in the example (exact money).** Commerce `Order.total` `int` → `decimal(12, 2)` (+ the `place_order`
 param); commerce snapshot re-blessed; the three quickstarts' `total` converted, their `src/client.rs`
 regenerated (importing `rust_decimal`), `0001_init` migration + Cargo.toml updated, and each **re-run green
 live** (SQLite `cargo run`; MariaDB `mariadb:11.4` + Postgres `postgres:16` via Docker `migrate apply` →
@@ -3582,7 +3582,7 @@ budget, and a silent truncation would be worse than the buffer).
 envelope: `{"row":{…}}` per row, then exactly one terminal `{"done":{"rows":N}}` (success)
 or `{"error":{code,message}}` (mid-stream failure, same envelope as the non-streaming
 error body — D71's single code registry). The status line is spent once the body starts,
-so the terminal line is the only honest place for a late DB error — and **a body that ends
+so the terminal line is the only correct place for a late DB error — and **a body that ends
 without a terminal line is defined as truncation** (client must report a transport error,
 never completion). This is why NDJSON wins: lines parse standalone (any JSON parser,
 `curl | jq`, LLM tooling), and it has an in-band place for the error/success signal — a
@@ -3666,7 +3666,7 @@ out of the domain instead of being decorated on:
 - two real audiences give the scope DNF meaning: agents see the org (`scoped Tenant`), requesters
   see their own tickets (`scoped Requester`) — `@scope Tenant` + `@scope Requester` stacked on
   `Ticket` is a genuine OR; an agent's private `DraftNote` is a genuine AND (`@scope Tenant, Author`);
-- streaming is the compliance/BI ticket export; raw SQL is honestly motivated (the workload report
+- streaming is the compliance/BI ticket export; raw SQL is well motivated (the workload report
   needs aggregation, which the DSL defers to T4; date-interval math in an `overdue` filter term);
   soft-delete is archive/restore; `hard delete` is comment purging; `tx` + `^` is
   open-ticket-with-first-comment.
@@ -3900,7 +3900,7 @@ of it is a spelling the grammar should change.
   source-level spelling, value is the stored/wire spelling — and the example's smoke asserts it
   deliberately.
 - **`~` is verbatim LIKE**, so the search handler wraps `%…%` itself. Accepted (the operator
-  stays honest about SQL); queries.md now says so in one line, and the example README notes it.
+  stays explicit about SQL); queries.md now says so in one line, and the example README notes it.
 
 **Final coverage map (deltas vs D86 §4; everything not listed shipped as mapped):**
 - **`in` — not demonstrated.** The operator exists but only as `col IN ($param)` (one bound
@@ -4234,7 +4234,7 @@ field is `#[serde(skip_serializing_if = "Option::is_none")]`, so a consumer re-s
 a typed `Page` (the helpdesk route does exactly that) mirrors the engine wire — no
 phantom `"total": null` on an uncounted page.
 
-**OpenAPI is per-query honest.** `page_schema` takes the query's `with count` flag
+**OpenAPI is per-query accurate.** `page_schema` takes the query's `with count` flag
 (read off the AST `Clause::Page`, the same derivation as the request-body page
 controls): a counted query's inlined page schema advertises
 `total: { type: integer, format: int64 }`; an uncounted query's schema doesn't carry
@@ -4469,7 +4469,7 @@ plan/scan/value/decode paths were untouched.
 **SQLite decimal is degraded (documented, per D83).** `sum`/`avg` over a `decimal` on SQLite
 compute through float (TEXT affinity), and `max`/`min` compare lexicographically — production
 dialects (`DECIMAL`/`NUMERIC`) are exact. The live proof therefore asserts exact values on int
-columns and the honest float-degraded value for the decimal sum.
+columns and the actual float-degraded value for the decimal sum.
 
 **Editor / fmt.** fmt reprints `= count()` / `= sum(col)` and `group by (…)` / `having (…)`
 canonically (round-trip stable). `group`/`by`/`having` join the keyword vocabulary
@@ -4581,7 +4581,7 @@ autofix.** (1) A relation join key some query/shape traverses with no covering `
 error **`E0260`** (promoted from the `W0103` lint) — satisfied by `@index <field>` (the autofix
 inserts it) or the existing visible `unindexed(max_rows: N)` / `unindexed(unsafe)` opt-out.
 (2) A model that declares no `id` is a new error **`E0261`** — the autofix inserts the `id` line.
-Both fire in `based check` (CLI), not only the editor, so the compiler is equally honest headless.
+Both fire in `based check` (CLI), not only the editor, so the compiler is equally strict headless.
 
 **Why — principle 8 is reworded.** Principle 8 (“show, don’t write, for derived facts”) currently
 *names inferred indexes as its example*; this decision inverts that example. An index has real
@@ -4770,7 +4770,7 @@ then prints the hints; `cmd_migrate_apply` prints the offending migration's hint
 appends the hint to the matching model's `W0108` note. `W0107` (spent-`@was`) is unchanged. Gate: full
 `make check` green (fast gate + all three live suites + all examples + the axum-helpdesk smoke).
 
-## D106 — `up.mig` is snapshot-authoritative: honest contract + a real editable surface (NF8)
+## D106 — `up.mig` is snapshot-authoritative: accurate contract + a real editable surface (NF8)
 
 **Decision.** The generated `up.mig` header says “edit if needed, then apply,” but apply/render
 re-derive **structural** SQL from the `schema.snap` chain and only *parse* `raw(<dialect>)` lines out
@@ -4778,7 +4778,7 @@ of `up.mig` (`based-runtime` `load_migrations` → `migrate::diff_snapshots` for
 `parse_raw_steps` for raw) — so a hand-edit to a structural step line is **silently ignored at
 apply** (only offline `based migrate verify` catches the byte-drift, and only if it runs). Six fixes:
 
-(a) **Honest header.** `render_up`’s header (`migrate/up_mig.rs`) states the real contract:
+(a) **Accurate header.** `render_up`’s header (`migrate/up_mig.rs`) states the real contract:
 structural steps derive from `schema.snap` (editing a structural line has no effect at apply); the
 editable surface is `raw(dialect)` lines (which run *after* all structural steps, regardless of file
 position) and a hand-authored `down.mig`.
@@ -4838,7 +4838,7 @@ treats an all-comment (zero-statement) `down.mig` as absent, so an untouched pla
 roll-forward-only (a `--down` is a loud `NoDown`, not a silent no-op). (f) migrations.md + raw.md document
 the safe (unmodeled: views/triggers/extensions) vs dangerous (modeled: table/column/index) raw boundary;
 `W0109` (`migrate::raw_modeled_tables`, whole-identifier scan) surfaces in `based migrate verify` when a
-raw step's SQL names a modeled table. Tests: codegen units (honest header, multi-line raw round-trip,
+raw step's SQL names a modeled table. Tests: codegen units (accurate header, multi-line raw round-trip,
 drift helper, down-prefill, `raw_modeled_tables` word-boundary), runtime (UpMigDrift refused at load,
 multi-line raw applies live on SQLite, the two Tamper tests reworked to a `raw`-line append), CLI
 (down.mig prefill + irreversible placeholder, W0109 in verify). Green via `make check`.
@@ -4939,7 +4939,7 @@ explicit + greppable), so `on_delete: cascade` actually cascades — proven live
 `IndexSnap`), so adding/removing/changing an FK diffs into an `add foreign_key` /
 `drop foreign_key` step (a changed action is drop + re-add). Postgres/MariaDB render these as
 `ALTER TABLE … ADD CONSTRAINT`/`DROP CONSTRAINT`/`DROP FOREIGN KEY`; **SQLite has no in-place
-FK ALTER**, so an add/drop there is an honest loud marker pointing at a hand-authored
+FK ALTER**, so an add/drop there is a loud marker pointing at a hand-authored
 `raw(sqlite)` rebuild — never a silent skip (the full-rebuild engine is out of scope this
 iteration; from-scratch `create table` carries FKs inline on SQLite, so init works).
 
@@ -4954,7 +4954,7 @@ pass. `MemberKind::Forward` gained an `FkDecl` (presence intent + resolved actio
 spans); `RModel` gained model-level `no_fk`. Tests: parser +/− (`@fk`/`@no_fk` forms), sema
 +/− per code **in both toml directions incl. both redundancy lints** (`tests/fk.rs`, 18
 cases), DDL golden all three dialects, snapshot round-trip + add/drop/change diff (+ per-dialect
-render, incl. the SQLite honest-marker), fmt round-trip, a sema conformance golden
+render, incl. the SQLite raw-rebuild marker), fmt round-trip, a sema conformance golden
 (`fk_referential`), and a **live SQLite cascade proof** (bad-parent insert rejected → pragma
 on; parent delete cascades the child away). `make check` green end to end (fast gate + all
 three live suites + all examples + the axum-helpdesk smoke).
@@ -5051,7 +5051,7 @@ bind a `tx` sibling — the id is unknown until the INSERT runs). DDL (`sql.rs` 
 `BIGINT NOT NULL AUTO_INCREMENT`, Postgres `BIGINT GENERATED ALWAYS AS IDENTITY`, SQLite `INTEGER PRIMARY
 KEY AUTOINCREMENT` (inline, no separate PK clause); `sql_type(Serial)` is the plain storage type so FK
 columns mirror a plain `BIGINT`/`INTEGER`, and the migration `fk_type` maps a serial target to neutral
-`int` (an FK is never an identity column). Wire honesty: OpenAPI serial id → `{type: integer}`, ulid →
+`int` (an FK is never an identity column). Wire representation: OpenAPI serial id → `{type: integer}`, ulid →
 string; the generated client `Id<E>` (de)serializes int-or-string (hand-written serde, `from_int`); the
 runtime `Family::of(Serial)` = int, and relation FK/`$ctx` families mirror the target PK. Read-back
 planner: a serial `create` omits the id (`serial_return` on `LoweredWrite`) and appends `RETURNING <id>`
@@ -5095,7 +5095,7 @@ then substitutes it into later steps' params. So `serial` steps in a `tx` execut
 capability (`execute` today returns only rows-affected). App-minted strategies keep the existing batch
 path unchanged.
 
-**Wire honesty (no repr hiding).** An integer PK is an integer on the wire: `Id<entity::M>`'s underlying
+**Wire representation (no repr hiding).** An integer PK is an integer on the wire: `Id<entity::M>`'s underlying
 repr is per-entity (string for uuid/ulid, `i64` for serial), the JSON value is a number, and OpenAPI
 carries `{type: integer}` rather than `{type: string, format: uuid}`. A forward relation's FK column
 mirrors the target PK type (already true), so a relation to a `serial` model gets a `BIGINT` FK.
@@ -5227,7 +5227,7 @@ Postgres: legal (`PRIMARY KEY (a, id)`, `id` IDENTITY). MariaDB/MySQL InnoDB: le
 `AUTO_INCREMENT` column must lead *some* index, so codegen auto-emits a helper `INDEX(seq)` when the
 serial part is non-leading — covered, not forbidden, not misleading. SQLite: native `AUTOINCREMENT` only
 on a single-column `INTEGER PRIMARY KEY`, so a serial-in-composite is expressed via the raw DDL hatch plus
-an honest "not native on this dialect" diagnostic. A serial part reuses D110's read-back planner; a
+an explicit "not native on this dialect" diagnostic. A serial part reuses D110's read-back planner; a
 composite key of only known-at-insert parts (FKs + natural scalars) needs no read-back.
 
 **Relations *into* a composite-key model — first-class, no interim backstop.** An inbound FK to a
@@ -5261,7 +5261,7 @@ in 10.7; 10.6 LTS lacks it) — silent, with the crate claiming MySQL-8 compatib
 **Decision.**
 - **`mysql` is a distinct dialect** (own `Dialect::MySql` variant), no longer aliased to `MariaDb`
   (`lib.rs:54` maps both today). MySQL and MariaDB diverge and will diverge further; a real target is
-  required for honest output and per-dialect type/DDL choices. Identifier quoting stays backticks (shared).
+  required for correct output and per-dialect type/DDL choices. Identifier quoting stays backticks (shared).
 - **The MySQL/MariaDB family defaults `uuid`/`Id` to `CHAR(36)`.** It matches the engine's app-minted v4
   *string* exactly, so the runtime value mapping is unchanged (it already binds/reads uuid strings), and it
   executes on every MySQL and MariaDB version. Replaces the unconditional `UUID`.
@@ -5280,7 +5280,7 @@ rule); doc-truth (`lib.rs:24-26` becomes accurate). Spec: `spec/syntax/models.md
 `"mysql"`→`MySql`, `"mariadb"`→`MariaDb` (unknown still falls back to `MariaDb`). A
 `Dialect::is_mysql_family()` helper (`MariaDb | MySql`) carries the shared branches — the two are
 identical everywhere today (quoting, operators, DDL, DML, migration renderer, the runtime driver:
-`ShardRouter` serves both, MySQL sharing MariaDB's wire protocol), so the split is honest-output +
+`ShardRouter` serves both, MySQL sharing MariaDB's wire protocol), so the split is accurate-output +
 future-proofing, not present divergence. `sql_type` emits `CHAR(36)` for `uuid`/`Id` on the whole
 family (was unconditional `UUID`); `fk_type` now reads the target PK member's `opaque()` raw type and
 propagates its per-dialect literal, so `id: Id raw("UUID")` makes both the PK and every FK to it
@@ -5327,7 +5327,7 @@ under principle 9 ("consume any database; every valid state is expressible").
   `CREATE TABLE` + FK. A model **moving** namespace is detected (never silently missed) and diffs
   into an `alter schema` step: Postgres `ALTER TABLE … SET SCHEMA`, MySQL/MariaDB cross-database
   `RENAME TABLE from.t TO to.t`; SQLite has no in-place cross-attached-database move, so it renders
-  a loud raw-rebuild pointer (same honesty as the SQLite FK-add / alter-column cases).
+  a loud raw-rebuild pointer (same handling as the SQLite FK-add / alter-column cases).
 
 **New diagnostics.** `E0296` (invalid `@schema` name), `E0297` (a `.` in `@table` → use `@schema`).
 
@@ -5747,7 +5747,7 @@ row-level `FOR UPDATE`, so this per-row hand-off is a Postgres/MySQL-family sema
 whole-database transaction lock serializes writers instead).
 
 **Optional nowait/skip-locked: deferred** as a clean micro-follow-on (documented in transactions.md).
-Postgres supports both, MariaDB 10.6+ both, SQLite neither — the MariaDB-version gating makes honest
+Postgres supports both, MariaDB 10.6+ both, SQLite neither — the MariaDB-version gating makes accurate
 emission (we can't know the server version at compile time) a follow-up rather than jeopardize a green
 slice.
 
@@ -5988,7 +5988,7 @@ probe an unknowable server version at compile time. On **SQLite** every wait mod
 documented no-op** as plain `for update`: SQLite has no row-level lock, so there is no already-locked
 row to skip or fail fast on — its whole-database transaction lock serializes writers at the boundary
 regardless. This is not a new design fork — it is the direct, consistent extension of D119's plain
-`for update` no-op precedent (principle 9: honest, never silently misleading), so no owner sign-off was
+`for update` no-op precedent (principle 9: warn, never silently mislead), so no owner sign-off was
 needed.
 
 **No new sema code.** The wait mode rides the **same** compile-time boundaries as plain `for update`

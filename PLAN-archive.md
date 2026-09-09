@@ -222,7 +222,7 @@ the user; see the decision block below. `spec/syntax/migrations.md` is written b
     answer "what schema do these migrations produce?" **without a DB**, which is only tractable if the
     steps are machine-understandable. Raw SQL would be opaque offline (needs a SQL parser or a shadow
     DB, which the user declined for the baseline). So: neutral for structural DDL (keeps snapshots
-    honest + drift check working infra-free); raw escape where SQL is genuinely the right tool, with
+    accurate + drift check working infra-free); raw escape where SQL is genuinely the right tool, with
     that migration visibly marked "not offline-verifiable for the raw step."
   - **Rollback = roll-forward by default; an OPTIONAL author-supplied `down.mig` is honored if
     present, never auto-generated** (no fake reverses). *(user)*
@@ -405,7 +405,7 @@ its own `cargo test`/`fmt`/`clippy`-green commit):
     Migration snapshot (`based-codegen::migrate`, extends D39): `Snapshot.scopes` serializes top-level
     `scope <Name> (<col>: <Type> = $ctx.<f>, …)` decls (sorted, before tables); `TableSnap.scope_alts`
     records each table's DNF as `scope=(A, B)` header groups (one per alternative). Both round-trip; a scope
-    change surfaces as a no-DDL `Step::ScopeChange` (advances the snapshot so `verify` drift stays honest;
+    change surfaces as a no-DDL `Step::ScopeChange` (advances the snapshot so `verify` drift stays accurate;
     init stays create-only). Commerce golden re-blessed (`scope Tenant (org: Org = $ctx.org)` + Order's
     `scope=(Tenant)`); multi-alternative OR round-trip/diff unit test added.
 
@@ -692,7 +692,7 @@ example generates a module that compiles clean against `serde`/`serde_json`. Del
   declaration — inverse after the field, index at the model header line — with the
   `detail` as tooltip), **hover** (the fuller "why" for any fact whose span
   covers the cursor), and **go-to-definition** (Cmd+click a model/type reference →
-  its declaration, cross-file; D43). `LineIndex` does faithful UTF-16 position mapping
+  its declaration, cross-file; D43). `LineIndex` does accurate UTF-16 position mapping
   (LSP's default). Tests: `based-lsp/src/compile.rs` unit tests (position round-trips
   incl. multibyte; `compile` over commerce; go-to-def cross-file). Smoke-tested
   end-to-end over the JSON-RPC wire.
@@ -1032,7 +1032,7 @@ suites + the examples green on the async core (owner, 2026-07-10). Worked in ord
 - **N1. ✅ COMPLETE. Native async execution core (implements D84).** All four slices landed;
   N2 streaming is next.
   - ✅ **First step — the D84 de-risk spike** (`tests/sqlx_spike.rs`; live gate `ci-live-sqlx`):
-    all three dialects codec-faithful through sqlx. Decimal feature = **`bigdecimal`**
+    all three dialects codec-correct through sqlx. Decimal feature = **`bigdecimal`**
     (`rust_decimal` silently truncates past ~28 digits, disqualified; `pg_numeric` stays, decoding
     sqlx's byte-exact raw numeric); Postgres binds must be **native-typed** — sqlx's all-binary
     parameters kill the coerce-wire-text trick, so `SqlValue` grows typed text-riding variants;

@@ -956,7 +956,7 @@ fn raw_step_renders_only_for_its_dialect() {
     );
 }
 
-/// The generated header states the honest contract (structural steps derive from the
+/// The generated header states the real contract (structural steps derive from the
 /// snapshot; the editable surface is `raw`/`down.mig`) and drops the old "edit if needed".
 #[test]
 fn render_up_header_states_the_honest_contract() {

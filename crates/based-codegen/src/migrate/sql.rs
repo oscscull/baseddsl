@@ -176,7 +176,7 @@ pub fn render_migration(steps: &[Step], dialect: Dialect, target: &Snapshot) -> 
 /// into one [`Emit::Rebuild`] (emitted at the table's first touch, in step order), and pass
 /// every other step through as [`Emit::Step`]. A rebuild is triggered only when the target
 /// snapshot actually carries the table's post-migration shape — otherwise the step falls
-/// through to its per-step lowering (which surfaces the honest "can't in place" error).
+/// through to its per-step lowering (which surfaces the explicit "can't in place" error).
 fn sqlite_plan<'a>(steps: &'a [Step], target: &Snapshot) -> Vec<Emit<'a>> {
     let rebuild: Vec<&str> = steps
         .iter()
@@ -760,7 +760,7 @@ fn alter_schema_statements(
 }
 
 /// `ALTER TABLE … DROP CONSTRAINT` (Postgres) / `DROP FOREIGN KEY` (MariaDB). SQLite has no
-/// in-place FK drop either — same honest table-rebuild message.
+/// in-place FK drop either — same explicit table-rebuild message.
 fn drop_foreign_key_statements(
     table: &str,
     schema: Option<&str>,

@@ -1514,7 +1514,7 @@ fn de_bool_opt_vec<'de, D: serde::Deserializer<'de>>(
     Ok(Option::<Vec<BoolWire>>::deserialize(d)?.map(|v| v.into_iter().map(|b| b.0).collect()))
 }
 
-/// A typed id: the primary key of entity `E`. The wire repr is honest to the entity's
+/// A typed id: the primary key of entity `E`. The wire repr matches the entity's
 /// key strategy — a `uuid`/`ulid` id is a JSON string, a `serial` id a JSON number — so
 /// this (de)serializes transparently as either (`numeric` records which). The `E` marker
 /// keeps ids of different entities distinct types, so a `User` id can't be passed where an

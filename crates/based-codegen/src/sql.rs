@@ -345,7 +345,7 @@ fn constraint_lines(
     }
 
     // Enum columns carry a DB-native CHECK constraint (`col IN ('v1', …)`) — the
-    // dialect-honest form on every target (SQLite has no native enum type; Postgres's
+    // canonical form on every target (SQLite has no native enum type; Postgres's
     // `CREATE TYPE` and MariaDB's inline `ENUM(…)` both make a variant change an awkward
     // `ALTER TYPE`/`MODIFY`, so a text column + CHECK is the uniform, migration-simple
     // representation). Membership is also enforced by the DSL layer (E0154).

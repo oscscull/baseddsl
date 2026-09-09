@@ -22,7 +22,7 @@ pub fn render_up(steps: &[Step]) -> String {
     out
 }
 
-/// The generated `up.mig` header — the honest contract. The structural steps below are
+/// The generated `up.mig` header — the real contract. The structural steps below are
 /// re-derived from `schema.snap` at apply time, so editing one has no effect (and
 /// `based migrate apply` refuses a divergent edit). The editable surface is a `raw(dialect)`
 /// line and a hand-authored `down.mig`. All lines are `#` comments (dropped from the

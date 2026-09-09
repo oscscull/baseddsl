@@ -695,7 +695,7 @@ fn typed_ids_are_phantom_newtypes_per_entity() {
         query order_by_id(id) -> OrderCard;
         "#);
     // The phantom newtype + its explicit raw/int constructors. Its serde is hand-written
-    // (wire-honest: a serial id is a JSON number, a uuid/ulid id a string), so there is no
+    // (the wire form tracks the key strategy: a serial id is a JSON number, a uuid/ulid id a string), so there is no
     // derived `#[serde(transparent)]`.
     assert!(out.contains("pub struct Id<E> {"), "\n{out}");
     assert!(out.contains("impl<E> Serialize for Id<E>"), "\n{out}");

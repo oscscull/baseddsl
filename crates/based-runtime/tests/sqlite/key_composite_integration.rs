@@ -171,7 +171,7 @@ async fn composite_key_create_get_fk_and_nest() {
     assert_eq!(with.body["sessions"], json!([{ "note": "kickoff" }]));
 
     // A composite FK projected bare crosses the wire as the structured id object — the two
-    // FK columns reassembled into `{ course, student }`, honest to the key parts.
+    // FK columns reassembled into `{ course, student }`, matching the key parts.
     let sessions = call(&c, &backend, "/q/sessions", json!({})).await;
     assert_eq!(sessions.status, 200, "{:?}", sessions.body);
     assert_eq!(

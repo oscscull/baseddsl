@@ -242,7 +242,7 @@ one-file artifact keeps its tamper guarantee with **no sidecar files**.
   step is flagged: the tool **cannot** compute the resulting schema state from opaque SQL without a
   SQL parser or a shadow DB (both declined for the baseline). So `schema.snap` for a raw-carrying
   migration reflects only the *neutral* steps; the raw step's structural effect (if any) must be
-  declared alongside it so the snapshot stays honest — **TODO (E2/E3):** decide the annotation form
+  declared alongside it so the snapshot stays accurate — **TODO (E2/E3):** decide the annotation form
   for "this raw step also adds column X" (a paired neutral step vs. a `produces:` note). Until then,
   a raw step is treated as data-only (no structural effect) and the migration is stamped
   `verify: partial (raw)` so `based migrate verify` reports it can't fully check that migration
@@ -424,7 +424,7 @@ net is the worst quadrant of principle 1.
   comment for the rest. The file exists so a reverse is *there to finish* rather than never written —
   without the invitation, down migrations don't get authored.
 - **A `down.mig` is honored only when it carries an executable statement.** It is **raw per-dialect
-  SQL** (`;`-terminated statements — the honest form for a hand-written reverse, D42): a
+  SQL** (`;`-terminated statements — the natural form for a hand-written reverse, D42): a
   neutral-vocabulary down would need a lossless neutral-step *text parser* the engine deliberately
   doesn't have (the up path is snapshot-authoritative, not text-parsed — E3/E4), and someone writing a
   reverse is writing SQL anyway (this mirrors the `raw(dialect)` escape). A placeholder left

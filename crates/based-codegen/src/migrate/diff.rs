@@ -131,7 +131,7 @@ pub enum Step {
     /// model joining/leaving a scope. A scope emits **no DDL** (it is an injected filter in
     /// generated code, not a DB object), so this renders as a neutral note and produces no
     /// SQL — it exists so the change lands in a reviewable migration and advances the
-    /// snapshot, keeping the offline drift check honest.
+    /// snapshot, keeping the offline drift check accurate.
     ScopeChange(ScopeChange),
 }
 

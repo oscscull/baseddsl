@@ -79,7 +79,7 @@ A single **column + named CHECK** per enum column, through the same `Dialect` ty
 | int     | SQLite   | `INTEGER`      | `CONSTRAINT ck_<table>_<col> CHECK (col IN (0, 1, …))` |
 | int     | Postgres | `BIGINT`       | `CONSTRAINT ck_<table>_<col> CHECK (col IN (0, 1, …))` |
 
-The CHECK lists the **wire values** (a renamed string variant checks `'PAID'`, not `'paid'`). Why a plain column + CHECK rather than a DB-native enum type (MariaDB inline `ENUM(…)`, Postgres `CREATE TYPE … AS ENUM`): migration simplicity. A native enum makes a variant add an `ALTER TYPE … ADD VALUE` / `MODIFY COLUMN` — non-transactional on older Postgres, unable to *remove* a value, and a second type map that can drift from `based gen sql`. SQLite has no native enum at all. One uniform representation keeps the three dialects honest through the same type-map seam and makes a variant change a diffable column change.
+The CHECK lists the **wire values** (a renamed string variant checks `'PAID'`, not `'paid'`). Why a plain column + CHECK rather than a DB-native enum type (MariaDB inline `ENUM(…)`, Postgres `CREATE TYPE … AS ENUM`): migration simplicity. A native enum makes a variant add an `ALTER TYPE … ADD VALUE` / `MODIFY COLUMN` — non-transactional on older Postgres, unable to *remove* a value, and a second type map that can drift from `based gen sql`. SQLite has no native enum at all. One uniform representation keeps the three dialects consistent through the same type-map seam and makes a variant change a diffable column change.
 
 ## Migrations
 
