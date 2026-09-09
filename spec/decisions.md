@@ -33,7 +33,7 @@ relevant entries instead of scanning. A decision may appear under more than one 
   string, equality-only; 3-driver binary decode incl. Postgres `pg_time`/`bytea`→base64;
   E0313 time-default-not-string, E0314 bytes-literal-default)
 - **Manifest & discovery** — D5 (project manifest + `**/*.bsl` glob)
-- **`$ctx` (per-request context)** — D4 (inferred, never a global type), D136 (optional read `$ctx.<field>?`: present-guarded, query-filter only)
+- **`$ctx` (per-request context)** — D4 (inferred, never a global type), D136 (optional read `$ctx.<field>?`: absent binds NULL → null-safe `=`, query-filter only)
 - **Scope / auth** — D19 (`@tenant` removed; `@scope` open), D32 (`@scope` resolved: single-owner
   filter + create auto-set + `unscoped`), D33 (shard key ← scope `$ctx` field), D34 (`@scope` in a
   joined `ON`), D46 (named scope, spec), D47 (multi-scope DNF, spec), D48 (named scope, impl),
@@ -6580,34 +6580,47 @@ same to-many/sort-cascade decision codegen lowers with — one source of truth).
 LSP run it after `check_target` once the manifest dialect is resolved; the front end / sema
 core stay dialect-agnostic.
 
-## D136 — optional context reads: `$ctx.<field>?` (present-guarded, read-filter only)
+## D136 — optional context reads: `$ctx.<field>?` (null-safe, read-filter only)
 
 Owner-approved 2026-09-09. Every `$ctx.<field>` a callable reads is **required** by default —
 absent at request time is `missing_ctx` (`bind_ctx` in `plan.rs`), never a silent pass (principle
 2). But a genuinely public endpoint needs identity to be *optional*: "my rows **or** the public
 rows", where an anonymous caller has no `$ctx.user`. A trailing `?` on the **use site**
-(`$ctx.user?`) makes that read optional — the field may be absent, and when it is, the predicate
-leaf **present-guards away** (the filter widens) rather than erroring.
+(`$ctx.user?`) makes that read optional — the field may be absent, and when it is, it **binds SQL
+NULL** rather than erroring.
 
-- **One mechanism, not a new one.** It reuses the optional-filter present-guard (D133): the leaf
-  lowers to `(:ctx_<field>__present = 0 OR <predicate>)` and composes through `and`/`or`. The `?`
-  differs from a `?` *param* only in where it is written — on the `$ctx.<field>` reference itself,
-  not the signature — since context has no signature slot. Runtime (`bind_ctx_into`) binds the
-  `:ctx_<field>__present` companion (`0` when the field is absent **or** JSON `null`, else `1`) plus
-  the value (`NULL` when absent); the generated client carries the field as `Option<T>` (D30), and
-  `None` present-guards it off. A field is optional for binding only if **every** use marks `?`.
+**Superseded lowering (2026-09-09, same day):** the read first shipped reusing the optional-filter
+present-guard (D133) — the leaf lowered to `(:ctx_<field>__present = 0 OR <predicate>)`. That was a
+**data-leak bug**: `= 0 OR …` widens an absent leaf to **TRUE**, which is the identity of `AND` but
+the *annihilator* of `OR`. In the flagship shape `where (author = $ctx.user? or visibility = "public")`
+an anonymous caller lowered to `(TRUE) OR visibility = "public"` = **TRUE**, returning every row —
+including the private ones the co-guard was gating. "Absent-means-widen is safe (a superset)" was the
+false premise; widening a caller-identity filter is exactly the leak. Corrected below.
 
-- **The boundary (owner call): a read-filter construct only.** Absent-means-widen is safe in a query
-  `where` (the caller sees a superset of rows they are entitled to) but would silently *un*filter a
-  scope or a write. So `$ctx.<field>?` is a hard error (`E0339`) in: a `scope` term (auth.md Handle
-  2 — a scope is mandatory confinement), any mutation statement (write filter or assign), and a named
-  `filter` body (spliced into writes as well as reads); and the `?` marker is only ever legal on a
-  `$ctx.<field>`, never a plain param. A field read **both** optional and required in one callable is
-  `E0349` (pick one). This keeps invertibility intact — an optional read in a `where` never changes
-  what a row *is*, only whether a filter applies (write-features north star, D126/D127).
+- **Absent binds NULL; `=`/`!=` is null-safe.** An absent optional context field is SQL NULL, and its
+  equality leaf lowers to the dialect's **null-safe** (in)equality — `col <=> :ctx` (MariaDB/MySQL),
+  `col IS NOT DISTINCT FROM :ctx` (Postgres), `col IS :ctx` (SQLite) — so an absent field reads as
+  `col IS NULL`: it matches exactly the rows whose own column is *unset*, and never widens to TRUE. An
+  anonymous caller on the flagship query gets `author IS NULL OR visibility = "public"` → just the
+  public rows when `author` is a required relation (and additionally the *unowned* rows when it is
+  nullable — the deliberate "unset context = unset column" consequence, owner-accepted). A non-`=`
+  operator keeps a plain comparison, where a NULL bind matches nothing. There is **no present-flag**:
+  the null *is* the signal. Runtime (`bind_ctx_into`) binds the value alone — the coerced field, or
+  `NULL` when absent/JSON-null. The generated client carries the field as `Option<T>` (D30); `None`
+  binds NULL. A field is optional for binding only if **every** use marks `?`.
+
+- **The boundary (owner call): a read-filter construct only.** Selecting the unset rows is meaningful
+  in a query `where`, but a NULL bind would silently mis-own a created row or match across an ownership
+  boundary in a scope or a write. So `$ctx.<field>?` is a hard error (`E0339`) in: a `scope` term
+  (auth.md Handle 2 — a scope is mandatory confinement), any mutation statement (write filter or
+  assign), and a named `filter` body (spliced into writes as well as reads); and the `?` marker is only
+  ever legal on a `$ctx.<field>`, never a plain param. A field read **both** optional and required in
+  one callable is `E0349` (pick one). This keeps invertibility intact — an optional read in a `where`
+  never changes what a row *is*, only which rows a filter selects (write-features north star, D126/D127).
 
 - **Surface.** Parser: `param_ref` consumes a trailing `?` into `ParamRef.optional`. Sema: `CtxReq`
   carries `optional`; `check.rs` enforces placement (E0339) + mixed-use (E0349); `ctx.rs` AND-folds
-  optionality across uses. Codegen: `guard_optional` present-guards a `$ctx.<field>?` leaf; the
-  client emits `Option<T>`. `based fmt` prints the `?`. Auth.md Handle 1 is the prose home;
-  queries.md notes the shared lowering.
+  optionality across uses. Codegen: `predicate` lowers a `$ctx.<field>?` `=`/`!=` leaf through
+  `nullsafe_cmp` (not `guard_optional`, which still serves `?` *params* per D133); the client emits
+  `Option<T>`. `based fmt` prints the `?`. Auth.md Handle 1 is the prose home; queries.md contrasts it
+  with the `?`-param present-guard.

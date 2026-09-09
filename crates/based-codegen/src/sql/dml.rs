@@ -637,6 +637,29 @@ fn keyset_predicate(keys: &[OrderKey], dialect: Dialect) -> String {
         .join(" OR ")
 }
 
+/// Dialect null-safe equality (`negated` → inequality). Unlike plain `=`, a NULL on either
+/// side is a real operand: `NULL` matches `NULL`, and `col <=> NULL` is `col IS NULL`. Used
+/// where an absent value binds to SQL NULL yet must still match the rows that are themselves
+/// unset — an optional `$ctx.field?` read whose field is absent (auth.md Handle 1).
+fn nullsafe_cmp(dialect: Dialect, lhs: &str, rhs: &str, negated: bool) -> String {
+    let eq = match dialect {
+        Dialect::Sqlite => format!("{lhs} IS {rhs}"),
+        Dialect::MariaDb | Dialect::MySql => format!("{lhs} <=> {rhs}"),
+        Dialect::Postgres => format!("{lhs} IS NOT DISTINCT FROM {rhs}"),
+    };
+    if negated {
+        format!("NOT ({eq})")
+    } else {
+        eq
+    }
+}
+
+/// A `$ctx.<field>?` optional context read (auth.md Handle 1) — an absent field binds SQL
+/// NULL. Distinct from an optional `?` filter param (a marker on the signature).
+fn is_optional_ctx_read(v: &Value) -> bool {
+    matches!(v, Value::Param(pr) if pr.optional && pr.name.node == "ctx" && pr.path.len() == 1)
+}
+
 /// The equality prefix step for sort key `j` (`col = :keyset_j`). A nullable key uses the
 /// dialect's null-safe equality so a NULL at this position still chains into the following
 /// key's comparison instead of collapsing the whole conjunct to NULL.
@@ -2408,11 +2431,6 @@ impl<'a> Select<'a> {
             if pr.path.is_empty() && self.optional_params.contains(pr.name.node.as_str()) {
                 return format!("(:{}__present = 0 OR {pred})", pr.name.node);
             }
-            // `$ctx.field?` — an optional context read (auth.md Handle 1). The `?` rides on
-            // the use site, so it guards on its own `:ctx_<field>__present` companion.
-            if pr.optional && pr.name.node == "ctx" && pr.path.len() == 1 {
-                return format!("(:ctx_{}__present = 0 OR {pred})", pr.path[0].node);
-            }
         }
         pred
     }
@@ -2437,6 +2455,15 @@ impl<'a> Select<'a> {
             Predicate::Cmp { path, op, value } => {
                 let (alias, col) = self.resolve(path, model);
                 let lhs = self.qcol(&alias, &col);
+                // Optional context read `$ctx.field?` (auth.md Handle 1): an absent field is
+                // SQL NULL, so `=`/`!=` against it lower to null-safe (in)equality — absent
+                // matches the rows whose own column is unset (`col IS NULL`) rather than
+                // widening the filter. (A non-`=` operator keeps a plain comparison, where a
+                // NULL bind simply matches nothing.) No present-guard: the null is the signal.
+                if is_optional_ctx_read(value) && matches!(op, Op::Eq | Op::Ne) {
+                    let rhs = self.value(value, model);
+                    return nullsafe_cmp(self.dialect, &lhs, &rhs, *op == Op::Ne);
+                }
                 let pred = if matches!(value, Value::Lit(Literal::Null))
                     && matches!(op, Op::Eq | Op::Ne)
                 {

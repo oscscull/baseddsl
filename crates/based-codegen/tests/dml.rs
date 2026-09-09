@@ -287,10 +287,12 @@ fn block_query_where_order_page_and_bare_bool() {
 }
 
 #[test]
-fn optional_ctx_read_present_guards_its_leaf() {
-    // `$ctx.user?` is an optional context read (auth.md Handle 1): the `author =` leaf is
-    // wrapped in a present-guard on `:ctx_user__present`, so an anonymous caller (no `user`
-    // context, `__present` = 0) drops that leaf and sees only the public rows.
+fn optional_ctx_read_is_null_safe() {
+    // `$ctx.user?` is an optional context read (auth.md Handle 1): an absent field binds SQL
+    // NULL, so the `author =` leaf lowers to null-safe equality (`<=>`), not a present-guard.
+    // An anonymous caller (no `user`) matches only the rows whose own `author` is unset
+    // (`author IS NULL`) — the leaf never widens to TRUE, so the public-visibility guard on
+    // the other side of the `or` still gates the private rows out.
     let ddl = gen(r#"
         @sort(id asc)
         User { id: Id, name: text }
@@ -301,10 +303,13 @@ fn optional_ctx_read_present_guards_its_leaf() {
         }
         "#);
     assert!(
-        ddl.contains(":ctx_user__present = 0 OR"),
-        "optional ctx read must present-guard its leaf\n{ddl}"
+        ddl.contains("`post`.`author_id` <=> :ctx_user"),
+        "optional ctx `=` must lower to null-safe equality\n{ddl}"
     );
-    assert!(ddl.contains(":ctx_user"), "the value placeholder still binds\n{ddl}");
+    assert!(
+        !ddl.contains("__present"),
+        "a ctx read is null-driven, not present-guarded\n{ddl}"
+    );
 }
 
 #[test]

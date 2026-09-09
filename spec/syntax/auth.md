@@ -22,26 +22,30 @@ Not a decision — a filter value the caller produced.
 ### Optional context — `$ctx.<field>?`
 By default every `$ctx.<field>` a callable reads is **required**: absent at request time is a hard
 `missing_ctx` (a `400`), never a silent pass. A trailing `?` on the *use site* makes that one read
-**optional** — the field may be absent, and when it is, that predicate leaf **present-guards away** (the
-filter widens) instead of erroring. It reuses the exact optional-filter machinery of a `?` param
-(queries.md): the leaf lowers to `(:ctx_<field>__present = 0 OR <predicate>)`, so it composes correctly
-through `and`/`or`.
+**optional** — the field may be absent, and when it is, it **binds SQL NULL** instead of erroring. Its
+`=` / `!=` leaf lowers to the dialect's **null-safe** (in)equality (`col <=> :ctx` / `IS NOT DISTINCT
+FROM` / `IS`), so an absent field reads as `col IS NULL` — it matches exactly the rows whose own column
+is *unset*, and **never widens the leaf to TRUE**. The comparison then composes through `and`/`or` as an
+ordinary predicate. (A non-`=` operator keeps a plain comparison; a NULL bind there matches nothing.)
 ```
 query feed() -> PostCard[] unscoped("public: owner's posts plus anything public") {
   list Post where (author = $ctx.user? or visibility = "public");
 }
 ```
-Signed-in caller (`$ctx.user` present) → both leaves apply, they see their own posts **and** public ones.
-Anonymous caller (`$ctx.user` absent) → the `author = …` leaf drops, leaving `visibility = "public"` —
-the public endpoint just works, no `missing_ctx`. The generated client carries an optional field as
-`Option<T>` (calling.md); `None` present-guards it off server-side.
+Signed-in caller (`$ctx.user` present) → the leaf is `author = <that id>`: they see their own posts
+**and** public ones. Anonymous caller (`$ctx.user` absent) → the leaf is `author IS NULL`, matching only
+*unowned* posts (none, when `author` is a required relation), so the endpoint returns just `visibility =
+"public"` — no `missing_ctx`, and **no private post leaks**. This is the whole point of the null-safe
+lowering: a widen-to-TRUE leaf under an `or` would collapse the group to TRUE and expose every row the
+co-guard was gating. The generated client carries an optional field as `Option<T>` (calling.md); `None`
+binds NULL server-side.
 
-**A read-filter construct only.** Absent-means-widen is safe in a query `where` — the caller sees a
-superset of rows they are entitled to — but it must **never** touch a scope or a write, where absence
-would silently *un*filter. So `$ctx.<field>?` is rejected (`E0339`) in a `scope` term, in any mutation
+**A read-filter construct only.** Selecting the unset rows is meaningful in a query `where`, but a NULL
+bind must **never** touch a scope or a write, where it would silently mis-own a created row or match
+across an ownership boundary. So `$ctx.<field>?` is rejected (`E0339`) in a `scope` term, in any mutation
 statement (filter or assign), and in a named `filter` body (spliced into writes too); and the `?` marker
 is only ever valid on a `$ctx.<field>`, never a plain param. A field read **both** optional and required
-within one callable is `E0349` — pick one. (See queries.md for the present-guard lowering it shares.)
+within one callable is `E0349` — pick one.
 
 ## Handle 2 — named scope (a written contract, referenced on both sides)
 A **scope** is a standing filter, parameterized by request context, injected into every query **and
