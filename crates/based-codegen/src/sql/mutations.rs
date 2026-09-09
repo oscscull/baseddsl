@@ -523,9 +523,9 @@ fn lower_mutation<'a>(
     // its `json` leaves need the same structured-JSON normalization a read gets.
     let json_paths = rm
         .and_then(|rm| {
-            schema
-                .model(&rm.ret_model)
-                .map(|root| json_output_paths(schema, decls, rm.ret_shape.as_deref(), &rm.ret_model, root))
+            schema.model(&rm.ret_model).map(|root| {
+                json_output_paths(schema, decls, rm.ret_shape.as_deref(), &rm.ret_model, root)
+            })
         })
         .unwrap_or_default();
 
