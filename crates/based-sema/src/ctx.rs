@@ -198,6 +198,7 @@ fn record_ctx_use(path: &Path, value: &Value, model: usize, cx: &Cx, out: &mut V
             field,
             ty: term_to_ctx(&term),
             span: pr.path[0].span,
+            optional: pr.optional,
         });
     }
 }
@@ -236,6 +237,7 @@ fn record_assign(a: &Assign, mi: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
         field,
         ty,
         span: pr.path[0].span,
+        optional: pr.optional,
     });
 }
 
@@ -281,10 +283,15 @@ fn ty_name(t: &CtxField) -> String {
 fn dedup(reqs: Vec<CtxReq>) -> Vec<CtxReq> {
     let mut out: Vec<CtxReq> = Vec::new();
     for r in reqs {
-        if !out
-            .iter()
-            .any(|e| e.field == r.field && compatible(&e.ty, &r.ty))
+        // A field is optional for binding only if *every* use marks `?`; any required use
+        // makes it required (mixed use is separately flagged `E0349`, but AND-ing here keeps
+        // the conservative required binding even when that error is present).
+        if let Some(e) = out
+            .iter_mut()
+            .find(|e| e.field == r.field && compatible(&e.ty, &r.ty))
         {
+            e.optional = e.optional && r.optional;
+        } else {
             out.push(r);
         }
     }

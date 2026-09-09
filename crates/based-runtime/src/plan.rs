@@ -463,10 +463,7 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
         }
     }
     for c in &rq.ctx_requires {
-        env.insert(
-            format!("ctx_{}", c.field),
-            bind_ctx(&compiled.schema, c, req)?,
-        );
+        bind_ctx_into(&mut env, &compiled.schema, c, req)?;
     }
     if offset_paginated(ast) {
         env.insert("offset".to_string(), bind_offset(req)?);
@@ -551,10 +548,7 @@ fn mutation_env(
         );
     }
     for c in ctx_requires {
-        env.insert(
-            format!("ctx_{}", c.field),
-            bind_ctx(&compiled.schema, c, req)?,
-        );
+        bind_ctx_into(&mut env, &compiled.schema, c, req)?;
     }
     Ok(env)
 }
@@ -1383,6 +1377,36 @@ fn find_filter<'a>(decls: &'a [Decl], name: &str) -> Option<&'a NamedFilter> {
         Decl::Filter(f) if f.name.node == name => Some(f),
         _ => None,
     })
+}
+
+/// Bind one `$ctx.<field>` requirement into the value environment as `ctx_<field>`. An
+/// **optional** field (`$ctx.field?`, auth.md Handle 1) also binds a `:ctx_<field>__present`
+/// companion the codegen's guard reads: absent (missing key or JSON null) → present `0` and a
+/// null value, so the predicate leaf drops; present → `1` and the coerced value. A **required**
+/// field binds the value alone and errors when absent (`bind_ctx`).
+fn bind_ctx_into(
+    env: &mut Env,
+    schema: &CheckedSchema,
+    c: &CtxReq,
+    req: &Request,
+) -> Result<(), PlanError> {
+    let key = format!("ctx_{}", c.field);
+    if c.optional {
+        let present = matches!(req.ctx.get(&c.field), Some(v) if !v.is_null());
+        env.insert(
+            format!("{key}__present"),
+            SqlValue::Int(i64::from(present)),
+        );
+        let value = if present {
+            bind_ctx(schema, c, req)?
+        } else {
+            SqlValue::Null
+        };
+        env.insert(key, value);
+    } else {
+        env.insert(key, bind_ctx(schema, c, req)?);
+    }
+    Ok(())
 }
 
 /// Bind one `$ctx.<field>` requirement from the request context. Always required —

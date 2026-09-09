@@ -1122,6 +1122,10 @@ fn param_ref(pr: &ParamRef) -> String {
         s.push('.');
         s.push_str(&seg.node);
     }
+    // `$ctx.field?` — the trailing `?` marks an optional context read (auth.md Handle 1).
+    if pr.optional {
+        s.push('?');
+    }
     s
 }
 

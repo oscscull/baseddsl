@@ -2408,6 +2408,11 @@ impl<'a> Select<'a> {
             if pr.path.is_empty() && self.optional_params.contains(pr.name.node.as_str()) {
                 return format!("(:{}__present = 0 OR {pred})", pr.name.node);
             }
+            // `$ctx.field?` — an optional context read (auth.md Handle 1). The `?` rides on
+            // the use site, so it guards on its own `:ctx_<field>__present` companion.
+            if pr.optional && pr.name.node == "ctx" && pr.path.len() == 1 {
+                return format!("(:ctx_{}__present = 0 OR {pred})", pr.path[0].node);
+            }
         }
         pred
     }

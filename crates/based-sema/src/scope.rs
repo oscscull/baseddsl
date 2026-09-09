@@ -74,6 +74,16 @@ fn resolve_term(
         // opaque; the parser rejects `raw(…)` outside a field type, so this is dead.
         BaseType::Raw(_) => CtxField::Scalar(Primitive::Text),
     };
+    // An optional `$ctx.<field>?` read has no place in a scope: absent-means-widen would
+    // silently unfilter the scope (auth.md — optional context is a read-filter construct only).
+    if t.ctx.optional {
+        sink.error_note(
+            code::OPT_CTX_PLACEMENT,
+            t.ctx.path.last().map_or(t.ctx.name.span, |s| s.span),
+            "a scope term can't take an optional `$ctx.<field>?` read",
+            "an absent scope value would silently unfilter the scope; optional context is a query read-filter only",
+        );
+    }
     // The binding must be `$ctx.<field>` (the restricted form) — else `E0180`.
     let ctx_field = if t.ctx.name.node == "ctx" && t.ctx.path.len() == 1 {
         t.ctx.path[0].node.clone()
@@ -190,6 +200,7 @@ fn synthesize_pred(terms: &[&RScopeTerm], span: Span) -> Option<Predicate> {
             value: Value::Param(ParamRef {
                 name: ident("ctx", span),
                 path: vec![ident(&t.ctx_field, span)],
+                optional: false,
             }),
         };
         acc = Some(match acc {
@@ -372,6 +383,8 @@ pub fn inject_ctx_reqs(
                 field: term.ctx_field.clone(),
                 ty: term.ty.clone(),
                 span,
+                // A scope is always injected — its context value is required, never optional.
+                optional: false,
             })
         })
         .collect()

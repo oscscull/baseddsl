@@ -67,6 +67,12 @@ query search(q?, min?) -> ProductName[] {
 ```
 Absent `q` widens the whole `or`-group to TRUE (the filter drops); a value applies both `LIKE`s.
 
+The same present-guard lowering serves an **optional context read** written at the use site as
+`$ctx.<field>?` (auth.md Handle 1): the leaf becomes `(:ctx_<field>__present = 0 OR <predicate>)`, so an
+absent context field widens it away. Unlike a `?` param (a marker on the *signature*), the `?` there rides
+the `$ctx.<field>` reference itself, and is a query-filter construct only — never a scope, a write, or a
+filter body (`E0339`).
+
 ## Full body form
 ```
 query products(org: Id, active: bool = true) -> OrderCard[] {

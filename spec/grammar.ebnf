@@ -417,7 +417,10 @@ value       = param_ref | path | literal | func_call ;
 (* `$` unifies to "a value bound in this callable": a param (`$id`), a `$ctx` bag  *)
 (* field (`$ctx.org`), or a `tx` step binding (`$user.id` — one field of the row a  *)
 (* `create … as user` produced). Which one a `$name` is resolves in sema.          *)
-param_ref   = '$' param_name { '.' lower_ident } ;   (* $id, $ctx.org, $user.id *)
+param_ref   = '$' param_name { '.' lower_ident } [ '?' ] ;   (* $id, $ctx.org, $user.id, $ctx.user? *)
+(* A trailing `?` marks an optional `$ctx.<field>` read — present-guarded, drops its  *)
+(* filter leaf when absent (auth.md Handle 1). Sema restricts it to a query `where`'s  *)
+(* `$ctx.<field>`; anywhere else is E0339.                                             *)
 path        = lower_ident { '.' lower_ident } ;       (* dotted traversal       *)
 
 func_call   = func_name '(' [ value { ',' value } ] ')' ;

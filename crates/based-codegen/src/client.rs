@@ -1378,7 +1378,13 @@ pub fn adopt_{suffix}<'a>(
     /// the inference (a relation requirement carries the model's key `Uuid`).
     fn ctx_fields(schema: &CheckedSchema, reqs: &[CtxReq]) -> Vec<(String, String)> {
         reqs.iter()
-            .map(|r| (r.field.clone(), ctx_field_type(schema, &r.ty)))
+            .map(|r| {
+                let ty = ctx_field_type(schema, &r.ty);
+                // An optional `$ctx.field?` read may be absent — the caller passes `None`, and
+                // the server present-guards the filter away (auth.md Handle 1).
+                let ty = if r.optional { format!("Option<{ty}>") } else { ty };
+                (r.field.clone(), ty)
+            })
             .collect()
     }
 

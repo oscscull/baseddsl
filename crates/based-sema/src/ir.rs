@@ -257,6 +257,8 @@ pub mod code {
     pub const OPT_PARAM_DEFAULT: &str = "E0336"; // `?` combined with a `= default` — skip-when-absent and fill-when-absent contradict; pick one
                                                  // E0337 retired: `?` now works with any operator (was "optional filter is equality-only").
     pub const OPT_PARAM_UNFILTERED: &str = "E0338"; // `?` where the param is not an auto-applied filter — a block/raw query (params are `$`-referenced) or a mutation param
+    pub const OPT_CTX_PLACEMENT: &str = "E0339"; // `?` outside a query filter's `$ctx.<field>` — a scope term, create/update, raw body, mutation filter, or a non-`$ctx` param (optional context is a read-filter widening, never a scope/write)
+    pub const OPT_CTX_MIXED: &str = "E0349"; // a `$ctx.<field>` is read both optional (`?`) and required within one callable — pick one
 
     // Warnings on an input-used shape naming an engine-managed column (BW1).
     pub const INPUT_NAMES_TIMESTAMP: &str = "W0112"; // names an `@created`/`@updated` column — the explicit value overrides the auto-timestamp
@@ -1132,6 +1134,11 @@ pub struct CtxReq {
     pub field: String,
     pub ty: CtxField,
     pub span: Span,
+    /// `$ctx.<field>?` — the field may be absent at request time; its predicate leaf
+    /// present-guards away rather than erroring. Optional iff every use in the callable
+    /// marks `?` (mixed use is `E0349`). Optional fields bind a `:ctx_<field>__present`
+    /// companion; the client carries them as `Option<T>`.
+    pub optional: bool,
 }
 
 /// A `$ctx` field's inferred type: a primitive, or a relation to a model (the
