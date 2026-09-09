@@ -214,11 +214,12 @@ fn missing_ctx_is_rejected() {
 }
 
 #[test]
-fn absent_optional_ctx_plans_and_present_guards_off() {
+fn absent_optional_ctx_binds_null_and_is_null_safe() {
     // The counterpoint to `missing_ctx_is_rejected`: an *optional* `$ctx.user?` read may be
     // absent (auth.md Handle 1). An anonymous request (empty `$ctx`) plans successfully — the
-    // present flag binds 0 and the value binds NULL, so the guarded leaf drops and only the
-    // public rows come back, instead of a `MissingCtx` rejection.
+    // field binds SQL NULL, and the leaf lowers to null-safe equality (`<=>`), so the leaf
+    // means `author IS NULL` (match the unowned rows) rather than widening to TRUE. The
+    // public-visibility guard on the other side of the `or` still gates the private rows out.
     let c = compile(
         r#"
         @sort(id asc)
@@ -232,20 +233,22 @@ fn absent_optional_ctx_plans_and_present_guards_off() {
     );
     let plan = plan_query(&c, &Request::new("feed", json!({}), json!({}))).unwrap();
     assert!(
-        plan.main.sql.contains("? = 0 OR"),
-        "the optional-ctx leaf must be present-guarded\n{}",
+        plan.main.sql.contains("<=> ?"),
+        "the optional-ctx leaf must be null-safe, not present-guarded\n{}",
         plan.main.sql
     );
-    // SQL order: the present flag (0 → the leaf drops), then its unused value (NULL).
-    assert_eq!(plan.main.params, vec![SqlValue::Int(0), SqlValue::Null]);
+    assert!(
+        !plan.main.sql.contains("__present") && !plan.main.sql.contains("= 0 OR"),
+        "no present-guard on a ctx read\n{}",
+        plan.main.sql
+    );
+    // The one bound param is the ctx value: NULL for an anonymous caller.
+    assert_eq!(plan.main.params, vec![SqlValue::Null]);
 
-    // A signed-in request supplies `user`: the flag binds 1 and the value binds the id.
+    // A signed-in request supplies `user`: the value binds the id (`<=>` acts as plain `=`).
     let signed_in =
         plan_query(&c, &Request::new("feed", json!({}), json!({ "user": "u-1" }))).unwrap();
-    assert_eq!(
-        signed_in.main.params,
-        vec![SqlValue::Int(1), SqlValue::Uuid("u-1".into())]
-    );
+    assert_eq!(signed_in.main.params, vec![SqlValue::Uuid("u-1".into())]);
 }
 
 #[test]

@@ -1134,10 +1134,10 @@ pub struct CtxReq {
     pub field: String,
     pub ty: CtxField,
     pub span: Span,
-    /// `$ctx.<field>?` — the field may be absent at request time; its predicate leaf
-    /// present-guards away rather than erroring. Optional iff every use in the callable
-    /// marks `?` (mixed use is `E0349`). Optional fields bind a `:ctx_<field>__present`
-    /// companion; the client carries them as `Option<T>`.
+    /// `$ctx.<field>?` — the field may be absent at request time; when absent it binds SQL
+    /// NULL and its `=`/`!=` leaf lowers to null-safe (in)equality (matching the unset rows)
+    /// rather than erroring. Optional iff every use in the callable marks `?` (mixed use is
+    /// `E0349`). The client carries an optional field as `Option<T>`.
     pub optional: bool,
 }
 

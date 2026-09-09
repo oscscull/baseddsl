@@ -1380,10 +1380,10 @@ fn find_filter<'a>(decls: &'a [Decl], name: &str) -> Option<&'a NamedFilter> {
 }
 
 /// Bind one `$ctx.<field>` requirement into the value environment as `ctx_<field>`. An
-/// **optional** field (`$ctx.field?`, auth.md Handle 1) also binds a `:ctx_<field>__present`
-/// companion the codegen's guard reads: absent (missing key or JSON null) → present `0` and a
-/// null value, so the predicate leaf drops; present → `1` and the coerced value. A **required**
-/// field binds the value alone and errors when absent (`bind_ctx`).
+/// **optional** field (`$ctx.field?`, auth.md Handle 1) binds SQL NULL when absent (missing
+/// key or JSON null): the codegen lowers `=`/`!=` against it to null-safe (in)equality, so an
+/// absent field matches the rows whose own column is unset rather than widening the filter. A
+/// **required** field binds the value alone and errors when absent (`bind_ctx`).
 fn bind_ctx_into(
     env: &mut Env,
     schema: &CheckedSchema,
@@ -1393,10 +1393,6 @@ fn bind_ctx_into(
     let key = format!("ctx_{}", c.field);
     if c.optional {
         let present = matches!(req.ctx.get(&c.field), Some(v) if !v.is_null());
-        env.insert(
-            format!("{key}__present"),
-            SqlValue::Int(i64::from(present)),
-        );
         let value = if present {
             bind_ctx(schema, c, req)?
         } else {

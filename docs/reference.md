@@ -306,7 +306,7 @@ create Card[] from $rows on conflict (oracle_id) update { ...incoming, hits = hi
 
 Three layers, smallest to largest:
 
-1. **`$ctx`** — the request-context bag: `where (org = $ctx.org)`. A read is **required** by default (absent → `missing_ctx`). A trailing `?` on the use site makes it **optional** — `where (author = $ctx.user? or visibility = "public")` — so an absent field drops just that leaf (anonymous caller → public rows, no error); client carries it as `Option<T>`. Query-`where` only: a `?` on a scope term, a write, a filter body, or a plain param is `E0339`; reading one field both optional and required in a callable is `E0349`.
+1. **`$ctx`** — the request-context bag: `where (org = $ctx.org)`. A read is **required** by default (absent → `missing_ctx`). A trailing `?` on the use site makes it **optional** — `where (author = $ctx.user? or visibility = "public")` — so an absent field binds NULL and its `=` leaf becomes null-safe (`author IS NULL`), matching the unset rows rather than widening to TRUE (anonymous caller → public rows, no error, no leak); client carries it as `Option<T>`. Query-`where` only: a `?` on a scope term, a write, a filter body, or a plain param is `E0339`; reading one field both optional and required in a callable is `E0349`.
 2. **Named scope** — declare once, attach to models, acknowledge per callable:
 
 ```
