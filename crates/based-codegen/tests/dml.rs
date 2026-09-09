@@ -287,6 +287,27 @@ fn block_query_where_order_page_and_bare_bool() {
 }
 
 #[test]
+fn optional_ctx_read_present_guards_its_leaf() {
+    // `$ctx.user?` is an optional context read (auth.md Handle 1): the `author =` leaf is
+    // wrapped in a present-guard on `:ctx_user__present`, so an anonymous caller (no `user`
+    // context, `__present` = 0) drops that leaf and sees only the public rows.
+    let ddl = gen(r#"
+        @sort(id asc)
+        User { id: Id, name: text }
+        Post { id: Id, author: User, visibility: text, body: text }
+        shape PostCard from Post { id, body }
+        query feed() -> PostCard[] {
+          list Post where (author = $ctx.user? or visibility = "public");
+        }
+        "#);
+    assert!(
+        ddl.contains(":ctx_user__present = 0 OR"),
+        "optional ctx read must present-guard its leaf\n{ddl}"
+    );
+    assert!(ddl.contains(":ctx_user"), "the value placeholder still binds\n{ddl}");
+}
+
+#[test]
 fn scope_predicate_is_injected() {
     let ddl = gen(r#"
         scope Tenant (org: Org = $ctx.org)

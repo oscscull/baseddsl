@@ -214,6 +214,41 @@ fn missing_ctx_is_rejected() {
 }
 
 #[test]
+fn absent_optional_ctx_plans_and_present_guards_off() {
+    // The counterpoint to `missing_ctx_is_rejected`: an *optional* `$ctx.user?` read may be
+    // absent (auth.md Handle 1). An anonymous request (empty `$ctx`) plans successfully — the
+    // present flag binds 0 and the value binds NULL, so the guarded leaf drops and only the
+    // public rows come back, instead of a `MissingCtx` rejection.
+    let c = compile(
+        r#"
+        @sort(id asc)
+        User { id: Id, name: text }
+        Post { id: Id, author: User, visibility: text, body: text }
+        shape PostCard from Post { id, body }
+        query feed() -> PostCard[] {
+          list Post where (author = $ctx.user? or visibility = "public");
+        }
+        "#,
+    );
+    let plan = plan_query(&c, &Request::new("feed", json!({}), json!({}))).unwrap();
+    assert!(
+        plan.main.sql.contains("? = 0 OR"),
+        "the optional-ctx leaf must be present-guarded\n{}",
+        plan.main.sql
+    );
+    // SQL order: the present flag (0 → the leaf drops), then its unused value (NULL).
+    assert_eq!(plan.main.params, vec![SqlValue::Int(0), SqlValue::Null]);
+
+    // A signed-in request supplies `user`: the flag binds 1 and the value binds the id.
+    let signed_in =
+        plan_query(&c, &Request::new("feed", json!({}), json!({ "user": "u-1" }))).unwrap();
+    assert_eq!(
+        signed_in.main.params,
+        vec![SqlValue::Int(1), SqlValue::Uuid("u-1".into())]
+    );
+}
+
+#[test]
 fn missing_required_arg_is_rejected() {
     let c = compile(SCHEMA);
     let err = plan_query(&c, &req("order_by_id", json!({}))).unwrap_err();

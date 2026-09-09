@@ -913,10 +913,15 @@ pub enum Value {
 
 /// `$name`, `$ctx.org`, or `$step.field` — a param, `$ctx` bag field, or a `tx` step
 /// binding (`create … as step`) reference; `$` unifies to "a value bound in this callable".
+///
+/// `optional` records a trailing `?` at the use site (`$ctx.user?`) — a present-guarded
+/// context read that drops its predicate leaf when the field is absent (auth.md Handle 1).
+/// It is only legal on a `$ctx.<field>` in a query filter; sema rejects it elsewhere.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamRef {
     pub name: Ident,
     pub path: Vec<Ident>,
+    pub optional: bool,
 }
 
 /// Dotted traversal: `address.city.name`.

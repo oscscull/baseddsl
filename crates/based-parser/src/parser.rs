@@ -2016,7 +2016,15 @@ impl<'a> Parser<'a> {
         while self.eat(Tok::Dot) {
             path.push(self.lower_ident("path segment")?);
         }
-        Ok(ParamRef { name, path })
+        // A trailing `?` marks an optional context read (`$ctx.user?`): the predicate
+        // leaf present-guards away when the field is absent. Only valid on `$ctx.<field>`
+        // in a query filter — sema rejects it in any other position.
+        let optional = self.eat(Tok::Question);
+        Ok(ParamRef {
+            name,
+            path,
+            optional,
+        })
     }
 
     fn path(&mut self) -> PResult<Path> {
@@ -2374,7 +2382,11 @@ fn parse_raw_parts(inner: &str, span: Span) -> Vec<RawPart> {
                 let mut segs = raw.split('.').map(str::trim);
                 let name = mk_ident(segs.next().unwrap_or(""));
                 let path = segs.map(mk_ident).collect();
-                parts.push(RawPart::Param(ParamRef { name, path }));
+                parts.push(RawPart::Param(ParamRef {
+                    name,
+                    path,
+                    optional: false,
+                }));
                 i = close + 1;
                 continue;
             }

@@ -509,6 +509,7 @@ pub fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery> {
         check_param(p, ti, infer, cx, sink);
     }
     check_optional_params(q, verb, sink);
+    check_optional_ctx_query(q, sink);
 
     // An aggregate return shape turns the query into an aggregate query: `group by` /
     // `having` become legal (and required for consistency), and the `get`/sort/pagination
@@ -1054,6 +1055,181 @@ fn check_optional_params(q: &Query, verb: Verb, sink: &mut Sink) {
     }
 }
 
+// ---------- optional `$ctx.<field>?` placement (auth.md Handle 1) -----------
+//
+// A trailing `?` on a `$ctx.<field>` read makes the field optional: when it is absent at
+// request time the predicate leaf present-guards away (the filter widens) instead of erroring.
+// It is a *read-filter* construct only. Absent-means-widen is safe in a query `where` (the
+// caller sees a superset it is entitled to) but would silently unfilter a scope or a write —
+// so it is illegal in a scope term, a mutation, or a named filter (shared with writes), and
+// only ever on a `$ctx.<field>`, never a plain param.
+
+struct CtxUseMode {
+    optional: bool,
+    required: bool,
+    span: Span,
+}
+
+/// A query's optional-context reads: allowed in a `where`, but a field read both optional and
+/// required in the same callable is `E0349`. An optional `?` on anything but a `$ctx.<field>`
+/// is `E0339`.
+fn check_optional_ctx_query(q: &Query, sink: &mut Sink) {
+    let clauses: &[Clause] = match &q.body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        QueryBody::Bare | QueryBody::Raw(_) => &[],
+    };
+    let mut modes: std::collections::HashMap<String, CtxUseMode> = std::collections::HashMap::new();
+    for clause in clauses {
+        if let Clause::Where(p) = clause {
+            record_pred_ctx_modes(p, &mut modes, sink);
+        }
+    }
+    for (field, m) in &modes {
+        if m.optional && m.required {
+            sink.error_note(
+                code::OPT_CTX_MIXED,
+                m.span,
+                format!("`$ctx.{field}` is read both optional (`?`) and required in this query"),
+                "an optional read widens its filter when the field is absent; a required read demands the value — pick one per callable",
+            );
+        }
+    }
+}
+
+fn record_pred_ctx_modes(
+    p: &Predicate,
+    modes: &mut std::collections::HashMap<String, CtxUseMode>,
+    sink: &mut Sink,
+) {
+    match p {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            record_pred_ctx_modes(a, modes, sink);
+            record_pred_ctx_modes(b, modes, sink);
+        }
+        Predicate::Not(x) => record_pred_ctx_modes(x, modes, sink),
+        Predicate::Cmp { value, .. } => record_value_ctx_mode(value, modes, sink),
+        Predicate::InList { values, .. } => {
+            for v in values {
+                record_value_ctx_mode(v, modes, sink);
+            }
+        }
+        // A named filter is shared with writes, so an optional read can't ride through it.
+        Predicate::FilterCall { args, .. } => {
+            for a in args {
+                reject_optional_value(a, "a filter argument", sink);
+            }
+        }
+        Predicate::Bare(_) | Predicate::Raw(_) => {}
+    }
+}
+
+fn record_value_ctx_mode(
+    v: &Value,
+    modes: &mut std::collections::HashMap<String, CtxUseMode>,
+    sink: &mut Sink,
+) {
+    let Value::Param(pr) = v else { return };
+    if pr.name.node == "ctx" && pr.path.len() == 1 {
+        let e = modes
+            .entry(pr.path[0].node.clone())
+            .or_insert(CtxUseMode {
+                optional: false,
+                required: false,
+                span: pr.path[0].span,
+            });
+        if pr.optional {
+            e.optional = true;
+        } else {
+            e.required = true;
+        }
+    } else if pr.optional {
+        reject_optional_value(v, "a non-`$ctx` reference", sink);
+    }
+}
+
+/// `E0339` for a stray optional `?` — every position but a query `where`'s `$ctx.<field>`.
+fn reject_optional_value(v: &Value, at: &str, sink: &mut Sink) {
+    if let Value::Param(pr) = v {
+        if pr.optional {
+            let span = pr.path.last().map_or(pr.name.span, |s| s.span);
+            sink.error_note(
+                code::OPT_CTX_PLACEMENT,
+                span,
+                format!("optional `?` is not allowed on {at}"),
+                "a trailing `?` marks an optional `$ctx.<field>` read, valid only in a query filter (auth.md Handle 1) — absent-means-widen must never touch a scope or a write",
+            );
+        }
+    }
+}
+
+/// Reject every optional `?` in a predicate (a mutation filter or a named-filter body).
+fn forbid_optional_in_pred(p: &Predicate, at: &str, sink: &mut Sink) {
+    match p {
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            forbid_optional_in_pred(a, at, sink);
+            forbid_optional_in_pred(b, at, sink);
+        }
+        Predicate::Not(x) => forbid_optional_in_pred(x, at, sink),
+        Predicate::Cmp { value, .. } => reject_optional_value(value, at, sink),
+        Predicate::InList { values, .. } => {
+            for v in values {
+                reject_optional_value(v, at, sink);
+            }
+        }
+        Predicate::FilterCall { args, .. } => {
+            for a in args {
+                reject_optional_value(a, at, sink);
+            }
+        }
+        Predicate::Bare(_) | Predicate::Raw(_) => {}
+    }
+}
+
+/// A mutation is a write; an optional context read has no place in any of its statements.
+fn forbid_optional_ctx_writes(body: &[WriteStmt], sink: &mut Sink) {
+    for stmt in body {
+        match stmt {
+            WriteStmt::Create {
+                assigns, conflict, ..
+            } => {
+                for a in assigns {
+                    reject_optional_assign(a, sink);
+                }
+                if let Some(oc) = conflict {
+                    for a in &oc.update {
+                        reject_optional_assign(a, sink);
+                    }
+                }
+            }
+            WriteStmt::Update {
+                where_, assigns, ..
+            } => {
+                forbid_optional_in_pred(where_, "a mutation filter", sink);
+                for a in assigns {
+                    reject_optional_assign(a, sink);
+                }
+            }
+            WriteStmt::Restore { where_, .. } => {
+                forbid_optional_in_pred(where_, "a mutation filter", sink);
+            }
+            WriteStmt::Delete { where_, .. } | WriteStmt::HardDelete { where_, .. } => {
+                if let Some(p) = where_ {
+                    forbid_optional_in_pred(p, "a mutation filter", sink);
+                }
+            }
+            WriteStmt::Tx(inner) => forbid_optional_ctx_writes(inner, sink),
+            WriteStmt::Raw(_) => {}
+        }
+    }
+}
+
+fn reject_optional_assign(a: &Assign, sink: &mut Sink) {
+    if let Some(v) = a.value.as_value() {
+        reject_optional_value(v, "a write assignment", sink);
+    }
+}
+
 fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut Sink) {
     let m = cx.model(ti);
     // The column/edge this param maps onto — its type is what an explicit
@@ -1544,6 +1720,7 @@ pub fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<RMutatio
             "a write returns its row once; declare a stream query for the read",
         );
     }
+    forbid_optional_ctx_writes(&m.body, sink);
     let params: Vec<String> = m.params.iter().map(|p| p.name.node.clone()).collect();
     for p in &m.params {
         if let Some(d) = &p.default {
@@ -3244,6 +3421,8 @@ pub fn check_filter(f: &NamedFilter, cx: &Cx, sink: &mut Sink) -> RFilter {
     // bound here (they resolve against whichever model calls it) — only params,
     // nested filter calls, and functions are checked.
     resolve::check_predicate(&f.pred, None, cx, &params, sink);
+    // A filter body is spliced into reads *and* writes, so an optional read can't live here.
+    forbid_optional_in_pred(&f.pred, "a named filter (shared with writes)", sink);
     RFilter {
         name: f.name.node.clone(),
         span: f.span,

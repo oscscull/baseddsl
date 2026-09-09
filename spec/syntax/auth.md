@@ -19,6 +19,30 @@ query my_orders() -> OrderCard[] {
 ```
 Not a decision — a filter value the caller produced.
 
+### Optional context — `$ctx.<field>?`
+By default every `$ctx.<field>` a callable reads is **required**: absent at request time is a hard
+`missing_ctx` (a `400`), never a silent pass. A trailing `?` on the *use site* makes that one read
+**optional** — the field may be absent, and when it is, that predicate leaf **present-guards away** (the
+filter widens) instead of erroring. It reuses the exact optional-filter machinery of a `?` param
+(queries.md): the leaf lowers to `(:ctx_<field>__present = 0 OR <predicate>)`, so it composes correctly
+through `and`/`or`.
+```
+query feed() -> PostCard[] unscoped("public: owner's posts plus anything public") {
+  list Post where (author = $ctx.user? or visibility = "public");
+}
+```
+Signed-in caller (`$ctx.user` present) → both leaves apply, they see their own posts **and** public ones.
+Anonymous caller (`$ctx.user` absent) → the `author = …` leaf drops, leaving `visibility = "public"` —
+the public endpoint just works, no `missing_ctx`. The generated client carries an optional field as
+`Option<T>` (calling.md); `None` present-guards it off server-side.
+
+**A read-filter construct only.** Absent-means-widen is safe in a query `where` — the caller sees a
+superset of rows they are entitled to — but it must **never** touch a scope or a write, where absence
+would silently *un*filter. So `$ctx.<field>?` is rejected (`E0339`) in a `scope` term, in any mutation
+statement (filter or assign), and in a named `filter` body (spliced into writes too); and the `?` marker
+is only ever valid on a `$ctx.<field>`, never a plain param. A field read **both** optional and required
+within one callable is `E0349` — pick one. (See queries.md for the present-guard lowering it shares.)
+
 ## Handle 2 — named scope (a written contract, referenced on both sides)
 A **scope** is a standing filter, parameterized by request context, injected into every query **and
 write** on a model — exactly like soft-delete. It is a contract important enough that it must be
