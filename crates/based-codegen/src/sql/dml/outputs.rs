@@ -1,16 +1,7 @@
-//! Output-path metadata: which projected columns the runtime reassembles into nested JSON.
+//! The JSON output-path list: which projected columns the runtime reassembles into nested
+//! JSON, mirroring the projection so a `json` column read back as a string re-parses.
 
 use super::*;
-
-/// A relation field's target model and whether it is to-**many** (an inverse edge → a JSON
-/// array in the result) rather than to-one. `None` for a non-relation field.
-fn relation_target<'a>(model: &'a RModel, field: &str) -> Option<(&'a str, bool)> {
-    match &model.member(field)?.kind {
-        MemberKind::Forward { target, .. } => Some((target.as_str(), false)),
-        MemberKind::Inverse { target, .. } => Some((target.as_str(), true)),
-        MemberKind::Scalar { .. } => None,
-    }
-}
 
 /// Recurse a shape body, appending the output path of every `json` leaf. `prefix` is the
 /// accumulated path to this body — empty at the root, `field.` inside a to-one nest,
@@ -91,20 +82,6 @@ fn walk_nest_json(
     walk_shape_json(schema, decls, body, child, &p, out);
 }
 
-/// The model a relation `path` terminates on (walking each edge to its target).
-fn relation_terminal_model<'a>(
-    schema: &'a CheckedSchema,
-    model: &'a RModel,
-    path: &Path,
-) -> Option<&'a RModel> {
-    let mut cur = model;
-    for seg in &path.segments {
-        let (target, _) = relation_target(cur, &seg.node)?;
-        cur = schema.model(target)?;
-    }
-    Some(cur)
-}
-
 /// The output field-paths ([`NEST_SEP`]/[`ARRAY_MARK`]-joined, relative to one result row)
 /// of every `json`-typed leaf a return projection produces — the runtime's list for
 /// normalizing json columns read back as strings into structured JSON. Mirrors
@@ -134,17 +111,4 @@ pub(crate) fn json_output_paths(
         }
     }
     out
-}
-
-/// Whether `field` on `model` is a plain `json`-typed stored column (not an enum-, raw-, or
-/// generated-typed column that merely rides the text path).
-fn is_json_scalar(model: &RModel, field: &str) -> bool {
-    matches!(
-        model.member(field).map(|m| &m.kind),
-        Some(MemberKind::Scalar {
-            ty: Primitive::Json,
-            raw_type: None,
-            ..
-        })
-    )
 }

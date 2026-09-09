@@ -1,8 +1,7 @@
-//! Return-shape projection into the SELECT list: columns, FK reaches, to-one/to-many nest dispatch.
+//! Assemble the SELECT projection list from a return shape: columns, FK reaches, and
+//! to-one/to-many nest dispatch.
 
 use super::*;
-
-// ---------- projection -----------------------------------------------------
 
 /// Build the indented SELECT-list text for a query. Delegates to [`project_return`],
 /// the shape-projection core the write side reuses for its post-write re-select.
@@ -179,43 +178,9 @@ fn project_body<'a>(
                     sel.q(&out_alias(out_prefix, &id.node))
                 ));
             }
-            ShapeField::Rename { out, value } => match value {
-                ShapeValue::Path(p) => {
-                    let (a, col) = sel.resolve_from(p, alias, prefix, model);
-                    cols.push(format!(
-                        "{} AS {}",
-                        sel.qcol(&a, &col),
-                        sel.q(&out_alias(out_prefix, &out.node))
-                    ));
-                }
-                ShapeValue::Raw(raw) => {
-                    cols.push(format!(
-                        "({}) AS {}",
-                        render_raw(sel.dialect, raw, alias, &model.table),
-                        sel.q(&out_alias(out_prefix, &out.node))
-                    ));
-                }
-                // An aggregate shape is lowered by `lower_agg_query`, so a valid schema
-                // never reaches an aggregate through the row-projection path; emit the
-                // aggregate SQL defensively so the branch is total.
-                ShapeValue::Agg(agg) => {
-                    let d = sel.dialect;
-                    let expr = agg_sql(sel, model, alias, prefix, agg, d, true);
-                    cols.push(format!(
-                        "{expr} AS {}",
-                        sel.q(&out_alias(out_prefix, &out.node))
-                    ));
-                }
-                // A per-row derived scalar (`out = price - discount` / `a || b` / `case …`):
-                // lower the expression to one SELECT-list column.
-                ShapeValue::Computed(expr) => {
-                    let sql = sel.shape_expr(expr, alias, prefix, model);
-                    cols.push(format!(
-                        "{sql} AS {}",
-                        sel.q(&out_alias(out_prefix, &out.node))
-                    ));
-                }
-            },
+            ShapeField::Rename { out, value } => {
+                project_rename(sel, out, value, model, alias, prefix, out_prefix, cols);
+            }
             // A to-**one** relation nests the target's columns under a `field.`-prefixed
             // alias (reassembled by the runtime). A to-**many** relation aggregates the
             // child rows into a single JSON-array column (`field[]`) via a correlated
@@ -247,6 +212,54 @@ fn project_body<'a>(
     }
 }
 
+/// Project a renamed field (`out = <value>`): a path reach, a raw expression, an aggregate
+/// (defensive — an aggregate shape lowers via `lower_agg_query`, never this path), or a
+/// per-row computed scalar. One SELECT-list column under the `out`-named alias.
+#[allow(clippy::too_many_arguments)]
+fn project_rename<'a>(
+    sel: &mut Select<'a>,
+    out: &Ident,
+    value: &'a ShapeValue,
+    model: &'a RModel,
+    alias: &str,
+    prefix: &str,
+    out_prefix: &str,
+    cols: &mut Vec<String>,
+) {
+    match value {
+        ShapeValue::Path(p) => {
+            let (a, col) = sel.resolve_from(p, alias, prefix, model);
+            cols.push(format!(
+                "{} AS {}",
+                sel.qcol(&a, &col),
+                sel.q(&out_alias(out_prefix, &out.node))
+            ));
+        }
+        ShapeValue::Raw(raw) => {
+            cols.push(format!(
+                "({}) AS {}",
+                render_raw(sel.dialect, raw, alias, &model.table),
+                sel.q(&out_alias(out_prefix, &out.node))
+            ));
+        }
+        ShapeValue::Agg(agg) => {
+            let d = sel.dialect;
+            let expr = agg_sql(sel, model, alias, prefix, agg, d, true);
+            cols.push(format!(
+                "{expr} AS {}",
+                sel.q(&out_alias(out_prefix, &out.node))
+            ));
+        }
+        ShapeValue::Computed(expr) => {
+            let sql = sel.shape_expr(expr, alias, prefix, model);
+            cols.push(format!(
+                "{sql} AS {}",
+                sel.q(&out_alias(out_prefix, &out.node))
+            ));
+        }
+    }
+}
+
 /// Whether a to-one nest's joined row can be absent: an optional forward relation
 /// or a to-one inverse — the LEFT-JOINed edges. A required forward edge inner-joins,
 /// so its row always exists. Mirrors the client emitter's `Option<…>` typing.
@@ -255,75 +268,5 @@ pub(crate) fn to_one_absent_possible(model: &RModel, field: &str) -> bool {
         Some(MemberKind::Forward { optional, .. }) => *optional,
         Some(MemberKind::Inverse { .. }) => true,
         _ => false,
-    }
-}
-
-impl<'a> Select<'a> {
-    /// Lower a computed shape-field expression to a per-row SQL scalar: arithmetic to a
-    /// parenthesized `(a op b)`, concatenation through the dialect's `concat` seam, and a
-    /// conditional to `CASE WHEN … THEN … ELSE … END` (its `when` reusing the shared
-    /// predicate lowering, its branches recursing). Operands resolve like any reach, so a
-    /// dotted path materializes the same join a `Path` projection would.
-    pub(crate) fn shape_expr(
-        &mut self,
-        expr: &'a ShapeExpr,
-        alias: &str,
-        prefix: &str,
-        model: &'a RModel,
-    ) -> String {
-        match expr {
-            ShapeExpr::Value(Value::Path(p)) => {
-                let (a, col) = self.resolve_from(p, alias, prefix, model);
-                self.qcol(&a, &col)
-            }
-            ShapeExpr::Value(v) => self.value(v, model),
-            ShapeExpr::Arith { lhs, op, rhs, .. } => format!(
-                "({} {} {})",
-                self.shape_expr(lhs, alias, prefix, model),
-                arith_op_sql(*op),
-                self.shape_expr(rhs, alias, prefix, model)
-            ),
-            ShapeExpr::Concat { .. } => {
-                // Flatten a left-associative concat chain into one `a || b || c` /
-                // `CONCAT(a, b, c)` rather than nesting a call per operator.
-                let mut parts = Vec::new();
-                self.collect_concat(expr, alias, prefix, model, &mut parts);
-                self.dialect.concat(&parts)
-            }
-            ShapeExpr::Case { arms, else_, .. } => {
-                let mut s = String::from("CASE");
-                for arm in arms {
-                    s.push_str(&format!(
-                        " WHEN {} THEN {}",
-                        self.predicate(&arm.when, model),
-                        self.shape_expr(&arm.then, alias, prefix, model)
-                    ));
-                }
-                s.push_str(&format!(
-                    " ELSE {} END",
-                    self.shape_expr(else_, alias, prefix, model)
-                ));
-                s
-            }
-        }
-    }
-
-    /// Flatten a concat chain (`a || b || c`) into its ordered operand SQL, so the whole
-    /// chain lowers to one `CONCAT(…)` / `… || … || …` instead of nesting per operator.
-    fn collect_concat(
-        &mut self,
-        expr: &'a ShapeExpr,
-        alias: &str,
-        prefix: &str,
-        model: &'a RModel,
-        parts: &mut Vec<String>,
-    ) {
-        match expr {
-            ShapeExpr::Concat { lhs, rhs, .. } => {
-                self.collect_concat(lhs, alias, prefix, model, parts);
-                self.collect_concat(rhs, alias, prefix, model, parts);
-            }
-            other => parts.push(self.shape_expr(other, alias, prefix, model)),
-        }
     }
 }

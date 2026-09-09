@@ -1,88 +1,7 @@
-//! Ordering, keyset-cursor comparison, pagination, and row locking.
+//! ORDER BY derivation (the sort cascade + keyset PK tiebreaker) and pagination-clause
+//! detection.
 
 use super::*;
-
-/// The keyset "strictly after the cursor" predicate over the ordered sort keys
-/// For keys `k0 dir0, k1 dir1, …` and cursor values `:keyset_0, …`,
-/// the row-comparison expands lexicographically:
-/// `(k0 ▷ v0) OR (k0 = v0 AND k1 ▷ v1) OR …`, where `▷` is `>` for an ASC key and `<`
-/// for a DESC key. The expanded form (rather than a `(k0,k1) > (v0,v1)` row-value
-/// comparison) is used because SQL row comparison cannot mix ASC/DESC directions and
-/// the expansion is portable across all three dialects. The final key is always the
-/// unique `id` tiebreaker, so the comparison never drops or repeats a row.
-///
-/// A nullable sort key needs NULL-aware SQL, or a plain `col < :v` silently drops every
-/// NULL-valued row from the walk (`NULL < v` is `NULL`, not true). Each dialect's own
-/// default NULL sort position — NULL lowest on MariaDB/SQLite, highest on Postgres —
-/// decides where such rows fall, and [`keyset_after`]/[`keyset_eq`] render a comparison
-/// that matches it, so the ORDER BY (left at the dialect default) and the cursor predicate
-/// agree and every row is returned exactly once.
-pub(crate) fn keyset_predicate(keys: &[OrderKey], dialect: Dialect) -> String {
-    (0..keys.len())
-        .map(|i| {
-            let mut ands: Vec<String> = (0..i).map(|j| keyset_eq(&keys[j], j, dialect)).collect();
-            ands.push(keyset_after(&keys[i], i, dialect));
-            format!("({})", ands.join(" AND "))
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ")
-}
-
-/// The equality prefix step for sort key `j` (`col = :keyset_j`). A nullable key uses the
-/// dialect's null-safe equality so a NULL at this position still chains into the following
-/// key's comparison instead of collapsing the whole conjunct to NULL.
-fn keyset_eq(key: &OrderKey, j: usize, dialect: Dialect) -> String {
-    let param = format!(":keyset_{j}");
-    if !key.nullable {
-        return format!("{} = {param}", key.col_ref);
-    }
-    match dialect {
-        Dialect::Sqlite => format!("{} IS {param}", key.col_ref),
-        Dialect::MariaDb | Dialect::MySql => format!("{} <=> {param}", key.col_ref),
-        Dialect::Postgres => format!("{} IS NOT DISTINCT FROM {param}", key.col_ref),
-    }
-}
-
-/// The "strictly after" step for sort key `i`. A non-nullable key is a plain `col ▷ :v`.
-/// A nullable key expands to cover NULL on either side, using the key's direction and the
-/// dialect's default NULL position so the predicate ranks NULLs exactly as the ORDER BY.
-fn keyset_after(key: &OrderKey, i: usize, dialect: Dialect) -> String {
-    let param = format!(":keyset_{i}");
-    let cmp = match key.dir {
-        SortDir::Asc => ">",
-        SortDir::Desc => "<",
-    };
-    let col = &key.col_ref;
-    if !key.nullable {
-        return format!("{col} {cmp} {param}");
-    }
-    // Where NULLs fall in this key's direction: NULL is lowest on MariaDB/SQLite, highest
-    // on Postgres, and the direction flips that. `nulls_first` = NULLs sort before the
-    // non-NULL values in this key's own order.
-    // An explicit `nulls first|last` on the key pins the placement; otherwise the cursor
-    // follows the dialect default (NULL is lowest on MariaDB/MySQL/SQLite, highest on Postgres).
-    let nulls_first = match key.nulls {
-        Some(NullsPlacement::First) => true,
-        Some(NullsPlacement::Last) => false,
-        None => {
-            let nulls_low = matches!(dialect, Dialect::MariaDb | Dialect::MySql | Dialect::Sqlite);
-            (key.dir == SortDir::Asc) == nulls_low
-        }
-    };
-    // Parenthesized as a unit: it is ANDed behind the preceding keys' equality prefix, so
-    // its inner `OR` must not escape the conjunction.
-    if nulls_first {
-        // NULLs lead: a NULL cursor is passed only by non-NULL rows; a non-NULL cursor is
-        // passed by rows that plainly compare after it (NULL rows precede it, excluded).
-        format!("(({param} IS NULL AND {col} IS NOT NULL) OR ({param} IS NOT NULL AND {col} {cmp} {param}))")
-    } else {
-        // NULLs trail: a NULL cursor is the last position (nothing is after it here); a
-        // non-NULL cursor is passed by later non-NULL rows and by the trailing NULL rows.
-        format!("({param} IS NOT NULL AND ({col} {cmp} {param} OR {col} IS NULL))")
-    }
-}
-
-// ---------- sort cascade ---------------------------------------------------
 
 /// One resolved sort key: its quoted `table`.`col` reference, direction, the column's
 /// primitive (the type the runtime re-binds the cursor value as), and whether the column
@@ -114,30 +33,7 @@ pub(crate) fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<Ord
         None => &root.sort,
     };
 
-    // The primary-key column(s) + each part's own primitive — the deterministic keyset
-    // tiebreaker. One entry for a surrogate/natural key; the full tuple, in key order, for a
-    // composite `@key`.
-    let pk_cols: Vec<(String, Primitive)> = root
-        .pk_members()
-        .into_iter()
-        .map(|m| {
-            let prim = match &m.kind {
-                MemberKind::Scalar { ty, .. } => *ty,
-                // A relation key part (a junction FK) mirrors its own target's key type.
-                MemberKind::Forward { target, .. } => sel
-                    .schema
-                    .model(target)
-                    .and_then(RModel::pk_member)
-                    .and_then(|t| match &t.kind {
-                        MemberKind::Scalar { ty, .. } => Some(*ty),
-                        _ => None,
-                    })
-                    .unwrap_or(Primitive::Uuid),
-                MemberKind::Inverse { .. } => Primitive::Id,
-            };
-            (m.physical_col().to_string(), prim)
-        })
-        .collect();
+    let pk_cols = pk_keyset_cols(sel, root);
     let mut out: Vec<OrderKey> = Vec::new();
     let mut last_is_pk = false;
     for t in terms {
@@ -177,6 +73,31 @@ pub(crate) fn build_order(sel: &mut Select, q: &Query, root: &RModel) -> Vec<Ord
     out
 }
 
+/// The primary-key column(s) + each part's own primitive — the deterministic keyset
+/// tiebreaker. One entry for a surrogate/natural key; the full tuple, in key order, for a
+/// composite `@key`. A relation key part (a junction FK) mirrors its own target's key type.
+fn pk_keyset_cols(sel: &Select, root: &RModel) -> Vec<(String, Primitive)> {
+    root.pk_members()
+        .into_iter()
+        .map(|m| {
+            let prim = match &m.kind {
+                MemberKind::Scalar { ty, .. } => *ty,
+                MemberKind::Forward { target, .. } => sel
+                    .schema
+                    .model(target)
+                    .and_then(RModel::pk_member)
+                    .and_then(|t| match &t.kind {
+                        MemberKind::Scalar { ty, .. } => Some(*ty),
+                        _ => None,
+                    })
+                    .unwrap_or(Primitive::Uuid),
+                MemberKind::Inverse { .. } => Primitive::Id,
+            };
+            (m.physical_col().to_string(), prim)
+        })
+        .collect()
+}
+
 fn order_of(c: &Clause) -> Option<&[SortTerm]> {
     match c {
         Clause::Order(terms) => Some(terms),
@@ -188,28 +109,6 @@ fn order_of(c: &Clause) -> Option<&[SortTerm]> {
 /// (an injected key column would defeat the row dedup). Block-body only.
 pub(crate) fn query_distinct(q: &Query) -> bool {
     matches!(&q.body, QueryBody::Block(s) if s.distinct)
-}
-
-/// `get|list … for update` — a pessimistic locking read (`SELECT … FOR UPDATE`, a no-op on
-/// SQLite via the [`Dialect`](crate::Dialect) seam). Block-body only. Sema confines it to
-/// well-defined single-row sets; the client confines it to transaction transports.
-fn query_for_update(q: &Query) -> Option<LockWait> {
-    match &q.body {
-        QueryBody::Block(s) => s.for_update,
-        _ => None,
-    }
-}
-
-/// Append the `for update` row-locking clause (after ORDER BY/LIMIT) per dialect: `FOR UPDATE`
-/// (plus its optional `NOWAIT`/`SKIP LOCKED` wait mode) on Postgres/MySQL/MariaDB, nothing on
-/// SQLite (its transaction lock already serializes writers).
-pub(crate) fn push_lock_clause(sql: &mut String, q: &Query, dialect: Dialect) {
-    if let Some(wait) = query_for_update(q) {
-        let lock = dialect.for_update_clause(wait);
-        if !lock.is_empty() {
-            sql.push_str(&format!("\n{lock}"));
-        }
-    }
 }
 
 pub(crate) fn query_page(q: &Query) -> Option<&PageClause> {

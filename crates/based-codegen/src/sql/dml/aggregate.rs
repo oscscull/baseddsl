@@ -1,4 +1,4 @@
-//! Aggregate queries: GROUP BY, aggregate SELECT list, and HAVING.
+//! Lower an aggregate query: GROUP BY, the aggregate SELECT list, and HAVING.
 
 use super::*;
 
@@ -27,69 +27,11 @@ pub(crate) fn lower_agg_query<'a>(
     body: &'a [ShapeField],
     dialect: Dialect,
 ) -> LoweredQuery {
-    // Projection: each field is a group column (its `table.col`) or an aggregate
-    // expression, aliased to the shape's output name. Two expressions per aggregate: the
-    // *projection* form (decode-cast so the wire type is right) in the SELECT list, and the
-    // *comparison* form (the plain numeric aggregate) supplied to `HAVING`/`ORDER BY` — an
-    // alias isn't portable in `HAVING`, and the SELECT's decimal-to-text cast would break
-    // an ordered comparison.
-    let mut cols: Vec<String> = Vec::new();
-    let mut expr_map: HashMap<String, String> = HashMap::new();
-    // out-name → the model column path a group (non-aggregate) field projects, so
-    // `having` can render an enum-typed group column's RHS variant as its wire literal.
-    let mut group_col_paths: HashMap<String, Path> = HashMap::new();
-    let root_alias = sel.root_alias.clone();
-    for f in body {
-        let (out, proj, cmp) = match f {
-            ShapeField::Bare(id) => {
-                let (a, c) = sel.resolve_from(&single(&id.node), &root_alias, "", root);
-                let q = sel.qcol(&a, &c);
-                group_col_paths.insert(id.node.clone(), single(&id.node));
-                (id.node.clone(), q.clone(), q)
-            }
-            ShapeField::Rename { out, value } => match value {
-                ShapeValue::Path(p) => {
-                    let (a, c) = sel.resolve_from(p, &root_alias, "", root);
-                    let q = sel.qcol(&a, &c);
-                    group_col_paths.insert(out.node.clone(), p.clone());
-                    (out.node.clone(), q.clone(), q)
-                }
-                ShapeValue::Agg(agg) => {
-                    let proj = agg_sql(&mut sel, root, &root_alias, "", agg, dialect, true);
-                    let cmp = agg_sql(&mut sel, root, &root_alias, "", agg, dialect, false);
-                    (out.node.clone(), proj, cmp)
-                }
-                ShapeValue::Raw(raw) => {
-                    let e = format!("({})", render_raw(dialect, raw, &root_alias, &root.table));
-                    (out.node.clone(), e.clone(), e)
-                }
-                // A computed field never co-occurs with an aggregate (sema `E0324`); lower
-                // it defensively so the branch is total.
-                ShapeValue::Computed(expr) => {
-                    let e = sel.shape_expr(expr, &root_alias, "", root);
-                    (out.node.clone(), e.clone(), e)
-                }
-            },
-            // Aggregate shapes are flat (sema `E0245`); a stray nest/flatten is ignored.
-            ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. } => {
-                continue
-            }
-            ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
-        };
-        cols.push(format!("  {} AS {}", proj, sel.q(&out)));
-        expr_map.insert(out, cmp);
-    }
+    let (cols, expr_map, group_col_paths) = agg_projection(&mut sel, body, root, dialect);
     let projection = cols.join(",\n");
 
     // Row filter (before grouping): the query's own `where`, then soft-delete + `@scope`.
-    let mut wheres: Vec<String> = Vec::new();
-    collect_filter(&mut sel, q, root, &mut wheres);
-    if let Some(sd) = &root.soft_delete {
-        wheres.push(soft_pred(dialect, &sel.root_alias, root, sd));
-    }
-    if let Some(scope) = sel.scope_where(&sel.root_alias, root) {
-        wheres.push(scope);
-    }
+    let wheres = build_wheres(&mut sel, q, root, dialect);
 
     // `group by` columns, `having`, and `order` (all naming projected columns).
     let (group_paths, having_pred, order_terms) = agg_clause_parts(q);
@@ -116,7 +58,6 @@ pub(crate) fn lower_agg_query<'a>(
         })
         .collect();
 
-    // Assemble — joins were accumulated by the resolves above.
     let mut sql = format!("SELECT\n{}\nFROM {}", projection, sel.qt(root));
     push_joins(&mut sql, sel.dialect, &sel.joins);
     if !wheres.is_empty() {
@@ -146,6 +87,67 @@ pub(crate) fn lower_agg_query<'a>(
             v
         },
     }
+}
+
+/// The aggregate SELECT list: for each shape field a `(out_name, projection_expr,
+/// comparison_expr)` — two forms per aggregate, the projection form decode-cast for the wire
+/// type and the plain comparison form for `HAVING`/`ORDER BY` (an alias isn't portable in
+/// `HAVING`, and the SELECT's decimal-to-text cast would break an ordered comparison).
+/// Returns the indented columns, the out-name → comparison-expr map, and the out-name → group
+/// column path map (for rendering an enum group column's HAVING RHS).
+fn agg_projection<'a>(
+    sel: &mut Select<'a>,
+    body: &'a [ShapeField],
+    root: &'a RModel,
+    dialect: Dialect,
+) -> (Vec<String>, HashMap<String, String>, HashMap<String, Path>) {
+    let mut cols: Vec<String> = Vec::new();
+    let mut expr_map: HashMap<String, String> = HashMap::new();
+    // out-name → the model column path a group (non-aggregate) field projects, so
+    // `having` can render an enum-typed group column's RHS variant as its wire literal.
+    let mut group_col_paths: HashMap<String, Path> = HashMap::new();
+    let root_alias = sel.root_alias.clone();
+    for f in body {
+        let (out, proj, cmp) = match f {
+            ShapeField::Bare(id) => {
+                let (a, c) = sel.resolve_from(&single(&id.node), &root_alias, "", root);
+                let q = sel.qcol(&a, &c);
+                group_col_paths.insert(id.node.clone(), single(&id.node));
+                (id.node.clone(), q.clone(), q)
+            }
+            ShapeField::Rename { out, value } => match value {
+                ShapeValue::Path(p) => {
+                    let (a, c) = sel.resolve_from(p, &root_alias, "", root);
+                    let q = sel.qcol(&a, &c);
+                    group_col_paths.insert(out.node.clone(), p.clone());
+                    (out.node.clone(), q.clone(), q)
+                }
+                ShapeValue::Agg(agg) => {
+                    let proj = agg_sql(sel, root, &root_alias, "", agg, dialect, true);
+                    let cmp = agg_sql(sel, root, &root_alias, "", agg, dialect, false);
+                    (out.node.clone(), proj, cmp)
+                }
+                ShapeValue::Raw(raw) => {
+                    let e = format!("({})", render_raw(dialect, raw, &root_alias, &root.table));
+                    (out.node.clone(), e.clone(), e)
+                }
+                // A computed field never co-occurs with an aggregate (sema `E0324`); lower
+                // it defensively so the branch is total.
+                ShapeValue::Computed(expr) => {
+                    let e = sel.shape_expr(expr, &root_alias, "", root);
+                    (out.node.clone(), e.clone(), e)
+                }
+            },
+            // Aggregate shapes are flat (sema `E0245`); a stray nest/flatten is ignored.
+            ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. } => {
+                continue
+            }
+            ShapeField::Spread { .. } => unreachable!("spreads expanded before codegen"),
+        };
+        cols.push(format!("  {} AS {}", proj, sel.q(&out)));
+        expr_map.insert(out, cmp);
+    }
+    (cols, expr_map, group_col_paths)
 }
 
 /// The `group by` paths, `having` predicate, and `order` terms of an aggregate query's
@@ -211,27 +213,6 @@ pub(crate) fn agg_sql(
         "min" => format!("MIN({cref})"),
         "max" => format!("MAX({cref})"),
         _ => "COUNT(*)".to_string(),
-    }
-}
-
-/// The `CAST(… AS <int>)` target that coerces a widened `SUM(int)` back to an integer, or
-/// `None` where the dialect keeps it integral (SQLite). MariaDB/Postgres widen `SUM` of a
-/// `BIGINT` to decimal/numeric, which would decode as a string; the cast keeps it a number.
-fn int_cast_type(dialect: Dialect) -> Option<&'static str> {
-    match dialect {
-        Dialect::MariaDb | Dialect::MySql => Some("SIGNED"),
-        Dialect::Postgres => Some("BIGINT"),
-        Dialect::Sqlite => None,
-    }
-}
-
-/// The dialect's double type, the `CAST` target that makes `AVG` decode as a float number
-/// on every dialect (Postgres `AVG` of an int/numeric is otherwise a numeric string).
-fn double_cast_type(dialect: Dialect) -> &'static str {
-    match dialect {
-        Dialect::MariaDb | Dialect::MySql => "DOUBLE",
-        Dialect::Postgres => "DOUBLE PRECISION",
-        Dialect::Sqlite => "REAL",
     }
 }
 
