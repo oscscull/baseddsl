@@ -1382,7 +1382,11 @@ pub fn adopt_{suffix}<'a>(
                 let ty = ctx_field_type(schema, &r.ty);
                 // An optional `$ctx.field?` read may be absent — the caller passes `None`, and
                 // the server present-guards the filter away (auth.md Handle 1).
-                let ty = if r.optional { format!("Option<{ty}>") } else { ty };
+                let ty = if r.optional {
+                    format!("Option<{ty}>")
+                } else {
+                    ty
+                };
                 (r.field.clone(), ty)
             })
             .collect()
