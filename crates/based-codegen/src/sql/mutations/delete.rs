@@ -38,7 +38,7 @@ fn soft_delete_write(
     let header = if wipe {
         "-- delete all (soft): tombstone every row in scope\n"
     } else {
-        "-- delete (soft): tombstone, never a real DELETE\n"
+        "-- delete (soft): tombstone the matched rows\n"
     };
     LoweredWrite {
         header: header.to_string(),

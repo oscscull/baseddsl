@@ -235,7 +235,7 @@ fn lower_tx<'a>(
     }
     if let Some(first) = out.get_mut(start) {
         first.header = format!(
-            "-- tx: one engine-owned transaction (principle 7); rolls back together\n{}",
+            "-- tx: one engine-owned transaction; rolls back together\n{}",
             first.header
         );
     }
