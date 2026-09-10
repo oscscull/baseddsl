@@ -1,4 +1,4 @@
-# The Tenant scope (auth.md Handle 2 / D46): a named row-visibility contract declared
+# The Tenant scope (auth.md Handle 2): a named row-visibility contract declared
 # once and referenced by name on both sides — `@scope Tenant` on the model, `scoped
 # Tenant` on every callable that touches it (queries.bsl). The `org: Org` term is the
 # one place the scope column's — and thus `$ctx.org`'s — type is written.
@@ -22,7 +22,7 @@ Order {
 }
 
 # The declared read shape. `placed_by { … }` nests the related User as a sub-object
-# (L1/D55) — the response carries a real `placed_by: { name, email }`, not a flat id.
+# The response carries a real `placed_by: { name, email }`, not a flat id.
 shape OrderCard from Order {
   id
   status

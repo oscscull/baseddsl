@@ -1,6 +1,6 @@
 # commerce example
 
-Worked reference in the **recommended** convention (decisions.md D6/D9) — not a
+Worked reference in the **recommended** convention — not a
 required layout. One file extension (`.bsl`); the compiler only globs `**/*.bsl`,
 so you may divide files however you like. Here:
 

@@ -2,7 +2,7 @@
    based DSL — canonical grammar
    ----------------------------------------------------------------------------
    Source of truth for what parses. Where the prose specs were ambiguous, this
-   file commits; see decisions.md for the rationale of each commitment.
+   file commits.
 
    Notation (ISO-ish EBNF):
      =            definition
@@ -21,7 +21,7 @@
 (* One extension (.bsl), one uniform grammar: any top-level declaration may     *)
 (* appear in any file. Splitting schema vs access across files (model.bsl /     *)
 (* queries.bsl) and grouping by domain dir is recommended convention, not       *)
-(* enforced (decisions.md D6/D9).                                               *)
+(* enforced.                                                                    *)
 
 file        = { decl } ;
 decl        = model | shape | scope_decl | enum_decl | query | mutation | named_filter ;
@@ -30,7 +30,7 @@ sep         = NEWLINE | ',' ;          (* item separator inside blocks/files   *
 (* ---------- Models -------------------------------------------------------- *)
 
 model       = { model_deco } model_name '{' { member sep } [ member ] '}' ;
-model_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
+model_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold *)
 
 member      = field | generated_col | index_decl | soft_override ;
 
@@ -40,11 +40,11 @@ member      = field | generated_col | index_decl | soft_override ;
 generated_col = field_name '=' shape_expr ;
 
 (* A model header stacks decorators, one per line. `@scope Name` is a distinct    *)
-(* form (D46): it references a top-level `scope` decl by name, no parenthesized    *)
+(* form: it references a top-level `scope` decl by name, no parenthesized          *)
 (* predicate (the predicate lives in the `scope` decl — P4). Every other decorator *)
 (* takes the generic parenthesized-args form. `@scope Name(field)` — a per-model   *)
-(* scope-column override — is reserved but not yet accepted (D46).                 *)
-(* Multi-scope (D47): `@scope` is REPEATABLE and its names are comma-separated.     *)
+(* scope-column override — is reserved but not yet accepted.                       *)
+(* Multi-scope: `@scope` is REPEATABLE and its names are comma-separated.           *)
 (* The stack is a disjunction of conjunctions (DNF): commas WITHIN one `@scope`     *)
 (* are an AND-conjunction (one alternative — all named axes required together);     *)
 (* the repeated decorators are OR-alternatives (each a valid confinement). So       *)
@@ -85,11 +85,11 @@ base_type   = primitive | model_ref ;
 primitive   = 'text' | 'int' | 'bool' | 'timestamp' | 'date' | 'time' | 'bytes'
             | 'json' | 'uuid' | 'Id' | 'ulid' | 'serial' | 'float' | decimal ;
 (* `ulid`/`serial` are primary-key generation strategies — valid only as the `id`  *)
-(* type (D110). `serial` = a DB-generated sequential integer PK.                    *)
+(* type. `serial` = a DB-generated sequential integer PK.                           *)
 (* Fixed base-10 numeric. Bare `decimal` = `decimal(38, 9)`; args are compile-time  *)
 (* INT literals, sema validates `1 <= scale <= precision <= 38` (E0159). models.md.  *)
 decimal     = 'decimal' [ '(' INT ',' INT ')' ] ;
-model_ref   = upper_ident ;            (* relation; resolves to a model (D7)   *)
+model_ref   = upper_ident ;            (* relation; resolves to a model        *)
 type_qualifier = '?'                   (* nullable / optional                  *)
             | '[]' ;                   (* to-many                              *)
 
@@ -132,7 +132,7 @@ method_name = lower_ident ;      (* closed set enforced in sema, not here *)
 (* The opaque `raw(…)` body, in type and index position. One literal for every target,  *)
 (* or a per-dialect map when the spelling differs; a target absent from the map is      *)
 (* E0270. Distinct from the backtick `raw`…`` value/predicate form below — same         *)
-(* keyword, different position (D96: `raw` is the one escape-hatch spelling; `sql` is   *)
+(* keyword, different position (`raw` is the one escape-hatch spelling; `sql` is        *)
 (* never a keyword).                                                                    *)
 raw_spec    = 'raw' '(' ( STRING | dialect_map ) ')' ;
 dialect_map = '{' dialect_entry { ',' dialect_entry } '}' ;
@@ -149,16 +149,16 @@ shape       = 'shape' shape_name 'from' model_ref shape_body ;
 shape_name  = upper_ident | 'full' ;   (* `shape full` is the conventional view*)
 shape_body  = '{' { shape_field sep } [ shape_field ] '}' ;
 (* A nest is spelled inline (`field { … }`) or as a reference to a top-level shape *)
-(* decl by name (`field -> UserRow`, D79) — `->` reads "connects to", as in a       *)
+(* decl by name (`field -> UserRow`) — `->` reads "connects to", as in a             *)
 (* relation decl and a param binding. The referenced shape's `from` model must     *)
 (* equal the relation's target; the reference is a pure body expansion (`full` is  *)
 (* per-model, so it is never referenced this way).                                 *)
 shape_field = bare_field                       (* local, same-name             *)
             | out_name '=' shape_value          (* reach/raw/agg/computed       *)
-            | out_name '=' path shape_body      (* far-side flatten (m2m, D109) *)
+            | out_name '=' path shape_body      (* far-side flatten (m2m)       *)
             | bare_field shape_body             (* nest a relation into subobj  *)
-            | bare_field '->' upper_ident        (* nest via a named shape (D79) *)
-            | '...' upper_ident ;               (* splice a same-model shape (D130) *)
+            | bare_field '->' upper_ident        (* nest via a named shape       *)
+            | '...' upper_ident ;               (* splice a same-model shape        *)
 bare_field  = lower_ident ;
 out_name    = lower_ident ;
 (* A lone `path` reaches-and-renames; `raw_sql` / `aggregate` are the escape hatch and  *)
@@ -186,15 +186,15 @@ case_expr    = 'case' ( 'when' predicate 'then' shape_expr )+
 aggregate   = agg_func '(' [ path ] ')' ;
 agg_func    = 'count' | 'sum' | 'avg' | 'min' | 'max' ;   (* contextual, checked in sema *)
 
-(* ---------- Scopes (auth.md Handle 2, D46) -------------------------------- *)
+(* ---------- Scopes (auth.md Handle 2) ------------------------------------- *)
 (* A named row-visibility contract, declared once and referenced by name on the     *)
 (* model it governs (`@scope Name`) and every callable that touches it (`scoped      *)
-(* Name`). The predicate is the D32 restricted form — a conjunction of `col =        *)
+(* Name`). The predicate is the restricted form — a conjunction of `col =           *)
 (* $ctx.field` equalities — with the column's (and thus $ctx field's) type declared  *)
-(* here (D46), which sources the scope field's type instead of D4/D5 inference.      *)
+(* here, which sources the scope field's type instead of inference.                  *)
 
 scope_decl  = 'scope' scope_name '(' scope_term { ',' scope_term } ')' ;
-scope_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
+scope_name  = upper_ident ;            (* UpperCamel; decl == ref, no fold *)
 scope_term  = column_name ':' type_expr '=' param_ref ;   (* col: Type = $ctx.field *)
 
 (* ---------- Enums (enums.md) ---------------------------------------------- *)
@@ -205,7 +205,7 @@ scope_term  = column_name ':' type_expr '=' param_ref ;   (* col: Type = $ctx.fi
 (* identifier (an ordinary single-segment path), resolved against the column's enum.    *)
 
 enum_decl   = 'enum' enum_name '{' { variant sep } [ variant ] '}' ;
-enum_name   = upper_ident ;            (* UpperCamel; decl == ref, no fold (D7) *)
+enum_name   = upper_ident ;            (* UpperCamel; decl == ref, no fold *)
 (* A variant is a bare name, optionally with an explicit wire value. The name is always  *)
 (* the identifier (client variant, go-to-def, rename); the value is what the wire + DB    *)
 (* store. Kind is inferred in sema: no int value anywhere => a string enum (bare name or   *)
@@ -221,12 +221,12 @@ query       = 'query' query_name '(' [ params ] ')' '->' ret_type
               [ scope_ack ] ( query_inline | query_block | ';' ) ;
 query_name  = lower_ident ;
 
-(* Per-callable scope acknowledgement (auth.md Handle 2 / D32 / D46 / D47). A callable *)
+(* Per-callable scope acknowledgement (auth.md Handle 2). A callable                   *)
 (* whose target model is in a scope MUST carry exactly one of these (else E0182):     *)
 (*  - `scoped Name[, Name]*` accepts standing scope(s). The named axis set must be a   *)
 (*    SUPERSET of ≥1 declared `@scope` alternative for EACH scoped model it touches     *)
-(*    (root + joined reaches, D34) — too few axes to satisfy any alternative, or an     *)
-(*    axis no touched model declares, is E0185 (D47). An AND model needs both axes; an  *)
+(*    (root + joined reaches) — too few axes to satisfy any alternative, or an          *)
+(*    axis no touched model declares, is E0185. An AND model needs both axes; an        *)
 (*    OR model is satisfied by either.                                                  *)
 (*  - `unscoped("reason")` opts the one callable out of ALL scope handling (cross-scope *)
 (*    admin/support/jobs). Mandatory reason — an escape hatch is never silent (P6);    *)
@@ -292,14 +292,14 @@ write_stmt  = create_stmt | update_stmt | delete_stmt
 (* as `$name.field` (mutations.md Atomic groups). `as` is a keyword — the bare trailing     *)
 (* form is two adjacent bare tokens, banned by principle 3.                                  *)
 (* A create takes its column values two ways: an inline `assign_block` (`{ f = $x }`), or    *)
-(* — BW1 — a `create_from` tail (`create Model[] from $rows` / `create Model from $row`),     *)
+(* a `create_from` tail (`create Model[] from $rows` / `create Model from $row`),             *)
 (* where the row(s) come from a shape-typed param (`shape[]` bulk / `shape` single). The     *)
 (* runtime materializes a chunked, atomic multi-row INSERT; the input shape names the         *)
 (* settable columns (a to-one relation FK-linked with an inline `{ key }` block). Sema        *)
 (* E0325-E0332 (use-site eligibility), W0112/W0113 (named engine-managed column). A           *)
-(* `create_from` reads back `-> ok`, `-> Shape` (single), or `-> Shape[]` (bulk, D127).       *)
+(* `create_from` reads back `-> ok`, `-> Shape` (single), or `-> Shape[]` (bulk).             *)
 (* `on_conflict` may follow either form — a `create_from … on_conflict` is a BULK UPSERT      *)
-(* (BW2/D127): its `update` branch may reference the proposed row via `incoming.<col>` (a     *)
+(* its `update` branch may reference the proposed row via `incoming.<col>` (a                 *)
 (* contextual keyword valid only here; sema E0333/E0334), lowered to `excluded.<col>`         *)
 (* (Postgres/SQLite) / `VALUES(<col>)` (MySQL/MariaDB). A bare column is the stored value.    *)
 create_stmt = 'create' model_ref ( assign_block | create_from )
@@ -440,12 +440,12 @@ raw_char    = ? any char except '`' and an interp opener ? ;
 
 (* ---------- Lexical ------------------------------------------------------- *)
 
-(* Keywords are contextual (decisions.md D8): a word is a keyword only where the *)
+(* Keywords are contextual: a word is a keyword only where the                   *)
 (* grammar expects one; elsewhere it is an ordinary ident. A field may thus be   *)
 (* named `order:` even though `order (...)` is a clause. Legacy keyword-named    *)
 (* columns/tables may also be aliased via (column "...") / @table("...").        *)
 (* Keyword-in-position set additionally includes `scope` (decl head + `@scope`)  *)
-(* and `scoped` (the callable acknowledgement) — D46; both contextual. `enum`     *)
+(* and `scoped` (the callable acknowledgement) — both contextual. `enum`          *)
 (* (decl head, enums.md) is likewise contextual, as are `stream` and `ok`          *)
 (* (return-type position only; streaming.md / mutations.md).                       *)
 ident       = lower_ident | upper_ident ;

@@ -86,7 +86,7 @@ method returns a `Stream` of typed rows instead of a `Vec` (the `Transport` trai
 streaming call beside `call`; the embedded transport yields the engine's row stream
 in-process). Wire framing, mid-stream error contract, cancellation: streaming.md.
 
-## Transport + the embedded bridge (D62)
+## Transport + the embedded bridge
 The generated `Client<T>` is generic over a `Transport` trait the module *defines itself* (post typed input + typed `$ctx` to a route, decode the reply). Both the trait's `call` and every client method are `async` — a transport awaits its round-trip (an HTTP client's socket, or the in-process engine's execution). A wire/HTTP transport is the caller's; the module carries no HTTP stack.
 
 The in-process path is different: because the trait is defined in the generated module, the orphan rule forbids a library-side `impl Transport for Engine` in based-runtime — so `based gen client` **emits the bridge** when asked (`ClientOptions::embedded`). The module then also carries an `Embedded` transport over `based_runtime::Engine` and a one-call constructor:

@@ -1,5 +1,5 @@
 # model + its read contract live together; access layer is in queries.bsl
-# created_at is declared + @created (timestamps are never implicit, D2);
+# created_at is declared + @created (timestamps are never implicit);
 # product.queries sorts by it.
 @soft_delete(deleted_at)
 @created(created_at)

@@ -6,7 +6,8 @@ When terse vs readable conflict: readable wins.
 
 Source comments: only where a reader can't infer *what* the code does from the code itself —
 most code needs none; a few key entry points get a short doc block. No cross-refs to
-D#/M#/PLAN/DoD/decisions in source. No WIP/rationale/narration — that lives in spec/decisions/PLAN.
+D#/M#/PLAN/DoD/decisions in source. No WIP/rationale/narration — the spec says what the
+language is; work status lives in GitHub issues + git history.
 
 `spec/principles.md` is always-loaded tiebreakers, in order. Read before any decision.
 
@@ -15,12 +16,12 @@ choice — compiler globs `**/*.bsl`. Recommended convention: `<domain>/model.bs
 + `<domain>/queries.bsl` (access layer). See spec/examples/commerce.
 
 Repo layout:
-- `PLAN.md` — implementation status + build-out roadmap (what's done/deferred/next). Read when resuming work. Lean by design; shipped-milestone narration is in `PLAN-archive.md` (history, not needed to resume).
 - `spec/` — language design docs (prose). Source of truth for *what* the language is.
 - `spec/grammar.ebnf` — canonical grammar. Source of truth for *what parses*; resolves prose ambiguity.
-- `spec/decisions.md` — resolved implementation decisions not in the prose (Id, implicit fields, table naming, $ctx, file layout). Chronological D1–D50 with a topic-router index at the top — use it to load only the relevant entries.
 - `crates/` — Rust cargo workspace (compiler + runtime).
 - `tests/conformance/` — golden (input.bsl, expected) pairs.
+
+Work is tracked in GitHub issues; the "why" behind shipped work lives in git history + closed issues, not in a checked-in log.
 
 Spec file map:
 - `spec/principles.md` — design rules. Always in context.

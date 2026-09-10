@@ -8,7 +8,7 @@ query order_by_id(id) -> OrderCard scoped Tenant;
 # "my org's orders" — the scope predicate + `@sort(placed_at desc)` do all the work.
 query my_orders() -> OrderCard[] scoped Tenant { list Order; }
 
-# Keyset-cursor pagination (L2/D56): walk the whole set two rows at a time. The response
+# Keyset-cursor pagination: walk the whole set two rows at a time. The response
 # is `{ rows, cursor }`; feed `cursor` back to fetch the next page (null cursor = done).
 query recent_orders() -> OrderCard[] scoped Tenant {
   list Order order (placed_at desc) page (2);
@@ -21,7 +21,7 @@ mutation place_order(buyer: Id, total: decimal(12, 2)) -> OrderCard scoped Tenan
 }
 
 # `delete` on a @soft_delete model is the soft action (tombstone, never real DELETE).
-# The response is the tombstoned row read back in its declared shape (D58).
+# The response is the tombstoned row read back in its declared shape.
 mutation cancel_order(id: Id) -> OrderCard scoped Tenant {
   delete Order where (id = $id);
 }

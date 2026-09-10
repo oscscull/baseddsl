@@ -7,7 +7,7 @@ and Postgres are also supported.
 
 **[Language reference →](docs/reference.md)** — every feature and its syntax, on one page.
 
-Wip, for progress, see [`PLAN.md`](PLAN.md) for status.
+WIP — progress and open work are tracked in [GitHub issues](https://github.com/oscscull/baseddsl/issues).
 
 ## Try it
 
