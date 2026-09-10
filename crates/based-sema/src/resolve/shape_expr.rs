@@ -13,7 +13,12 @@ pub fn check_shape_expr(expr: &ShapeExpr, mi: usize, cx: &Cx, sink: &mut Sink) {
 /// Infer a computed expression's coarse value family while type-checking it. `None` = a
 /// `null` literal or an unmodelled leaf (function / rejected operand) — compatible with any
 /// context, so it never triggers a mismatch on its own.
-pub(crate) fn infer_shape_expr(expr: &ShapeExpr, mi: usize, cx: &Cx, sink: &mut Sink) -> Option<Family> {
+pub(crate) fn infer_shape_expr(
+    expr: &ShapeExpr,
+    mi: usize,
+    cx: &Cx,
+    sink: &mut Sink,
+) -> Option<Family> {
     match expr {
         ShapeExpr::Value(v) => infer_operand(v, mi, cx, sink),
         ShapeExpr::Arith { lhs, rhs, span, .. } => {

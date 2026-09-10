@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Every scope-name reference identifier across the AST, with its span — the sites a name
 /// *points at* a `scope` decl: `@scope Name[, …]` on a model, `scoped Name[, …]` on a
 /// query or mutation. Used for go-to-definition into the `scope` decl.

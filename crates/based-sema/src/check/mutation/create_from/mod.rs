@@ -2,22 +2,22 @@
 
 use super::*;
 
-mod incoming;
 mod bulk_upsert;
-mod input_shape;
+mod incoming;
 mod input_body;
-mod input_scalar;
-mod input_nest;
 mod input_coverage;
+mod input_nest;
+mod input_scalar;
+mod input_shape;
 
-use incoming::*;
 use bulk_upsert::*;
 pub(in crate::check::mutation) use incoming::rhs_incoming_span;
-use input_shape::*;
+use incoming::*;
 use input_body::*;
-use input_scalar::*;
-use input_nest::*;
 use input_coverage::*;
+use input_nest::*;
+use input_scalar::*;
+use input_shape::*;
 
 /// Shape-as-input eligibility for every `create … from $param` in the body. A
 /// `shape` is a neutral bag of typed fields; whether it may serve as a create's row input

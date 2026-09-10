@@ -31,14 +31,14 @@ mod paginate;
 mod param_use;
 mod query;
 
-pub use ir::*;
-pub use mutation::*;
-pub use query::*;
 pub(crate) use bind::*;
 pub(crate) use bulk::*;
+pub use ir::*;
 pub(crate) use lookup::*;
+pub use mutation::*;
 pub(crate) use paginate::*;
 pub(crate) use param_use::*;
+pub use query::*;
 
 #[cfg(test)]
 mod tests {

@@ -4,8 +4,8 @@ use super::*;
 
 mod conflict_target;
 
-use conflict_target::*;
 pub(in crate::check::mutation) use conflict_target::check_conflict_target_over;
+use conflict_target::*;
 
 /// Validate an upsert's `on conflict (target) update { … }`: the target
 /// must be a declared unique key each of whose columns the create sets, the `update`

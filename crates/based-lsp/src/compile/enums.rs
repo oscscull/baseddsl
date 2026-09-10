@@ -1,6 +1,5 @@
 use super::*;
 
-
 impl Snapshot {
     /// The declaration span of the enum variant the cursor sits on — either a variant
     /// use in value/default position (`where status = paid`, `default pending`) or the
@@ -29,7 +28,6 @@ impl Snapshot {
         }
         None
     }
-
 
     /// Every enum-variant use site in value/default position, paired with the enum it
     /// belongs to: a `where`/write comparison whose column is enum-typed, a write assign
@@ -81,7 +79,6 @@ impl Snapshot {
         out
     }
 
-
     fn clause_variant_sites<'a>(
         &'a self,
         c: &'a Clause,
@@ -92,7 +89,6 @@ impl Snapshot {
             self.pred_variant_sites(p, root, out);
         }
     }
-
 
     fn pred_variant_sites<'a>(
         &'a self,
@@ -129,7 +125,6 @@ impl Snapshot {
             _ => {}
         }
     }
-
 
     fn write_variant_sites<'a>(
         &'a self,
@@ -172,7 +167,6 @@ impl Snapshot {
         }
     }
 
-
     fn assign_variant_sites<'a>(
         &'a self,
         model: &str,
@@ -191,13 +185,11 @@ impl Snapshot {
         }
     }
 
-
     /// The enum a dotted column path (rooted at `root`) terminates on, or `None` when the
     /// terminal column is not enum-typed.
     fn enum_of_path<'a>(&'a self, root: &str, segs: &[Ident]) -> Option<&'a str> {
         self.field_enum(self.walk_path(root, segs)?)
     }
-
 
     /// The enum name a field is typed by, when its `UpperCamel` type resolves to a
     /// declared enum (not a model relation).
@@ -210,13 +202,11 @@ impl Snapshot {
         None
     }
 
-
     fn is_enum_decl(&self, name: &str) -> bool {
         self.decls
             .iter()
             .any(|d| matches!(d, Decl::Enum(e) if e.name.node == name))
     }
-
 
     /// The declaration span of variant `variant` in enum `enum_name`, or `None`.
     fn variant_decl_span(&self, enum_name: &str, variant: &str) -> Option<Span> {
@@ -229,7 +219,6 @@ impl Snapshot {
             _ => None,
         })
     }
-
 
     /// The `(enum_name, variant_name)` a declaration span identifies, when it is a variant
     /// declaration. Lets find-references key variant uses to the right enum.
@@ -245,5 +234,4 @@ impl Snapshot {
         }
         None
     }
-
 }

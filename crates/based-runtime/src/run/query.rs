@@ -59,4 +59,3 @@ pub fn run_query_stream(
 pub async fn run_stmt<D: DbRead + ?Sized>(db: &mut D, stmt: &Stmt) -> Result<Vec<Row>, DbError> {
     fetch_all(db.fetch(&stmt.sql, &stmt.params)).await
 }
-

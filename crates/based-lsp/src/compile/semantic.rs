@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Append one highlight span `[start, end)` (byte offsets in `src`) to `out` as
 /// `(line, utf16-char, utf16-len, token-type)`, splitting at newlines so no emitted
 /// token crosses a line (an LSP semantic token is single-line).
@@ -24,7 +23,6 @@ fn push_semantic_token(
         lo = if line_stop < end { line_stop + 1 } else { end };
     }
 }
-
 
 /// Every `raw`…`` block declared anywhere in `d` — value, shape, index-adjacent, query,
 /// mutation, and filter positions — for per-dialect SQL highlighting.
@@ -50,7 +48,6 @@ fn collect_raw_in_decl<'a>(d: &'a Decl, out: &mut Vec<&'a RawSql>) {
     }
 }
 
-
 fn shape_field_raw<'a>(f: &'a ShapeField, out: &mut Vec<&'a RawSql>) {
     match f {
         ShapeField::Rename { value, .. } => shape_value_raw(value, out),
@@ -63,7 +60,6 @@ fn shape_field_raw<'a>(f: &'a ShapeField, out: &mut Vec<&'a RawSql>) {
     }
 }
 
-
 fn shape_value_raw<'a>(v: &'a ShapeValue, out: &mut Vec<&'a RawSql>) {
     match v {
         ShapeValue::Raw(r) => out.push(r),
@@ -71,7 +67,6 @@ fn shape_value_raw<'a>(v: &'a ShapeValue, out: &mut Vec<&'a RawSql>) {
         ShapeValue::Path(_) | ShapeValue::Agg(_) => {}
     }
 }
-
 
 fn shape_expr_raw<'a>(e: &'a ShapeExpr, out: &mut Vec<&'a RawSql>) {
     match e {
@@ -90,13 +85,11 @@ fn shape_expr_raw<'a>(e: &'a ShapeExpr, out: &mut Vec<&'a RawSql>) {
     }
 }
 
-
 fn clause_raw<'a>(c: &'a Clause, out: &mut Vec<&'a RawSql>) {
     if let Clause::Where(p) | Clause::Having(p) = c {
         pred_raw(p, out);
     }
 }
-
 
 fn pred_raw<'a>(p: &'a Predicate, out: &mut Vec<&'a RawSql>) {
     match p {
@@ -112,7 +105,6 @@ fn pred_raw<'a>(p: &'a Predicate, out: &mut Vec<&'a RawSql>) {
         | Predicate::Bare(_) => {}
     }
 }
-
 
 fn write_raw<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a RawSql>) {
     for w in body {
@@ -131,7 +123,6 @@ fn write_raw<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a RawSql>) {
         }
     }
 }
-
 
 impl Snapshot {
     /// LSP semantic tokens highlighting the SQL inside every `raw`…`` block in file
@@ -196,9 +187,7 @@ impl Snapshot {
         }
         out
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -261,7 +250,6 @@ mod tests {
         assert!(toks.iter().all(|(t, _)| t != "raw" && !t.contains('`')));
     }
 
-
     /// The highlighting dialect follows the manifest: a Postgres project reads `"col"`
     /// as an identifier, a MariaDB project reads it as a string.
     #[test]
@@ -291,5 +279,4 @@ mod tests {
             "mariadb reads `\"total\"` as a string: {maria:?}"
         );
     }
-
 }

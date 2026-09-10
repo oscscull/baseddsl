@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// A `TypeExpr` as source writes it: base spelling + `?` (optional) + `[]` (many).
 pub(super) fn type_str(ty: &TypeExpr) -> String {
     let mut s = match &ty.base {
@@ -16,7 +15,6 @@ pub(super) fn type_str(ty: &TypeExpr) -> String {
     }
     s
 }
-
 
 /// Primitive → its DSL spelling (`Id` keeps its casing, the rest lowercase).
 pub(super) fn primitive_str(p: Primitive) -> String {
@@ -38,7 +36,6 @@ pub(super) fn primitive_str(p: Primitive) -> String {
     }
 }
 
-
 /// `$ctx.org` and the like, from a `ParamRef` (`$` + name + dotted path).
 pub(super) fn paramref_str(pr: &ParamRef) -> String {
     let mut s = format!("${}", pr.name.node);
@@ -48,7 +45,6 @@ pub(super) fn paramref_str(pr: &ParamRef) -> String {
     }
     s
 }
-
 
 /// A binding operator's DSL spelling.
 pub(super) fn op_str(op: Op) -> &'static str {
@@ -65,7 +61,6 @@ pub(super) fn op_str(op: Op) -> &'static str {
     }
 }
 
-
 /// What a binding operator means, for the binding hover.
 pub(super) fn op_gloss(op: Op) -> &'static str {
     match op {
@@ -75,7 +70,6 @@ pub(super) fn op_gloss(op: Op) -> &'static str {
         _ => "the column is the left operand",
     }
 }
-
 
 /// A field's hover: its `name: Type` signature, plus a cardinality note for relations.
 pub(super) fn field_hover(f: &Field) -> String {
@@ -93,7 +87,6 @@ pub(super) fn field_hover(f: &Field) -> String {
     }
 }
 
-
 /// A model's hover: `model Name` and its declared-field count.
 pub(super) fn model_hover(m: &Model) -> String {
     let n = m
@@ -105,12 +98,10 @@ pub(super) fn model_hover(m: &Model) -> String {
     format!("```based\nmodel {}\n```\n{n} field{plural}", m.name.node)
 }
 
-
 /// A shape's hover: `shape Name from Model`.
 pub(super) fn shape_hover(s: &Shape) -> String {
     format!("```based\nshape {} from {}\n```", s.name.node, s.from.node)
 }
-
 
 /// An enum's hover: `enum Name { a, b, c }` (variant names, a compact closed set).
 pub(super) fn enum_hover(e: &EnumDecl) -> String {
@@ -122,7 +113,6 @@ pub(super) fn enum_hover(e: &EnumDecl) -> String {
         .join(", ");
     format!("```based\nenum {} {{ {names} }}\n```", e.name.node)
 }
-
 
 /// A scope's hover: `scope Name (col: Type = $ctx.field, …)`.
 pub(super) fn scope_hover(s: &ScopeDecl) -> String {
@@ -142,7 +132,6 @@ pub(super) fn scope_hover(s: &ScopeDecl) -> String {
     format!("```based\nscope {} ({terms})\n```", s.name.node)
 }
 
-
 /// A query's hover: `query name(params) -> Ret[]` (or `-> stream Ret`).
 pub(super) fn query_hover(q: &Query) -> String {
     let stream = if q.ret.stream { "stream " } else { "" };
@@ -155,7 +144,6 @@ pub(super) fn query_hover(q: &Query) -> String {
     )
 }
 
-
 /// A mutation's hover: `mutation name(params) -> Ret[]`.
 pub(super) fn mutation_hover(m: &Mutation) -> String {
     let card = if m.ret.many { "[]" } else { "" };
@@ -167,7 +155,6 @@ pub(super) fn mutation_hover(m: &Mutation) -> String {
     )
 }
 
-
 /// A filter's hover: `filter name(params)`.
 pub(super) fn filter_hover(f: &NamedFilter) -> String {
     format!(
@@ -176,7 +163,6 @@ pub(super) fn filter_hover(f: &NamedFilter) -> String {
         params_str(&f.params)
     )
 }
-
 
 /// A parameter list rendered `name: Type` (type dropped when the param is untyped).
 pub(super) fn params_str(params: &[Param]) -> String {

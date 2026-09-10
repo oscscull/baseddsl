@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Every explicit inverse pairing `(Model.field)` as its `(model, field)` idents — the
 /// `field` part references a forward edge on `model`. Inferred inverses carry no such
 /// written pairing (they surface via `Fact.nav` instead).
@@ -19,7 +18,6 @@ pub(crate) fn collect_explicit_inverse_fields(decls: &[Decl]) -> Vec<(&Ident, &I
     }
     out
 }
-
 
 /// Write-target models, recursing through `tx` blocks; `raw` carries no target.
 pub(crate) fn collect_write_targets<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {

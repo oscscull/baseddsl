@@ -1,6 +1,5 @@
 use super::*;
 
-
 impl Snapshot {
     /// Resolve a model/type reference under the cursor to the span of the matching
     /// declaration's name. `(fid, offset)` is the byte offset within file `fid`.
@@ -64,7 +63,6 @@ impl Snapshot {
         self.decl_name_at(fid, offset)
     }
 
-
     /// The declaration-name span a model/shape/enum type reference names, if declared here.
     fn type_ref_target(&self, id: &Ident) -> Option<Span> {
         self.decls.iter().find_map(|d| match d {
@@ -75,7 +73,6 @@ impl Snapshot {
         })
     }
 
-
     /// The `scope` decl-name span a `@scope`/`scoped` reference names.
     fn scope_ref_target(&self, id: &Ident) -> Option<Span> {
         self.decls.iter().find_map(|d| match d {
@@ -84,7 +81,6 @@ impl Snapshot {
         })
     }
 
-
     /// The `filter` decl-name span a `filter(...)` call names.
     fn filter_ref_target(&self, id: &Ident) -> Option<Span> {
         self.decls.iter().find_map(|d| match d {
@@ -92,7 +88,6 @@ impl Snapshot {
             _ => None,
         })
     }
-
 
     /// Every reference site that resolves to the same declaration as the symbol under
     /// the cursor — the inverse of `definition_at`. Powers find-references and (later)
@@ -205,7 +200,6 @@ impl Snapshot {
         out
     }
 
-
     /// Resolve an explicit inverse's `(Model.field)` to that field's name span.
     fn explicit_inverse_target(&self, model: &Ident, field: &Ident) -> Option<Span> {
         let m = self.model_by_name(&model.node)?;
@@ -214,7 +208,6 @@ impl Snapshot {
             _ => None,
         })
     }
-
 
     /// The name span of a declaration whose own name the cursor sits on: a model, one
     /// of its fields, a shape, a query/mutation/filter, or a scope. `None` elsewhere.
@@ -247,9 +240,7 @@ impl Snapshot {
         }
         None
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -286,7 +277,6 @@ mod tests {
         assert_eq!(snap.definition_at(user_fid, ws_off), None);
     }
 
-
     /// A `field -> Shape` nest reference resolves to the referenced shape decl's
     /// name span (cross-file), and the decl's references include the nest site.
     #[test]
@@ -315,7 +305,6 @@ mod tests {
             "nest reference listed: {refs:?}"
         );
     }
-
 
     /// Go-to-definition from a `@scope Name` (model) or `scoped Name` (callable)
     /// reference resolves to the `scope Name (…)` decl's name span — the both-sides
@@ -358,7 +347,6 @@ mod tests {
         assert_eq!(d2.start as usize, decl_at);
     }
 
-
     /// Find-references on a forward edge includes the inverse that pairs through it —
     /// the "back-follow". `OrderItem.order`'s references include `Order.items` (the
     /// inferred inverse joining via `order`), plus the declaration itself when asked.
@@ -389,7 +377,6 @@ mod tests {
             "the declaration itself: {refs:?}"
         );
     }
-
 
     /// Find-references + go-to-def reach into query/mutation bodies: a field used in a
     /// query `where` and a `filter(...)` call are both resolved.
@@ -436,7 +423,6 @@ mod tests {
         );
     }
 
-
     /// Go-to-definition on a *field-reference* path resolves each segment to the
     /// field it names, walking through relations from the shape's `from` root — even
     /// when the walk crosses into another file's model (`placed_by.name` → `User.name`).
@@ -478,7 +464,6 @@ mod tests {
         );
     }
 
-
     /// Field-reference go-to-def reaches beyond shapes: a query block's `where`/`order`
     /// columns and a mutation's create-assign columns all resolve to the model field,
     /// rooted at the statement target / write model.
@@ -514,7 +499,6 @@ mod tests {
         let d = snap.definition_at(fid, asg as u32).expect("assign column");
         assert_eq!(d.start as usize, label_decl);
     }
-
 
     #[test]
     fn goto_def_on_a_variant_use_resolves_to_its_declaration() {
@@ -552,7 +536,6 @@ mod tests {
         assert_eq!(d.start as usize, ship_decl);
     }
 
-
     #[test]
     fn goto_def_on_a_variant_inside_an_in_list_resolves() {
         let (snap, fid) = enum_nav_snapshot();
@@ -570,7 +553,6 @@ mod tests {
             &src[d.start as usize..d.end as usize]
         );
     }
-
 
     #[test]
     fn find_references_on_a_variant_are_enum_local() {
@@ -598,7 +580,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn enum_type_ref_goto_def_and_hover_still_work() {
         let (snap, fid) = enum_nav_snapshot();
@@ -618,7 +599,6 @@ mod tests {
         let h = snap.hover_at(fid, vh).expect("variant hover");
         assert!(h.contains("variant of enum `Status`"), "{h}");
     }
-
 
     /// A signature binding's column/edge ident is a field reference like any other:
     /// go-to-def resolves it, find-references lists it, and renaming the field
@@ -661,7 +641,6 @@ mod tests {
         assert!(out.contains("labels: json"), "{out}");
         assert!(out.contains("tag: json has labels"), "{out}");
     }
-
 
     /// A raw-bodied query is inert editor surface: hover walks it without crashing,
     /// find-references lists a `${param}` use (at the raw block), and renaming the
@@ -706,7 +685,6 @@ mod tests {
         assert!(out.contains("query heavy(floor: int)"), "{out}");
         assert!(out.contains("${min}"), "raw text must be untouched: {out}");
     }
-
 
     /// A `tx` step binding (`create … as name`) is a first-class editor symbol: the
     /// `$name.field` head resolves to the `as name` decl (go-to-def), find-references
@@ -761,5 +739,4 @@ mod tests {
         assert!(out.contains("user = $owner.id"), "{out}");
         assert!(out.contains("city = $city"), "$city untouched: {out}");
     }
-
 }

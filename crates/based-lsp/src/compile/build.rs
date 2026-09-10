@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Walk up `file`'s ancestor directories to the nearest one holding a `based.toml`,
 /// returning that directory — the manifest root that *owns* the file (the
 /// rust-analyzer / tsserver project-marker model). `None` when no ancestor has a
@@ -20,7 +19,6 @@ pub fn find_manifest_root(file: &Path) -> Option<PathBuf> {
 }
 
 // ---- Offline migration-drift diagnostic -------------------------------------
-
 
 /// Compile the manifest project rooted at `root` (the dir holding `based.toml`),
 /// with `overlays` (canonical path -> unsaved buffer text) taking precedence over
@@ -65,7 +63,6 @@ pub fn compile_manifest(root: &Path, overlays: &HashMap<PathBuf, String>) -> Sna
     }
 }
 
-
 /// Compile a single `.bsl` file under no manifest in isolation (the fallback for a
 /// file that belongs to no project — cross-file references cannot resolve here).
 pub fn compile_loose(file: &Path, overlays: &HashMap<PathBuf, String>) -> Snapshot {
@@ -79,7 +76,6 @@ pub fn compile_loose(file: &Path, overlays: &HashMap<PathBuf, String>) -> Snapsh
         based_sema::PkStrategy::Uuid,
     )
 }
-
 
 /// Read + parse + check a fixed file set, preferring open buffers over disk, into a
 /// snapshot. `project_diagnostics` carries any spanless project-level issues.
@@ -161,13 +157,11 @@ fn compile_paths(
     }
 }
 
-
 /// Canonicalize for path comparison; fall back to the raw path if the file does
 /// not resolve (e.g. an unsaved buffer whose path may not exist on disk yet).
 pub fn canon(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -191,7 +185,6 @@ mod tests {
         );
     }
 
-
     /// A file embedded in a host repo resolves to its own schema's `based.toml`,
     /// not the opened workspace root.
     #[test]
@@ -209,7 +202,6 @@ mod tests {
         orphan.write("loose.bsl", "Order { name: text }\n");
         assert_eq!(find_manifest_root(&orphan.path("loose.bsl")), None);
     }
-
 
     /// The MySQL ordered-nest error must reach the editor: it needs the
     /// resolved compile target, so it only fires on the manifest-project path, and it
@@ -254,7 +246,6 @@ mod tests {
         );
     }
 
-
     /// The misplaced field-`@sort` error must reach the editor with a span.
     #[test]
     fn misplaced_field_sort_surfaces_e0348() {
@@ -272,7 +263,6 @@ mod tests {
             .unwrap_or_else(|| panic!("expected E0348, got {:?}", snap.diagnostics));
         assert!(d.span.is_some(), "E0348 must carry a span for the editor");
     }
-
 
     /// Opening the repo root (no `based.toml` there) and editing a file whose model
     /// references a *sibling* file must resolve the whole manifest project — no
@@ -307,5 +297,4 @@ mod tests {
             loose.diagnostics
         );
     }
-
 }

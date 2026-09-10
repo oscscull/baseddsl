@@ -62,8 +62,11 @@ pub(crate) struct OutSchema {
 /// Build the callable descriptors from the checked schema + AST — the OpenAPI twin of
 /// the client emitter's `collect`, so the two agree on routes and schema names.
 pub(crate) fn collect<'a>(schema: &'a CheckedSchema, decls: &'a [Decl]) -> Vec<Callable<'a>> {
-    let queries: HashMap<&str, &RQuery> =
-        schema.queries.iter().map(|q| (q.name.as_str(), q)).collect();
+    let queries: HashMap<&str, &RQuery> = schema
+        .queries
+        .iter()
+        .map(|q| (q.name.as_str(), q))
+        .collect();
     let mutations: HashMap<&str, &RMutation> = schema
         .mutations
         .iter()

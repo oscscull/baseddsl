@@ -241,7 +241,13 @@ pub(crate) fn infer_inverse(target: &RModel, me: &str) -> Result<String, String>
     }
 }
 
-pub(crate) fn check_inverse_ref(target: &RModel, via: &str, me: &str, mem: &RMember, sink: &mut Sink) {
+pub(crate) fn check_inverse_ref(
+    target: &RModel,
+    via: &str,
+    me: &str,
+    mem: &RMember,
+    sink: &mut Sink,
+) {
     match target.member(via).map(|m| &m.kind) {
         Some(MemberKind::Forward { target: t, .. }) if t == me => {}
         Some(_) => sink.error(

@@ -3,7 +3,13 @@ use super::*;
 /// Follow a `-> Shape` reference for cycle detection only: a shape that transitively nests
 /// itself by reference would expand forever, so it is an error reported at the reference
 /// that closes the cycle.
-pub(super) fn check_ref_cycle(shape: &str, at: Span, cx: &Cx, stack: &mut Vec<String>, sink: &mut Sink) {
+pub(super) fn check_ref_cycle(
+    shape: &str,
+    at: Span,
+    cx: &Cx,
+    stack: &mut Vec<String>,
+    sink: &mut Sink,
+) {
     if stack.iter().any(|s| s == shape) {
         sink.error(
             code::SHAPE_REF_CYCLE,

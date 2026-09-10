@@ -1,9 +1,12 @@
 use super::*;
 
-
 /// A query clause's field paths, rooted at `root`: a `where` predicate's columns and
 /// an `order` clause's sort paths (a `page` clause carries none).
-pub(crate) fn clause_paths<'a>(c: &'a Clause, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn clause_paths<'a>(
+    c: &'a Clause,
+    root: &'a str,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     match c {
         Clause::Where(p) => pred_paths(p, root, out),
         Clause::Order(terms) => {
@@ -23,10 +26,13 @@ pub(crate) fn clause_paths<'a>(c: &'a Clause, root: &'a str, out: &mut Vec<(&'a 
     }
 }
 
-
 /// A predicate's field paths (both sides of a comparison, bare bool columns, filter-
 /// call value paths), all rooted at `root`. Filter *names* are not fields.
-pub(crate) fn pred_paths<'a>(p: &'a Predicate, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn pred_paths<'a>(
+    p: &'a Predicate,
+    root: &'a str,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     match p {
         Predicate::Or(a, b) | Predicate::And(a, b) => {
             pred_paths(a, root, out);
@@ -53,7 +59,6 @@ pub(crate) fn pred_paths<'a>(p: &'a Predicate, root: &'a str, out: &mut Vec<(&'a
     }
 }
 
-
 /// A value's field path, when it is one (a column reference or a function argument
 /// that is itself a column); params, literals, and `$name.field` step refs carry none.
 pub(crate) fn value_paths<'a>(v: &'a Value, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
@@ -67,7 +72,6 @@ pub(crate) fn value_paths<'a>(v: &'a Value, root: &'a str, out: &mut Vec<(&'a st
         _ => {}
     }
 }
-
 
 /// A mutation write body's field paths, rooted at each statement's write model,
 /// recursing through `tx`. Covers `where` predicates and assign columns/values.
@@ -108,19 +112,25 @@ pub(crate) fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a
     }
 }
 
-
 /// A create/update's assign paths: the target column and any column-valued RHS.
-pub(crate) fn assign_paths<'a>(assigns: &'a [Assign], model: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn assign_paths<'a>(
+    assigns: &'a [Assign],
+    model: &'a str,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     for a in assigns {
         out.push((model, std::slice::from_ref(&a.col)));
         assign_rhs_paths(&a.value, model, out);
     }
 }
 
-
 /// Field paths in an assignment RHS: a plain value's path, or every column operand
 /// of an arithmetic expression (each rooted at the write model).
-pub(crate) fn assign_rhs_paths<'a>(rhs: &'a AssignRhs, root: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn assign_rhs_paths<'a>(
+    rhs: &'a AssignRhs,
+    root: &'a str,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     match rhs {
         AssignRhs::Value(v) => value_paths(v, root, out),
         AssignRhs::Arith { lhs, rhs, .. } => {

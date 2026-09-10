@@ -41,7 +41,14 @@ pub(crate) fn walk_pred_values(pred: &Predicate, f: &mut impl FnMut(&Value)) {
 /// (for equality/ordering against a literal or another column) the two operands
 /// must share a family. Silent when either side failed to resolve — that name
 /// error was already reported.
-pub(crate) fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx: &Cx, sink: &mut Sink) {
+pub(crate) fn check_cmp_types(
+    path: &Path,
+    op: Op,
+    value: &Value,
+    mi: usize,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let Some(lhs) = resolve_quiet(path, mi, cx) else {
         return;
     };
@@ -124,7 +131,13 @@ pub(crate) fn check_cmp_types(path: &Path, op: Op, value: &Value, mi: usize, cx:
 /// form (whose RHS the engine can't see into), a listed element is compared to
 /// the column with `=` semantics, so it must share the column's family — the
 /// per-element twin of `check_cmp_types` step 2.
-pub(crate) fn check_in_element_type(path: &Path, value: &Value, mi: usize, cx: &Cx, sink: &mut Sink) {
+pub(crate) fn check_in_element_type(
+    path: &Path,
+    value: &Value,
+    mi: usize,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let Some(lhs) = resolve_quiet(path, mi, cx) else {
         return;
     };

@@ -65,43 +65,40 @@ impl Snapshot {
         self.sources.iter().position(|(p, _)| canon(p) == want)
     }
 
-
     /// The source text a span covers, within its owning file.
     pub(super) fn span_text(&self, span: Span) -> Option<&str> {
         let (_, src) = self.sources.get(span.file.0 as usize)?;
         src.get(span.start as usize..span.end as usize)
     }
 
-
     /// The owning file's URI for a file id — the target document of a quick-fix edit.
     pub fn file_uri(&self, fid: usize) -> Option<Url> {
         let (path, _) = self.sources.get(fid)?;
         Url::from_file_path(path).ok()
     }
-
 }
 
-mod navigation;
-mod rename;
+mod bindings;
+mod build;
+mod collect;
+mod completions;
+mod drift;
+mod enums;
 mod folding;
 mod format;
+mod hover;
 mod inlay;
+mod line_index;
+mod navigation;
+mod rename;
+mod resolve;
 mod semantic;
 mod symbols;
-mod resolve;
-mod enums;
-mod bindings;
-mod hover;
-mod completions;
-mod collect;
-mod build;
-mod drift;
-mod line_index;
 #[cfg(test)]
 mod testsupport;
 
-pub use build::{compile_manifest, compile_loose, find_manifest_root, canon};
-pub use line_index::LineIndex;
-pub(crate) use line_index::{span_range, word_extent, line_start};
-pub(crate) use drift::{latest_snapshot, drift_diagnostics};
+pub use build::{canon, compile_loose, compile_manifest, find_manifest_root};
 pub(crate) use collect::*;
+pub(crate) use drift::{drift_diagnostics, latest_snapshot};
+pub use line_index::LineIndex;
+pub(crate) use line_index::{line_start, span_range, word_extent};

@@ -163,7 +163,10 @@ fn split_pk_marker(after: &str) -> (&str, &str) {
         (&after[..close], after[close..].trim_start())
     } else {
         let mut sp = after.splitn(2, char::is_whitespace);
-        (sp.next().unwrap_or(""), sp.next().unwrap_or("").trim_start())
+        (
+            sp.next().unwrap_or(""),
+            sp.next().unwrap_or("").trim_start(),
+        )
     }
 }
 

@@ -1,6 +1,5 @@
 use super::*;
 
-
 impl Snapshot {
     /// The field a reference path segment under the cursor names. Every path in a
     /// shape body / query clause / mutation write is rooted at a statically-known
@@ -18,7 +17,6 @@ impl Snapshot {
         }
         None
     }
-
 
     /// Resolve a path prefix against `root`, returning the field its last segment
     /// names. Intermediate segments must be relation edges (they advance the model);
@@ -42,7 +40,6 @@ impl Snapshot {
         }
         last
     }
-
 
     /// Every field-reference path in the project, each paired with the model it is
     /// rooted at. Covers shape bodies, query `where`/`order` clauses, signature
@@ -92,7 +89,6 @@ impl Snapshot {
         }
         out
     }
-
 
     /// Collect a shape body's field paths (rooted at `from`), recursing into `field {
     /// … }` sub-objects against the relation's target model.
@@ -152,7 +148,6 @@ impl Snapshot {
         }
     }
 
-
     /// The model a relation `field` on `model` points at, if it is a relation edge.
     fn relation_target(&self, model: &str, field: &str) -> Option<&str> {
         let m = self.model_by_name(model)?;
@@ -164,7 +159,6 @@ impl Snapshot {
             _ => None,
         })
     }
-
 
     /// The model an inline/bare query reads from: its return shape's `from`, or the
     /// return model itself when the return type is a bare model.
@@ -179,12 +173,10 @@ impl Snapshot {
 
     // ---- Enum variant navigation ------------------------------------------
 
-
     pub(super) fn model_by_name(&self, name: &str) -> Option<&Model> {
         self.decls.iter().find_map(|d| match d {
             Decl::Model(m) if m.name.node == name => Some(m),
             _ => None,
         })
     }
-
 }

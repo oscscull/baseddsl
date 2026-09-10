@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// A callable's declared params, or an empty slice for a non-callable declaration.
 pub(crate) fn decl_params(d: &Decl) -> &[Param] {
     match d {
@@ -10,7 +9,6 @@ pub(crate) fn decl_params(d: &Decl) -> &[Param] {
         _ => &[],
     }
 }
-
 
 /// Every `$param` / `$ctx.field` reference in a callable's body (query clauses,
 /// mutation writes, or a filter predicate) — the sites that name a param or bag field.
@@ -33,13 +31,11 @@ pub(crate) fn callable_param_refs(d: &Decl) -> Vec<&ParamRef> {
     out
 }
 
-
 pub(crate) fn clause_param_refs<'a>(c: &'a Clause, out: &mut Vec<&'a ParamRef>) {
     if let Clause::Where(p) = c {
         pred_param_refs(p, out);
     }
 }
-
 
 /// Every `create … as name` step-binding declaration ident in a callable body — a
 /// mutation only (queries/filters have no writes), recursing through `tx`.
@@ -50,7 +46,6 @@ pub(crate) fn callable_binding_decls(d: &Decl) -> Vec<&Ident> {
     }
     out
 }
-
 
 pub(crate) fn collect_binding_decls<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
     for w in body {
@@ -63,7 +58,6 @@ pub(crate) fn collect_binding_decls<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a
         }
     }
 }
-
 
 /// The model name of the `create … as name` binding whose decl span is `target`, if it
 /// is in this write body (recursing through `tx`).
@@ -85,7 +79,6 @@ pub(crate) fn binding_model(body: &[WriteStmt], target: Span) -> Option<&str> {
     }
     None
 }
-
 
 pub(crate) fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a ParamRef>) {
     for w in body {
@@ -122,7 +115,6 @@ pub(crate) fn write_param_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Para
     }
 }
 
-
 pub(crate) fn pred_param_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a ParamRef>) {
     match p {
         Predicate::Or(a, b) | Predicate::And(a, b) => {
@@ -138,7 +130,6 @@ pub(crate) fn pred_param_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a ParamRef>)
     }
 }
 
-
 /// Every `$param` reference in an assignment RHS (a plain value, or each operand of
 /// an arithmetic expression).
 pub(crate) fn assign_rhs_param_refs<'a>(rhs: &'a AssignRhs, out: &mut Vec<&'a ParamRef>) {
@@ -151,7 +142,6 @@ pub(crate) fn assign_rhs_param_refs<'a>(rhs: &'a AssignRhs, out: &mut Vec<&'a Pa
     }
 }
 
-
 pub(crate) fn value_param_refs<'a>(v: &'a Value, out: &mut Vec<&'a ParamRef>) {
     match v {
         Value::Param(pr) => out.push(pr),
@@ -159,7 +149,6 @@ pub(crate) fn value_param_refs<'a>(v: &'a Value, out: &mut Vec<&'a ParamRef>) {
         _ => {}
     }
 }
-
 
 pub(crate) fn raw_param_refs<'a>(r: &'a RawSql, out: &mut Vec<&'a ParamRef>) {
     for part in &r.parts {

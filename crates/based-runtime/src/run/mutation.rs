@@ -84,7 +84,10 @@ pub async fn run_mutation(
 /// Map a mutation-attempt [`TxOutcome`] for a path that carried **no** in-transaction claim
 /// (keyless, or an out-of-band store): only `Done`/`NotFound` can arise — `Replayed` and
 /// `Mismatch` are produced solely by a tx-participant claim.
-pub(crate) fn plain_outcome(outcome: TxOutcome, callable: &str) -> Result<serde_json::Value, RunError> {
+pub(crate) fn plain_outcome(
+    outcome: TxOutcome,
+    callable: &str,
+) -> Result<serde_json::Value, RunError> {
     match outcome {
         TxOutcome::Done(r) => Ok(r),
         TxOutcome::NotFound => Err(RunError::NotFound(callable.to_string())),

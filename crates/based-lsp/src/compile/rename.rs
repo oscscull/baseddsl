@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Whether `s` is a well-formed identifier — a rename target must be one, else the
 /// edit would produce unparseable source. (Casing rules, e.g. models UpperName, are
 /// left to sema, which re-flags a bad rename inline.)
@@ -9,7 +8,6 @@ fn is_ident(s: &str) -> bool {
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
-
 
 impl Snapshot {
     /// The workspace edit renaming the symbol under the cursor to `new_name`, grouped
@@ -53,7 +51,6 @@ impl Snapshot {
         (!edits.is_empty()).then_some(edits)
     }
 
-
     /// The identifier range under the cursor to offer for rename (prepareRename), or
     /// `None` when the cursor is not on a renameable symbol. The range is the extent of
     /// the identifier the cursor sits in; renameability is gated on the same resolver
@@ -64,7 +61,6 @@ impl Snapshot {
         let idx = &self.lines[fid];
         Some(Range::new(idx.position(start), idx.position(end)))
     }
-
 
     /// The extra edit that makes a field/model rename **data-preserving**: a `@was("old")`
     /// naming the declaration's current physical column/table, so the next generated
@@ -127,7 +123,6 @@ impl Snapshot {
         None
     }
 
-
     /// A zero-width `TextEdit` inserting `text` at byte `offset` in file `fid`.
     fn insertion(&self, fid: usize, offset: usize, text: String) -> Option<(Url, TextEdit)> {
         let uri = Url::from_file_path(&self.sources[fid].0).ok()?;
@@ -140,9 +135,7 @@ impl Snapshot {
             },
         ))
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -183,7 +176,6 @@ mod tests {
             .all(|e| e.new_text == "Organization"));
     }
 
-
     #[test]
     fn rename_forward_edge_leaves_inverse_back_edge_untouched() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/examples/commerce");
@@ -208,7 +200,6 @@ mod tests {
             "the declaration itself is rewritten: {texts:?}"
         );
     }
-
 
     #[test]
     fn rename_rejects_bad_target_and_non_symbol_cursor() {
@@ -239,7 +230,6 @@ mod tests {
             src.find("Org").unwrap() + "Org".len()
         );
     }
-
 
     /// (a) A callable param renames its declaration and every `$param` use in *that*
     /// callable's body — and only that callable's (params are callable-local).
@@ -276,7 +266,6 @@ mod tests {
         assert!(out.contains("query other(min: int)"), "{out}");
         assert!(out.contains("qty < $min"), "{out}");
     }
-
 
     /// (b) A `$ctx.<field>` bag field renames its `scope … = $ctx.field` binding and
     /// every callable use, leaving the scope *column* and same-named model columns alone.
@@ -318,7 +307,6 @@ mod tests {
         assert!(out.contains("Widget { org: Org"), "{out}");
     }
 
-
     /// (c) A query name is a wire endpoint with no in-`.bsl` references, so rename
     /// rewrites just its declaration.
     #[test]
@@ -341,7 +329,6 @@ mod tests {
         let texts = rename_texts(&snap, &changes);
         assert_eq!(texts, vec!["find".to_string()], "just the decl: {texts:?}");
     }
-
 
     /// (d) Renaming a field mapped to a *live* DB column also inserts `@was("old_col")`
     /// so the next generated migration renames the column (preserving data) — but only
@@ -388,7 +375,6 @@ mod tests {
         assert!(has_was, "reparsed field carries @was(\"barcode\"): {out}");
     }
 
-
     /// A field with a `(column …)` override, an existing `@was`, or no captured
     /// migration snapshot gets no inserted `@was` (its physical name is decoupled,
     /// already named, or has no live column to preserve).
@@ -432,7 +418,6 @@ mod tests {
         assert!(!out2.contains("@was"), "no migrations → no @was: {out2}");
     }
 
-
     /// Renaming a field already carrying `@was("orig")` keeps the *original* physical
     /// name as the was-source (the snapshot's column), so a rename chain still preserves
     /// data — it does not become `@was("<intermediate>")`.
@@ -467,7 +452,6 @@ mod tests {
         );
     }
 
-
     /// Renaming a model mapped to a live table inserts a leading `@was("old_table")`
     /// decorator, so the migration renames the table instead of drop+recreate.
     #[test]
@@ -499,7 +483,6 @@ mod tests {
             .any(|d| matches!(d, Decl::Model(m) if m.name.node == "Item")));
     }
 
-
     #[test]
     fn rename_variant_rewrites_uses_and_leaves_same_named_variant_in_another_enum() {
         let (snap, fid) = enum_nav_snapshot();
@@ -519,5 +502,4 @@ mod tests {
         // Grade's same-named `pending` variant is untouched.
         assert!(out.contains("enum Grade { pending, top }"), "{out}");
     }
-
 }

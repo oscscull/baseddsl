@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// The start byte offset of a spanned model member (field / index). A raw
 /// soft-override carries no span, so it never anchors the insert.
 fn member_start(m: &Member) -> Option<u32> {
@@ -13,7 +12,6 @@ fn member_start(m: &Member) -> Option<u32> {
 }
 
 // ---- Hover renderers ("what", rust-analyzer baseline) -----------------------
-
 
 impl Snapshot {
     /// The inlay hints for file `fid`: one per derived fact anchored in it, each at
@@ -62,7 +60,6 @@ impl Snapshot {
         hints
     }
 
-
     /// The edit a quick-fix applies to insert `line` as the first member of model
     /// `model`'s body: `(file id, TextEdit)`. The line lands at the top of the body,
     /// matching the existing members' indentation (or two spaces on an empty body).
@@ -103,7 +100,6 @@ impl Snapshot {
         ))
     }
 
-
     /// A cross-file `Location` for a span, resolving its `FileId` to the owning URI —
     /// the command-click target of an inlay label part (an inverse's forward edge).
     fn nav_location(&self, span: Span) -> Option<Location> {
@@ -115,9 +111,7 @@ impl Snapshot {
             range: span_range(span, &self.lines[fid]),
         })
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -166,7 +160,6 @@ mod tests {
             .expect("the click's go-to-def-at-location round-trips");
         assert!(oi_src[def.start as usize..].starts_with("order"));
     }
-
 
     /// The one-key quick-fix for a missing `id` and an unindexed query:
     /// each diagnostic carries a `fix` naming the model + the member line, and
@@ -219,5 +212,4 @@ mod tests {
             .expect("edit");
         assert_eq!(edit.new_text, "  @index org\n");
     }
-
 }

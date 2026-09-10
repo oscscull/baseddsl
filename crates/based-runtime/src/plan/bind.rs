@@ -12,7 +12,6 @@ pub(crate) fn json_kind(v: &serde_json::Value) -> &'static str {
     }
 }
 
-
 /// Named bind values gathered from the validated request; `bind` pulls from it in
 /// SQL placeholder order. Carries the target `dialect` so the positional rewrite emits
 /// the right placeholder form (`?` vs `$n`).
@@ -49,7 +48,6 @@ impl Env {
         Ok(Stmt { sql, params })
     }
 }
-
 
 /// Bind one signature param: use the supplied arg (coerced to the resolved family),
 /// or its default, or `null` if optional — else it is missing.
@@ -183,7 +181,11 @@ pub(crate) fn binding_field(p: &Param) -> &str {
 /// The family of the member a dotted path terminates in: a scalar is its primitive,
 /// a relation terminal is the target's key (mirroring the target PK — a uuid/ulid string,
 /// or a serial integer). `None` when unresolved.
-pub(crate) fn member_family(schema: &CheckedSchema, model: &RModel, path: &[&str]) -> Option<Family> {
+pub(crate) fn member_family(
+    schema: &CheckedSchema,
+    model: &RModel,
+    path: &[&str],
+) -> Option<Family> {
     let mut cur = model;
     let n = path.len();
     for (i, seg) in path.iter().enumerate() {
@@ -243,7 +245,11 @@ pub(crate) fn bind_ctx_into(
 
 /// Bind one `$ctx.<field>` requirement from the request context. Always required —
 /// the callable cannot run without the context it reads.
-pub(crate) fn bind_ctx(schema: &CheckedSchema, c: &CtxReq, req: &Request) -> Result<SqlValue, PlanError> {
+pub(crate) fn bind_ctx(
+    schema: &CheckedSchema,
+    c: &CtxReq,
+    req: &Request,
+) -> Result<SqlValue, PlanError> {
     let family = match &c.ty {
         CtxField::Scalar(prim) => Family::of(*prim),
         // A relation-typed context field carries the model's key — mirroring the target
@@ -276,7 +282,11 @@ pub(crate) fn bind_offset(req: &Request) -> Result<SqlValue, PlanError> {
 /// each re-bound as its sort column's own primitive (so a typed driver binds the same
 /// type the row carried); a bad cursor is a `BadCursor` boundary error, not a silent
 /// empty page.
-pub(crate) fn bind_cursor(env: &mut Env, req: &Request, prims: &[Primitive]) -> Result<(), PlanError> {
+pub(crate) fn bind_cursor(
+    env: &mut Env,
+    req: &Request,
+    prims: &[Primitive],
+) -> Result<(), PlanError> {
     match req.args.get("cursor").filter(|v| !v.is_null()) {
         Some(serde_json::Value::String(s)) => {
             let vals =
@@ -303,7 +313,6 @@ pub(crate) fn bind_cursor(env: &mut Env, req: &Request, prims: &[Primitive]) -> 
     Ok(())
 }
 
-
 pub(crate) fn bad_arg(name: &str, e: CoerceError) -> PlanError {
     PlanError::BadArg {
         name: name.to_string(),
@@ -316,7 +325,12 @@ pub(crate) fn bad_arg(name: &str, e: CoerceError) -> PlanError {
 /// default on a `timestamp` column still binds typed). A `now()` default has no
 /// request-time value (it is a write-time engine concern) → `Null` here; query params
 /// default to literals in practice.
-pub(crate) fn default_value(schema: &CheckedSchema, p: &Param, dv: &DefaultVal, family: Family) -> SqlValue {
+pub(crate) fn default_value(
+    schema: &CheckedSchema,
+    p: &Param,
+    dv: &DefaultVal,
+    family: Family,
+) -> SqlValue {
     match dv {
         DefaultVal::Lit(Literal::Str(s)) => string_in_family(s.clone(), family),
         DefaultVal::Lit(Literal::Int(i)) => SqlValue::Int(*i),

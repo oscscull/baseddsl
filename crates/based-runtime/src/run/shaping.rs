@@ -182,7 +182,10 @@ pub(crate) async fn shape<D: DbRead + ?Sized>(
                 }
             }
             let mut obj = serde_json::Map::new();
-            obj.insert("rows".into(), J::Array(rows.into_iter().map(nest).collect()));
+            obj.insert(
+                "rows".into(),
+                J::Array(rows.into_iter().map(nest).collect()),
+            );
             obj.insert("cursor".into(), cursor.map_or(J::Null, J::String));
             if with_count {
                 if let Some(count) = &plan.count {

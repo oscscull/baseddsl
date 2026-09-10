@@ -67,13 +67,11 @@ fn record_value_ctx_mode(
 ) {
     let Value::Param(pr) = v else { return };
     if pr.name.node == "ctx" && pr.path.len() == 1 {
-        let e = modes
-            .entry(pr.path[0].node.clone())
-            .or_insert(CtxUseMode {
-                optional: false,
-                required: false,
-                span: pr.path[0].span,
-            });
+        let e = modes.entry(pr.path[0].node.clone()).or_insert(CtxUseMode {
+            optional: false,
+            required: false,
+            span: pr.path[0].span,
+        });
         if pr.optional {
             e.optional = true;
         } else {

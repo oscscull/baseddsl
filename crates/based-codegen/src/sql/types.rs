@@ -207,7 +207,11 @@ fn fk_type(schema: &CheckedSchema, target: &str, dialect: Dialect) -> String {
 /// The SQL type of a primary-key part column — used to type the FK column(s) that mirror
 /// it. A scalar part carries its own (raw or primitive) type; a relation part (a junction
 /// key `@key(order, product)`) carries its own target's key type, so the mirror composes.
-pub(crate) fn key_part_sql_type(schema: &CheckedSchema, part: &RMember, dialect: Dialect) -> String {
+pub(crate) fn key_part_sql_type(
+    schema: &CheckedSchema,
+    part: &RMember,
+    dialect: Dialect,
+) -> String {
     match &part.kind {
         MemberKind::Scalar {
             raw_type: Some(spec),

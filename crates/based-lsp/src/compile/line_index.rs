@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// The identifier extent (byte range) the cursor at `offset` sits in, or `None` off
 /// any word. Identifiers are ASCII, so a non-ASCII byte (high bit set) stops the walk
 /// — a byte scan over identifier characters is safe. Shared by prepareRename (the
@@ -20,7 +19,6 @@ pub(crate) fn word_extent(src: &str, offset: u32) -> Option<(usize, usize)> {
     (start != end).then_some((start, end))
 }
 
-
 /// A source `Span`'s byte range as an LSP `Range` via the owning file's index.
 pub(crate) fn span_range(span: Span, idx: &LineIndex) -> Range {
     Range::new(
@@ -29,14 +27,12 @@ pub(crate) fn span_range(span: Span, idx: &LineIndex) -> Range {
     )
 }
 
-
 /// The byte offset of the start of the line containing `off` (the char after the
 /// preceding newline, or 0). Where a leading `@was` decorator line is inserted.
 pub(crate) fn line_start(src: &str, off: u32) -> usize {
     let o = (off as usize).min(src.len());
     src[..o].rfind('\n').map_or(0, |i| i + 1)
 }
-
 
 /// Byte-offset <-> LSP `Position` mapping for one file. LSP positions are 0-based
 /// `(line, character)` where `character` counts UTF-16 code units (the protocol
@@ -46,7 +42,6 @@ pub struct LineIndex {
     /// Byte offset of each line's first byte.
     line_starts: Vec<usize>,
 }
-
 
 impl LineIndex {
     pub fn new(src: &str) -> Self {
@@ -115,7 +110,6 @@ impl LineIndex {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,7 +124,6 @@ mod tests {
         assert_eq!(idx.offset(Position::new(1, 2)), at);
     }
 
-
     #[test]
     fn position_counts_utf16_code_units() {
         // "é" is one UTF-16 unit but two UTF-8 bytes; "𐐷" is two UTF-16 units.
@@ -142,7 +135,6 @@ mod tests {
         assert_eq!(idx.offset(Position::new(0, 7)), x);
     }
 
-
     #[test]
     fn end_of_line_skips_the_newline() {
         let src = "Order {\n  x: int\n}\n";
@@ -151,5 +143,4 @@ mod tests {
         // End of line 0 = after "Order {" (7 chars), before the '\n'.
         assert_eq!(idx.end_of_line(brace), Position::new(0, 7));
     }
-
 }

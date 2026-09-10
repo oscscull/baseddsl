@@ -18,7 +18,10 @@ impl Scratch {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        dir.push(format!("based-apply-cli-{tag}-{}-{nanos}", std::process::id()));
+        dir.push(format!(
+            "based-apply-cli-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -103,12 +106,12 @@ fn destructive_gate_exits_nonzero_and_reports_partial_state() {
     // The gate names the offending migration and says the database is partially migrated.
     assert!(stderr.contains("0003_drop_name"), "stderr: {stderr}");
     assert!(stderr.contains("partially migrated"), "stderr: {stderr}");
-    assert!(
-        stderr.contains("--allow-destructive"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("--allow-destructive"), "stderr: {stderr}");
     // 0004 (after the gate) must not have applied.
-    assert!(!stdout.contains("applied 0004_add_color"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("applied 0004_add_color"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -122,7 +125,17 @@ fn re_running_with_the_ack_completes_the_chain() {
     // Re-run with the ack: the partial state rolls forward to completion, exit 0.
     let out = run_apply(&s.0, &db, true);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "expected success\nstdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("applied 0003_drop_name"), "stdout: {stdout}");
-    assert!(stdout.contains("applied 0004_add_color"), "stdout: {stdout}");
+    assert!(
+        out.status.success(),
+        "expected success\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("applied 0003_drop_name"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("applied 0004_add_color"),
+        "stdout: {stdout}"
+    );
 }
