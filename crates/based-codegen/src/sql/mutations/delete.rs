@@ -33,7 +33,10 @@ fn soft_delete_write(
     }
     // `delete all` narrows by nothing user-supplied; only the injected live + scope guards
     // remain (tombstone every live row in scope).
-    let mut wheres: Vec<String> = where_.map(|p| sel.predicate(p, model)).into_iter().collect();
+    let mut wheres: Vec<String> = where_
+        .map(|p| sel.predicate(p, model))
+        .into_iter()
+        .collect();
     inject_guards(&mut sel, model, &mut wheres, /* live = */ true);
     let header = if wipe {
         "-- delete all (soft): tombstone every row in scope\n"
@@ -70,7 +73,10 @@ fn real_delete_write(
     let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
         .with_scope_inject(!cx.unscoped)
         .with_scope_terms(cx.inject);
-    let mut wheres: Vec<String> = where_.map(|p| sel.predicate(p, model)).into_iter().collect();
+    let mut wheres: Vec<String> = where_
+        .map(|p| sel.predicate(p, model))
+        .into_iter()
+        .collect();
     inject_guards(&mut sel, model, &mut wheres, /* live = */ false);
 
     let sql = if wipe && wheres.is_empty() {

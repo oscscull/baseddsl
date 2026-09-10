@@ -55,7 +55,12 @@ impl<'a> Select<'a> {
     /// Inline a named filter: bind its params to the call arguments, substitute those
     /// bindings through its body, then lower the result against `model`. The filter
     /// carries no model of its own, so its column paths resolve at the call site.
-    pub(super) fn filter_call(&mut self, f: &'a NamedFilter, args: &[Value], model: &RModel) -> String {
+    pub(super) fn filter_call(
+        &mut self,
+        f: &'a NamedFilter,
+        args: &[Value],
+        model: &RModel,
+    ) -> String {
         // Recursion guard: a self-referential filter is legal (sema terminates it);
         // stop re-expanding and leave a visible marker rather than looping.
         if self.filter_stack.contains(&f.name.node.as_str()) {

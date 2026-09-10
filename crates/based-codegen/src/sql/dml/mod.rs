@@ -13,35 +13,35 @@ use based_sema::{
 
 use crate::Dialect;
 
-mod literals;
-mod ops;
-mod raw;
-mod value;
+mod aggregate;
 mod columns;
-mod path;
-mod relation;
-mod shape;
 mod computed;
-mod types;
+mod count;
+mod expr;
+mod filter;
 mod join_on;
 mod joins;
+mod keyset;
+mod literals;
+mod lock;
+mod lower;
+mod nest;
+mod ops;
+mod order;
+mod outputs;
+mod path;
+mod project;
+mod raw;
+mod relation;
+mod render;
 mod resolve;
 mod scope;
 mod select;
+mod shape;
 mod soft_delete;
 mod to_many;
-mod filter;
-mod expr;
-mod nest;
-mod outputs;
-mod project;
-mod keyset;
-mod lock;
-mod order;
-mod aggregate;
-mod count;
-mod lower;
-mod render;
+mod types;
+mod value;
 mod wire;
 
 pub(crate) use aggregate::*;
@@ -66,8 +66,8 @@ pub(crate) use soft_delete::*;
 pub(crate) use types::*;
 
 pub(crate) use filter::build_wheres;
-pub(crate) use value::{bref_name, param_key};
 pub(crate) use lower::{index_queries, lower_query};
+pub(crate) use value::{bref_name, param_key};
 
 pub use lower::{lower_queries, LoweredQuery};
 pub use render::dml;

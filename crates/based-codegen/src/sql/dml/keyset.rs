@@ -24,7 +24,13 @@ pub(crate) fn splice_keyset(
         let hidden = order_keys
             .iter()
             .enumerate()
-            .map(|(i, k)| format!("  {} AS {}", k.col_ref, sel.q(&format!("{KEYSET_PREFIX}{i}"))))
+            .map(|(i, k)| {
+                format!(
+                    "  {} AS {}",
+                    k.col_ref,
+                    sel.q(&format!("{KEYSET_PREFIX}{i}"))
+                )
+            })
             .collect::<Vec<_>>()
             .join(",\n");
         *projection = format!("{projection},\n{hidden}");

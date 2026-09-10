@@ -3,7 +3,10 @@ use super::nest::bulk_nest_col;
 
 /// Resolve a `create … from $param`'s input shape to `(from_model, body)`, via the param's
 /// declared shape type. Sema already validated eligibility; this just re-reads the shape.
-pub(super) fn resolve_from_shape<'a>(cx: &LowerCx<'a>, param: &str) -> Option<(&'a str, &'a [ShapeField])> {
+pub(super) fn resolve_from_shape<'a>(
+    cx: &LowerCx<'a>,
+    param: &str,
+) -> Option<(&'a str, &'a [ShapeField])> {
     let p = cx.params.iter().find(|p| p.name.node == param)?;
     let BaseType::Model(name) = &p.ty.as_ref()?.base else {
         return None;
@@ -128,7 +131,12 @@ fn shape_body_by_name<'a>(cx: &LowerCx<'a>, name: &str) -> Option<&'a [ShapeFiel
 
 /// Append a bulk-insert column unless its physical column is already present (first source
 /// wins — the shape-named value beats a later engine default).
-pub(super) fn bulk_push(columns: &mut Vec<BulkCol>, have: &mut Vec<String>, col: String, source: BulkSource) {
+pub(super) fn bulk_push(
+    columns: &mut Vec<BulkCol>,
+    have: &mut Vec<String>,
+    col: String,
+    source: BulkSource,
+) {
     if !have.contains(&col) {
         have.push(col.clone());
         columns.push(BulkCol {

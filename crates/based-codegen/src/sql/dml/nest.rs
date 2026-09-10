@@ -6,7 +6,12 @@ use super::*;
 /// The ORDER BY clause for a nested-array subquery's sort cascade, resolved against `model`
 /// at `alias` (dotted terms join inside the subquery's own scope). `None` when no terms
 /// apply, leaving element order unspecified.
-fn order_clause(sub: &mut Select, terms: &[SortTerm], alias: &str, model: &RModel) -> Option<String> {
+fn order_clause(
+    sub: &mut Select,
+    terms: &[SortTerm],
+    alias: &str,
+    model: &RModel,
+) -> Option<String> {
     let keys: Vec<String> = terms
         .iter()
         .map(|t| {

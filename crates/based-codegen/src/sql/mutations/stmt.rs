@@ -19,7 +19,12 @@ pub(crate) fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
 /// moves the joined tables into a `FROM` list and folds the join `ON` into the `WHERE`
 /// (`UPDATE t SET … FROM j WHERE <join-on> AND …`). Without joins both are the plain
 /// single-table `UPDATE t SET … WHERE …`.
-pub(crate) fn update_stmt(sel: &Select, model: &RModel, sets: &[String], wheres: &[String]) -> String {
+pub(crate) fn update_stmt(
+    sel: &Select,
+    model: &RModel,
+    sets: &[String],
+    wheres: &[String],
+) -> String {
     let mut s = format!("UPDATE {}", sel.qt(model));
     if sel.dialect == Dialect::Postgres {
         s.push_str(&format!("\nSET {}", sets.join(", ")));
@@ -105,7 +110,12 @@ pub(crate) fn push_where(s: &mut String, wheres: &[String]) {
 /// out-of-scope row. An `unscoped` callable injects no scope (`scope_where` returns
 /// `None` — its `scope_inject` is empty); soft-delete still applies (a separate
 /// guarantee).
-pub(crate) fn inject_guards(sel: &mut Select, model: &RModel, wheres: &mut Vec<String>, live: bool) {
+pub(crate) fn inject_guards(
+    sel: &mut Select,
+    model: &RModel,
+    wheres: &mut Vec<String>,
+    live: bool,
+) {
     if live {
         if let Some(sd) = &model.soft_delete {
             wheres.push(soft_pred(sel.dialect, &sel.root_alias, model, sd));
@@ -128,7 +138,12 @@ pub(crate) fn updated_bump(sel: &Select, model: &RModel, assigned: &[String]) ->
 
 /// The `SET` fragment that writes (or clears) the tombstone for the covered subset
 /// timestamp `CURRENT_TIMESTAMP`/`NULL`, bool `TRUE`/`FALSE`.
-pub(crate) fn tombstone_set(sel: &Select, model: &RModel, sd: &SoftDelete, deleting: bool) -> String {
+pub(crate) fn tombstone_set(
+    sel: &Select,
+    model: &RModel,
+    sd: &SoftDelete,
+    deleting: bool,
+) -> String {
     let col = physical_col(model, &sd.field);
     let val = match (sd.mode, deleting) {
         (SoftMode::Timestamp, true) => "CURRENT_TIMESTAMP".to_string(),
