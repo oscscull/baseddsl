@@ -246,8 +246,11 @@ fn absent_optional_ctx_binds_null_and_is_null_safe() {
     assert_eq!(plan.main.params, vec![SqlValue::Null]);
 
     // A signed-in request supplies `user`: the value binds the id (`<=>` acts as plain `=`).
-    let signed_in =
-        plan_query(&c, &Request::new("feed", json!({}), json!({ "user": "u-1" }))).unwrap();
+    let signed_in = plan_query(
+        &c,
+        &Request::new("feed", json!({}), json!({ "user": "u-1" })),
+    )
+    .unwrap();
     assert_eq!(signed_in.main.params, vec![SqlValue::Uuid("u-1".into())]);
 }
 

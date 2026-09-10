@@ -1,6 +1,5 @@
 use super::*;
 
-
 impl Snapshot {
     /// Folding ranges for file `fid`: one region per top-level declaration whose body
     /// spans more than one line — a model, shape, scope, query, mutation, or filter.
@@ -16,9 +15,7 @@ impl Snapshot {
         let formatted = based_fmt::format_source(src).ok()?;
         (formatted != *src).then_some(formatted)
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -50,5 +47,4 @@ mod tests {
         );
         assert_ne!(formatted, canonical); // the overlay replaced the on-disk model
     }
-
 }

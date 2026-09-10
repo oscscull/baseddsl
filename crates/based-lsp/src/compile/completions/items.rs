@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// The DSL keyword vocabulary, derived from the parser's positionally-recognized
 /// keywords (there is no `model` keyword — a model is a bare `UpperName { … }`).
 pub(super) const KEYWORDS: &[&str] = &[
@@ -61,7 +60,6 @@ pub(super) const KEYWORDS: &[&str] = &[
     "end",
 ];
 
-
 /// Primitive type spellings (the `Primitive` variants), offered in type position.
 pub(super) const PRIMITIVES: &[&str] = &[
     "text",
@@ -76,7 +74,6 @@ pub(super) const PRIMITIVES: &[&str] = &[
     "Id",
 ];
 
-
 /// Everything an author writes after `@`: the engine-understood model decorators
 /// (`based_sema::KNOWN_DECORATORS`) plus the member-level `@index` and the
 /// `@was("old")` rename directive.
@@ -88,7 +85,6 @@ pub(super) fn decorator_items() -> Vec<CompletionItem> {
         .map(|d| item(d, CompletionItemKind::PROPERTY))
         .collect()
 }
-
 
 /// The dotted identifier chain immediately before a `.` in `head` (which ends with
 /// that `.`) — the base path a field completion resolves. `["a", "b"]` for `a.b.`;
@@ -118,7 +114,6 @@ pub(super) fn trailing_path(head: &str) -> Vec<String> {
     segs.reverse();
     segs
 }
-
 
 /// One completion item with just a label + kind (no snippet / fuzzy detail).
 pub(super) fn item(label: &str, kind: CompletionItemKind) -> CompletionItem {

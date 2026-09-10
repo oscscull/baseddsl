@@ -3,7 +3,13 @@ use super::*;
 /// The result-envelope rules, judged once the body is known: a scalar `get` must be
 /// keyed, a `list` must sort deterministically, `stream` and `page` are exclusive, and a
 /// keyset page over a keyless model needs a unique sort key.
-pub(super) fn check_query_envelope(q: &Query, ti: usize, shape: &QueryShape, cx: &Cx, sink: &mut Sink) {
+pub(super) fn check_query_envelope(
+    q: &Query,
+    ti: usize,
+    shape: &QueryShape,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let engine_built = !shape.raw && !shape.agg;
     check_stream_get_cardinality(q, shape, sink);
     check_get_keyed(q, ti, shape, engine_built, cx, sink);
@@ -28,7 +34,14 @@ fn check_stream_get_cardinality(q: &Query, shape: &QueryShape, sink: &mut Sink) 
 }
 
 /// A scalar `get` must be keyed on a unique field.
-fn check_get_keyed(q: &Query, ti: usize, shape: &QueryShape, engine_built: bool, cx: &Cx, sink: &mut Sink) {
+fn check_get_keyed(
+    q: &Query,
+    ti: usize,
+    shape: &QueryShape,
+    engine_built: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     if shape.verb == Verb::Get && !q.ret.stream && engine_built && !get_is_keyed(q, ti, cx) {
         sink.error_note(
             code::GET_NOT_UNIQUE,
@@ -56,7 +69,14 @@ fn check_stream_page_exclusive(q: &Query, shape: &QueryShape, sink: &mut Sink) {
 }
 
 /// Nondeterministic-order lint: a `list` with no sort at any tier.
-fn check_nondet_sort(q: &Query, ti: usize, shape: &QueryShape, engine_built: bool, cx: &Cx, sink: &mut Sink) {
+fn check_nondet_sort(
+    q: &Query,
+    ti: usize,
+    shape: &QueryShape,
+    engine_built: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     if shape.verb == Verb::List && engine_built && !shape.has_order && cx.model(ti).sort.is_empty()
     {
         sink.warn(

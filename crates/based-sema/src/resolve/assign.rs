@@ -49,7 +49,13 @@ pub fn check_field_assign_type(
 
 /// Emit when an assigned value's family (`rf`) is incompatible with the target
 /// column's (`lf`). Shared by the column/literal and the tx-binding assign checks.
-pub(crate) fn report_assign_family(target: &MemberKind, col: &Ident, rf: Family, lf: Family, sink: &mut Sink) {
+pub(crate) fn report_assign_family(
+    target: &MemberKind,
+    col: &Ident,
+    rf: Family,
+    lf: Family,
+    sink: &mut Sink,
+) {
     if !compatible(lf, rf) {
         let target_desc = match target {
             MemberKind::Scalar { ty, .. } => format!("`{}`", prim_name(*ty)),

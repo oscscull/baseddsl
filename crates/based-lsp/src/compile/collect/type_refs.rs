@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Every model/type-reference identifier across the AST, with its span — the sites
 /// a name *points at* a declared model or shape (not the declarations themselves).
 /// Traverses all reference-bearing positions: field types, opt-in inverses, shape
@@ -68,11 +67,14 @@ pub(crate) fn collect_type_refs(decls: &[Decl]) -> Vec<&Ident> {
     out
 }
 
-
 /// Collect every navigable column path in a computed shape field (`out = price - discount`
 /// / `a || b` / `case …`), rooted at the shape's model `from` — its arithmetic/concat
 /// operands and its CASE `when` comparison columns, so each is a go-to-def / rename site.
-pub(crate) fn computed_paths<'a>(expr: &'a ShapeExpr, from: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn computed_paths<'a>(
+    expr: &'a ShapeExpr,
+    from: &'a str,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     match expr {
         ShapeExpr::Value(Value::Path(p)) => out.push((from, &p.segments)),
         ShapeExpr::Value(_) => {}
@@ -90,9 +92,12 @@ pub(crate) fn computed_paths<'a>(expr: &'a ShapeExpr, from: &'a str, out: &mut V
     }
 }
 
-
 /// The column paths a predicate compares on (a CASE `when` condition), rooted at `from`.
-pub(crate) fn pred_column_paths<'a>(p: &'a Predicate, from: &'a str, out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn pred_column_paths<'a>(
+    p: &'a Predicate,
+    from: &'a str,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     match p {
         Predicate::And(a, b) | Predicate::Or(a, b) => {
             pred_column_paths(a, from, out);
@@ -105,7 +110,6 @@ pub(crate) fn pred_column_paths<'a>(p: &'a Predicate, from: &'a str, out: &mut V
         Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
     }
 }
-
 
 /// The `field -> Shape` references and `...Shape` spreads in a shape body (recursing
 /// through inline nests) — each names a shape decl, so it rides the type-reference index
@@ -121,7 +125,6 @@ pub(crate) fn collect_shape_body_refs<'a>(body: &'a [ShapeField], out: &mut Vec<
         }
     }
 }
-
 
 /// The model reference in a type expression, if its base is a model (not a primitive).
 pub(crate) fn collect_type_expr<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Ident>) {

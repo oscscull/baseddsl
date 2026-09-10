@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Build one `DocumentSymbol` from a declaration's name + extent span.
 #[allow(deprecated)] // `deprecated` is a required struct field, set to None.
 fn symbol(
@@ -22,7 +21,6 @@ fn symbol(
     }
 }
 
-
 /// One `workspace/symbol` result: a flat, file-located symbol (no nesting — that is
 /// what `container_name` is for).
 #[allow(deprecated)] // `deprecated` is a required struct field, set to None.
@@ -42,7 +40,6 @@ fn sym_info(
     }
 }
 
-
 /// Case-insensitive fuzzy subsequence match, the ⌘T convention: every char of
 /// `query` must appear in `name` in order (not necessarily contiguously). An empty
 /// query matches everything. The client re-ranks; this is the coarse server filter.
@@ -55,7 +52,6 @@ fn fuzzy_match(query: &str, name: &str) -> bool {
     }
     true
 }
-
 
 impl Snapshot {
     /// Document symbols for file `fid` — the outline the editor shows (breadcrumbs
@@ -125,7 +121,6 @@ impl Snapshot {
         out
     }
 
-
     /// Workspace symbols (`workspace/symbol`, ⌘T): every named declaration across the
     /// whole project — models (with their fields), shapes, scopes, queries, mutations,
     /// filters — filtered by a case-insensitive fuzzy subsequence match on `query`
@@ -179,9 +174,7 @@ impl Snapshot {
         }
         out
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -237,7 +230,6 @@ mod tests {
         assert!(qsyms.iter().all(|s| s.name != "Order"));
     }
 
-
     /// Workspace symbols span every file in the project (unlike document symbols),
     /// map each declaration kind, nest fields under their model via `container_name`,
     /// and filter by a fuzzy subsequence query. Asserted over the commerce schema.
@@ -291,7 +283,6 @@ mod tests {
             .all(|s| s.name != "OrderCard"));
     }
 
-
     /// `fuzzy_match` is an ordered, case-insensitive subsequence test; empty matches all.
     #[test]
     fn fuzzy_match_is_ordered_subsequence() {
@@ -302,5 +293,4 @@ mod tests {
         assert!(!fuzzy_match("co", "OrderCard")); // out of order
         assert!(!fuzzy_match("xyz", "Order"));
     }
-
 }

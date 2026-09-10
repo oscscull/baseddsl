@@ -11,12 +11,12 @@ mod ir;
 mod parse;
 mod render;
 
-pub use from_schema::{foreign_key_snaps, target_pk_column};
 pub(crate) use from_schema::index_name;
+pub use from_schema::{foreign_key_snaps, target_pk_column};
 pub use ir::{
     ColumnSnap, ForeignKeySnap, IndexSnap, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot,
     TableSnap,
 };
 pub use parse::ParseError;
-pub use render::{fk_spec_text, snapshot};
 pub(crate) use render::{col_list_text, index_spec_text, render_scope_decl};
+pub use render::{fk_spec_text, snapshot};

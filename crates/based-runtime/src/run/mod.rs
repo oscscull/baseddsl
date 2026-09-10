@@ -36,10 +36,10 @@ mod mutation;
 mod query;
 mod shaping;
 
+pub(crate) use bulk::*;
 pub use db::*;
 pub use error::*;
 pub use mock::*;
 pub use mutation::*;
 pub use query::*;
-pub(crate) use bulk::*;
 pub(crate) use shaping::*;

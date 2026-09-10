@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// The offline drift diagnostics for a project: the schema-vs-migrations delta the editor
 /// can compute with no database. Empty unless the project has captured
 /// migrations *and* the current `.bsl` has structural changes not yet in one. Each change
@@ -72,7 +71,6 @@ pub(crate) fn drift_diagnostics(
     out
 }
 
-
 /// Spent `@was` directives: a rename already reflected in the latest snapshot (the old
 /// name is gone, the new name present), so the `@was` no longer does anything and should
 /// be removed. Anchored at the `@was` literal.
@@ -117,7 +115,6 @@ fn spent_was_diagnostics(
     out
 }
 
-
 fn spent_was(span: Span, old: &str) -> Diagnostic {
     Diagnostic::warning(
         based_sema::code::WAS_SPENT,
@@ -125,7 +122,6 @@ fn spent_was(span: Span, old: &str) -> Diagnostic {
     )
     .at(span)
 }
-
 
 /// The declaration-name span of the model whose (physical) table is `table`.
 fn self_model_span(
@@ -145,7 +141,6 @@ fn self_model_span(
     })
 }
 
-
 /// The first model declaration's name span — a fallback anchor for a drift step whose
 /// table no longer has a declaration (a dropped model).
 fn first_model_span(decls: &[Decl]) -> Option<Span> {
@@ -154,7 +149,6 @@ fn first_model_span(decls: &[Decl]) -> Option<Span> {
         _ => None,
     })
 }
-
 
 /// The highest-numbered `migrations/NNNN_slug/schema.snap` under `root`, parsed — the
 /// diff baseline for the drift check. `None` when there is no `migrations/` dir, no
@@ -179,7 +173,6 @@ pub(crate) fn latest_snapshot(root: &Path) -> Option<based_codegen::migrate::Sna
     let text = std::fs::read_to_string(path.join("schema.snap")).ok()?;
     based_codegen::migrate::Snapshot::parse(&text).ok()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -212,7 +205,6 @@ mod tests {
         );
     }
 
-
     /// A drop-one/add-one-same-family diff (a rename spelled as drop+add) tags the
     /// drift note with the teach-`@was` hint, so the ambiguity is self-revealing.
     #[test]
@@ -243,7 +235,6 @@ mod tests {
         );
     }
 
-
     /// When the snapshot already matches the schema, there is no drift diagnostic; and a
     /// spent `@was` (rename already captured) is surfaced.
     #[test]
@@ -269,5 +260,4 @@ mod tests {
             "expected spent-@was W0107: {codes:?}"
         );
     }
-
 }

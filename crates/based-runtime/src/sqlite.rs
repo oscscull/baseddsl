@@ -20,8 +20,8 @@ use futures_util::StreamExt;
 use sqlx::pool::PoolConnection;
 use sqlx::query::Query;
 use sqlx::sqlite::{
-    Sqlite, SqliteArguments, SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
-    SqliteSynchronous,
+    Sqlite, SqliteArguments, SqliteConnectOptions, SqliteJournalMode, SqlitePool,
+    SqlitePoolOptions, SqliteSynchronous,
 };
 use sqlx::{Column, Row as SqlxRow, TypeInfo, ValueRef};
 
@@ -569,7 +569,9 @@ mod tests {
         let path = temp_db_path("wal");
         let backend = SqliteBackend::open(&path).unwrap();
         let mut db = backend.checkout("").await.unwrap();
-        let rows = fetch_all(db.fetch("PRAGMA journal_mode", &[])).await.unwrap();
+        let rows = fetch_all(db.fetch("PRAGMA journal_mode", &[]))
+            .await
+            .unwrap();
         assert_eq!(rows[0]["journal_mode"], json!("wal"));
     }
 

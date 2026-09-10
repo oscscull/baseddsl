@@ -4,7 +4,12 @@ use super::*;
 /// to-**many** inverse edge (into the junction), and each later segment a forward
 /// edge to the next model. Returns the far model (the last segment's target) on a
 /// clean path, else reports the offending segment and returns `None`.
-pub(super) fn check_flatten_path(path: &Path, mi: usize, cx: &Cx, sink: &mut Sink) -> Option<usize> {
+pub(super) fn check_flatten_path(
+    path: &Path,
+    mi: usize,
+    cx: &Cx,
+    sink: &mut Sink,
+) -> Option<usize> {
     let segs = &path.segments;
     let first = &segs[0];
     if segs.len() < 2 {

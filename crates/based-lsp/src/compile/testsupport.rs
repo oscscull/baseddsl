@@ -7,9 +7,7 @@ pub(crate) use std::collections::HashSet;
 /// and the code-action test, not here.
 pub(crate) fn nav_clean(diags: &[Diagnostic]) -> bool {
     !diags.iter().any(|d| {
-        d.severity == based_diagnostics::Severity::Error
-            && d.code != "E0260"
-            && d.code != "E0261"
+        d.severity == based_diagnostics::Severity::Error && d.code != "E0260" && d.code != "E0261"
     })
 }
 
@@ -107,8 +105,7 @@ impl TempWorkspace {
     pub(crate) fn new(tag: &str) -> Self {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("based-lsp-{tag}-{}-{n}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("based-lsp-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         Self { root }
     }

@@ -2,7 +2,12 @@ use super::*;
 
 /// The model a nested field points at: its member must exist and be a relation.
 /// Reports the missing-field / not-a-relation case and returns `None`.
-pub(super) fn nest_target<'a>(field: &Ident, mi: usize, cx: &'a Cx, sink: &mut Sink) -> Option<&'a str> {
+pub(super) fn nest_target<'a>(
+    field: &Ident,
+    mi: usize,
+    cx: &'a Cx,
+    sink: &mut Sink,
+) -> Option<&'a str> {
     match cx.model(mi).member(&field.node).map(|m| &m.kind) {
         Some(MemberKind::Forward { target, .. } | MemberKind::Inverse { target, .. }) => {
             Some(target)

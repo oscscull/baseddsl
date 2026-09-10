@@ -34,7 +34,6 @@ impl Snapshot {
         }
     }
 
-
     /// Fields of the model a dotted path resolves to, when the base is statically
     /// known. The path is rooted at the enclosing shape's `from` or query block's
     /// target and walked segment-by-segment through relation fields; any segment
@@ -77,7 +76,6 @@ impl Snapshot {
             .collect()
     }
 
-
     /// The model a dotted path is rooted at, if the cursor sits in a decl whose
     /// root is cheaply known: a shape (its `from`) or a query block (its target).
     fn root_model_at(&self, fid: usize, offset: u32) -> Option<&str> {
@@ -92,7 +90,6 @@ impl Snapshot {
         })
     }
 
-
     /// Field type annotation position: the primitives plus every model name.
     fn type_items(&self) -> Vec<CompletionItem> {
         let mut items: Vec<CompletionItem> = PRIMITIVES
@@ -102,7 +99,6 @@ impl Snapshot {
         items.extend(self.model_name_items());
         items
     }
-
 
     /// Return type position: models and shapes (a callable may return either), plus
     /// the `stream` return form.
@@ -115,7 +111,6 @@ impl Snapshot {
         }));
         items
     }
-
 
     /// The fallback vocabulary: keywords, functions, and model names.
     fn default_items(&self) -> Vec<CompletionItem> {
@@ -133,7 +128,6 @@ impl Snapshot {
         items
     }
 
-
     fn model_name_items(&self) -> Vec<CompletionItem> {
         self.decls
             .iter()
@@ -144,7 +138,6 @@ impl Snapshot {
             .collect()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -228,5 +221,4 @@ mod tests {
         assert!(labels(&kw).contains(&"User".to_string()));
         assert!(labels(&kw).contains(&"Thing".to_string()));
     }
-
 }

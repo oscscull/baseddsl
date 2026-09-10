@@ -69,7 +69,12 @@ fn reverse_statements(step: &Step, dialect: Dialect) -> Option<Vec<String>> {
             schema,
             index,
         } => {
-            vec![drop_index_sql(dialect, schema.as_deref(), table, &index.name)]
+            vec![drop_index_sql(
+                dialect,
+                schema.as_deref(),
+                table,
+                &index.name,
+            )]
         }
         // An added FK reverses to a drop (safe on PG/MariaDB; SQLite has no in-place drop,
         // so its reverse is left to a hand-authored raw step — mark irreversible here).

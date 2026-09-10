@@ -6,7 +6,14 @@ use super::*;
 /// distinct groups); each explicit `order` column must be projected (Postgres rejects
 /// `SELECT DISTINCT … ORDER BY <unselected>`, enforced uniformly); and it warns when the
 /// projection already carries the primary key (every row is then unique).
-pub(super) fn check_distinct(q: &Query, ret: &Resolved, ti: usize, agg: bool, cx: &Cx, sink: &mut Sink) {
+pub(super) fn check_distinct(
+    q: &Query,
+    ret: &Resolved,
+    ti: usize,
+    agg: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let stmt = match &q.body {
         QueryBody::Block(s) if s.distinct => s,
         _ => return,
@@ -66,7 +73,12 @@ fn reject_distinct_keyset(q: &Query, stmt: &Statement, sink: &mut Sink) {
 
 /// Under `distinct` every `order` column must be projected (Postgres rejects an unselected
 /// `ORDER BY` column).
-fn check_distinct_order_projected(q: &Query, stmt: &Statement, paths: &[&[Ident]], sink: &mut Sink) {
+fn check_distinct_order_projected(
+    q: &Query,
+    stmt: &Statement,
+    paths: &[&[Ident]],
+    sink: &mut Sink,
+) {
     for c in &stmt.clauses {
         if let Clause::Order(terms) = c {
             for t in terms {

@@ -1,7 +1,11 @@
 use super::*;
 
 /// Find the family of the first column `$name` fills or filters across the write body.
-pub(crate) fn param_use_in_stmts(compiled: &Compiled, stmts: &[WriteStmt], name: &str) -> Option<Family> {
+pub(crate) fn param_use_in_stmts(
+    compiled: &Compiled,
+    stmts: &[WriteStmt],
+    name: &str,
+) -> Option<Family> {
     let schema = &compiled.schema;
     for stmt in stmts {
         let found = match stmt {

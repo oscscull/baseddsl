@@ -144,7 +144,12 @@ pub(crate) fn deco_field(d: &Decorator) -> Option<&Ident> {
     }
 }
 
-pub(crate) fn resolve_soft_delete(field: &Ident, mi: usize, models: &mut [RModel], sink: &mut Sink) {
+pub(crate) fn resolve_soft_delete(
+    field: &Ident,
+    mi: usize,
+    models: &mut [RModel],
+    sink: &mut Sink,
+) {
     let mode = match models[mi].member(&field.node).map(|m| &m.kind) {
         Some(MemberKind::Scalar {
             ty: Primitive::Timestamp | Primitive::Date,

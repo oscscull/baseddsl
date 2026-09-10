@@ -7,7 +7,14 @@ use super::*;
 /// non-streaming (a lock held across a long-lived stream is a footgun). Enforced uniformly
 /// at compile time so a `FOR UPDATE` boundary surfaces on every dialect. Confinement to
 /// transaction clients lives in the generated client (the `TxBound` marker trait).
-pub(super) fn check_for_update(q: &Query, ret: &Resolved, ti: usize, agg: bool, cx: &Cx, sink: &mut Sink) {
+pub(super) fn check_for_update(
+    q: &Query,
+    ret: &Resolved,
+    ti: usize,
+    agg: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     let stmt = match &q.body {
         QueryBody::Block(s) if s.for_update.is_some() => s,
         _ => return,

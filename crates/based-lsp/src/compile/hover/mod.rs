@@ -48,7 +48,6 @@ impl Snapshot {
         self.decl_site_hover(fid, offset)
     }
 
-
     /// Hover for a `tx` step binding: names the model of the row it binds, so a reader
     /// knows what `$name.field` reaches. `None` off any binding decl / `$name` head.
     fn step_binding_hover(&self, fid: usize, offset: u32) -> Option<String> {
@@ -65,7 +64,6 @@ impl Snapshot {
         }
         None
     }
-
 
     /// The predicate a signature param binding generates, when the cursor sits on
     /// the binding — the column/edge ident or the operator/arrow between it and the
@@ -136,7 +134,6 @@ impl Snapshot {
         None
     }
 
-
     /// Prepend `ident`'s field signature to `line` when the cursor is on the ident
     /// and it resolves against `root`; the bare binding line otherwise.
     fn with_field_sig(
@@ -154,7 +151,6 @@ impl Snapshot {
         line
     }
 
-
     /// A model or shape decl's one-line hover, by name.
     fn decl_hover_by_name(&self, name: &str) -> Option<String> {
         self.decls.iter().find_map(|d| match d {
@@ -164,7 +160,6 @@ impl Snapshot {
             _ => None,
         })
     }
-
 
     /// An enum variant's hover: `` variant `paid` of `Status` `` (plus its explicit
     /// value, when written). `decl` is the variant's declaration span.
@@ -188,7 +183,6 @@ impl Snapshot {
         None
     }
 
-
     /// A scope decl's one-line hover (`scope Name (col: Type = $ctx.field, …)`).
     fn scope_hover(&self, name: &str) -> Option<String> {
         self.decls.iter().find_map(|d| match d {
@@ -196,7 +190,6 @@ impl Snapshot {
             _ => None,
         })
     }
-
 
     /// Hover for a generated (stored derived) column: `name: <inferred type> = <expr>`.
     /// The type is the one sema inferred from the expression; the expression is
@@ -213,7 +206,6 @@ impl Snapshot {
              read-only (never assigned)"
         )
     }
-
 
     /// The inferred type of a generated column (`text`, `decimal(…)`, an enum name, …),
     /// with a trailing `?` when nullable, read from the checked schema. `None` when the
@@ -238,7 +230,6 @@ impl Snapshot {
         }
         Some(s)
     }
-
 
     /// Hover for a declaration's own name (the cursor sits on the thing being
     /// declared, not a reference to it): the model/field/shape/callable/scope it
@@ -273,9 +264,7 @@ impl Snapshot {
         }
         None
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -315,7 +304,6 @@ mod tests {
         assert!(hs.contains("shape OrderCard from Order"), "{hs}");
     }
 
-
     /// A `-> stream Shape` query's hover shows the stream return form.
     #[test]
     fn hover_shows_the_stream_return_form() {
@@ -336,7 +324,6 @@ mod tests {
         let h = snap.hover_at(fid, off).expect("query hover");
         assert!(h.contains("-> stream OrderRow"), "{h}");
     }
-
 
     /// An `-> ok` mutation's hover shows the ack return form as written; the `ok`
     /// token itself is not a type reference (hovering it resolves nothing, no crash).
@@ -359,7 +346,6 @@ mod tests {
         let ok_off = (src.find("-> ok").unwrap() + 3) as u32;
         assert!(snap.hover_at(fid, ok_off).is_none());
     }
-
 
     /// A generated column (`net = price - discount`) is a real column to the editor:
     /// hover on its declaration shows `name: <inferred type> = <expr>`, dot-completion
@@ -412,7 +398,6 @@ mod tests {
         );
     }
 
-
     /// Hovering a binding states the predicate it generates — on the column/edge
     /// ident (led by the field's signature), on the operator token itself, and on
     /// an unbound param (the derived same-name equality).
@@ -452,5 +437,4 @@ mod tests {
         assert!(h.contains("name: text"), "{h}");
         assert!(h.contains("binds `name = $name`"), "{h}");
     }
-
 }

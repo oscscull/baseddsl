@@ -8,7 +8,12 @@ use super::*;
 /// on a keyless (`@no_id`) model is contradictory; an empty `@key()` and a
 /// field named twice are rejected. A rejected key resolves to empty so the model
 /// still needs an `id` (the ordinary path), never a half-formed key.
-pub(crate) fn resolve_key(m: &Model, members: &[RMember], no_id: bool, sink: &mut Sink) -> Vec<String> {
+pub(crate) fn resolve_key(
+    m: &Model,
+    members: &[RMember],
+    no_id: bool,
+    sink: &mut Sink,
+) -> Vec<String> {
     let mut fields: Vec<String> = Vec::new();
     let mut key_span: Option<Span> = None;
     for d in &m.decorators {

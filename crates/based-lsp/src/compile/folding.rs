@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// A top-level declaration's extent span (name/decorators through the closing
 /// delimiter) — the anchor folding and selection ranges expand to.
 fn decl_span(d: &Decl) -> Span {
@@ -14,7 +13,6 @@ fn decl_span(d: &Decl) -> Span {
         Decl::Filter(f) => f.span,
     }
 }
-
 
 impl Snapshot {
     pub fn folding_ranges(&self, fid: usize) -> Vec<FoldingRange> {
@@ -43,7 +41,6 @@ impl Snapshot {
         }
         out
     }
-
 
     /// The selection-range hierarchy at `offset`: the nested ranges an editor cycles
     /// through on expand/shrink-selection, innermost first. Levels are the identifier
@@ -110,9 +107,7 @@ impl Snapshot {
         }
         node.map(|b| *b)
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -155,7 +150,6 @@ mod tests {
         // Both the model and the shape fold (two multi-line decls in the file).
         assert!(ranges.len() >= 2, "{ranges:?}");
     }
-
 
     /// A selection range expands outward through the AST: the `total` token → its
     /// field declaration → the enclosing `Order` model → the whole file, each range
@@ -214,5 +208,4 @@ mod tests {
             );
         }
     }
-
 }

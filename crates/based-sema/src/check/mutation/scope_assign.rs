@@ -5,7 +5,13 @@ use super::*;
 /// is therefore an error, like assigning `id`/`@created` — *unless* the mutation is
 /// `unscoped`, where scope injection is off and the caller owns the column. Reports every
 /// offending assign.
-pub(super) fn check_scope_assign(mi: usize, assigns: &[Assign], unscoped: bool, cx: &Cx, sink: &mut Sink) {
+pub(super) fn check_scope_assign(
+    mi: usize,
+    assigns: &[Assign],
+    unscoped: bool,
+    cx: &Cx,
+    sink: &mut Sink,
+) {
     if unscoped {
         return;
     }

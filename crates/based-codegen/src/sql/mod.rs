@@ -20,5 +20,5 @@ pub(crate) use types::*;
 pub use dml::{lower_queries, LoweredQuery, ARRAY_MARK, KEYSET_PREFIX, NEST_PRESENT, NEST_SEP};
 pub use mutations::{lower_mutations, LoweredMutation, LoweredWrite};
 
-pub use ddl::{ddl, ddl_with, idempotency_table_ddl, IDEMPOTENCY_TABLE};
 pub(crate) use ddl::{constraint_name, physical_col, raw_index_name};
+pub use ddl::{ddl, ddl_with, idempotency_table_ddl, IDEMPOTENCY_TABLE};

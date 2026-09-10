@@ -1,27 +1,27 @@
 //! Query checks: verb, return, envelope lints, distinct/for-update guards, params, clauses.
 use super::*;
 
-mod check_query;
-mod verb;
 mod body;
+mod check_query;
 mod clauses;
-mod envelope;
-mod get_keyed;
 mod distinct;
+mod envelope;
 mod for_update;
-mod param;
+mod get_keyed;
 mod optional_params;
+mod param;
 mod raw;
+mod verb;
 
-use verb::*;
 use body::*;
-use clauses::*;
-use envelope::*;
-use get_keyed::*;
-use distinct::*;
-use for_update::*;
-use param::*;
-use optional_params::*;
-use raw::*;
-use check_query::QueryShape;
 pub(crate) use check_query::check_query;
+use check_query::QueryShape;
+use clauses::*;
+use distinct::*;
+use envelope::*;
+use for_update::*;
+use get_keyed::*;
+use optional_params::*;
+use param::*;
+use raw::*;
+use verb::*;

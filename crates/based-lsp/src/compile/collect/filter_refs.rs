@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Every `filter(...)` call-name identifier across the AST — the sites a name *invokes*
 /// a declared filter (`Predicate::FilterCall`), found by walking every predicate a
 /// query/mutation/filter carries. The reference-collection twin for filters.
@@ -24,14 +23,12 @@ pub(crate) fn collect_filter_refs(decls: &[Decl]) -> Vec<&Ident> {
     out
 }
 
-
 /// Filter-call names in a query clause's `where` predicate.
 pub(crate) fn clause_filter_refs<'a>(c: &'a Clause, out: &mut Vec<&'a Ident>) {
     if let Clause::Where(p) = c {
         pred_filter_refs(p, out);
     }
 }
-
 
 /// Filter-call names in a mutation write body's `where` predicates (recursing `tx`).
 pub(crate) fn write_filter_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ident>) {
@@ -50,7 +47,6 @@ pub(crate) fn write_filter_refs<'a>(body: &'a [WriteStmt], out: &mut Vec<&'a Ide
         }
     }
 }
-
 
 /// Filter-call names anywhere in a predicate tree.
 pub(crate) fn pred_filter_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a Ident>) {

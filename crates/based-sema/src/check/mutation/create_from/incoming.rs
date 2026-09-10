@@ -20,7 +20,13 @@ pub(in crate::check::mutation) fn rhs_incoming_span(rhs: &AssignRhs) -> Option<S
 
 /// Validate every `incoming.<col>` operand of an assign RHS: `<col>` must be a settable
 /// scalar column of the model. Walks arithmetic operands.
-pub(super) fn check_incoming_refs(rhs: &AssignRhs, model: &RModel, cx: &Cx, mi: usize, sink: &mut Sink) {
+pub(super) fn check_incoming_refs(
+    rhs: &AssignRhs,
+    model: &RModel,
+    cx: &Cx,
+    mi: usize,
+    sink: &mut Sink,
+) {
     match rhs {
         AssignRhs::Value(Value::Path(p)) if is_incoming_path(p) => {
             let field = &p.segments[1];
