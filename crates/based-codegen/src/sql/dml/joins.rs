@@ -90,7 +90,10 @@ impl<'a> Select<'a> {
     /// directions share.
     fn finalize_join_on(&self, on: &mut String, alias: &str, tmodel: &RModel) {
         if let Some(sd) = &tmodel.soft_delete {
-            on.push_str(&format!(" AND {}", soft_pred(self.dialect, alias, tmodel, sd)));
+            on.push_str(&format!(
+                " AND {}",
+                soft_pred(self.dialect, alias, tmodel, sd)
+            ));
         }
         if let Some(scope) = self.scope_join_pred(alias, tmodel) {
             on.push_str(&format!(" AND {scope}"));

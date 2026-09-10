@@ -48,14 +48,14 @@ pub(crate) fn ret_select(
             .find(|w| w.conflict_key.is_some() && w.model == rm.ret_model);
         // A composite `@key` create with a DB-generated `serial` part keys the re-select on
         // the captured serial value (`:result_id`) and its other app-supplied key parts.
-        let composite_serial = stmts.iter().find(|w| {
-            w.serial_col.is_some() && w.read_key.is_some() && w.model == rm.ret_model
-        });
+        let composite_serial = stmts
+            .iter()
+            .find(|w| w.serial_col.is_some() && w.read_key.is_some() && w.model == rm.ret_model);
         // A keyless create reads back by the `(unique)` column it set — the same
         // `WHERE col = value` shape as a conflict key.
-        let keyless = stmts.iter().find(|w| {
-            w.read_key.is_some() && w.serial_col.is_none() && w.model == rm.ret_model
-        });
+        let keyless = stmts
+            .iter()
+            .find(|w| w.read_key.is_some() && w.serial_col.is_none() && w.model == rm.ret_model);
         // A create of the return row keys the re-select on that row's id — app-minted
         // (`gen_id`) or DB-generated (a sole `serial` id, bound late from the captured id).
         // Both use `WHERE id = :result_id`.

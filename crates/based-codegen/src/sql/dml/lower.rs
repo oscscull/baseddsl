@@ -43,7 +43,11 @@ pub(crate) fn index_queries(schema: &CheckedSchema) -> HashMap<&str, &RQuery> {
 
 /// Lower every query in the schema to its structured SQL, in declaration order.
 /// The in-process runtime consumes this directly (no serialized artifact).
-pub fn lower_queries(schema: &CheckedSchema, decls: &[Decl], dialect: Dialect) -> Vec<LoweredQuery> {
+pub fn lower_queries(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    dialect: Dialect,
+) -> Vec<LoweredQuery> {
     let queries = index_queries(schema);
     decls
         .iter()

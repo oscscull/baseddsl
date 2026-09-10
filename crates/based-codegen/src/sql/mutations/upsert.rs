@@ -97,7 +97,12 @@ fn incoming_col_ref(dialect: Dialect, col: &str) -> String {
 
 /// The per-dialect upsert clause appended to the INSERT: Postgres/SQLite carry the explicit
 /// conflict-target column list, MariaDB does not (`ON DUPLICATE KEY UPDATE`).
-pub(crate) fn upsert_tail(dialect: Dialect, oc: &OnConflict, model: &RModel, sets: &[String]) -> String {
+pub(crate) fn upsert_tail(
+    dialect: Dialect,
+    oc: &OnConflict,
+    model: &RModel,
+    sets: &[String],
+) -> String {
     match dialect {
         Dialect::MariaDb | Dialect::MySql => {
             format!("\nON DUPLICATE KEY UPDATE {}", sets.join(", "))

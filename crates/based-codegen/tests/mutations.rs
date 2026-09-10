@@ -176,10 +176,7 @@ fn delete_on_soft_model_rewrites_to_tombstone_update() {
           delete Order where (id = $id);
         }
         "#);
-    assert!(
-        out.contains("-- delete (soft): tombstone"),
-        "\n{out}"
-    );
+    assert!(out.contains("-- delete (soft): tombstone"), "\n{out}");
     // the tombstone write + updated bump.
     assert!(
         out.contains("UPDATE `order`\nSET `order`.`deleted_at` = CURRENT_TIMESTAMP, `order`.`updated_at` = CURRENT_TIMESTAMP"),

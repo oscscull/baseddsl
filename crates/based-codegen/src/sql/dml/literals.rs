@@ -45,7 +45,13 @@ impl<'a> Select<'a> {
     ///     tag), so it is base64-encoded in SQL (`encode`/`TO_BASE64`). SQLite's JSON
     ///     functions cannot carry a `BLOB`, so a `bytes` field inside a to-many array is
     ///     unsupported there — project it flat instead.
-    pub(crate) fn json_scalar(&self, alias: &str, col: &str, path: &Path, model: &RModel) -> String {
+    pub(crate) fn json_scalar(
+        &self,
+        alias: &str,
+        col: &str,
+        path: &Path,
+        model: &RModel,
+    ) -> String {
         let qcol = self.qcol(alias, col);
         match path_primitive(self.schema, model, path) {
             Primitive::Decimal { .. } => match self.dialect {
