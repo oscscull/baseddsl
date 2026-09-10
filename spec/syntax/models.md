@@ -139,7 +139,7 @@ column** is stored derived *data*.
   `@no_id("reason")` (below). It then forfeits the id-keyed operations.
 - Not-null default. `?` opts into nullable.
 
-### Primary-key generation strategy (`id: uuid | ulid | serial`, D110)
+### Primary-key generation strategy (`id: uuid | ulid | serial`)
 A PK's *generation strategy* — how its value comes to exist — is a per-model choice,
 written in the `id` type (its generation is consequential, so it is visible, not implied).
 
@@ -249,7 +249,7 @@ namespace diffs into a reviewable `alter schema` migration step (Postgres `SET S
 MySQL/MariaDB cross-database `RENAME TABLE`; SQLite needs a raw table-rebuild).
 
 ## Decorators (model-level)
-Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit; decisions.md D2), `@table("legacy_name")` (legacy table alias — D3/D8), `@schema("name")` (a non-default schema/database namespace — see above, D113), `@no_id("reason")` (a keyless legacy table — see Defaults), `@no_fk[("reason")]` (opt the whole table out of FK constraints — see relations.md). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
+Stacked `@decorator` lines above the model. Never positional keywords on the model line. Extensible: `@soft_delete(...)`, `@sort(...)`, `@scope(...)`, `@created(field)` / `@updated(field)` (mark a declared timestamp engine-managed — timestamps are never implicit), `@table("legacy_name")` (legacy table alias), `@schema("name")` (a non-default schema/database namespace — see above), `@no_id("reason")` (a keyless legacy table — see Defaults), `@no_fk[("reason")]` (opt the whole table out of FK constraints — see relations.md). Tenant scoping is not its own decorator — express it with `@scope` (auth.md).
 
 Field-level, on a forward to-one relation: `@fk[(…)]` opts a relation into a DB `FOREIGN KEY` constraint (with optional `on_delete`/`on_update` actions); `@no_fk` opts one edge out. Presence is resolved against the `[schema] foreign_keys` convention, and a decorator that flips presence against it needs a reason string — full spec in relations.md.
 ```

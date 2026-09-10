@@ -55,25 +55,25 @@ each side — the model it governs (`@scope Name`) and every callable that touch
 (`scoped Name`). We enforce the constraint shape; the caller supplies the value. No branching.
 
 ### The `scope` declaration
-Declared once, like a shape (D46). Each term is `col: Type = $ctx.field`:
+Declared once, like a shape. Each term is `col: Type = $ctx.field`:
 ```
 scope Tenant (org: Org = $ctx.org)
 ```
 Read: "the *Tenant* scope filters on column `org` (type `Org`), bound to `$ctx.org`."
 
-- **The predicate keeps the exact restricted form** of the old inline `@scope` (D32): a conjunction
+- **The predicate keeps the exact restricted form** of the old inline `@scope`: a conjunction
   of `col = $ctx.field` equalities, nothing else — no `or`, `in`, range, literal RHS, multi-hop path,
   or named filter (`E0180`). That restriction is what lets a scope be injected *everywhere* and, in
   particular, **auto-set on `create`**; a non-equality/multi-owner rule has no create-time projection
   and is not a scope (it is a Handle-1 filter, below). A conjunction is written comma-separated:
   `scope Region (org: Org = $ctx.org, region: Region = $ctx.region)`.
-- **The scope decl is where `$ctx.<field>`'s type is declared** (D46). `org: Org` states the type of
+- **The scope decl is where `$ctx.<field>`'s type is declared**. `org: Org` states the type of
   both the column each governed model must carry *and* the `$ctx.org` request field — they are one
   type by the equality, sourced once here (P4). This **ends the per-callable `$ctx` inference for the
-  scope field** (D4/D5): a scoped callable reads `$ctx.org`'s type from `Tenant`, not from whichever
+  scope field**: a scoped callable reads `$ctx.org`'s type from `Tenant`, not from whichever
   column it happened to compare against. Coherence for the scope field is now structural — one decl,
   one type — so it can never clash across callables. (`$ctx` fields used only in hand-written Handle-1
-  `where`s or `guard` args are still inferred per callable, D4.)
+  `where`s or `guard` args are still inferred per callable.)
 
 ### The model reference — `@scope Name` (repeatable; a set of alternatives)
 A model opts into a scope by naming it; the predicate is not restated (P4 — one source of truth):
@@ -88,11 +88,11 @@ Order {
 ```
 The governed model **must declare each named scope's column(s)** at a conforming type (`org: Org`) —
 else `E0184` (checked per `@scope` decorator). A model whose *physical* column name differs aliases it
-at the field (`org: Org (column "legacy_org")`, D3/D8); the field name still matches the scope. (A
+at the field (`org: Org (column "legacy_org")`); the field name still matches the scope. (A
 per-model *field-name* override — `@scope Tenant(owner_org)` — is reserved but **deferred**; v1 requires
-the field name to match the scope column name. See D46.)
+the field name to match the scope column name.)
 
-**A model may declare `@scope` more than once (D47).** The stack of `@scope` decorators is a
+**A model may declare `@scope` more than once.** The stack of `@scope` decorators is a
 **disjunction of conjunctions** (DNF) — each decorator is *one alternative* (a valid way to be scoped),
 the commas *within* one decorator are a conjunction:
 - `@scope Page, Author` — **one** alternative `{Page ∧ Author}`: a row/callable must confine by **both**.
@@ -122,7 +122,7 @@ mutation place_order(buyer: Id, total: int) -> OrderCard scoped Tenant {
 name, P4). It is the visible half of the both-sides contract: `@scope Tenant` on the model, `scoped
 Tenant` on the callable.
 
-**The uniform callable rule (D47).** A callable must confine by a set of scope axes that is a
+**The uniform callable rule.** A callable must confine by a set of scope axes that is a
 **superset of at least one** of its target model's declared `@scope` alternatives — else
 `unscoped("reason")`. In DNF terms: the `scoped …` set must satisfy ≥1 whole `@scope` decorator.
 - AND model (`@scope Page, Author`): `scoped …` must include **both** `Page` and `Author` (the only
@@ -135,10 +135,10 @@ Tenant` on the callable.
 This vindicates the "input ⊇ allowed scopes" intuition, now precise: the callable's confinement axes
 must ⊇ one declared alternative.
 
-What the acknowledgement means, per operation (unchanged from D32/D34):
+What the acknowledgement means, per operation:
 - **Reads + writes:** each named axis's `col = $ctx.field` equality is ANDed into every `WHERE`
   (updates/deletes/restores can't touch an out-of-scope row) and into every *joined* scoped table's
-  `ON` (a relation reach can't read across a scope boundary, D34). The injected predicate is the
+  `ON` (a relation reach can't read across a scope boundary). The injected predicate is the
   **conjunction of the named axes** — the alternative the callable chose.
 - **Create:** the scope columns are **engine-managed** — auto-set from `$ctx`, never caller params. A
   create auto-sets every scope column whose `$ctx` field is available and **must satisfy ≥1 of the
@@ -148,14 +148,14 @@ What the acknowledgement means, per operation (unchanged from D32/D34):
   `$ctx` field is absent at create — is `E0186`.
 
 ### Multi-scope callables (a set per touched model)
-A query reaching a *second* scoped model through a relation (D34 joined-`ON`) is in **both** models'
+A query reaching a *second* scoped model through a relation (joined-`ON`) is in **both** models'
 scopes; the `scoped …` set must satisfy ≥1 alternative for **each** scoped model it touches (root plus
 every scoped model reached), one `scoped` clause, comma-separated:
 ```
 query ticket_with_contact(id) -> TicketCard scoped Tenant, Region;
 ```
 A touched scoped model left unsatisfiable by the set (too few axes for any of its alternatives), or an
-axis no touched model declares any `@scope` for, is `E0185`. This makes D34's joined-scope enforcement
+axis no touched model declares any `@scope` for, is `E0185`. This makes the joined-scope enforcement
 *written*: the reader sees every scope boundary the query crosses.
 
 ### Worked example — a model with two alternatives (OR) and one with two axes (AND)
@@ -221,7 +221,7 @@ checking whether the caller holds *some* credential — is **not** a scope: it i
 rows come back*, it is a set of `@scope` alternatives (each an un-forgettable filter); if it only gates
 *whether the same rows come back*, it is a `guard`.
 
-### Error set (E018x band, D46 → revised D47)
+### Error set (E018x band)
 | Code | Triggers |
 |------|----------|
 | `E0180` | a `scope` decl's predicate isn't a conjunction of `col = $ctx.field` |

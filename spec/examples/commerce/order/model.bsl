@@ -1,6 +1,6 @@
 # model + its read contract live together; access layer is in queries.bsl
 
-# The Tenant scope (auth.md Handle 2 / D46): a named row-visibility contract declared
+# The Tenant scope (auth.md Handle 2): a named row-visibility contract declared
 # once, referenced by name on both sides — `@scope Tenant` on the model below, `scoped
 # Tenant` on every callable that touches it (queries.bsl). The `org: Org` term is the one
 # place the scope column's — and thus `$ctx.org`'s — type is written.

@@ -13,7 +13,7 @@ lives in host Rust against an engine-owned transaction, never in the DSL (princi
 Within a `tx`, a `create … as name` **re-selects its written row**, so a later step's
 `$name.field` reads the row the database actually wrote — read-your-writes *inside the
 transaction*, seeing DB defaults, engine timestamps, and DB-generated (`serial`) ids as
-written (mutations.md, D124). This is threading a committed value between static steps, not
+written (mutations.md). This is threading a committed value between static steps, not
 branching on it — the write set is still fixed at compile time.
 
 The seam is **embedded-only** (in-process): it runs a transaction over the same `Engine` an
@@ -73,7 +73,7 @@ error the closure aborts (and rolls back) with.
 
 **Retry variant** — `client::transaction_retrying(&engine, opts, Retry::on_serialization(max), |tx| …)`
 re-runs the **whole closure** when the driver classifies the failure as a serialization/deadlock
-abort (`DbErrorKind::Deadlock`, D65). Only the engine-owned form can auto-retry, because only it
+abort (`DbErrorKind::Deadlock`). Only the engine-owned form can auto-retry, because only it
 owns the boundary — this is the `Serializable` payoff.
 
 ### Rung 2 — explicit handle (caller owns the lifetime)
@@ -91,7 +91,7 @@ txn.commit().await?;                                    // or txn.rollback().awa
 handle, or a panic, never leaks a half-written transaction). `commit`/`rollback` are the explicit,
 awaited forms.
 
-### Rung 3 — bring-your-own transaction (`adopt`) — BUILT (slice 3, D120)
+### Rung 3 — bring-your-own transaction (`adopt`)
 
 For interop with app code that already opened a transaction on the same driver: a per-driver
 `client::adopt_<driver>(&engine, &mut caller_sqlx_tx)` binds the generated calls to a transaction
@@ -124,7 +124,7 @@ client emits exactly the one for its compile-target dialect. Under the hood each
 *borrowed* `sqlx::Transaction` in a per-driver adapter implementing baseddsl's `DbRead` read+execute
 seam (never the owning `Tx`), run through the same dispatch core as the engine-owned rungs.
 
-## `for update` row locking — BUILT (slice 2, D119)
+## `for update` row locking
 
 A `.bsl` `get`/`list` query requests pessimistic row locks with a **trailing `for update`
 modifier**, after the clause list in a **block** query body:
@@ -141,7 +141,7 @@ written visibly (principle 1). Inline/bare query bodies do not carry it.
 **Per-dialect lowering** (over the `Dialect::for_update_clause` seam, so the spelling can't drift from
 the compile target): `FOR UPDATE`, appended last (after `ORDER BY`/`LIMIT`), on Postgres and the
 MySQL/MariaDB family; **a no-op on SQLite** — SQLite has no row-level lock, but its transaction locks
-the whole database (`BEGIN IMMEDIATE`/`EXCLUSIVE`, slice 1) and already serializes writers, so the lock
+the whole database (`BEGIN IMMEDIATE`/`EXCLUSIVE`) and already serializes writers, so the lock
 intent is honored at the transaction boundary rather than per row. The no-op is documented, never
 silently misleading (principle 9).
 
@@ -187,42 +187,3 @@ both). On **SQLite** every wait mode is the **same documented no-op** as plain `
 has no row-level lock, so there is no already-locked row to skip or fail fast on — its whole-database
 transaction lock serializes writers at the boundary regardless. Consistent with the plain-`for update`
 no-op, never silently misleading (principle 9).
-
-## What shipped (slice 1)
-
-`TxOptions`/`Isolation`/`AccessMode` (applied per dialect via the `Dialect` seam), `Engine::begin`
-→ `Transaction` (rung 2), the managed `client::transaction` / `transaction_retrying` (rung 1), the
-`Transaction::client()` accessor, and the `TxTransport` transaction-bound transport the generated
-client runs on. The central runtime refactor factors dispatch so a request runs against a
-**provided open transaction** (`dispatch_on` / `run_mutation_on`) instead of a fresh
-auto-committing checkout; the auto-commit path is unchanged. Implementation: D118.
-
-## What shipped (slice 2)
-
-The `for update` locking-read modifier + its `TxBound` compile-time confinement (the built section
-above): parser (trailing `for update` in the block query body) → AST (`Statement.for_update`) → sema
-(the four E-codes E0315–E0318) → codegen (`Dialect::for_update_clause` seam + `SELECT … FOR UPDATE`
-emission; the `TxBound` marker trait + confined `impl<T: Transport + TxBound> Client<T>` block, with
-`impl TxBound for TxTransport` under the embedded bridge) → fmt round-trip → LSP keyword completion.
-Proven live on Postgres (two concurrent transactions: B's `for update` read blocks until A commits, then
-observes A's committed write). Implementation: D119.
-
-## What shipped (slice 3) — the feature is COMPLETE
-
-The BYO `adopt` interop rung (the built section above): per-driver borrowed `DbRead` adapters
-(`AdoptedPg` / `AdoptedSqlite` / `AdoptedMaria`) over a caller-owned `sqlx::Transaction`, wrapped in the
-`AdoptedTransport<D>` transport and run through the same dispatch core (`dispatch_on` generalized from a
-`Tx` to any `DbRead`, so an engine-owned transaction and a borrowed adopted one take the identical path);
-the generic adopted `Transport` + `TxBound` impls and the one per-dialect `#[cfg]`-gated `adopt_*`
-constructor in codegen; `based_runtime` re-exports `sqlx` so a consumer names the same driver types.
-Proven live (raw app write + baseddsl `for update` read + mutation on one caller-owned transaction, atomic
-on commit, discarded together on rollback) on Postgres and SQLite, and demonstrated end-to-end in the
-flagship axum-helpdesk (`resolve_with_audit` → `POST /tickets/{id}/resolve`, in the smoke). Implementation:
-D120. With this the three-rung transaction seam (D118–D120) is complete.
-
-The `for update nowait` / `for update skip locked` wait modes shipped as the documented micro-follow-on
-(the wait-mode section under `for update` above): parser (the optional `nowait` / `skip locked` after
-`for update`) → AST (`Statement.for_update: Option<LockWait>`) → codegen (`Dialect::for_update_clause`
-spells each mode, no-op on SQLite for all) → fmt/LSP round-trip. Proven live on Postgres (`skip locked`
-returns the unlocked rows, `nowait` errors fast on a locked row) and as a no-op on SQLite. The
-three-rung transaction seam plus its locking-read modifiers are now complete.

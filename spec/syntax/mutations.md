@@ -254,9 +254,9 @@ on MySQL (no `INSERT … RETURNING`). An **unbound** create does no such re-sele
   model reuses `unknown_field` (`E0111`).
 
 ## Scope acknowledgement (`scoped` / `unscoped`)
-A mutation whose target model is in a scope **must** acknowledge it (auth.md Handle 2 / D46), exactly
+A mutation whose target model is in a scope **must** acknowledge it (auth.md Handle 2), exactly
 like a query — `scoped Name` (accept) or `unscoped("reason")` (opt out), else `E0182`. The clause sits
-after any `guard`, before the body. A model with several `@scope` alternatives (OR, D47) is satisfied by
+after any `guard`, before the body. A model with several `@scope` alternatives (OR) is satisfied by
 naming **one**. On a scoped `create` the scope columns are engine-managed (auto-set from `$ctx`, never a
 param — assigning one is `E0181`); the create **must satisfy ≥1 alternative** (all axes of some `@scope`
 set, so no row lands unowned), else `E0186`:
@@ -276,7 +276,6 @@ those guards) matched nothing: a wrong id, or an id another scope owns — the m
 `not_found` (`404`) and the whole transaction rolls back, so nothing in the body survives the miss;
 the caller gets a typed error, never an empty success. The response is identical whether the row is
 absent or out of scope, so existence never leaks across a scope boundary.
-(Implementation: D12 + D58 + D92.)
 
 ## Acknowledgement (`-> ok`) — destructive mutations
 A **real DELETE** (a plain-model `delete` or `hard delete`) removes the row, so there is no
@@ -292,7 +291,7 @@ OpenAPI advertises the shared empty `Ack` schema. A DELETE that matches **no row
 id another scope owns — is the same `not_found` (`404`) rollback as a surviving write's empty
 read-back, with the same no-existence-leak response.
 
-**`-> ok` is the universal opt-out of read-back** (broadened in BW1 from real-DELETE-only): *any*
+**`-> ok` is the universal opt-out of read-back:** *any*
 mutation may forfeit its declared-shape return with `-> ok` — a bulk `create Model[] from $rows -> ok`
 is the motivating case (a large load skips echoing every row back). The primary model (scope, sharding)
 is the first engine-known write's. The **zero-row 404** still fires only for a filtered **real DELETE**
@@ -309,4 +308,4 @@ The remaining rules (one way to say each thing):
 - `-> ok` on a query is an error (`E0222`) — a query returns data.
 
 ## Read-decide-write
-Not in the DSL. Use the host-language `transaction(closure)` seam: engine owns the boundary (commit on Ok, rollback on Err/panic, always release); caller writes logic; inside, queries are the same safe queries bound to the tx. Full design — the three rungs (managed closure, explicit handle, BYO `adopt`), isolation levels, and `for update` locking — in **syntax/transactions.md** (D118).
+Not in the DSL. Use the host-language `transaction(closure)` seam: engine owns the boundary (commit on Ok, rollback on Err/panic, always release); caller writes logic; inside, queries are the same safe queries bound to the tx. Full design — the three rungs (managed closure, explicit handle, BYO `adopt`), isolation levels, and `for update` locking — in **syntax/transactions.md**.

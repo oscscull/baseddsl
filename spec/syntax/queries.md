@@ -108,11 +108,11 @@ delivered one at a time (exports, large scans). Body verb is still `list`; wire 
 contract in streaming.md.
 
 ## Scope acknowledgement (`scoped` / `unscoped`)
-If a query's target model is in a scope (`@scope Name`, auth.md Handle 2 / D46), the signature **must**
+If a query's target model is in a scope (`@scope Name`, auth.md Handle 2), the signature **must**
 say so — `scoped Name` to accept the standing filter, or `unscoped("reason")` to opt out. Writing
 neither is `E0182` (the contract is too important to be true by omission). Both sit after the return
 type; a query reaching a second scoped model names both (`scoped Tenant, Region`). A model with several
-`@scope` alternatives (OR, D47) is satisfied by naming **one** of them — a `Post` scoped by page *or*
+`@scope` alternatives (OR) is satisfied by naming **one** of them — a `Post` scoped by page *or*
 author: `posts_on_page … scoped Page` / `my_posts … scoped Author`, each fully confined. See auth.md.
 ```
 query order_by_id(id) -> OrderCard scoped Tenant;
@@ -185,4 +185,4 @@ Distinct is about the *projected tuple*, so:
 filter active = not banned and deleted_at = null;
 filter in_city(c) = address.city.name = $c;
 ```
-Same predicate language as `where`, soft-delete injection, and auth scope. One expression type everywhere — never separate grammars. A filter param is referenced as `$c` inside the body — the same `$`-means-bound-parameter rule as everywhere else ("$param vs column", above). A filter has no model of its own; its column paths (`address.city.name`) resolve against whichever model calls it (D14).
+Same predicate language as `where`, soft-delete injection, and auth scope. One expression type everywhere — never separate grammars. A filter param is referenced as `$c` inside the body — the same `$`-means-bound-parameter rule as everywhere else ("$param vs column", above). A filter has no model of its own; its column paths (`address.city.name`) resolve against whichever model calls it.
