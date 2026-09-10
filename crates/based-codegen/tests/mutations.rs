@@ -177,10 +177,10 @@ fn delete_on_soft_model_rewrites_to_tombstone_update() {
         }
         "#);
     assert!(
-        out.contains("-- delete (soft): tombstone, never a real DELETE"),
+        out.contains("-- delete (soft): tombstone"),
         "\n{out}"
     );
-    // the tombstone write + updated bump; never a real DELETE.
+    // the tombstone write + updated bump.
     assert!(
         out.contains("UPDATE `order`\nSET `order`.`deleted_at` = CURRENT_TIMESTAMP, `order`.`updated_at` = CURRENT_TIMESTAMP"),
         "\n{out}"
