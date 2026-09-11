@@ -26,6 +26,19 @@ fn get_on_unique_column_ok() {
 }
 
 #[test]
+fn explicit_query_verb_must_match_return_cardinality() {
+    let (_, d) = analyze(
+        r#"
+        Product { id: Id, name: text }
+        shape P from Product { name }
+        query scalar(id) -> P { list Product where (id = $id); }
+        query collection(id) -> P[] { get Product where (id = $id); }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0203", "E0203"]);
+}
+
+#[test]
 fn unknown_return_type() {
     let (_, d) = analyze("query q(id) -> Nope;");
     assert_eq!(errors(&d), ["E0140"]);

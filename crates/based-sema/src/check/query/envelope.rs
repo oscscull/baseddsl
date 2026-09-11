@@ -12,10 +12,39 @@ pub(super) fn check_query_envelope(
 ) {
     let engine_built = !shape.raw && !shape.agg;
     check_stream_get_cardinality(q, shape, sink);
+    check_query_cardinality(q, shape, sink);
     check_get_keyed(q, ti, shape, engine_built, cx, sink);
     check_stream_page_exclusive(q, shape, sink);
     check_nondet_sort(q, ti, shape, engine_built, cx, sink);
     check_keyset_keyless(q, ti, engine_built, cx, sink);
+}
+
+/// An explicit body verb must agree with the declared return envelope. Bare and inline
+/// queries infer their verb from that envelope, but a block can otherwise pair `list` with a
+/// scalar client type (or `get` with a collection) and defer the mismatch to wire decoding.
+fn check_query_cardinality(q: &Query, shape: &QueryShape, sink: &mut Sink) {
+    if q.ret.stream || q.ret.many == (shape.verb == Verb::List) {
+        return;
+    }
+
+    let (message, note) = if q.ret.many {
+        (
+            format!(
+                "list query `{}` uses `get` — the declared return is many rows",
+                q.name.node
+            ),
+            "use `list`, or drop `[]` for a scalar return",
+        )
+    } else {
+        (
+            format!(
+                "scalar query `{}` uses `list` — the declared return is one row",
+                q.name.node
+            ),
+            "use `get`, or add `[]` for a list return",
+        )
+    };
+    sink.error_note(code::QUERY_CARDINALITY, q.span, message, note);
 }
 
 /// A stream is a list delivered incrementally; a `get` body is a cardinality mismatch.
