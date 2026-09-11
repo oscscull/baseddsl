@@ -1,8 +1,6 @@
 //! Precedence-driven reprinting of the recursive expression forms with minimal
 //! parentheses: computed shape expressions, predicates, and assignment arithmetic.
 
-use based_ast::*;
-
 use crate::*;
 
 /// Reprint a computed shape expression with minimal parentheses. Precedence, tightest

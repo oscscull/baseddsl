@@ -2,8 +2,6 @@
 //! anchors to for each construct, a declaration's span, and the model-header
 //! item (decorator or `@scope` ref) the header lays out in source order.
 
-use based_ast::*;
-
 use crate::*;
 
 /// The leading ident's start byte of a shape field, used to place comments between the

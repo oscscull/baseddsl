@@ -1,8 +1,6 @@
 //! Reprint an enum declaration on one line, variants comma-joined, preserving
 //! explicit string/int variant values.
 
-use based_ast::*;
-
 use crate::*;
 
 /// `enum Name { a, b = "B", c }` — one line, variants comma-joined (a closed value set
