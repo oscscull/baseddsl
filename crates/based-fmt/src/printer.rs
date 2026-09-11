@@ -2,8 +2,6 @@
 //! walk each declaration, and emit body lines in the canonical layout while
 //! reproducing full-line comments in their original slots.
 
-use based_ast::*;
-
 use crate::*;
 
 /// Shapes wider than this (rendered on one line) break onto a line per field.

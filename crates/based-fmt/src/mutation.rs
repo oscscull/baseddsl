@@ -2,8 +2,6 @@
 //! its assignment block, an `on conflict … update` branch, and the start-byte a
 //! comment anchors to for a write.
 
-use based_ast::*;
-
 use crate::*;
 
 pub(crate) fn write_line(w: &WriteStmt) -> String {

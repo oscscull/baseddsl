@@ -1,7 +1,5 @@
 //! Reprint a named `filter` declaration: name, optional params, and its predicate body.
 
-use based_ast::*;
-
 use crate::*;
 
 pub(crate) fn named_filter(f: &NamedFilter) -> String {

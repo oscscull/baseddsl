@@ -1,8 +1,6 @@
 //! Reprint a `scope` declaration and the `scoped`/`unscoped` acknowledgement that
 //! trails a query or mutation signature.
 
-use based_ast::*;
-
 use crate::*;
 
 pub(crate) fn scope_decl(s: &ScopeDecl) -> String {

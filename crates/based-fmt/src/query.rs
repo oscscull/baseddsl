@@ -2,8 +2,6 @@
 //! (where/order/page/group by/having/unindexed), the return type, the `for update`
 //! modifier, and the parameter list.
 
-use based_ast::*;
-
 use crate::*;
 
 pub(crate) fn statement_inline(stmt: &Statement) -> String {

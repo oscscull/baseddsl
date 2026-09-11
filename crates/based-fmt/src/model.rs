@@ -2,8 +2,6 @@
 //! (name/type/inverse alignment, modifiers, relation and FK annotations), and the
 //! `field_of` member accessor.
 
-use based_ast::*;
-
 use crate::*;
 
 pub(crate) fn decorator(d: &Decorator) -> String {

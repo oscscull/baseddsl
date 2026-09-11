@@ -1,8 +1,6 @@
 //! Reprint a shape's fields, inline and block form (bare, rename, nest, flatten,
 //! spread), the value a rename maps to, and an aggregate call.
 
-use based_ast::*;
-
 use crate::*;
 
 pub(crate) fn shape_field_inline(f: &ShapeField) -> String {
