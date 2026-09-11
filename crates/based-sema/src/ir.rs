@@ -111,6 +111,7 @@ pub mod code {
     pub const STREAM_GET: &str = "E0200"; // stream body verb must be `list` (`get` is a cardinality mismatch)
     pub const STREAM_PAGE: &str = "E0201"; // `page` forbidden on a stream query (bounded chunk vs unbounded pass)
     pub const STREAM_MUTATION: &str = "E0202"; // a mutation return never streams
+    pub const QUERY_CARDINALITY: &str = "E0203"; // explicit get/list verb must match the declared one/many return envelope
 
     // whole-query raw bodies (raw.md's third level, E021x)
     pub const RAW_QUERY_PARAM: &str = "E0210"; // a raw-bodied query's param must be typed and unbound (nothing to infer from / bind against)
