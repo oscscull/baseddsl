@@ -27,4 +27,7 @@ cargo run   # from inside an example project
 
 ## License
 
-[AGPL-3.0](LICENSE).
+Based source code, including the Rust crates and VS Code extension, is licensed
+under [AGPL-3.0-only](LICENSE). See [generated-output terms](LICENSE-GENERATED.md)
+for Rust clients, SQL, OpenAPI documents, and migration artifacts produced from
+your schemas. Your schemas and data remain yours.

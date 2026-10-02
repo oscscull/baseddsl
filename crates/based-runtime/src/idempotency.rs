@@ -88,6 +88,9 @@ pub enum KeyState {
 /// hook the mutation's cancellation `Drop` guard fires, and `Drop` cannot `.await`. A store
 /// that needs I/O to release implements it as fire-and-forget through its own owned handle
 /// (see [`MemStore`] — an immediate in-memory removal — for the trivial case).
+// Newer Clippy versions flag `#[must_use]` emitted by async_trait on futures,
+// whose return values are already `must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait IdempotencyStore: Send + Sync {
     /// Atomically claim `(callable, key)` for this attempt, or report its existing
@@ -152,6 +155,7 @@ pub enum TxClaim {
 /// (pool pressure under a retry storm). [`claim`](Self::claim) runs right after the
 /// mutation's `begin`, [`record`](Self::record) right before its `commit`, both on the
 /// mutation connection.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait TxIdempotency: Send + Sync {
     /// Claim `(callable, key)` on the mutation's connection, inside its transaction, before

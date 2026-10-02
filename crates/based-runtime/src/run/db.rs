@@ -22,6 +22,8 @@ pub type ShapedStream =
 /// shape — a one-shot caller collects), [`execute`](DbRead::execute) runs one write
 /// statement. Every method is fallible: a dependable driver surfaces
 /// connection/query failures rather than panicking.
+// async_trait emits `#[must_use]` on a future, which is already `must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DbRead: Send {
     /// Run a SELECT and stream its rows. The stream borrows the connection; errors
@@ -34,6 +36,7 @@ pub trait DbRead: Send {
 
 /// A checked-out connection. [`begin`](Db::begin) consumes it into a [`Tx`] — the
 /// typestate that makes an open transaction impossible to leak back to the pool.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Db: DbRead {
     /// Open the transaction a mutation body runs in, consuming the connection. Uses the
@@ -55,6 +58,7 @@ pub trait Db: DbRead {
 /// commit rolls back or discards the connection (never pooled with an open tx), so a
 /// write can only survive via `commit` — cancellation at any await point cannot
 /// double-write.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Tx: DbRead {
     async fn commit(self: Box<Self>) -> Result<(), DbError>;
@@ -74,6 +78,7 @@ pub trait Tx: DbRead {
 /// [`crate::driver::ShardRouter`] is one implementation; the Postgres / SQLite
 /// backends are others (the [`Db`] trait is already dialect-agnostic — it speaks
 /// positional SQL + [`SqlValue`], not a wire protocol).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Backend: Send + Sync {
     /// Check out a connection for the shard the key routes to. A failure (pool
