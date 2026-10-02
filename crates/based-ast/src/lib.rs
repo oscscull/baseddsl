@@ -337,7 +337,7 @@ pub enum Primitive {
     Float,
     /// Fixed-precision base-10 numeric (`decimal(p, s)` — precision `p`, scale `s`; bare
     /// `decimal` defaults to `(38, 9)`). Carried lossless as a string end-to-end (wire
-    /// JSON string, client `rust_decimal::Decimal`), never through an `f64`. `precision`
+    /// JSON string, generated client `Decimal`), never through an `f64`. `precision`
     /// and `scale` are compile-time literals (sema validates `1 ≤ s ≤ p ≤ 38`).
     Decimal {
         precision: u32,

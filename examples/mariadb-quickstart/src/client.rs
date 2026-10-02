@@ -20,6 +20,53 @@ pub type Time = String;
 pub type Bytes = String;
 pub type Json = serde_json::Value;
 
+/// A wire boolean. A `bool` column rides the wire as a real JSON `true`/`false` on
+/// Postgres, but as the `0`/`1` of its backing integer on MySQL and SQLite (which lose the
+/// boolean type at the value level). This accepts either form so the same client decodes a
+/// response from any dialect; it serializes back as a real JSON bool.
+struct BoolWire(bool);
+
+impl<'de> Deserialize<'de> for BoolWire {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = bool;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a boolean or 0/1")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<bool, E> {
+                Ok(v)
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<bool, E> {
+                Ok(v != 0)
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<bool, E> {
+                Ok(v != 0)
+            }
+        }
+        d.deserialize_any(V).map(BoolWire)
+    }
+}
+
+fn de_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    BoolWire::deserialize(d).map(|b| b.0)
+}
+
+fn de_bool_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(Option::<BoolWire>::deserialize(d)?.map(|b| b.0))
+}
+
+fn de_bool_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<bool>, D::Error> {
+    Ok(Vec::<BoolWire>::deserialize(d)?
+        .into_iter()
+        .map(|b| b.0)
+        .collect())
+}
+
+fn de_bool_opt_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<bool>>, D::Error> {
+    Ok(Option::<Vec<BoolWire>>::deserialize(d)?.map(|v| v.into_iter().map(|b| b.0).collect()))
+}
+
 /// A typed id: the primary key of entity `E`. The wire repr is honest to the entity's
 /// key strategy — a `uuid`/`ulid` id is a JSON string, a `serial` id a JSON number — so
 /// this (de)serializes transparently as either (`numeric` records which). The `E` marker
@@ -351,7 +398,7 @@ pub struct OrgRow {
 pub struct OrderCard {
     pub id: Id<entity::Order>,
     pub status: String,
-    pub total: rust_decimal::Decimal,
+    pub total: Decimal,
     pub placed_by: OrderCardPlacedBy,
 }
 
@@ -413,7 +460,7 @@ pub const RECENT_ORDERS_ROUTE: &str = "/q/recent_orders";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderInput {
     pub buyer: Id<entity::User>,
-    pub total: rust_decimal::Decimal,
+    pub total: Decimal,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderCtx {
@@ -950,5 +997,37 @@ pub fn adopt_mariadb<'a>(
             engine.clone(),
             based_runtime::AdoptedMaria::new(tx),
         ),
+    }
+}
+
+/// An exact decimal backed by `bigdecimal::BigDecimal`. JSON always carries a
+/// plain decimal string; no float conversion or scientific notation enters SQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decimal(bigdecimal::BigDecimal);
+
+impl std::str::FromStr for Decimal {
+    type Err = bigdecimal::ParseBigDecimalError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
+    }
+}
+
+impl std::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.to_plain_string())
+    }
+}
+
+impl Serialize for Decimal {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_plain_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Decimal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }

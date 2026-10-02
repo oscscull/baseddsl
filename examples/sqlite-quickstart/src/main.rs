@@ -261,10 +261,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// A whole-dollar amount as a money `Decimal` (scale 2, e.g. `100` -> `100.00`). The
-/// generated client types `total` as `rust_decimal::Decimal` and carries it as an exact
+/// generated client types `total` as `Decimal` and carries it as an exact
 /// string on the wire.
-fn money(dollars: i64) -> rust_decimal::Decimal {
-    rust_decimal::Decimal::new(dollars * 100, 2)
+fn money(dollars: i64) -> client::Decimal {
+    format!("{dollars}.00").parse().expect("valid money")
+}
+
+#[cfg(test)]
+mod decimal_tests {
+    use super::client;
+
+    #[test]
+    fn generated_decimal_preserves_full_domain_as_json_strings() {
+        let values = [
+            "12345678901234567890123456789.123456789", // decimal(38,9)
+            "0.00000000000000000000000000000000000001", // decimal(38,38)
+            "-12345678901234567890123456789.123456789",
+            "0.00",
+            "19.90",
+        ];
+        for value in values {
+            let amount: client::Decimal = value.parse().unwrap();
+            let json = serde_json::to_value(&amount).unwrap();
+            assert_eq!(json, serde_json::json!(value));
+            let decoded: client::Decimal = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.to_string(), value);
+        }
+        let missing: Option<client::Decimal> = serde_json::from_str("null").unwrap();
+        assert!(missing.is_none());
+        assert!(serde_json::from_str::<client::Decimal>("1.25").is_err());
+    }
 }
 
 /// Place an order for `buyer` at `total`, acting as `org`; return its id.

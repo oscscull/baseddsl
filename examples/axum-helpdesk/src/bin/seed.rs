@@ -11,7 +11,7 @@ use based_runtime::guard::{GuardVerdict, Guards};
 use based_runtime::id::UuidGen;
 use based_runtime::shard::PoolConfig;
 use based_runtime::{Compiled, Engine, PgRouter};
-use rust_decimal::Decimal;
+use client::Decimal;
 use std::path::PathBuf;
 
 use client::entity;
