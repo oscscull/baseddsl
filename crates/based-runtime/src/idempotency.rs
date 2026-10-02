@@ -155,6 +155,7 @@ pub enum TxClaim {
 /// (pool pressure under a retry storm). [`claim`](Self::claim) runs right after the
 /// mutation's `begin`, [`record`](Self::record) right before its `commit`, both on the
 /// mutation connection.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait TxIdempotency: Send + Sync {
     /// Claim `(callable, key)` on the mutation's connection, inside its transaction, before
