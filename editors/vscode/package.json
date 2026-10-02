@@ -3,6 +3,7 @@
   "displayName": "Based DSL",
   "description": "Language support for the Based DSL (.bsl): diagnostics, inlay hints, and hover via based-lsp.",
   "version": "0.1.1",
+  "license": "AGPL-3.0-only",
   "publisher": "based",
   "engines": {
     "vscode": "^1.75.0"

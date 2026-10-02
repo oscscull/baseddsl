@@ -1,5 +1,7 @@
 # Based DSL — VS Code extension
 
+Licensed under [AGPL-3.0-only](LICENSE).
+
 Language support for the Based DSL (`.bsl`). It registers the `bsl` language, gives
 you minimal syntax highlighting + bracket/comment editing, and — the point — launches
 the `based-lsp` language server so you get live **diagnostics**, **inlay hints** (inferred
