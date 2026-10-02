@@ -319,6 +319,7 @@ dependencies = [
  "based-manifest",
  "based-parser",
  "based-sema",
+ "bigdecimal",
  "chrono",
  "futures-core",
  "futures-util",

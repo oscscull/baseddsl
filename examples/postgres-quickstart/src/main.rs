@@ -268,10 +268,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// A whole-dollar amount as a money `Decimal` (scale 2, e.g. `100` -> `100.00`). The
-/// generated client types `total` as `rust_decimal::Decimal` and carries it as an exact
+/// generated client types `total` as `Decimal` and carries it as an exact
 /// string on the wire.
-fn money(dollars: i64) -> rust_decimal::Decimal {
-    rust_decimal::Decimal::new(dollars * 100, 2)
+fn money(dollars: i64) -> client::Decimal {
+    format!("{dollars}.00").parse().expect("valid money")
 }
 
 /// Place an order for `buyer` at `total`, acting as `org`; return its id.

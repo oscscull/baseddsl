@@ -27,6 +27,9 @@ pub(crate) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions
     if opts.embedded {
         emit_embedded_bridge(&mut out, &callables, opts, has_stream, has_mutation);
     }
+    if out.contains(": Decimal") || out.contains("<Decimal>") {
+        out.push_str(DECIMAL);
+    }
     out
 }
 

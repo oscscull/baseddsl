@@ -452,7 +452,7 @@ async fn restore_ticket(
 #[derive(Deserialize)]
 struct TimeBody {
     hours: f64,
-    amount: rust_decimal::Decimal,
+    amount: client::Decimal,
     note: String,
     logged_at: String,
 }
