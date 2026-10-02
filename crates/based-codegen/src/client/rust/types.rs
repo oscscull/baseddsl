@@ -172,11 +172,9 @@ pub(super) fn primitive(p: Primitive) -> &'static str {
         // path uses) rides the wire as a JSON number.
         Primitive::Serial => "i64",
         Primitive::Float => "f64",
-        // A decimal rides the wire as a JSON string; the `serde-str` feature (in the
-        // consumer's Cargo.toml) makes `rust_decimal::Decimal` (de)serialize as a
-        // string, so no digit is lost. Referenced by full path — a schema with no
-        // decimal never mentions `rust_decimal`, so the dep is needed only when used.
-        Primitive::Decimal { .. } => "rust_decimal::Decimal",
+        // The generated Decimal wrapper stores BigDecimal and emits a plain JSON
+        // string, including values beyond rust_decimal's 96-bit mantissa.
+        Primitive::Decimal { .. } => "Decimal",
     }
 }
 

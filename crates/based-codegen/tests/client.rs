@@ -884,14 +884,21 @@ fn int_enum_emits_explicit_discriminants_and_a_manual_serde_impl() {
 }
 
 #[test]
-fn decimal_field_emits_rust_decimal_and_float_emits_f64() {
+fn decimal_field_emits_exact_decimal_and_float_emits_f64() {
     let out = gen(r#"
         Ledger { id: Id, price: decimal(12, 2), score: float }
         shape LedgerRow from Ledger { price, score }
         query ledger() -> LedgerRow[];
         "#);
-    assert!(out.contains("pub price: rust_decimal::Decimal,"), "\n{out}");
+    assert!(out.contains("pub price: Decimal,"), "\n{out}");
+    assert!(out.contains("pub struct Decimal(bigdecimal::BigDecimal);"));
     assert!(out.contains("pub score: f64,"), "\n{out}");
+}
+
+#[test]
+fn schema_without_decimal_has_no_bigdecimal_dependency() {
+    let out = gen("Ledger { id: Id, score: float }");
+    assert!(!out.contains("bigdecimal::"));
 }
 
 #[test]
@@ -1052,16 +1059,10 @@ fn aggregate_shape_types_each_function() {
         "#);
     // count → non-null i64; sum/min/max keep the column type but nullable; avg → f64.
     assert!(out.contains("pub orders: i64"), "\n{out}");
-    assert!(
-        out.contains("pub revenue: Option<rust_decimal::Decimal>"),
-        "\n{out}"
-    );
+    assert!(out.contains("pub revenue: Option<Decimal>"), "\n{out}");
     assert!(out.contains("pub units: Option<i64>"), "\n{out}");
     assert!(out.contains("pub avg_qty: Option<f64>"), "\n{out}");
-    assert!(
-        out.contains("pub biggest: Option<rust_decimal::Decimal>"),
-        "\n{out}"
-    );
+    assert!(out.contains("pub biggest: Option<Decimal>"), "\n{out}");
 }
 
 #[test]
@@ -1146,10 +1147,7 @@ fn computed_shape_fields_type_by_inferred_expression() {
     // int arithmetic -> i64; int*decimal promotes to decimal; concat -> String; a CASE of
     // text branches -> String; a CASE with a `null` branch is nullable.
     assert!(out.contains("pub net: i64,"), "\n{out}");
-    assert!(
-        out.contains("pub amount: rust_decimal::Decimal,"),
-        "\n{out}"
-    );
+    assert!(out.contains("pub amount: Decimal,"), "\n{out}");
     assert!(out.contains("pub label: String,"), "\n{out}");
     assert!(out.contains("pub tier: String,"), "\n{out}");
     assert!(out.contains("pub maybe: Option<String>,"), "\n{out}");
