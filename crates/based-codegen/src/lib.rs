@@ -3,8 +3,8 @@
 //! SQL **DDL** ([`sql::ddl`]): `CheckedSchema` -> `CREATE TABLE`. SQL **DML**:
 //! queries -> parameterized `SELECT`s ([`sql::dml`]) and mutations ->
 //! INSERT/UPDATE/DELETE ([`sql::mutations`]). The typed **client**
-//! ([`client`]): `CheckedSchema` -> a Rust client module. The **OpenAPI** spec
-//! ([`openapi`]): `CheckedSchema` -> one OpenAPI document over the same wire, so
+//! (`client`, enabled by the default `client` feature): `CheckedSchema` -> a Rust client module. The **OpenAPI** spec
+//! (`openapi`, enabled by the default `openapi` feature): `CheckedSchema` -> one OpenAPI document over the same wire, so
 //! `openapi-generator` yields clients in any language (polyglot via one emitter, not
 //! N). The **migration** engine ([`migrate`]): `CheckedSchema` -> a canonical
 //! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list. Each
@@ -14,9 +14,11 @@
 //! resolution facts (table names, FK columns, soft-delete mode) — those live on the
 //! IR. It only picks physical representations (SQL types, index names) per dialect.
 
+#[cfg(feature = "client")]
 pub mod client;
 mod dialect_check;
 pub mod migrate;
+#[cfg(feature = "openapi")]
 pub mod openapi;
 pub mod sql;
 

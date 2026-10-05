@@ -58,12 +58,8 @@ ctrlc = { version = "3", features = ["termination"] }
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
-# Optimize build scripts + proc-macros only: they compile once but RUN on every build, so paying
-# optimization here speeds every later compile. Dependencies stay at opt-level 0 — optimizing
-# their runtime buys nothing when the tests they serve execute in seconds, and cost ~36min of
-# cold build when it was tried.
-[profile.dev.build-override]
-opt-level = 3
+# Keep Cargo's unoptimized build-script/proc-macro default. Optimizing every macro
+# at level 3 nearly doubles cold test compilation here; see docs/compile-time.md.
 
 [profile.release]
 lto = "thin"

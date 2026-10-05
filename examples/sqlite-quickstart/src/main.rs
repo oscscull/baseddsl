@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // schema, a connection `Backend`, and an id generator, and runs each call through the
     // same async dispatch core. `SqliteBackend::open` is the whole database setup — bundled
     // SQLite, file created if absent. `SeqIdGen` yields readable ids for a demo; production
-    // uses `UuidGen` (behind the runtime's `serve` feature) or any custom `IdGen`.
+    // uses `UuidGen` (behind the runtime's `id-gen` feature) or any custom `IdGen`.
     let engine = Engine::new(
         compiled,
         SqliteBackend::open(&db_path)?,

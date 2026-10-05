@@ -139,3 +139,34 @@ fn re_running_with_the_ack_completes_the_chain() {
         "stdout: {stdout}"
     );
 }
+
+#[cfg(any(not(feature = "mariadb"), not(feature = "postgres")))]
+fn assert_missing_driver(dialect: &str, feature: &str) {
+    let s = Scratch::new(dialect);
+    s.write("based.toml", &format!("dialect = \"{dialect}\"\n"));
+    s.write("model.bsl", "Widget { id: Id }\n");
+    for command in [&["migrate", "status"][..], &["serve"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_based"))
+            .args(command)
+            .arg(&s.0)
+            .args(["--database-url", "unused"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(&format!("no {feature} driver")), "{error}");
+    }
+}
+
+#[cfg(not(feature = "mariadb"))]
+#[test]
+fn reduced_build_rejects_mariadb_and_mysql_execution() {
+    assert_missing_driver("mariadb", "mariadb");
+    assert_missing_driver("mysql", "mariadb");
+}
+
+#[cfg(not(feature = "postgres"))]
+#[test]
+fn reduced_build_rejects_postgres_execution() {
+    assert_missing_driver("postgres", "postgres");
+}

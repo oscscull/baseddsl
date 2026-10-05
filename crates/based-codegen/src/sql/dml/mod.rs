@@ -15,7 +15,8 @@ use crate::Dialect;
 
 mod aggregate;
 mod columns;
-mod computed;
+#[cfg(any(feature = "client", feature = "openapi"))]
+mod computed_result;
 mod count;
 mod expr;
 mod filter;
@@ -26,6 +27,7 @@ mod literals;
 mod lock;
 mod lower;
 mod nest;
+mod numeric_cast;
 mod ops;
 mod order;
 mod outputs;
@@ -46,13 +48,15 @@ mod wire;
 
 pub(crate) use aggregate::*;
 pub(crate) use columns::*;
-pub(crate) use computed::*;
+#[cfg(any(feature = "client", feature = "openapi"))]
+pub(crate) use computed_result::computed_result;
 pub(crate) use count::*;
 pub(crate) use join_on::*;
 pub(crate) use joins::*;
 pub(crate) use keyset::*;
 pub(crate) use literals::*;
 pub(crate) use lock::*;
+pub(crate) use numeric_cast::{double_cast_type, int_cast_type};
 pub(crate) use ops::*;
 pub(crate) use order::*;
 pub(crate) use outputs::*;
