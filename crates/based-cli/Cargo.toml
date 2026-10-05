@@ -9,6 +9,13 @@ rust-version.workspace = true
 name = "based"
 path = "src/main.rs"
 
+[features]
+# The installed CLI keeps every database driver. Local infra-free checks disable
+# these defaults; SQLite and the HTTP listener remain available in that build.
+default = ["mariadb", "postgres"]
+mariadb = ["based-runtime/mariadb"]
+postgres = ["based-runtime/postgres"]
+
 [dependencies]
 based-ast = { workspace = true }
 based-diagnostics = { workspace = true }
@@ -19,15 +26,13 @@ based-sema = { workspace = true }
 based-codegen = { workspace = true }
 based-facts = { workspace = true }
 based-version = { workspace = true }
-# The runtime, with the HTTP listener + all three concrete drivers, so `based serve` can
+# The runtime, with the HTTP listener + SQLite (server drivers are default features), so `based serve` can
 # stand the schema up as a live RPC service and `based migrate apply` can apply migrations
 # against whichever dialect the manifest targets (MariaDB/SQLite/Postgres). The front-end
 # commands — check/gen/facts/migrate gen|render — don't touch any of them.
 based-runtime = { path = "../based-runtime", features = [
     "serve",
-    "mariadb",
     "sqlite",
-    "postgres",
 ] }
 # The binary owns the async runtime: execution (serve, migrate apply/status) is native
 # async; the front-end commands just run on it.

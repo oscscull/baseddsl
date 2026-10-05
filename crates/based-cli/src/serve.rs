@@ -17,8 +17,9 @@ pub async fn cmd_serve(
     pool_min: usize,
     pool_max: usize,
 ) -> Result<(), CliError> {
-    use based_runtime::driver::{PoolConfig, ShardRouter};
     use based_runtime::http::{ServeConfig, TrustedHeaderContext};
+    #[cfg(any(feature = "mariadb", feature = "postgres"))]
+    use based_runtime::shard::PoolConfig;
     use based_runtime::Compiled;
 
     // Shard URLs: the repeated flag wins; else BASED_DATABASE_URL / DATABASE_URL.
@@ -34,11 +35,14 @@ pub async fn cmd_serve(
     // their conservative defaults (a saturated pool → fast 503, a runaway query
     // aborted). The pool is also the concurrency ceiling — requests past it wait at
     // most the checkout timeout, then fail fast.
+    #[cfg(any(feature = "mariadb", feature = "postgres"))]
     let pool = PoolConfig {
         min: pool_min,
         max: pool_max,
         ..PoolConfig::default()
     };
+    #[cfg(not(any(feature = "mariadb", feature = "postgres")))]
+    let _ = (pool_min, pool_max);
     let config = ServeConfig {
         listen: listen.to_string(),
     };
@@ -52,16 +56,22 @@ pub async fn cmd_serve(
     // one shared database), so it neither shards nor pools.
     let ctx = TrustedHeaderContext;
     match dialect {
+        #[cfg(feature = "mariadb")]
         Dialect::MariaDb | Dialect::MySql => {
-            let router = ShardRouter::new(&urls, pool)
+            let router = based_runtime::driver::ShardRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
             run_listener(compiled, router, ctx, config).await
         }
+        #[cfg(feature = "postgres")]
         Dialect::Postgres => {
             let router = based_runtime::PgRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
             run_listener(compiled, router, ctx, config).await
         }
+        #[cfg(not(feature = "mariadb"))]
+        Dialect::MariaDb | Dialect::MySql => Err(CliError::missing_driver("mariadb")),
+        #[cfg(not(feature = "postgres"))]
+        Dialect::Postgres => Err(CliError::missing_driver("postgres")),
         Dialect::Sqlite => {
             if urls.len() > 1 {
                 return Err(CliError::usage(format!(

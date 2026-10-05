@@ -32,6 +32,14 @@ enum Kind {
 }
 
 impl CliError {
+    /// A reduced development build must refuse an unavailable driver explicitly.
+    #[cfg(any(not(feature = "mariadb"), not(feature = "postgres")))]
+    pub fn missing_driver(feature: &str) -> Self {
+        Self::usage(format!(
+            "this build has no {feature} driver; rebuild based-cli with --features {feature}"
+        ))
+    }
+
     /// A usage/config mistake the caller must fix. Exit code 2.
     pub fn usage(message: impl Into<String>) -> Self {
         Self {

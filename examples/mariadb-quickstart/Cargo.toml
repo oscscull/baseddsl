@@ -9,10 +9,10 @@ publish = false
 
 [dependencies]
 # The engine: in-process `Engine`, the `ShardRouter`/`MariaDb` driver, and the production
-# uuid id generator. The `serve` feature pulls in `mariadb` (the concrete driver) *and*
+# uuid id generator. The `id-gen` feature pulls in `mariadb` (the concrete driver) *and*
 # `UuidGen` — MariaDB's native `UUID` id columns reject non-uuid ids, so a real embed uses
 # the same v4-uuid generator production does (never the deterministic `SeqIdGen`).
-based-runtime = { path = "../../crates/based-runtime", features = ["mariadb", "serve"] }
+based-runtime = { path = "../../crates/based-runtime", features = ["mariadb", "id-gen"] }
 # The engine is async; tokio's macro runtime drives `#[tokio::main]`.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # The generated client derives serde; the embedded bridge serializes the typed input.

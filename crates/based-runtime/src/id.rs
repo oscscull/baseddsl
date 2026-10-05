@@ -2,7 +2,7 @@
 //!
 //! A `create` binds its `id` to an engine-generated value (`:id` / `:id_<step>`);
 //! the runtime fills it from an [`IdGen`]. The trait is the seam: production uses the
-//! uuid generator ([`UuidGen`], behind the `serve` feature), while tests use the
+//! uuid generator ([`UuidGen`], behind the `id-gen` feature), while tests use the
 //! deterministic [`SeqIdGen`] so a planned INSERT's bound id is predictable.
 
 /// Produces fresh ids for engine-generated `id` columns. Called once per `create`
@@ -59,11 +59,11 @@ impl IdGen for SeqIdGen {
 /// globally unique — no coordination with the database, so a `create`'s id is known
 /// before the INSERT, which is what lets a `$name.id` step reference bind the same value
 /// the INSERT used. Stateless, so concurrent mints need no synchronization.
-#[cfg(feature = "serve")]
+#[cfg(feature = "id-gen")]
 #[derive(Default)]
 pub struct UuidGen;
 
-#[cfg(feature = "serve")]
+#[cfg(feature = "id-gen")]
 impl IdGen for UuidGen {
     fn next_id(&self) -> String {
         uuid::Uuid::new_v4().to_string()

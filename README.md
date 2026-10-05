@@ -21,6 +21,7 @@ cargo run   # from inside an example project
 ## Layout
 
 - [`docs/reference.md`](docs/reference.md) — the language reference (what to write).
+- [`docs/compile-time.md`](docs/compile-time.md) — build profiles, feature boundaries, and measured compilation costs.
 - [`spec/`](spec/) — language design docs; start with [`spec/principles.md`](spec/principles.md).
 - [`crates/`](crates/) — the Rust compiler + runtime workspace.
 - [`examples/`](examples/) — runnable quickstart projects.

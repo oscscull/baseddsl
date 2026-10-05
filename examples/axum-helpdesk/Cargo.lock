@@ -250,7 +250,6 @@ version = "0.1.12"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum",
  "base64",
  "based-ast",
  "based-codegen",
@@ -290,7 +289,7 @@ checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
 dependencies = [
  "autocfg",
  "libm",
- "num-bigint 0.4.8",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -1280,16 +1279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-bigint"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
-dependencies = [
- "num-integer",
- "num-traits",
-]
-
-[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1535,11 +1524,9 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "itoa",
- "num-bigint 0.5.1",
  "percent-encoding",
  "pin-project-lite",
  "ryu",
- "sha1_smol",
  "socket2",
  "tokio",
  "tokio-util",
@@ -1771,12 +1758,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1_smol"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1996,7 +1977,7 @@ dependencies = [
  "log",
  "md-5",
  "memchr",
- "num-bigint 0.4.8",
+ "num-bigint",
  "rand 0.10.2",
  "serde",
  "serde_json",

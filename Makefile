@@ -48,7 +48,7 @@ SQLITE_DB    ?= quickstart.db
 # throwaway `redis:7` in dev-db-up; a CI service container overrides it.
 REDIS_URL    ?= redis://127.0.0.1:16379
 
-.PHONY: ci check check-fast ensure-nextest ci-workspace ci-workspace-full ci-coloring ci-extension ci-image ci-live \
+.PHONY: ci check check-fast ensure-nextest ci-workspace ci-workspace-full ci-coloring ci-fast-features ci-extension ci-image ci-live \
         ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
         ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-reset dev-db-down
 
@@ -72,9 +72,9 @@ ensure-nextest:
 ## its cache is separate from the test build's), which runs in `make ci` + `make check`; and
 ## doctests (nextest doesn't run them), which run as the `--doc` step in `ci-workspace`/-full.
 ## No DB, no examples, no extension, no MariaDB/Postgres driver build.
-check-fast: ci-coloring ensure-nextest
+check-fast: ci-coloring ci-fast-features ensure-nextest
 	$(CARGO) fmt --check
-	$(NEXTEST) --workspace --features sqlite,serve
+	$(NEXTEST) --workspace --no-default-features --features sqlite,serve
 
 ## Full pre-commit gate: the full workspace at --all-features, then everything DB-backed
 ## (started here; left running for fast re-runs — `make dev-db-down` cleans up). Also refreshes
@@ -98,11 +98,11 @@ check: ci-workspace-full dev-db-up
 ## MariaDB/Postgres driver stacks (sqlx's mysql/postgres backends): those pull a large
 ## dependency tree, need a live server to actually test, and are covered by `make check`'s
 ## live suites + `ci-workspace-full`. Dropping them is what keeps this tier fast.
-ci-workspace: ci-coloring ensure-nextest
+ci-workspace: ci-coloring ci-fast-features ensure-nextest
 	$(CARGO) fmt --check
-	$(CARGO) clippy --workspace --features sqlite,serve -- -D warnings
-	$(NEXTEST) --workspace --features sqlite,serve
-	$(CARGO) test --workspace --features sqlite,serve --doc
+	$(CARGO) clippy --workspace --no-default-features --features sqlite,serve -- -D warnings
+	$(NEXTEST) --workspace --no-default-features --features sqlite,serve
+	$(CARGO) test --workspace --no-default-features --features sqlite,serve --doc
 
 ## Full workspace gate: fmt + coloring + lint/test with the MariaDB/Postgres driver code
 ## compiled and linted too. Part of `make check` (the heavy pre-commit gate). Clippy runs at
@@ -115,6 +115,10 @@ ci-workspace-full: ci-coloring ensure-nextest
 	$(CARGO) clippy --workspace --all-features -- -D warnings
 	$(NEXTEST) --workspace --features mariadb,postgres,sqlite,serve
 	$(CARGO) test --workspace --features mariadb,postgres,sqlite,serve --doc
+
+## Keep optional server drivers out of the infra-free dependency graph (including tests).
+ci-fast-features:
+	@CARGO="$(CARGO)" $(ROOT)ci/check-fast-features.sh
 
 ## Coloring boundary: every front-end crate's dependency tree must be free of async
 ## runtimes and drivers (tokio/sqlx/futures/async-*). Fails loudly on a leak.

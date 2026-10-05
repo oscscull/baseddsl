@@ -18,9 +18,9 @@ postgres = ["based-runtime/postgres"]
 
 [dependencies]
 # The engine: in-process `Engine`, the `PgRouter`/`PostgresDb` driver, and the
-# production uuid id generator (`serve` pulls in `UuidGen` — Postgres's native
+# production uuid id generator (`id-gen` pulls in `UuidGen` — Postgres's native
 # `uuid` id columns reject non-uuid ids).
-based-runtime = { path = "../../crates/based-runtime", features = ["postgres", "serve"] }
+based-runtime = { path = "../../crates/based-runtime", features = ["postgres", "id-gen"] }
 # The engine is async; tokio's macro runtime drives `#[tokio::main]`.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 # The HTTP surface: the app's own axum listener embedding the engine.
@@ -46,7 +46,8 @@ dotenvy = "0.15"
 # The production idempotency store: a shared Redis behind the engine's `IdempotencyStore`
 # seam (src/redis_store.rs). The engine itself carries no redis dependency — this lives in
 # the app. `connection-manager` is the cloneable, auto-reconnecting async handle.
-redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
+# Only basic async key commands are used; ACL/streams/geo/Lua/bigint APIs are unused.
+redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager"] }
 # The custom `IdempotencyStore` impl is an async trait.
 async-trait = "0.1"
 # The live smoke (`cargo run --bin smoke`) drives the service over real HTTP.

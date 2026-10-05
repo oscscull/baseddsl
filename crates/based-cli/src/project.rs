@@ -35,18 +35,26 @@ pub fn shard_urls(database_url: Vec<String>) -> Result<Vec<String>, CliError> {
 /// the same driver stack `based serve` uses (MariaDB/Postgres via a single-shard router;
 /// SQLite over a file).
 pub fn backend(dialect: Dialect, url: &str) -> Result<Box<dyn based_runtime::Backend>, CliError> {
-    use based_runtime::driver::{PoolConfig, ShardRouter};
+    #[cfg(any(feature = "mariadb", feature = "postgres"))]
+    use based_runtime::shard::PoolConfig;
 
+    #[cfg(any(feature = "mariadb", feature = "postgres"))]
     let connecting = || format!("connecting to {}", redact(url));
     let backend: Box<dyn based_runtime::Backend> = match dialect {
+        #[cfg(feature = "mariadb")]
         Dialect::MariaDb | Dialect::MySql => Box::new(
-            ShardRouter::single(url, PoolConfig::default())
+            based_runtime::driver::ShardRouter::single(url, PoolConfig::default())
                 .map_err(|e| CliError::db(connecting(), e))?,
         ),
+        #[cfg(feature = "postgres")]
         Dialect::Postgres => Box::new(
             based_runtime::PgRouter::single(url, PoolConfig::default())
                 .map_err(|e| CliError::db(connecting(), e))?,
         ),
+        #[cfg(not(feature = "mariadb"))]
+        Dialect::MariaDb | Dialect::MySql => return Err(CliError::missing_driver("mariadb")),
+        #[cfg(not(feature = "postgres"))]
+        Dialect::Postgres => return Err(CliError::missing_driver("postgres")),
         // A SQLite `url` is a filesystem path (or `:memory:`, useless for a persisted apply).
         Dialect::Sqlite => Box::new(
             based_runtime::SqliteBackend::open(url)

@@ -5,6 +5,20 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# CLI/editor consumers emit these artifacts; embedded runtimes only lower SQL.
+default = ["client", "openapi"]
+client = []
+openapi = []
+
+[[test]]
+name = "client"
+required-features = ["client"]
+
+[[test]]
+name = "openapi"
+required-features = ["openapi"]
+
 [dependencies]
 based-ast = { workspace = true }
 based-diagnostics = { workspace = true }
