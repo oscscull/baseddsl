@@ -1,7 +1,9 @@
 # Compilation costs
 
 Measured on 2026-10-05 against main `d622856`, using stable Rust 1.97.0 on an
-Apple M4 Max (14 CPU cores, 36 GiB RAM), with 14 Cargo jobs. These are local
+Apple M4 Max (14 CPU cores, 36 GiB RAM), with 14 Cargo jobs. Samples were captured
+at `84f57b7`, before the async-trait 0.1.92 compatibility update for Rust 1.99
+Clippy. These are local
 measurements, not timings from a GitHub Actions runner. Headstart was not used.
 
 The priorities are downstream application development and cold CI compilation.

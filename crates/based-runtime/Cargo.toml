@@ -56,8 +56,9 @@ based-sema.workspace = true
 based-codegen = { path = "../based-codegen", default-features = false }
 serde_json.workspace = true
 # The async trait surface: `Db`/`Tx`/`Backend` are dyn-compatible via boxed futures,
-# and `fetch` returns a boxed row stream.
-async-trait = "0.1"
+# and `fetch` returns a boxed row stream. Version 0.1.92 fixes generated must_use
+# attributes rejected by Clippy on Rust 1.99.
+async-trait = "0.1.92"
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The owned shaped-row stream (`run_query_stream`) holds its checked-out connection
@@ -93,7 +94,7 @@ base64 = { version = "0.22", optional = true }
 based-codegen.workspace = true
 based-parser.workspace = true
 # Test doubles implement the async `Db`/`Tx`/`Backend` traits.
-async-trait = "0.1"
+async-trait = "0.1.92"
 # The embed example (`tests/embed.rs`) hosts a committed generated client, which
 # derives serde — the same dependency any consumer of `based gen client` pulls in.
 serde.workspace = true
