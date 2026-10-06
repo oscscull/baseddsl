@@ -273,6 +273,11 @@ not a DSL symbol — nothing else in the schema defines it. The contract, end to
   dispatch is a loud `500 guard_unregistered`, never a silent pass.
 - **Fail closed.** A guard that cannot decide (its own lookup failed) should deny.
 
+The standalone v1 adapter follows the [external guard protocol](../external-guards.md):
+operator-configured authenticated HTTP callbacks, startup validation, bounded
+requests and fail-closed verdicts. This is the implementation contract for #75;
+the current standalone command still rejects guarded schemas.
+
 ### Preflight permissions and atomic invariants
 
 A guard runs before the auto-managed mutation transaction. Its `req.engine()`
