@@ -54,16 +54,19 @@ pub enum Dialect {
 }
 
 impl Dialect {
-    /// Parse the manifest `dialect` string. Unknown values fall back to MariaDB
-    /// (the documented default) rather than failing — dialect selection is not a
-    /// schema error.
+    /// Parse a previously validated dialect, retaining the legacy default for API callers.
     pub fn parse(s: &str) -> Self {
+        Self::try_parse(s).unwrap_or(Self::MariaDb)
+    }
+
+    /// Validate an explicit dialect choice without silently replacing it.
+    pub fn try_parse(s: &str) -> Option<Self> {
         match s {
-            "sqlite" => Self::Sqlite,
-            "postgres" | "postgresql" => Self::Postgres,
-            "mysql" => Self::MySql,
-            "mariadb" => Self::MariaDb,
-            _ => Self::MariaDb,
+            "sqlite" => Some(Self::Sqlite),
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            "mysql" => Some(Self::MySql),
+            "mariadb" => Some(Self::MariaDb),
+            _ => None,
         }
     }
 

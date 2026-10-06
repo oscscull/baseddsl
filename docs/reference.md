@@ -28,12 +28,14 @@ For supported deployment paths and versioning, see the [support policy](support-
 
 ## Project
 
+See [project discovery and connection precedence](project-configuration.md) for CLI roots and project-local `.env`.
+
 - Source is one extension, `.bsl`. The compiler globs `**/*.bsl` under the `based.toml` root; any
   declaration may live in any file. Recommended (not enforced) layout: one directory per domain, split
   `model.bsl` (model + its shapes) and `queries.bsl` (access layer).
 - Declarations are separated by a newline **or** a comma (interchangeable).
 - **`based.toml`** sets defaults: `dialect = "mariadb"`, `client = "rust"`, `[schema] id = "uuid"`,
-  `foreign_keys = "convention"`.
+  `foreign_keys = "none"`.
 - **No implicit fields.** Nothing is added behind your back — declare `id`, timestamps, everything.
 
 ## Models & fields

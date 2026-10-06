@@ -2,7 +2,8 @@
 //! connection pool, with graceful drain on SIGTERM/SIGINT.
 
 use crate::error::CliError;
-use crate::project::{load_checked, shard_urls};
+use crate::local_config::shard_urls;
+use crate::project::load_checked;
 use based_codegen::Dialect;
 use std::path::Path;
 
@@ -22,13 +23,17 @@ pub async fn cmd_serve(
     use based_runtime::shard::PoolConfig;
     use based_runtime::Compiled;
 
-    // Shard URLs: the repeated flag wins; else BASED_DATABASE_URL / DATABASE_URL.
-    let urls = shard_urls(database_url)?;
+    if pool_max == 0 || pool_min > pool_max {
+        return Err(CliError::usage(
+            "invalid pool options: --pool-max must be positive and --pool-min must not exceed it",
+        ));
+    }
 
     // Reuse the shared front end so diagnostics render exactly as `based check` does,
     // then build the served artifact from the clean schema (no second parse/check).
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
     let dialect = Dialect::parse(&project.manifest.dialect);
+    let urls = shard_urls(root, dialect, database_url)?;
     let compiled = Compiled::from_checked(schema, decls, dialect);
 
     // Pool sizing from the flags; the hardening timeouts (checkout + statement) keep

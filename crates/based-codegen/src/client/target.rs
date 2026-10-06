@@ -6,12 +6,16 @@ pub enum ClientTarget {
 }
 
 impl ClientTarget {
-    /// Parse the manifest `client` string. Unknown values fall back to Rust (the
-    /// documented default); target selection is lenient.
+    /// Parse a previously validated target, retaining the legacy default for API callers.
     pub fn parse(s: &str) -> Self {
+        Self::try_parse(s).unwrap_or(Self::Rust)
+    }
+
+    /// Validate an explicit client target without silently replacing it.
+    pub fn try_parse(s: &str) -> Option<Self> {
         match s {
-            "rust" => Self::Rust,
-            _ => Self::Rust,
+            "rust" => Some(Self::Rust),
+            _ => None,
         }
     }
 }

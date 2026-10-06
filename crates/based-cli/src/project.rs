@@ -9,28 +9,6 @@ use based_manifest::Project;
 use based_sema::CheckedSchema;
 use std::path::{Path, PathBuf};
 
-/// The shard database URLs: the repeated `--database-url` flag wins, else the
-/// comma-separated `BASED_DATABASE_URL`, else the ubiquitous single `DATABASE_URL` (the
-/// convention the quickstarts + most hosting platforms use). Errors when none is set (a
-/// live database is required to apply/status/serve).
-pub fn shard_urls(database_url: Vec<String>) -> Result<Vec<String>, CliError> {
-    let urls: Vec<String> = if !database_url.is_empty() {
-        database_url
-    } else {
-        std::env::var("BASED_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .ok()
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default()
-    };
-    if urls.is_empty() {
-        return Err(CliError::usage(
-            "no database url: pass --database-url <url> (repeatable) or set BASED_DATABASE_URL / DATABASE_URL",
-        ));
-    }
-    Ok(urls)
-}
-
 /// Build a single-shard [`based_runtime::Backend`] over `url` for the manifest dialect —
 /// the same driver stack `based serve` uses (MariaDB/Postgres via a single-shard router;
 /// SQLite over a file).
