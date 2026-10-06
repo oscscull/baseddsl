@@ -68,6 +68,19 @@ helpdesk select `id-gen`; the Postgres quickstart drops from 227 to 206 compilat
 units. The helpdesk also disables unused Redis ACL, stream, geospatial, Lua, and
 bigint features, retaining its async connection manager and basic key commands.
 
+### SQLite production-ID dependency boundary
+
+As of 2026-10-06 (main `a8871be` plus the #82 starter wiring), the SQLite
+quickstart also selects `sqlite,id-gen` and uses `based_runtime::id::UuidGen`.
+Counting distinct packages in `cargo tree -p based-runtime --no-default-features
+--features sqlite,id-gen -e normal,build --prefix none --format '{p}'` gives 140;
+selecting `sqlite,serve` instead gives 160. This removes 20 HTTP-related packages,
+including axum, hyper and tower, while preserving production UUID/ULID generation.
+The existing CI feature-boundary check now rejects HTTP dependencies in the
+embedded graph. This is a dependency count, not a new timing measurement; the
+SQLite timing samples above used the earlier test-ID starter and do not measure
+the cost of production ID generation.
+
 ## Reproducing the comparison
 
 Use separate copies of the baseline and candidate; do not clean the developer's

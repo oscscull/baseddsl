@@ -19,7 +19,8 @@
 //! server-side failure, the HTTP `status()`. Step 6 shows the pattern — a deliberately
 //! malformed cursor is rejected and matched on `kind()`.
 
-use based_runtime::{Compiled, Engine, SeqIdGen, SqliteBackend};
+use based_runtime::id::UuidGen;
+use based_runtime::{Compiled, Engine, SqliteBackend};
 use std::path::PathBuf;
 
 /// The typed client — the verbatim output of `based gen client -o src/client.rs --embedded`,
@@ -47,13 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The `Engine` is the library twin of `based serve`, minus the socket: it owns the
     // schema, a connection `Backend`, and an id generator, and runs each call through the
     // same async dispatch core. `SqliteBackend::open` is the whole database setup — bundled
-    // SQLite, file created if absent. `SeqIdGen` yields readable ids for a demo; production
-    // uses `UuidGen` (behind the runtime's `id-gen` feature) or any custom `IdGen`.
-    let engine = Engine::new(
-        compiled,
-        SqliteBackend::open(&db_path)?,
-        SeqIdGen::default(),
-    );
+    // SQLite, file created if absent. `UuidGen` (runtime feature `id-gen`) mints
+    // production UUIDs without enabling the HTTP listener.
+    let engine = Engine::new(compiled, SqliteBackend::open(&db_path)?, UuidGen);
 
     // `client::embedded(&engine)` is the entire bridge — a typed, in-process client that
     // implements the `Transport` seam over `Engine` for you.
@@ -274,7 +271,7 @@ mod decimal_tests {
     #[test]
     fn generated_decimal_preserves_full_domain_as_json_strings() {
         let values = [
-            "12345678901234567890123456789.123456789", // decimal(38,9)
+            "12345678901234567890123456789.123456789",  // decimal(38,9)
             "0.00000000000000000000000000000000000001", // decimal(38,38)
             "-12345678901234567890123456789.123456789",
             "0.00",

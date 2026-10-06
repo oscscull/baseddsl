@@ -8,6 +8,9 @@ mod embed;
 mod load;
 #[path = "core/mutation.rs"]
 mod mutation;
+#[cfg(feature = "id-gen")]
+#[path = "core/production_ids.rs"]
+mod production_ids;
 #[path = "core/query.rs"]
 mod query;
 #[path = "core/serve.rs"]
