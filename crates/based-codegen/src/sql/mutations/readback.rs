@@ -38,6 +38,7 @@ pub(crate) fn ret_select(
     unscoped: bool,
     inject: &[ScopeInject],
     dialect: Dialect,
+    transition_key: Option<&Predicate>,
 ) -> Option<String> {
     rm.and_then(|rm| {
         // An upsert (`create … on conflict`) on the return model keys on the conflict target
@@ -75,7 +76,10 @@ pub(crate) fn ret_select(
             RetKey::CreatedId
         } else {
             let (pred, live) = surviving_ret_write(&m.body, &rm.ret_model, schema)?;
-            RetKey::Where { pred, live }
+            RetKey::Where {
+                pred: transition_key.unwrap_or(pred),
+                live,
+            }
         };
         Some(lower_ret_select(
             schema,

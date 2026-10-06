@@ -55,7 +55,18 @@ fn lower_mutation<'a>(
         lower_write(&cx, stmt, "id", &no_bindings, &mut ret_taken, &mut stmts);
     }
 
-    let ret_select = ret_select(schema, decls, m, rm, &stmts, unscoped, inject, dialect);
+    let transition = transition_readback::transition_readback(m, rm, schema, &stmts);
+    let ret_select = ret_select(
+        schema,
+        decls,
+        m,
+        rm,
+        &stmts,
+        unscoped,
+        inject,
+        dialect,
+        transition.as_ref().map(|t| &t.key),
+    );
     let bulk_readback = bulk_readback(schema, decls, rm, &stmts, unscoped, inject, dialect);
 
     // A shape-returning mutation reads its written row back through `project_return`, so its
@@ -71,6 +82,7 @@ fn lower_mutation<'a>(
     LoweredMutation {
         name: m.name.node.clone(),
         stmts,
+        match_check: transition.map(|t| t.write_index),
         ret_select,
         bulk_readback,
         json_paths,

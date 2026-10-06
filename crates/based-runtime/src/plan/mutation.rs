@@ -132,17 +132,20 @@ pub fn plan_mutation(
         });
     }
 
-    // 4. An `-> ok` mutation's not-found signal is a filtered **real** DELETE (`hard delete
+    // 4. A key-bound conditional transition must match before re-selecting by key.
+    //    An `-> ok` mutation's not-found signal is a filtered **real** DELETE (`hard delete
     //    M where …` / a plain-model `delete M where …`) on the primary model affecting zero
     //    rows. A create / update / restore / wipe under `-> ok` (BW1's universal
     //    read-back opt-out) never 404s — a bulk insert of an empty array is a success.
-    let ack_check = if rm.ack {
-        low.stmts
-            .iter()
-            .position(|w| w.model == rm.ret_model && w.real_delete)
-    } else {
-        None
-    };
+    let ack_check = low.match_check.or_else(|| {
+        if rm.ack {
+            low.stmts
+                .iter()
+                .position(|w| w.model == rm.ret_model && w.real_delete)
+        } else {
+            None
+        }
+    });
 
     let bulk_readback = low.bulk_readback.as_ref().map(|br| BulkReadbackPlan {
         sql: br.sql.clone(),

@@ -27,6 +27,7 @@ mod lower;
 mod readback;
 mod restore;
 mod stmt;
+mod transition_readback;
 mod update;
 mod upsert;
 

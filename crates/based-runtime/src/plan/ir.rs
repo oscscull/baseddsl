@@ -140,11 +140,13 @@ pub struct MutationPlan {
     /// app-minted in `env0` or captured from a DB-generated create). `None` only when the
     /// row does not survive the write (a real DELETE) — the response falls back to `{}`.
     pub ret_select: Option<String>,
-    /// For an `-> ok` mutation, the index (into `steps`) of the primary DELETE — the
+    /// The index (into `steps`) of a conditional transition or the primary DELETE
+    /// for an `-> ok` mutation. Zero matches in a transition must fail before its
+    /// shape is read back by the unchanged primary key. For a DELETE, this is the
     /// write on the mutation's primary model. Zero rows affected there means the row
     /// was absent (or out of scope): the transaction rolls back and the mutation is a
     /// 404 `not_found`, mirroring a surviving write's empty re-select. `None` for a
-    /// shape-returning mutation.
+    /// shape-returning mutation without a conditional-transition check.
     pub ack_check: Option<usize>,
     /// The declared-shape read-back for a structured `create … from` (BW1b/BW2): after the
     /// chunked INSERT runs, the runtime re-selects the written rows keyed on their keys and

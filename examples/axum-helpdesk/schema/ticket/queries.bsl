@@ -73,8 +73,9 @@ mutation mark_duplicate(id: Id, of: Id) -> TicketRow scoped Tenant {
 
 # `guard` hands the close decision to a host-language function the app registers
 # at engine build; the engine owns that it runs before the write, on every door.
+# The state condition belongs in the UPDATE: the guard's read is preflight.
 mutation close_ticket(id: Id) -> TicketRow guard caller_can_close scoped Tenant {
-  update Ticket where (id = $id) { status = closed };
+  update Ticket where (id = $id and status = resolved) { status = closed };
 }
 
 # `delete` on a soft-delete model tombstones; `restore` lifts it. Both read the

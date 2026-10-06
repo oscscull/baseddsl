@@ -31,7 +31,8 @@ async fn main() {
 
     // The schema declares `guard caller_can_close`, so the engine won't build
     // without an implementation. Seeding acts as the desk owner, so it always
-    // allows; the service registers the real policy.
+    // allows preflight; the schema still requires resolved-to-closed in the write.
+    // The service registers the real preflight policy.
     let guards = Guards::new().register("caller_can_close", |_req| async { GuardVerdict::Allow });
     let engine =
         Engine::with_guards(compiled, router, UuidGen, guards).expect("every guard registered");
@@ -188,6 +189,15 @@ async fn main() {
     )
     .await
     .expect("mark_duplicate");
+    api.set_status(
+        client::SetStatusInput {
+            id: t3.clone(),
+            status: Status::Resolved,
+        },
+        client::SetStatusCtx { org: acme.clone() },
+    )
+    .await
+    .expect("resolve before close");
     api.close_ticket(
         client::CloseTicketInput { id: t3.clone() },
         client::CloseTicketCtx { org: acme.clone() },

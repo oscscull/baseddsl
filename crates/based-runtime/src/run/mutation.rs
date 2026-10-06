@@ -267,7 +267,8 @@ pub(crate) async fn run_writes<D: DbRead + ?Sized>(
         let (sql, params) = bind(&step.sql, &env)?;
         // A bound create's row read-back captures the written row's committed columns
         // (the INSERT's own `RETURNING`, or a MySQL follow-up keyed `SELECT`) into `env`; a
-        // plain write just executes (and, for an `-> ok` DELETE, checks it touched a row).
+        // plain write executes and checks required matches for conditional transitions
+        // and an `-> ok` DELETE before any later step or declared re-select runs.
         let Some(cap) = &step.capture else {
             let affected = db.execute(&sql, &params).await?;
             if plan.ack_check == Some(i) && affected == 0 {

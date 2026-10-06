@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Conditional helpdesk close
+
+The helpdesk's close transition now requires a resolved ticket in the database
+UPDATE itself. A concurrent reopen after guard approval leaves the ticket open
+and returns `404 not_found`. Preflight denials remain `403 guard_denied`.
+Shape-returning updates with direct conditions on assigned fields and an explicitly
+bound unchanged primary key check whether the write matched before reading the
+result by that key. The
+condition can change during the update without preventing a successful read-back.
+
 ### Generated Rust decimal type
 
 Generated clients now use their `client::Decimal` type, backed by

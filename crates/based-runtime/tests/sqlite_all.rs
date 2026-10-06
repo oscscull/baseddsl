@@ -11,6 +11,8 @@ mod bulk_integration;
 mod cancel_safety;
 #[path = "sqlite/computed_integration.rs"]
 mod computed_integration;
+#[path = "sqlite/conditional_transition.rs"]
+mod conditional_transition;
 #[path = "sqlite/distinct_integration.rs"]
 mod distinct_integration;
 #[path = "sqlite/idempotency_db.rs"]

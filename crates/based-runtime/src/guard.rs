@@ -9,6 +9,9 @@
 //! current state goes back through the schema's own queries (the typed client over
 //! `req.engine()`, scope + soft-delete injected), while a captured pool or any other
 //! resource stays available for state the schema doesn't model.
+//! Guard reads use the engine separately from the write transaction, even for
+//! adopted transactions. Approval is preflight; atomic state invariants belong
+//! in database write conditions or reads/locks within the actual transaction.
 //!
 //! A schema that declares a guard nobody registered must fail when the engine is
 //! *built* ([`Guards::missing_for`] backs that check), never pass silently at request
