@@ -156,7 +156,7 @@ install-dev:
 	@echo "install-dev: based (CLI) + based-lsp updated. Reload the VS Code window to pick up the new LSP."
 
 ## All live-DB proof (both dialects). Assumes both servers are up (see dev-db-up).
-ci-live: ci-live-mariadb ci-live-postgres ci-live-sqlx
+ci-live: ci-live-mariadb ci-live-postgres ci-live-sqlx ci-standalone-store
 
 ## Live MariaDB: the integration suite + `based migrate apply` (E4), both against a PROVIDED
 ## server. `TEST_MARIADB_URL` makes the harness connect there instead of spinning a container
@@ -253,3 +253,9 @@ dev-db-down:
 # Disposable test-CA fixtures, verified CLI/embedded calls and live server contracts.
 ci-database-tls:
 	bash $(ROOT)ci/check-database-tls.sh
+
+.PHONY: ci-standalone-store
+# Requires disposable admin URLs: creates and drops two uniquely named databases per driver.
+ci-standalone-store:
+	TEST_MARIADB_URL="$(MARIADB_URL)" TEST_POSTGRES_URL="$(POSTGRES_URL)" \
+	  $(CARGO) test -p based-cli --test serve_idempotency_live -- --test-threads=1

@@ -30,6 +30,9 @@ cargo run   # from inside an example project
 For certificate-verified Postgres and MariaDB connections, see
 [database TLS configuration](docs/database-tls.md).
 
+Standalone keyed mutation storage and explicit table setup are documented in
+[standalone idempotency](docs/standalone-idempotency.md).
+
 ## License
 
 Based source code, including the Rust crates and VS Code extension, is licensed
