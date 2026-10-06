@@ -215,6 +215,7 @@ ci-example-helpdesk: based-cli
 	cd examples/axum-helpdesk && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke -- reset && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(BASED) migrate apply --database-url "$(POSTGRES_URL)" && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) test --test close_transition && \
 	  DATABASE_URL="$(POSTGRES_URL)" REDIS_URL="$(REDIS_URL)" $(CARGO) run --bin seed && \
 	  DATABASE_URL="$(POSTGRES_URL)" REDIS_URL="$(REDIS_URL)" $(CARGO) run --bin smoke
 

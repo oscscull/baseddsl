@@ -361,7 +361,7 @@ async fn mark_duplicate(
     Ok(Json(row))
 }
 
-/// The guarded close: the engine runs `caller_can_close` (src/app.rs) before the
+/// The guarded close: the engine runs `caller_can_close` (src/close_policy.rs) before the
 /// write; a denial arrives as the engine's own `403 guard_denied` and passes
 /// through [`ApiError`] untouched.
 async fn close_ticket(

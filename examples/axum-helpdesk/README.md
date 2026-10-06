@@ -161,11 +161,23 @@ cross-tenant id is the engine's own `404 not_found`.
 
 **5. Real authorization decisions stay in your code** — `close_ticket` declares
 `guard caller_can_close`, and the engine refuses to build until the app registers an
-implementation (`src/app.rs`). The engine owns *that* the check runs — before the write, on
-every door; the app owns *what it decides* (here: only a resolved, visible ticket closes;
-a check that cannot decide denies). The decision is host code, but the *state it reads*
+implementation (`src/close_policy.rs`, registered in `src/app.rs`). The engine owns *that* the check runs — before the write, on
+every door; the app owns *what it decides* (here: a preflight check of the visible
+ticket; a check that cannot decide denies). The decision is host code, but the *state it reads*
 comes back through the schema's own `ticket` query over `req.engine()` — so the workspace
 scope and soft-delete filter are the ones the schema declares, not hand-written SQL.
+That read is separate from the mutation transaction, including when the caller
+adopts a transaction. The UPDATE's `where (id = $id and status = resolved)`
+enforces the resolved-to-closed invariant atomically. If another writer reopens
+the ticket after guard approval, the close writes nothing and returns the existing
+`404 not_found` response; an unresolved/missing/cross-tenant ticket rejected at
+preflight returns `403 guard_denied`. Refresh the ticket before deciding whether
+to retry. Guards do not replace database write conditions or transaction locks.
+
+The live `tests/close_transition.rs` gate pauses after the real guard approves,
+reopens the ticket through a second connection, and checks that both ordinary and
+adopted closes fail without changing it. `make ci-example-helpdesk` runs it after
+migration and before the HTTP smoke scenario.
 
 **6. The export is a stream** — `export_tickets` returns `-> stream TicketExport`: the
 client method yields a typed `RowStream` (rows arrive as the database produces them), and

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use based_runtime::guard::{GuardRequest, GuardVerdict, Guards};
+use based_runtime::guard::Guards;
 use based_runtime::id::UuidGen;
 use based_runtime::{Compiled, Engine, PgRouter};
 
@@ -56,7 +56,9 @@ impl App {
 
         // The schema declares `guard caller_can_close`, so the engine refuses to
         // build until an implementation is registered.
-        let guards = Guards::new().register("caller_can_close", |req| caller_can_close(req));
+        let guards = Guards::new().register("caller_can_close", |req| {
+            crate::close_policy::caller_can_close(req)
+        });
         // The engine runs over a router on the app's pool; the app keeps the pool too, so
         // `resolve_with_audit` can open its *own* transactions on the same connections and
         // adopt them into the engine.
@@ -178,25 +180,5 @@ impl From<sqlx::Error> for InteropError {
 impl From<client::ClientError> for InteropError {
     fn from(e: client::ClientError) -> Self {
         InteropError::Client(e)
-    }
-}
-
-/// The close policy: a ticket must be resolved before anyone closes it. The engine
-/// guarantees this runs before the write; the decision is app code — but the *read*
-/// it decides on goes back through the schema's own `ticket` query over `req.engine()`,
-/// so the workspace scope and the soft-delete filter are the ones the schema declares.
-/// A check that cannot decide denies — fail closed.
-async fn caller_can_close(req: GuardRequest) -> GuardVerdict {
-    let (Ok(input), Ok(ctx)) = (
-        serde_json::from_value::<client::TicketInput>(req.args.clone()),
-        serde_json::from_value::<client::TicketCtx>(req.ctx.clone()),
-    ) else {
-        return GuardVerdict::deny("close requires a ticket id and a workspace");
-    };
-    match client::embedded(req.engine()).ticket(input, ctx).await {
-        Ok(Some(t)) if t.status == client::Status::Resolved => GuardVerdict::Allow,
-        Ok(Some(_)) => GuardVerdict::deny("only a resolved ticket can be closed"),
-        Ok(None) => GuardVerdict::deny("no such ticket in this workspace"),
-        Err(_) => GuardVerdict::deny("could not verify the ticket"),
     }
 }

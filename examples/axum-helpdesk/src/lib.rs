@@ -14,6 +14,7 @@
 pub mod app;
 pub mod auth;
 pub mod client;
+pub mod close_policy;
 pub mod redis_store;
 pub mod routes;
 

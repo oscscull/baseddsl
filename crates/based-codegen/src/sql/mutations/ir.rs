@@ -8,11 +8,16 @@
 pub struct LoweredMutation {
     pub name: String,
     pub stmts: Vec<LoweredWrite>,
+    /// A conditional, primary-key-bound transition must affect a row before its
+    /// shape is re-selected by that stable key. Zero matches means `not_found`.
+    pub match_check: Option<usize>,
     /// The declared-shape re-select: a `SELECT <return shape> FROM <return model> WHERE
     /// <key> [AND <live>] AND <scope>` that reads back the mutation's written row, so the
     /// write response matches the client's decoded output type (the same projection a `get`
     /// of that shape emits). `<key>` is either `id = :result_id` for a create
-    /// or the write's own `where` for a surviving update / soft delete / restore. `None`
+    /// or the write's own `where` for a surviving update / soft delete / restore.
+    /// Conditional transitions with an unchanged, explicitly bound primary key read
+    /// back by that key after the `match_check` succeeds. `None`
     /// only when the row does not survive the write — a real DELETE (plain-model `delete` /
     /// `hard delete`) — where the response falls back to `{}`.
     pub ret_select: Option<String>,

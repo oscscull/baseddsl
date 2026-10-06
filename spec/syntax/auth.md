@@ -273,5 +273,26 @@ not a DSL symbol — nothing else in the schema defines it. The contract, end to
   dispatch is a loud `500 guard_unregistered`, never a silent pass.
 - **Fail closed.** A guard that cannot decide (its own lookup failed) should deny.
 
+### Preflight permissions and atomic invariants
+
+A guard runs before the auto-managed mutation transaction. Its `req.engine()`
+reads use a separate connection and do not join a managed or adopted transaction;
+even when the mutation uses a caller-owned transaction, guard approval does not
+lock the row or promise that the read state remains current. Use guards for
+preflight permission decisions and conditions in the database write for state
+invariants. The helpdesk close illustrates both:
+
+```bsl
+mutation close_ticket(id: Id) -> TicketRow guard caller_can_close scoped Tenant {
+  update Ticket where (id = $id and status = resolved) { status = closed };
+}
+```
+
+The guard can deny an unresolved or invisible ticket with `403 guard_denied`.
+If the status changes after approval, the conditional update matches nothing and
+returns `404 not_found`, just like a missing or out-of-scope write target. No invalid
+close commits. Re-read before deciding whether to retry; guard re-entry is not a
+transactional read-decide-write guarantee.
+
 ## Net
 Simple "scope to caller's org" -> Handles 1+2, zero logic. Complex permissions -> caller's code + Handle 3. Never a policy engine.

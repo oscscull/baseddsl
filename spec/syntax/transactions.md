@@ -29,6 +29,15 @@ boundary it owns.
 
 ## Isolation (shared by every rung)
 
+Declared guards remain preflight calls on every rung. Their engine reads use a
+separate connection, including when a mutation runs on an adopted transaction;
+they cannot inspect the caller's uncommitted state or hold its row locks. A
+guard's approval does not make a state transition atomic. Put the invariant in
+the mutation's conditional write (`where (id = $id and status = resolved)` in
+the helpdesk close), or make a locking read and the decision within the actual
+transaction. A conditional update matching no row returns `404 not_found` and
+does not perform the transition. See [guard boundaries](auth.md#preflight-permissions-and-atomic-invariants).
+
 Every entry point takes a `TxOptions` — the isolation level and access mode:
 
 ```rust
