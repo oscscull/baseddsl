@@ -2,6 +2,7 @@
 
 Every feature of `.bsl`, with the syntax to use it. One page; skim the index, jump to a section.
 For *why* the language is shaped this way, see [`spec/`](../spec/); this page is *how*.
+For supported deployment paths and versioning, see the [support policy](support-policy.md).
 
 ## Index
 

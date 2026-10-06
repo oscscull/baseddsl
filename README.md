@@ -1,9 +1,10 @@
 # based
 
-A DB-first DSL and engine. Describe your data model, relations, queries, and
-mutations in one small language (`.bsl`); the compiler generates the SQL, a typed
-access layer, and a runnable service. MySQL/MariaDB is the primary target; SQLite
-and Postgres are also supported.
+A DB-first DSL and engine. Describe models, relations, queries, and mutations in
+short, readable `.bsl` files independent of your host language. Based generates
+SQL and typed async Rust clients, with embedded Rust and standalone HTTP execution.
+See the [v1 support and compatibility policy](docs/support-policy.md) for tested
+databases, deployment paths, and current limits.
 
 **[Language reference →](docs/reference.md)** — every feature and its syntax, on one page.
 
