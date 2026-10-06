@@ -17,7 +17,7 @@ streaming NDJSON export, raw-SQL leaves, migrations with a data-preserving renam
 |---|---|
 | `schema/` | the whole desk in `.bsl`, by domain — `ticket/model.bsl` + `ticket/queries.bsl`, etc. |
 | `migrations/` | checked-in artifacts of `based migrate gen` — `0002` renames a column via `@was`, preserving data |
-| `src/client.rs` | **verbatim** output of `based gen client -o src/client.rs --embedded`; regenerate after a schema change, never edit |
+| `generated/client.rs` | **verbatim** output of `based gen client -o generated/client.rs --embedded`; regenerate after a schema change, never edit |
 | `src/app.rs` | the wiring: the app's `PgPool` → `PgRouter::from_pool` → `Engine`, plus the close-policy guard and the idempotency store |
 | `src/redis_store.rs` | the production idempotency store: `RedisStore` against the engine's `IdempotencyStore` seam (see below) |
 | `src/auth.rs` | bearer middleware: the token resolves to a session **through the client itself** |
@@ -232,3 +232,7 @@ cancellation `Drop` guard) and pass it to `Engine::with_store`. `App::connect` u
 > Standalone crate, **outside** the cargo workspace (the root `Cargo.toml` `exclude`s
 > `examples/`). It depends on the in-repo engine crates by path, so it always tracks the
 > current engine, but `cargo test --workspace` never builds it.
+
+The user-authored client module wraps `include!("../generated/client.rs")`.
+Application `cargo fmt` formats the wrapper and leaves this generator-owned
+artifact untouched; see [generated Rust](../../docs/generated-rust.md).

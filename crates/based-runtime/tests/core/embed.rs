@@ -66,8 +66,7 @@ fn generated_client_is_current() {
             .any(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260"),
         "schema should check clean"
     );
-    // Format exactly as `based gen client` does when it writes the file, so the mirror is the
-    // rustfmt-clean artifact a consumer's `cargo fmt` also leaves untouched.
+    // The compatibility helper preserves the emitter's generator-owned bytes.
     let generated = format_rust(&client_with(
         &schema,
         &sf.decls,

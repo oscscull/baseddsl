@@ -76,12 +76,12 @@ Regenerate them whenever `schema/*.bsl` changes:
 
 ```sh
 based migrate gen                              # migrations/NNNN_*/{up.mig, schema.snap}
-based gen client -o src/client.rs --embedded   # src/client.rs (the typed client)
+based gen client -o generated/client.rs --embedded   # generated/client.rs (the typed client)
 ```
 
 - **`migrations/`** — schema setup is `based migrate apply`, the real convention, not
   a raw-DDL string in the program. `main.rs` never issues DDL.
-- **`src/client.rs`** — the verbatim `based gen client` output. `--embedded` also
+- **`generated/client.rs`** — the verbatim `based gen client` output. `--embedded` also
   emits the in-process bridge, so the whole of the wiring is one line:
 
   ```rust
@@ -111,3 +111,7 @@ assertions; they differ only in the driver and `DATABASE_URL`.
 > Standalone crate, **outside** the cargo workspace (the root `Cargo.toml` `exclude`s
 > `examples/`). It depends on the in-repo engine crates by path, so it always tracks the
 > current engine, but `cargo test --workspace` never builds it.
+
+The user-authored client module wraps `include!("../generated/client.rs")`.
+Application `cargo fmt` formats the wrapper and leaves this generator-owned
+artifact untouched; see [generated Rust](../../docs/generated-rust.md).

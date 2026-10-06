@@ -45,11 +45,8 @@ pub fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> Result
     // `sqlx::Transaction<DB>`); a wire-only client never touches it.
     let dialect = embedded.then(|| Dialect::parse(&project.manifest.dialect));
     let opts = ClientOptions { embedded, dialect };
-    // Format the emitted client so the written file matches `cargo fmt`: a re-`gen` is never
-    // a whitespace diff, and the consumer's `cargo fmt` leaves the checked-in client alone.
-    let code = based_codegen::client::format_rust(&based_codegen::client::client_with(
-        &schema, &decls, target, opts,
-    ));
+    // Layout belongs to the emitter, independent of consumer tools/configuration.
+    let code = based_codegen::client::client_with(&schema, &decls, target, opts);
     match out {
         Some(path) => {
             std::fs::write(path, &code).map_err(|e| io_at("writing", path, e))?;

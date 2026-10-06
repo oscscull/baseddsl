@@ -4,8 +4,9 @@
 #![cfg(feature = "sqlite")]
 
 #[allow(dead_code, clippy::use_self)]
-#[path = "support/decimal_client.rs"]
-mod client;
+mod client {
+    include!("support/decimal_client.rs");
+}
 
 use based_codegen::{sql, Dialect};
 use based_runtime::{Compiled, Engine, SeqIdGen, SqliteBackend};

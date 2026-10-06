@@ -358,6 +358,8 @@ migrations gap-free with tamper + drift checks.
 
 ## Client
 
+Use the [generator-owned include! wrapper](generated-rust.md) to isolate generated Rust from application formatting.
+
 Each query/mutation generates a typed client method + one wire endpoint (`POST /q/<name>`, JSON body);
 clients call fixed signatures — the DSL never ships. Ids are phantom-typed newtypes (`Id<Order>`),
 transparent over the wire. `page` returns `{ rows, cursor }` (+ `total` with count); `-> ok` returns unit;
