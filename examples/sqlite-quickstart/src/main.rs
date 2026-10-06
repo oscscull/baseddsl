@@ -1,12 +1,12 @@
 //! SQLite quickstart — the whole engine, in one process, over a bundled SQLite database.
 //!
 //! Copy this directory to start. A `.bsl` schema (`schema/`) is consumed through the
-//! **generated typed client** (`src/client.rs`) running over the in-process **`Engine`**.
+//! **generated typed client** (`generated/client.rs`) running over the in-process **`Engine`**.
 //! The steps a user runs (see README):
 //!
 //!   1. set `DATABASE_URL` in `.env`
 //!   2. `based migrate apply` — create the tables from the checked-in `migrations/`
-//!   3. `based gen client -o src/client.rs --embedded` — the typed client (checked in)
+//!   3. `based gen client -o generated/client.rs --embedded` — the typed client (checked in)
 //!   4. `cargo run` — this program: seed via the client's own `create` calls, then run
 //!      the end-to-end scenario (create → read-your-writes → get → list/scope → paginate
 //!      → soft-delete/restore) and exit 0 only if every step passes.
@@ -23,11 +23,13 @@ use based_runtime::id::UuidGen;
 use based_runtime::{Compiled, Engine, SqliteBackend};
 use std::path::PathBuf;
 
-/// The typed client — the verbatim output of `based gen client -o src/client.rs --embedded`,
+/// The typed client — the verbatim output of `based gen client -o generated/client.rs --embedded`,
 /// checked in as a reviewable artifact. It defines the wire surface *and* an in-process
 /// `Embedded` transport over `Engine`, so `client::embedded(&engine)` is a ready client.
 #[allow(dead_code)]
-mod client;
+mod client {
+    include!("../generated/client.rs");
+}
 
 // Typed ids: `Id<entity::User>` and `Id<entity::Org>` are distinct types, so the compiler
 // rejects passing an org id where a user id is wanted (the client hands each one back typed).

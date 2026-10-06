@@ -2,12 +2,12 @@
 //!
 //! Copy this directory to start on Postgres. It is the *same* `.bsl` schema + scenario as
 //! `examples/sqlite-quickstart`, consumed through the **generated typed client**
-//! (`src/client.rs`) over the in-process **`Engine`** — but pointed at a real Postgres
+//! (`generated/client.rs`) over the in-process **`Engine`** — but pointed at a real Postgres
 //! server. The steps a user runs (see README):
 //!
 //!   1. set `DATABASE_URL` in `.env`
 //!   2. `based migrate apply` — create the tables from the checked-in `migrations/`
-//!   3. `based gen client -o src/client.rs --embedded` — the typed client (checked in)
+//!   3. `based gen client -o generated/client.rs --embedded` — the typed client (checked in)
 //!   4. `cargo run` — this program: seed via the client's own `create` calls, then run
 //!      the end-to-end scenario and exit 0 only if every step passes.
 //!
@@ -29,11 +29,13 @@ use based_runtime::shard::PoolConfig;
 use based_runtime::{Compiled, Engine, PgRouter};
 use std::path::PathBuf;
 
-/// The typed client — the verbatim output of `based gen client -o src/client.rs --embedded`,
+/// The typed client — the verbatim output of `based gen client -o generated/client.rs --embedded`,
 /// checked in as a reviewable artifact. It defines the wire surface *and* an in-process
 /// `Embedded` transport over `Engine`, so `client::embedded(&engine)` is a ready client.
 #[allow(dead_code)]
-mod client;
+mod client {
+    include!("../generated/client.rs");
+}
 
 // Typed ids: `Id<entity::User>` and `Id<entity::Org>` are distinct types, so an org id
 // can't be passed where a user id is wanted (the client hands each one back typed).
