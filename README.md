@@ -27,6 +27,9 @@ cargo run   # from inside an example project
 - [`crates/`](crates/) — the Rust compiler + runtime workspace.
 - [`examples/`](examples/) — runnable quickstart projects.
 
+For certificate-verified Postgres and MariaDB connections, see
+[database TLS configuration](docs/database-tls.md).
+
 ## License
 
 Based source code, including the Rust crates and VS Code extension, is licensed

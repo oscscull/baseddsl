@@ -244,3 +244,8 @@ dev-db-reset:
 
 dev-db-down:
 	-docker rm -fv based-ci-maria based-ci-pg based-ci-redis 2>/dev/null
+
+.PHONY: ci-database-tls
+# Disposable test-CA fixtures, verified CLI/embedded calls and live server contracts.
+ci-database-tls:
+	bash $(ROOT)ci/check-database-tls.sh

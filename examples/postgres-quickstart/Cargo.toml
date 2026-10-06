@@ -7,6 +7,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+# Certificate-verified server connections, selected explicitly by the consumer.
+tls = ["based-runtime/tls-rustls"]
+
 [dependencies]
 # The engine: in-process `Engine`, the `PgRouter`/`PostgresDb` driver, and the production
 # uuid id generator. `postgres` is the concrete driver; `id-gen` pulls in `UuidGen` —

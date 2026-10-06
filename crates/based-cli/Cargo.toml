@@ -13,8 +13,8 @@ path = "src/main.rs"
 # The installed CLI keeps every database driver. Local infra-free checks disable
 # these defaults; SQLite and the HTTP listener remain available in that build.
 default = ["mariadb", "postgres"]
-mariadb = ["based-runtime/mariadb"]
-postgres = ["based-runtime/postgres"]
+mariadb = ["based-runtime/mariadb", "based-runtime/tls-rustls"]
+postgres = ["based-runtime/postgres", "based-runtime/tls-rustls"]
 
 [dependencies]
 based-ast = { workspace = true }

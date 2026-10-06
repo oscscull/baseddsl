@@ -73,6 +73,10 @@ docker run -d -p 8080:8080 \
   based-serve
 ```
 
+For certificate-verified Postgres/MariaDB connections, use the URL options in
+[database TLS](../docs/database-tls.md). Mount the CA file read-only and reference
+its absolute **container** path in the URL. The image's default CLI includes Rustls.
+
 ## Health & shutdown
 
 - `HEALTHCHECK` probes `/healthz` — never touches the DB, so a DB blip drains via `/readyz`

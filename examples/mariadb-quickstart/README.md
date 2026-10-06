@@ -96,3 +96,6 @@ let api = client::embedded(&engine);   // typed, in-process, no socket, no bridg
 The user-authored client module wraps `include!("../generated/client.rs")`.
 Application `cargo fmt` formats the wrapper and leaves this generator-owned
 artifact untouched; see [generated Rust](../../docs/generated-rust.md).
+
+For a certificate-verified server, use the connection URL settings in
+[database TLS](../../docs/database-tls.md) and run `cargo run --features tls`.

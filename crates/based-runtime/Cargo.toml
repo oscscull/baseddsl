@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
+# Opt-in certificate-verified TLS for server drivers; does not enable a driver itself.
+tls-rustls = ["sqlx?/tls-rustls-ring"]
 # The concrete MariaDB driver + shard router, over sqlx's MySql driver. Off by default
 # so the core runtime (planning + dispatch) stays dependency-light and the seam tests
 # need no database.
@@ -44,7 +46,7 @@ id-gen = ["dep:uuid", "dep:ulid"]
 # via `TEST_MARIADB_URL`/`TEST_POSTGRES_URL` — to run the *verbatim* codegen-lowered
 # SQL against real servers. No reachable server ⇒ the harness skips cleanly, so
 # `cargo test --all-features` stays green with no daemon.
-docker-tests = ["mariadb", "serve", "postgres", "sqlite", "sqlx/rust_decimal"]
+docker-tests = ["mariadb", "serve", "postgres", "sqlite", "tls-rustls", "sqlx/rust_decimal"]
 
 [dependencies]
 based-ast.workspace = true
@@ -70,7 +72,7 @@ tokio = { version = "1", features = ["time", "sync"] }
 # The executor/pool layer for all three concrete drivers (principle 7 — reuse hardened
 # tx-drop/codec/pool/streaming machinery). Strictly an executor: `query` + per-value
 # binds over concrete per-DB drivers — no macros, no query builder, no `Any` driver.
-# TLS off, matching the previous drivers' no-system-OpenSSL choice.
+# Server TLS is selected separately by tls-rustls; SQLite-only builds stay TLS-free.
 sqlx = { version = "0.9.0", optional = true, default-features = false, features = [
     "runtime-tokio",
 ] }
