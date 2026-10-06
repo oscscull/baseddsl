@@ -11,8 +11,10 @@
 mod check;
 mod error;
 mod gen;
+mod local_config;
 mod migrate;
 mod project;
+mod project_root;
 mod render;
 mod serve;
 
@@ -32,15 +34,13 @@ struct Cli {
 enum Command {
     /// Parse + typecheck the project, print diagnostics.
     Check {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
     },
     /// Format the project's `.bsl` files in the canonical layout.
     Fmt {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// Don't write; exit nonzero if any file is not already formatted.
         #[arg(long)]
         check: bool,
@@ -52,9 +52,8 @@ enum Command {
     },
     /// Show the engine-derived facts (inferred inverses + indexes).
     Facts {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// Emit machine-readable JSON instead of the human-readable listing.
         #[arg(long)]
         json: bool,
@@ -66,9 +65,8 @@ enum Command {
     },
     /// Serve the checked schema as a live RPC service (`POST /q|m/<name>`).
     Serve {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// Address to bind the HTTP listener on. `BASED_LISTEN` overrides the default —
         /// a container sets `0.0.0.0:8080` there so the port is reachable from outside.
         #[arg(long, env = "BASED_LISTEN", default_value = "127.0.0.1:8080")]
@@ -92,9 +90,8 @@ enum MigrateAction {
     /// `migrations/NNNN_slug/{up.mig, schema.snap}`. No changes ⇒ writes nothing.
     /// Offline + deterministic — never touches a database.
     Gen {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// A short label for the migration slug (snake-cased). When omitted, the slug
         /// is derived from the change (`init` for the first, else `schema_update`).
         name: Option<String>,
@@ -102,9 +99,8 @@ enum MigrateAction {
     /// Render migrations' neutral `up.mig` steps to per-dialect SQL and print it — the
     /// review-the-SQL step. Offline: reads the stored `schema.snap`s, never a DB.
     Render {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// A specific migration number (`NNNN`) to render. When omitted, renders every
         /// migration in order.
         #[arg(long)]
@@ -119,9 +115,8 @@ enum MigrateAction {
     /// `--allow-destructive`. Applies to every `--database-url` (a sharded fleet migrates
     /// each shard).
     Apply {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// A database URL per physical shard (repeat for a sharded fleet). Falls back to
         /// `BASED_DATABASE_URL` (comma-separated) when none is passed.
         #[arg(long = "database-url")]
@@ -141,9 +136,8 @@ enum MigrateAction {
     /// Show applied vs. pending migrations, flagging any hash mismatch (an edited applied
     /// migration). Reads the ledger from a live database.
     Status {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// The database to read the ledger from (first shard). Falls back to
         /// `BASED_DATABASE_URL`.
         #[arg(long = "database-url")]
@@ -152,9 +146,8 @@ enum MigrateAction {
     /// Offline CI gate: confirm each `up.mig` still matches its `schema.snap` (no hand-edit
     /// drift) and the latest snapshot matches the current `.bsl` (no uncaptured changes).
     Verify {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
     },
 }
 
@@ -162,18 +155,16 @@ enum MigrateAction {
 enum GenTarget {
     /// Emit SQL DDL (`CREATE TABLE …`) for the manifest dialect.
     Sql {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// Write to this file instead of stdout.
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
     /// Emit a typed client module for the manifest client target.
     Client {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// Write to this file instead of stdout.
         #[arg(short, long)]
         out: Option<PathBuf>,
@@ -187,9 +178,8 @@ enum GenTarget {
     /// Emit an OpenAPI 3.1 spec for the wire — feed it to `openapi-generator` for a
     /// client in any language (polyglot via one contract, not N emitters).
     Openapi {
-        /// Project root (holds based.toml). Defaults to the current directory.
-        #[arg(default_value = ".")]
-        root: PathBuf,
+        /// Explicit project root; otherwise find the nearest ancestor based.toml.
+        root: Option<PathBuf>,
         /// Write to this file instead of stdout.
         #[arg(short, long)]
         out: Option<PathBuf>,
@@ -210,43 +200,82 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
-        Command::Check { root } => check::cmd_check(&root),
-        Command::Fmt { root, check } => check::cmd_fmt(&root, check),
+        Command::Check { root } => check::cmd_check(&project_root::resolve(root.as_deref())?),
+        Command::Fmt { root, check } => {
+            check::cmd_fmt(&project_root::resolve(root.as_deref())?, check)
+        }
         Command::Gen { target } => match target {
-            GenTarget::Sql { root, out } => gen::cmd_gen_sql(&root, out.as_deref()),
+            GenTarget::Sql { root, out } => {
+                gen::cmd_gen_sql(&project_root::resolve(root.as_deref())?, out.as_deref())
+            }
             GenTarget::Client {
                 root,
                 out,
                 embedded,
-            } => gen::cmd_gen_client(&root, out.as_deref(), embedded),
-            GenTarget::Openapi { root, out } => gen::cmd_gen_openapi(&root, out.as_deref()),
+            } => gen::cmd_gen_client(
+                &project_root::resolve(root.as_deref())?,
+                out.as_deref(),
+                embedded,
+            ),
+            GenTarget::Openapi { root, out } => {
+                gen::cmd_gen_openapi(&project_root::resolve(root.as_deref())?, out.as_deref())
+            }
         },
         Command::Migrate { action } => match action {
-            MigrateAction::Gen { root, name } => migrate::cmd_migrate_gen(&root, name.as_deref()),
+            MigrateAction::Gen { root, name } => {
+                migrate::cmd_migrate_gen(&project_root::resolve(root.as_deref())?, name.as_deref())
+            }
             MigrateAction::Render {
                 root,
                 number,
                 dialect,
-            } => migrate::cmd_migrate_render(&root, number, dialect.as_deref()),
+            } => migrate::cmd_migrate_render(
+                &project_root::resolve(root.as_deref())?,
+                number,
+                dialect.as_deref(),
+            ),
             MigrateAction::Apply {
                 root,
                 database_url,
                 allow_destructive,
                 to,
                 down,
-            } => migrate::cmd_migrate_apply(&root, database_url, allow_destructive, to, down).await,
-            MigrateAction::Status { root, database_url } => {
-                migrate::cmd_migrate_status(&root, database_url).await
+            } => {
+                migrate::cmd_migrate_apply(
+                    &project_root::resolve(root.as_deref())?,
+                    database_url,
+                    allow_destructive,
+                    to,
+                    down,
+                )
+                .await
             }
-            MigrateAction::Verify { root } => migrate::cmd_migrate_verify(&root),
+            MigrateAction::Status { root, database_url } => {
+                migrate::cmd_migrate_status(&project_root::resolve(root.as_deref())?, database_url)
+                    .await
+            }
+            MigrateAction::Verify { root } => {
+                migrate::cmd_migrate_verify(&project_root::resolve(root.as_deref())?)
+            }
         },
-        Command::Facts { root, json } => project::cmd_facts(&root, json),
+        Command::Facts { root, json } => {
+            project::cmd_facts(&project_root::resolve(root.as_deref())?, json)
+        }
         Command::Serve {
             root,
             listen,
             database_url,
             pool_min,
             pool_max,
-        } => serve::cmd_serve(&root, &listen, database_url, pool_min, pool_max).await,
+        } => {
+            serve::cmd_serve(
+                &project_root::resolve(root.as_deref())?,
+                &listen,
+                database_url,
+                pool_min,
+                pool_max,
+            )
+            .await
+        }
     }
 }

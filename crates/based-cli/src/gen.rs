@@ -28,7 +28,8 @@ pub fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
     }
     match out {
         Some(path) => {
-            std::fs::write(path, &sql).map_err(|e| io_at("writing", path, e))?;
+            let path = root.join(path);
+            std::fs::write(&path, &sql).map_err(|e| io_at("writing", &path, e))?;
             eprintln!("wrote {} ({} models)", path.display(), schema.models.len());
         }
         None => print!("{sql}"),
@@ -39,7 +40,8 @@ pub fn cmd_gen_sql(root: &Path, out: Option<&Path>) -> Result<(), CliError> {
 pub fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> Result<(), CliError> {
     use based_codegen::client::ClientOptions;
     let (project, schema, decls, _sources, _warnings) = load_checked(root)?;
-    let target = ClientTarget::parse(&project.manifest.client);
+    let target = ClientTarget::try_parse(&project.manifest.client)
+        .ok_or_else(|| CliError::usage("invalid client target; expected rust"))?;
     // The compile-target dialect gates the one per-driver `adopt_*` bring-your-own
     // transaction constructor the embedded bridge emits (each names a concrete
     // `sqlx::Transaction<DB>`); a wire-only client never touches it.
@@ -49,7 +51,8 @@ pub fn cmd_gen_client(root: &Path, out: Option<&Path>, embedded: bool) -> Result
     let code = based_codegen::client::client_with(&schema, &decls, target, opts);
     match out {
         Some(path) => {
-            std::fs::write(path, &code).map_err(|e| io_at("writing", path, e))?;
+            let path = root.join(path);
+            std::fs::write(&path, &code).map_err(|e| io_at("writing", &path, e))?;
             let n = schema.queries.len() + schema.mutations.len();
             eprintln!("wrote {} ({n} callable(s))", path.display());
         }
@@ -63,7 +66,8 @@ pub fn cmd_gen_openapi(root: &Path, out: Option<&Path>) -> Result<(), CliError> 
     let doc = based_codegen::openapi::openapi(&schema, &decls);
     match out {
         Some(path) => {
-            std::fs::write(path, &doc).map_err(|e| io_at("writing", path, e))?;
+            let path = root.join(path);
+            std::fs::write(&path, &doc).map_err(|e| io_at("writing", &path, e))?;
             let n = schema.queries.len() + schema.mutations.len();
             eprintln!("wrote {} ({n} operation(s))", path.display());
         }

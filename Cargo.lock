@@ -227,6 +227,7 @@ dependencies = [
  "based-version",
  "clap",
  "ctrlc",
+ "dotenvy",
  "tokio",
 ]
 

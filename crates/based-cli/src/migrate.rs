@@ -2,7 +2,8 @@
 //! offline-verify schema migrations (snapshot + diff, ledger-tracked).
 
 use crate::error::{io_at, CliError};
-use crate::project::{backend, discover_project, load_checked, redact, shard_urls};
+use crate::local_config::shard_urls;
+use crate::project::{backend, discover_project, load_checked, redact};
 use based_codegen::Dialect;
 use std::path::{Path, PathBuf};
 
@@ -129,7 +130,11 @@ pub fn cmd_migrate_render(
     // so it does not run the full front end (it works even against an in-progress schema).
     let project = discover_project(root)?;
     let dialect = match dialect {
-        Some(d) => Dialect::parse(d),
+        Some(d) => Dialect::try_parse(d).ok_or_else(|| {
+            CliError::usage(format!(
+                "invalid --dialect {d:?}; expected mariadb | mysql | sqlite | postgres"
+            ))
+        })?,
         None => Dialect::parse(&project.manifest.dialect),
     };
 
@@ -225,7 +230,7 @@ pub async fn cmd_migrate_apply(
         direction,
     };
 
-    let urls = shard_urls(database_url)?;
+    let urls = shard_urls(root, dialect, database_url)?;
     for url in &urls {
         let backend = backend(dialect, url)?;
         match migrate::apply(&*backend, dialect, &migrations, &opts).await {
@@ -266,7 +271,7 @@ pub async fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Resul
         .map_err(|e| CliError::migrate("loading migrations", e))?;
 
     // Status is about applied-vs-pending, so it needs the ledger (first shard suffices).
-    let urls = shard_urls(database_url)?;
+    let urls = shard_urls(root, dialect, database_url)?;
     let backend = backend(dialect, &urls[0])?;
     let mut db = backend
         .checkout("")

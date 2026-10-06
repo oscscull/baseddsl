@@ -9,8 +9,11 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+mod validate;
+
 /// Parsed `based.toml`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     #[serde(default = "default_dialect")]
     pub dialect: String,
@@ -26,6 +29,7 @@ pub struct Manifest {
 
 /// The `[schema]` manifest block: project-wide schema conventions.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaConfig {
     /// `foreign_keys = "all" | "none"` — the FK-constraint convention. `"none"` (default,
     /// backward-compatible): no relation gets an FK unless it writes `@fk`. `"all"`: every
@@ -98,6 +102,8 @@ pub fn discover(root: &Path) -> Result<Project, Vec<Diagnostic>> {
         )]
     })?;
 
+    validate::manifest(&manifest)?;
+
     // Schema root: the manifest's `root` (relative to the manifest dir), else the
     // manifest dir itself.
     let schema_root = match &manifest.root {
@@ -105,10 +111,18 @@ pub fn discover(root: &Path) -> Result<Project, Vec<Diagnostic>> {
         None => root.to_path_buf(),
     };
 
-    let mut files: Vec<DiscoveredFile> = WalkDir::new(&schema_root)
+    let entries = WalkDir::new(&schema_root)
         .sort_by_file_name()
         .into_iter()
-        .filter_map(std::result::Result::ok)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            vec![Diagnostic::error(
+                "E0013",
+                format!("cannot read schema under {}: {e}", schema_root.display()),
+            )]
+        })?;
+    let mut files: Vec<DiscoveredFile> = entries
+        .into_iter()
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().is_some_and(|x| x == "bsl"))
         .map(|e| DiscoveredFile {
