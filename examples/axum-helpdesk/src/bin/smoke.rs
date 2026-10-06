@@ -195,13 +195,14 @@ async fn main() {
     println!("ok - cross-tenant status update -> 404, nothing written");
 
     // ---- idempotent open: one key, one row -------------------------------------
+    let open_key = uuid::Uuid::new_v4().to_string();
     let open = json!({ "subject": "Printer on fire", "body": "Actual flames.", "priority": 3 });
     let (status, first) = desk
-        .post(Some(ada), "/tickets", open.clone(), Some("smoke-open-1"))
+        .post(Some(ada), "/tickets", open.clone(), Some(&open_key))
         .await;
     assert_eq!(status, 201, "{first}");
     let (status, replay) = desk
-        .post(Some(ada), "/tickets", open.clone(), Some("smoke-open-1"))
+        .post(Some(ada), "/tickets", open.clone(), Some(&open_key))
         .await;
     assert_eq!(status, 201, "{replay}");
     assert_eq!(
@@ -218,17 +219,15 @@ async fn main() {
             Some(ada),
             "/tickets",
             json!({ "subject": "Different", "body": "request" }),
-            Some("smoke-open-1"),
+            Some(&open_key),
         )
         .await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"]["code"], "idempotency_key_reuse");
-    // Same gate, whichever store `App::connect` wired: the production `RedisStore` when
-    // `REDIS_URL` is set (CI runs it against a live Redis), else the in-process `MemStore`.
     let store_kind = if std::env::var("REDIS_URL").is_ok() {
         "Redis"
     } else {
-        "MemStore"
+        "DbStore"
     };
     println!("ok - Idempotency-Key via {store_kind}: replayed open, one row, reuse -> 422");
 

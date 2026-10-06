@@ -17,6 +17,7 @@ pub mod client {
     include!("../generated/client.rs");
 }
 pub mod close_policy;
+mod idempotency_store;
 pub mod redis_store;
 pub mod routes;
 

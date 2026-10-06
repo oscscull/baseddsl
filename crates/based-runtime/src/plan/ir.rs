@@ -7,7 +7,7 @@ pub struct Request {
     pub args: serde_json::Map<String, serde_json::Value>,
     pub ctx: serde_json::Map<String, serde_json::Value>,
     /// An optional idempotency key for a mutation retry: the caller attaches a stable key
-    /// so the engine runs the write body at most once per key. Request metadata, supplied
+    /// to replay retained responses within the selected store's failure boundary. Supplied
     /// out of band (the `Idempotency-Key` header), never the JSON body — the same
     /// trusted-edge discipline as `$ctx`, and never a schema field. `None` → run every time
     /// (the default). Ignored by queries.

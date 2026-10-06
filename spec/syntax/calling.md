@@ -64,11 +64,16 @@ A `with count` query's envelope also carries `total` — the live-row count of t
 The cursor is a typed `Cursor` on the client surface — a `#[serde(transparent)]` newtype over the underlying string, so the wire stays an opaque cursor string and OpenAPI still describes it as `{ type: string }`. It is opaque by design: a page result hands one back and the caller feeds it straight to the next call, so a create→paginate→next-page chain needs no conversion. A single `Cursor` type covers every query (a cursor is not entity-typed the way an `Id<E>` is — it encodes a sort-key basis the runtime checksum-validates, cursor.rs). Turning a raw string into a `Cursor` is an explicit, greppable `Cursor::from_raw(s)` for the rare case a cursor arrives from outside the client.
 
 ## Idempotency keys
-A mutation retried after a timeout risks running its write twice; an **idempotency key**
-makes the engine run the body at most once per key and replay the first attempt's
-recorded response (runtime semantics: same key + same payload → the recorded response;
-same key + different payload → `422 idempotency_key_reuse`; a concurrent duplicate →
-`409 idempotency_conflict`).
+A mutation retried after a timeout risks a duplicate effect. A retained idempotency
+key replays the recorded response for the same args and context; changed args/context
+return `422 idempotency_key_reuse`. Keys are `(callable, key)` within the database/store,
+not tenant-scoped: use globally unique keys. `DbStore` commits key, response and database
+writes atomically, including across instances/restarts; concurrent retries block then
+replay. `MemStore` is local to a process and TTL (concurrent duplicates return
+`409 idempotency_conflict`). Out-of-band recording after commit can fail or be lost,
+allowing another write. Removed/expired keys run again; external side effects are
+excluded. After an ambiguous commit, retry the same request/key against the durable
+store to resolve the result. See [store guidance](../../examples/axum-helpdesk/README.md#choosing-an-idempotency-store).
 
 On the typed surface every mutation method has a keyed twin — `place_order(input, ctx)`
 and `place_order_with_key(input, ctx, key)` — so the common no-key call stays clean and

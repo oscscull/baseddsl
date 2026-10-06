@@ -42,7 +42,7 @@ futures-core = "0.3"
 uuid = { version = "1", features = ["v4"] }
 # Load `DATABASE_URL` from `.env` (the conventional 12-factor crate).
 dotenvy = "0.15"
-# The production idempotency store: a shared Redis behind the engine's `IdempotencyStore`
+# Optional shared response replay: Redis behind the engine's `IdempotencyStore`
 # seam (src/redis_store.rs). The engine itself carries no redis dependency — this lives in
 # the app. `connection-manager` is the cloneable, auto-reconnecting async handle.
 # Only basic async key commands are used; ACL/streams/geo/Lua/bigint APIs are unused.

@@ -107,8 +107,7 @@ jobs:
         options: >-
           --health-cmd="pg_isready -U postgres"
           --health-interval=10s --health-timeout=5s --health-retries=12
-      # The helpdesk's production idempotency store — its keyed-open gate runs against
-      # this live Redis (not just the in-process MemStore).
+      # The optional Redis integration is tested alongside the default DbStore.
       redis:
         image: redis:7-alpine
         ports:

@@ -2,8 +2,8 @@
 //!
 //! The engine mints a fresh `id` for every `create`, so a client that retries a mutation
 //! after a `503`/timeout would double-insert. An idempotency key closes it: the caller
-//! attaches a stable key to a mutation, and the engine runs the write body at most once
-//! per key — a retry replays the first attempt's stored response.
+//! attaches a stable key to a mutation; a retained completed key replays its stored
+//! response. Durable database deduplication requires [`DbStore`].
 //!
 //! ## Scope
 //! - Mutations only. A query is naturally idempotent, so only [`crate::run::run_mutation`]
@@ -20,7 +20,7 @@
 //! - Fresh → mark the key in-flight (recording the fingerprint), run the write body, then
 //!   [`record`] the response (or [`abandon`] on failure so a later retry may try again).
 //! - Done → a prior attempt with the same fingerprint already committed; replay its stored
-//!   response with no writes (exactly-once).
+//!   response with no writes while the entry is retained.
 //! - InFlight → a concurrent attempt with the same key + fingerprint is still running;
 //!   reject with a retryable `409`.
 //! - Mismatch → the key was seen before with a different fingerprint (the caller reused one
@@ -28,13 +28,22 @@
 //!   result.
 //!
 //! ## The store is a seam
-//! [`IdempotencyStore`] is a trait. [`MemStore`] is an in-process implementation (correct
-//! for a single instance, and the whole request→response path is testable against it with
-//! no infra). A multi-instance deployment backs the store with a shared/durable store (the
-//! database itself, or a cache) so a retry that lands on a different app instance still
-//! dedupes, behind the same trait, and plugs its own store in without editing runtime
-//! source: [`Engine::with_store`](crate::Engine::with_store) for an embed, or
-//! [`serve_with_store`](crate::http::serve_with_store) for the standalone listener.
+//! [`DbStore`] commits key, writes and response in the same database transaction.
+//! Concurrent retries block then replay; reconstructed stores against the same database
+//! retain replay ability. A commit error/cancellation can leave the caller uncertain:
+//! retry the same key/request to discover the committed outcome.
+//!
+//! [`MemStore`] is process-local. Out-of-band stores record after database commit, so
+//! recording failure, process loss or expiry can permit duplicate effects. An atomic
+//! external claim alone does not close this gap. Never recommend a fail-open cache for
+//! durable database deduplication. Arbitrary external side effects are outside the contract.
+//!
+//! Keys are `(callable, key)` within a store/database/shard, not tenant-scoped. Use globally
+//! unique keys. Fingerprints include args and context; different requests reject with 422.
+//! After expiry/deletion a key can run again. [`MemStore`] TTL must exceed operation
+//! duration because even in-flight claims expire. [`DbStore::with_gc`] uses detached,
+//! best-effort age-based deletion, not an exact expiry deadline. Unkeyed writes run every time.
+//! Inject a store with [`Engine::with_store`](crate::Engine::with_store).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -74,7 +83,7 @@ pub enum KeyState {
     Mismatch,
 }
 
-/// A store that makes a keyed mutation run **at most once** per `(callable, key)`.
+/// A store that claims and replays keyed mutations within its retention/failure boundary.
 ///
 /// The three methods form the lifecycle: [`begin`](Self::begin) claims the key (or
 /// reports it already done / in flight); on a claimed key the caller runs the write and
@@ -116,7 +125,7 @@ pub trait IdempotencyStore: Send + Sync {
     fn abandon(&self, callable: &str, key: &str);
 
     /// A store that commits the key **inside the mutation's own transaction** (atomic
-    /// exactly-once across app instances) returns a [`TxIdempotency`] here; the default
+    /// database deduplication across app instances) returns a [`TxIdempotency`] here; the default
     /// `None` is the out-of-band store (in-process [`MemStore`], a Redis store) whose
     /// [`begin`](Self::begin)/[`record`](Self::record)/[`abandon`](Self::abandon) bracket
     /// the mutation instead. When this is `Some`, [`crate::run::run_mutation`] ignores the
@@ -144,7 +153,7 @@ pub enum TxClaim {
 }
 
 /// A durable store that commits the idempotency key **in the mutation's own transaction**,
-/// giving genuine exactly-once even when a retry lands on a *different* app instance (the
+/// deduplicating committed database effects while retained, across app instances (the
 /// key lives in a shared table, not per-process memory). Returned by
 /// [`IdempotencyStore::tx_participant`].
 ///
@@ -218,7 +227,8 @@ impl State {
 /// An in-process [`IdempotencyStore`]: a `Mutex`-guarded map keyed by `(callable, key)`,
 /// with per-key TTL expiry.
 ///
-/// Correct for a single app instance (one process dedupes its own retries). It is
+/// Replays recorded responses within one process and its TTL; it cannot protect a
+/// committed write across process loss or the commit-to-record gap. It is
 /// `Send + Sync`, so the shared HTTP worker pool uses one behind an `Arc`. A
 /// multi-instance deployment wants a shared store (so a retry on another instance also
 /// dedupes) behind the same trait — injected via
@@ -346,8 +356,8 @@ impl IdempotencyStore for NoStore {
 /// A durable [`IdempotencyStore`] that keeps its keys in a `_based_idempotency` table in
 /// the same database the mutations write to, committing each key **in the mutation's own
 /// transaction** — so a keyed retry that lands on a *different* app instance still
-/// deduplicates, and the key can never commit apart from the writes it guards (genuine
-/// exactly-once, the DB-first alternative to a Redis store). It is a [`TxIdempotency`], so
+/// deduplicates while retained; the key cannot commit apart from the database writes
+/// it guards. External side effects are excluded. It is a [`TxIdempotency`], so
 /// [`crate::run::run_mutation`] drives it inside the transaction rather than bracketing it;
 /// its out-of-band [`begin`](IdempotencyStore::begin)/[`record`](IdempotencyStore::record)/
 /// [`abandon`](IdempotencyStore::abandon) are never consulted (they exist only to satisfy
@@ -359,13 +369,12 @@ impl IdempotencyStore for NoStore {
 /// [`TxIdempotency`]): this store never returns a 409.
 ///
 /// ## Growth
-/// Every keyed mutation leaves a row. Left unbounded that table only grows, so the store
-/// is intended as a *basic* durable option, not a high-volume one — reach for an
-/// out-of-band store with native expiry (a Redis [`IdempotencyStore`]) at scale. To keep
-/// the table bounded here, build it with [`with_gc`](Self::with_gc): a **dumb, amortized,
-/// age-based sweep** deletes rows past a TTL, on the store's *own* connection (never a
-/// mutation's transaction), at most once per TTL window. [`create`](Self::create) /
-/// [`new`](Self::new) keep every key forever (the retain-forever escape).
+/// Every keyed mutation leaves a row. [`create`](Self::create)/[`new`](Self::new)
+/// retain keys forever. [`with_gc`](Self::with_gc) performs detached best-effort
+/// age-based deletion on its own connection, at most once per TTL window. A removed
+/// key can execute again; retention must cover the application's retry horizon.
+/// Size the table, indexes and connection pool for workload rather than substituting
+/// a cache with weaker commit semantics. Each shard/database owns its own keys.
 pub struct DbStore {
     dialect: based_codegen::Dialect,
     gc: Option<Gc>,

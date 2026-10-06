@@ -6,12 +6,11 @@ use super::*;
 /// fresh checkout + fresh [`Tx`], so a failed attempt's connection is already back in
 /// the pool (or discarded) before the next begins.
 ///
-/// When the request carries an idempotency key the write body runs at most once per
-/// `(callable, key)`: a first attempt claims the key, runs, and records its response; a
-/// retry replays that recorded response with no writes (exactly-once), and a concurrent
-/// retry while the first is still in flight is a [`RunError::Conflict`]. Planning (arg /
-/// `$ctx` validation) happens before the store is consulted, so a malformed request is a
-/// clean `4xx` that never claims a key. Without a key this is the plain run-every-time path.
+/// Keyed requests replay retained responses according to the selected store's failure
+/// boundary. DbStore commits the key with database writes; out-of-band stores record
+/// after commit and cannot guarantee deduplication across that gap. Concurrent retries
+/// block-and-replay with DbStore or return conflict with MemStore. Planning validates
+/// args/context before claiming. Unkeyed requests execute every time.
 pub async fn run_mutation(
     compiled: &Compiled,
     backend: &dyn Backend,
@@ -101,7 +100,7 @@ pub(crate) fn plain_outcome(
 /// mutation future cancelled at an await point), it releases the key so a retry may run.
 /// A drop while the commit itself is in flight has an unknown outcome; releasing there
 /// matches the existing failed-commit semantics — a durable store that resolves the
-/// claim atomically with the transaction is the deferred multi-instance answer.
+/// claim atomically with the transaction (DbStore) resolves retries against the database.
 struct Claim<'a> {
     store: &'a dyn IdempotencyStore,
     callable: &'a str,
