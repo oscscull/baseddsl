@@ -21,6 +21,7 @@ docker run -d --name "$NAME" -p "$PORT:8080" \
   -v "$ROOT/examples/sqlite-quickstart:/app:ro" \
   -e DATABASE_URL=/tmp/smoke.db \
   -e BASED_MIGRATE_ON_START=1 \
+  -e BASED_INIT_IDEMPOTENCY_TABLE=true \
   "$IMAGE" >/dev/null
 
 # Wait for the listener to come up (bounded ~30s).

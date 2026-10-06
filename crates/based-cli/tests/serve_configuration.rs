@@ -27,7 +27,16 @@ fn serve_from_child_uses_project_local_connection() {
     let listen = address.to_string();
     let mut server = Server(
         project
-            .command("src/nested", &["serve", "--listen", &listen])
+            .command(
+                "src/nested",
+                &[
+                    "serve",
+                    "--listen",
+                    &listen,
+                    "--idempotency-store",
+                    "memory",
+                ],
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

@@ -41,6 +41,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-healthche
 #   BASED_PROJECT          — the served schema root (based.toml + **/*.bsl), mounted at /app
 #   BASED_LISTEN           — bind address, read natively by `based serve`; default 0.0.0.0:8080
 #                            so the port is reachable from outside the container
+#   BASED_IDEMPOTENCY_STORE — database (default), memory, or none
+#   BASED_INIT_IDEMPOTENCY_TABLE — true explicitly initializes the store table on every shard
 #   BASED_MIGRATE_ON_START — "1" runs `based migrate apply` before serving (opt-in)
 ENV BASED_PROJECT=/app \
     BASED_LISTEN=0.0.0.0:8080

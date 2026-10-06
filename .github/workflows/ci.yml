@@ -60,6 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: make ci-live-mariadb MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test
+      - run: TEST_MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test cargo test -p based-cli --test serve_idempotency_live mariadb_
 
   # Live Postgres: the integration suite against a service container (TEST_POSTGRES_URL).
   live-postgres:
@@ -79,6 +80,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: make ci-live-postgres POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
+      - run: TEST_POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test cargo test -p based-cli --test serve_idempotency_live postgres_
 
   # The example scenarios end-to-end: the three quickstarts (`based migrate apply` then
   # `cargo run`) plus the axum-helpdesk smoke (reset -> migrate -> seed -> drive every route
