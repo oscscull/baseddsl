@@ -32,7 +32,9 @@ impl Project {
         cmd.current_dir(self.0.join(cwd))
             .args(args)
             .env_remove("BASED_DATABASE_URL")
-            .env_remove("DATABASE_URL");
+            .env_remove("DATABASE_URL")
+            .env_remove("BASED_IDEMPOTENCY_STORE")
+            .env_remove("BASED_INIT_IDEMPOTENCY_TABLE");
         cmd
     }
 

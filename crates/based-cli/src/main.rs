@@ -11,6 +11,8 @@
 mod check;
 mod error;
 mod gen;
+mod idempotency_store;
+mod idempotency_table;
 mod local_config;
 mod migrate;
 mod project;
@@ -81,6 +83,8 @@ enum Command {
         /// Max connections per shard pool (the per-box concurrency cap).
         #[arg(long, default_value_t = 32)]
         pool_max: usize,
+        #[command(flatten)]
+        idempotency: idempotency_store::StoreOptions,
     },
 }
 
@@ -267,6 +271,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             database_url,
             pool_min,
             pool_max,
+            idempotency,
         } => {
             serve::cmd_serve(
                 &project_root::resolve(root.as_deref())?,
@@ -274,6 +279,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 database_url,
                 pool_min,
                 pool_max,
+                idempotency,
             )
             .await
         }

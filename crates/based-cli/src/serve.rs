@@ -2,6 +2,7 @@
 //! connection pool, with graceful drain on SIGTERM/SIGINT.
 
 use crate::error::CliError;
+use crate::idempotency_store::StoreOptions;
 use crate::local_config::shard_urls;
 use crate::project::load_checked;
 use based_codegen::Dialect;
@@ -17,6 +18,7 @@ pub async fn cmd_serve(
     database_url: Vec<String>,
     pool_min: usize,
     pool_max: usize,
+    idempotency: StoreOptions,
 ) -> Result<(), CliError> {
     use based_runtime::http::{ServeConfig, TrustedHeaderContext};
     #[cfg(any(feature = "mariadb", feature = "postgres"))]
@@ -28,6 +30,8 @@ pub async fn cmd_serve(
             "invalid pool options: --pool-max must be positive and --pool-min must not exceed it",
         ));
     }
+
+    idempotency.validate()?;
 
     // Reuse the shared front end so diagnostics render exactly as `based check` does,
     // then build the served artifact from the clean schema (no second parse/check).
@@ -52,9 +56,6 @@ pub async fn cmd_serve(
         listen: listen.to_string(),
     };
 
-    eprintln!("based serve: {dialect:?}, listening on {listen}");
-    eprintln!("liveness: GET /healthz  readiness: GET /readyz");
-
     // Build the backend for the manifest dialect and stand the listener up. The `@scope`
     // owner field routes to a shard schema-side, so no shard key is hand-set here —
     // the driver reads it off the compiled schema. SQLite is a single local file (one url,
@@ -65,13 +66,15 @@ pub async fn cmd_serve(
         Dialect::MariaDb | Dialect::MySql => {
             let router = based_runtime::driver::ShardRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
-            run_listener(compiled, router, ctx, config).await
+            crate::idempotency_table::mariadb(&router, dialect, idempotency).await?;
+            run_listener(compiled, router, ctx, config, idempotency).await
         }
         #[cfg(feature = "postgres")]
         Dialect::Postgres => {
             let router = based_runtime::PgRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
-            run_listener(compiled, router, ctx, config).await
+            crate::idempotency_table::postgres(&router, dialect, idempotency).await?;
+            run_listener(compiled, router, ctx, config, idempotency).await
         }
         #[cfg(not(feature = "mariadb"))]
         Dialect::MariaDb | Dialect::MySql => Err(CliError::missing_driver("mariadb")),
@@ -86,7 +89,8 @@ pub async fn cmd_serve(
             }
             let backend = based_runtime::SqliteBackend::open(&urls[0])
                 .map_err(|e| CliError::db(format!("opening {}", urls[0]), e))?;
-            run_listener(compiled, backend, ctx, config).await
+            crate::idempotency_table::sqlite(&backend, dialect, idempotency).await?;
+            run_listener(compiled, backend, ctx, config, idempotency).await
         }
     }
 }
@@ -102,8 +106,14 @@ async fn run_listener(
     backend: impl based_runtime::Backend + 'static,
     ctx: based_runtime::http::TrustedHeaderContext,
     config: based_runtime::http::ServeConfig,
+    idempotency: StoreOptions,
 ) -> Result<(), CliError> {
-    based_runtime::http::serve_with_handle(compiled, backend, ctx, config, |handle| {
+    let dialect = compiled.dialect;
+    let store = idempotency.build(dialect);
+    let listen = config.listen.clone();
+    based_runtime::http::serve_with_store(compiled, backend, ctx, store, config, |handle| {
+        eprintln!("based serve: {dialect:?}, listening on {listen}");
+        eprintln!("liveness: GET /healthz  readiness: GET /readyz");
         if let Err(e) = ctrlc::set_handler(move || {
             eprintln!("based serve: shutdown signal received, draining…");
             handle.shutdown();
