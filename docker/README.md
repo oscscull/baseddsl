@@ -25,6 +25,8 @@ the binary + entrypoint (~120 MB). Runs as an unprivileged user.
 | `BASED_DATABASE_URL` | one shard URL, or comma-separated for a sharded fleet. **Required.** The standard `DATABASE_URL` is also honored. |
 | `BASED_PROJECT` | served schema root — mount your project here. Default `/app`. |
 | `BASED_LISTEN` | bind address, read natively by `based serve`. Default `0.0.0.0:8080`. |
+| `BASED_IDEMPOTENCY_STORE` | `database` (default), `memory`, or `none`; see [store contracts](../docs/standalone-idempotency.md). |
+| `BASED_INIT_IDEMPOTENCY_TABLE` | `true` explicitly creates the store table on every shard at startup; otherwise provision it before serving. |
 | `BASED_MIGRATE_ON_START` | `1` runs `based migrate apply` before serving. Off by default — leave unset if you apply migrations out of band. |
 
 `$ctx` (auth/scope) is **server-supplied, never the request body**: front the
@@ -38,8 +40,14 @@ docker run -d --name based-serve -p 8080:8080 \
   -v "$PWD/examples/postgres-quickstart:/app:ro" \
   -e DATABASE_URL="postgres://user:pw@db-host:5432/mydb" \
   -e BASED_MIGRATE_ON_START=1 \
+  -e BASED_INIT_IDEMPOTENCY_TABLE=true \
   based-serve
 ```
+
+The example opts into both application migration and store-table initialization.
+For production, provision both through reviewed deployment steps, omit the setup flags,
+and use a runtime role with SELECT/INSERT/UPDATE permissions on the store table.
+Database mode retains keys until explicitly deleted; plan maintenance and capacity.
 
 Then:
 
@@ -70,6 +78,7 @@ docker run -d -p 8080:8080 \
   -v "$PWD/examples/sqlite-quickstart:/app:ro" \
   -v based-data:/data \
   -e DATABASE_URL=/data/app.db -e BASED_MIGRATE_ON_START=1 \
+  -e BASED_INIT_IDEMPOTENCY_TABLE=true \
   based-serve
 ```
 
