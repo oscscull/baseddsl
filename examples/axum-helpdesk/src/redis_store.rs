@@ -1,12 +1,10 @@
-//! A production idempotency store on Redis — the recommended store at scale.
+//! Optional Redis integration demonstrating the public idempotency-store seam.
 //!
-//! The engine dedupes keyed-mutation retries behind the public
-//! [`IdempotencyStore`](based_runtime::IdempotencyStore) trait. The built-in options are an
-//! in-process `MemStore` (per-instance; a retry that lands on another instance is not
-//! deduped) and a `DbStore` (durable, but every key is another row in your database). This
-//! example plugs in **Redis** instead: a shared, fast, out-of-band store whose **native key
-//! expiry** bounds it (no sweep to run), so a keyed retry that lands on *any* instance
-//! dedupes and old keys evict themselves.
+//! Shared response replay is useful when duplicate database effects are acceptable or
+//! independently prevented by database constraints. This adapter is NOT durable database
+//! deduplication: a write commits before Redis records its response. Process loss, Redis
+//! errors, failover or claim expiry can leave a committed write without a replayable entry.
+//! Use the transactional DbStore when retries must not duplicate database effects.
 //!
 //! It lives **in the application**, not the engine: `based-runtime` carries no `redis`
 //! dependency. Any store that satisfies the trait plugs in the same way — build it and pass
@@ -20,7 +18,7 @@
 //!   we are first ([`KeyState::Fresh`]). Already present ⇒ read it: a different fingerprint
 //!   is one key reused for two requests ([`KeyState::Mismatch`]); an in-flight marker is a
 //!   concurrent attempt ([`KeyState::InFlight`] → a retryable 409); a recorded response is
-//!   an exactly-once [`KeyState::Done`] replay.
+//!   a [`KeyState::Done`] replay while retained.
 //! - [`record`](RedisStore::record) overwrites the marker with the response (same `EX`), so
 //!   later attempts replay it.
 //! - [`abandon`](RedisStore::abandon) deletes the key so a failed/cancelled attempt can be
@@ -29,7 +27,7 @@
 //!
 //! Redis being unreachable **fails open**: `begin` returns `Fresh`, so the write still runs
 //! (dedupe degrades to at-least-once) rather than the desk rejecting every keyed write —
-//! availability over exactly-once while the store is down.
+//! availability over deduplication while the store is down.
 
 use std::time::Duration;
 

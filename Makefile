@@ -44,7 +44,7 @@ IMAGE ?= based-serve:ci
 MARIADB_URL  ?= mysql://root:based_test_pw@127.0.0.1:13306/based_test
 POSTGRES_URL ?= postgres://postgres:based_test_pw@127.0.0.1:15432/based_test
 SQLITE_DB    ?= quickstart.db
-# The helpdesk's production idempotency store (its `RedisStore`). Default matches the
+# The helpdesk's optional Redis integration. Default matches the
 # throwaway `redis:7` in dev-db-up; a CI service container overrides it.
 REDIS_URL    ?= redis://127.0.0.1:16379
 
@@ -207,8 +207,7 @@ ci-example-postgres: based-cli
 ## The flagship axum service, end to end over real HTTP: reset the database (drop +
 ## recreate `public`, so a shared throwaway server is fine), migrate, seed, then boot
 ## the service and drive every route (auth, scoping, guard, idempotency, NDJSON export).
-## The service's idempotency runs through its production `RedisStore` (REDIS_URL), so the
-## keyed-open gate is proven against a live Redis, not just the in-process MemStore.
+## Exercise the default transactional store and the optional Redis replay adapter.
 ci-example-helpdesk: based-cli
 	$(ROOT)ci/wait-for-db.sh "$(POSTGRES_URL)"
 	$(ROOT)ci/wait-for-db.sh "$(REDIS_URL)"
@@ -216,6 +215,11 @@ ci-example-helpdesk: based-cli
 	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke -- reset && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(BASED) migrate apply --database-url "$(POSTGRES_URL)" && \
 	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) test --test close_transition && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin seed && \
+	  DATABASE_URL="$(POSTGRES_URL)" env -u REDIS_URL $(CARGO) run --bin smoke
+	cd examples/axum-helpdesk && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(CARGO) run --bin smoke -- reset && \
+	  DATABASE_URL="$(POSTGRES_URL)" $(BASED) migrate apply --database-url "$(POSTGRES_URL)" && \
 	  DATABASE_URL="$(POSTGRES_URL)" REDIS_URL="$(REDIS_URL)" $(CARGO) run --bin seed && \
 	  DATABASE_URL="$(POSTGRES_URL)" REDIS_URL="$(REDIS_URL)" $(CARGO) run --bin smoke
 

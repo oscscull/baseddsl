@@ -44,7 +44,7 @@ fn compiled() -> Compiled {
 async fn make_widget(
     c: &Compiled,
     backend: &SqliteBackend,
-    store: &DbStore,
+    store: &dyn based_runtime::IdempotencyStore,
     ids: &SeqIdGen,
     name: &str,
     key: &str,
@@ -101,8 +101,13 @@ async fn keyed_retry_on_a_second_instance_dedupes_via_the_shared_table() {
     let store_a = DbStore::create(&instance_a, Dialect::Sqlite).await.unwrap();
     let store_b = DbStore::create(&instance_b, Dialect::Sqlite).await.unwrap();
 
-    // First attempt lands on instance A.
-    let first = make_widget(&c, &instance_a, &store_a, &ids, "alpha", "k1").await;
+    // Concurrent retries through separate backends commit exactly one database effect.
+    let (first, concurrent) = tokio::join!(
+        make_widget(&c, &instance_a, &store_a, &ids, "alpha", "k1"),
+        make_widget(&c, &instance_b, &store_b, &ids, "alpha", "k1"),
+    );
+    assert_eq!(concurrent.status, 200, "{:?}", concurrent.body);
+    assert_eq!(concurrent.body, first.body);
     assert_eq!(first.status, 200, "{:?}", first.body);
     assert_eq!(first.body, json!({ "name": "alpha" }));
     assert_eq!(count(&instance_a, "SELECT COUNT(*) FROM `widget`").await, 1);
@@ -129,6 +134,45 @@ async fn keyed_retry_on_a_second_instance_dedupes_via_the_shared_table() {
     assert_eq!(reused.status, 422, "{:?}", reused.body);
     assert_eq!(reused.body["error"]["code"], "idempotency_key_reuse");
     assert_eq!(count(&instance_b, "SELECT COUNT(*) FROM `widget`").await, 1);
+
+    let changed_context = dispatch(
+        &c,
+        &instance_b,
+        "",
+        &ids,
+        &store_b,
+        &Guards::new(),
+        None,
+        "POST",
+        "/m/make_widget",
+        json!({ "name": "alpha" }),
+        json!({ "tenant": "other" }),
+        Some("k1".to_string()),
+    )
+    .await;
+    assert_eq!(changed_context.status, 422);
+
+    // Reconstruct all per-process state against the same file database.
+    drop(store_a);
+    drop(store_b);
+    drop(instance_a);
+    drop(instance_b);
+    let instance_a = SqliteBackend::open(p).unwrap();
+    let store = DbStore::create(&instance_a, Dialect::Sqlite).await.unwrap();
+    let restarted = make_widget(
+        &compiled(),
+        &instance_a,
+        &store,
+        &SeqIdGen::default(),
+        "alpha",
+        "k1",
+    )
+    .await;
+    assert_eq!(restarted.body, first.body);
+    assert_eq!(restarted.status, 200);
+    assert_eq!(count(&instance_a, "SELECT COUNT(*) FROM `widget`").await, 1);
+    let instance_b = instance_a.clone();
+    let store_b = store;
 
     // A genuinely different key runs fresh.
     let fresh = make_widget(&c, &instance_b, &store_b, &ids, "beta", "k2").await;
@@ -202,5 +246,41 @@ async fn with_gc_sweeps_keys_older_than_the_ttl() {
         "the fresh key survives"
     );
     // GC touches only the key table — both widgets are still there.
+    assert_eq!(count(&backend, "SELECT COUNT(*) FROM `widget`").await, 2);
+    let after_expiry = make_widget(&c, &backend, &store, &ids, "alpha", "k1").await;
+    assert_eq!(after_expiry.status, 200);
+    assert_eq!(count(&backend, "SELECT COUNT(*) FROM `widget`").await, 3);
+}
+
+/// Model an external store losing its claim and response during recording after commit.
+struct LostRecording;
+
+#[async_trait::async_trait]
+impl based_runtime::IdempotencyStore for LostRecording {
+    async fn begin(
+        &self,
+        _: &str,
+        _: &str,
+        _: based_runtime::Fingerprint,
+    ) -> based_runtime::KeyState {
+        based_runtime::KeyState::Fresh
+    }
+    async fn record(&self, _: &str, _: &str, _: serde_json::Value) {}
+    fn abandon(&self, _: &str, _: &str) {}
+}
+
+#[tokio::test]
+async fn external_recording_loss_after_commit_permits_duplicate_effects() {
+    let c = compiled();
+    let backend = SqliteBackend::in_memory().unwrap();
+    backend
+        .execute_batch(&sql::ddl(&c.schema, Dialect::Sqlite))
+        .await
+        .unwrap();
+    let ids = SeqIdGen::default();
+    for _ in 0..2 {
+        let response = make_widget(&c, &backend, &LostRecording, &ids, "alpha", "k1").await;
+        assert_eq!(response.status, 200);
+    }
     assert_eq!(count(&backend, "SELECT COUNT(*) FROM `widget`").await, 2);
 }

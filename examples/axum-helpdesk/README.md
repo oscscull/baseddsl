@@ -19,7 +19,7 @@ streaming NDJSON export, raw-SQL leaves, migrations with a data-preserving renam
 | `migrations/` | checked-in artifacts of `based migrate gen` — `0002` renames a column via `@was`, preserving data |
 | `generated/client.rs` | **verbatim** output of `based gen client -o generated/client.rs --embedded`; regenerate after a schema change, never edit |
 | `src/app.rs` | the wiring: the app's `PgPool` → `PgRouter::from_pool` → `Engine`, plus the close-policy guard and the idempotency store |
-| `src/redis_store.rs` | the production idempotency store: `RedisStore` against the engine's `IdempotencyStore` seam (see below) |
+| `src/redis_store.rs` | optional Redis response-replay adapter; see its failure boundaries below |
 | `src/auth.rs` | bearer middleware: the token resolves to a session **through the client itself** |
 | `src/routes.rs` | the HTTP surface — one typed call per handler; `POST /sessions` is the public login |
 | `src/bin/seed.rs` | demo **content** (tickets/comments) through the client's own mutations; prints the demo login emails |
@@ -49,8 +49,7 @@ based migrate apply --database-url "$DATABASE_URL"
 cargo run --bin seed
 
 # 4. The desk, on http://127.0.0.1:8000.
-#    Set REDIS_URL (see .env) to run idempotency through the production Redis store;
-#    without it the engine's in-process MemStore is used (fine for a single instance).
+#    Startup initializes the transactional DbStore on the same Postgres.
 cargo run
 ```
 
@@ -79,7 +78,7 @@ TOKEN=$(curl -s -X POST http://127.0.0.1:8000/sessions \
 curl -s http://127.0.0.1:8000/my/tickets -H "Authorization: Bearer $TOKEN"
 
 # Open a ticket with a retry-safe key. Run it twice: the retry replays the first
-# response — same id, one row ever written.
+# response while the key is retained — same id, one committed row.
 curl -s -X POST http://127.0.0.1:8000/tickets \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Idempotency-Key: demo-1' -H 'Content-Type: application/json' \
@@ -194,22 +193,63 @@ request body.
 
 ## Choosing an idempotency store
 
-A keyed mutation (`Idempotency-Key`) runs **at most once** per key: the engine consults an
-`IdempotencyStore` before the write and replays the first response on a retry. The store is
-a **seam** — one trait, injected at construction with `Engine::with_store` (`src/app.rs`) —
-so which store you run is a deployment choice, not a code change:
+By default the desk uses `DbStore::with_gc` on its existing Postgres pool. Startup ensures
+`_based_idempotency` exists (requires CREATE TABLE permission); keyed requests
+need SELECT/INSERT/UPDATE, and reclamation needs DELETE. The key, database
+mutation and response commit together. Concurrent retries block on the unique
+key and replay the committed response; a new process using the same database
+can replay it too. Pool pressure and database availability still apply.
 
-| store | where it lives | dedupes across instances? | bounding | use it for |
-|---|---|---|---|---|
-| `MemStore` (default) | in `based-runtime` | no — per process | TTL + in-memory sweep | a single instance, local dev |
-| `DbStore` | in `based-runtime` | **yes** (keys in your DB, committed *in the mutation's own transaction* → exactly-once) | `DbStore::with_gc(…, ttl)` — an amortized age-based `DELETE`; else keys are kept forever | a durable option with no new infra — but every key is a row, so keep it modest |
-| **`RedisStore`** (this example) | **your app** (`src/redis_store.rs`) | **yes** — shared Redis | Redis-native key expiry (`EX`) — nothing to sweep | **the recommended production store at scale** |
+| store | boundary | retention | use |
+|---|---|---|---|
+| `DbStore` | one database/shard; key and writes share a transaction | forever with `create`/`new`, or best-effort age-based GC with `with_gc` | durable database mutation deduplication |
+| `MemStore` (engine default) | one process; response recorded after DB commit | 24 hours by default; lost on restart | local development and process-lifetime replay |
+| Optional `RedisStore` | shared replay; response recorded after SQL commit, fails open on Redis errors | Redis TTL | integration example when weaker guarantees are acceptable |
+| Custom out-of-band store | depends on implementation; recording follows DB commit | implementation dependent | only when its failure model is acceptable |
 
-`RedisStore` is ~120 lines in the app, not the engine: `based-runtime` carries no `redis`
-dependency. It shows what plugging in *any* superior store looks like — implement the
-`IdempotencyStore` trait (`begin`/`record` async; `abandon` sync, fired from the mutation's
-cancellation `Drop` guard) and pass it to `Engine::with_store`. `App::connect` uses it when
-`REDIS_URL` is set, and the smoke's keyed-open gate then runs against a live Redis.
+Keys are scoped by `(callable, key)` within the store/database, **not by tenant**.
+Use globally unique keys. The fingerprint includes args and server-derived `$ctx`;
+changed args or context with a retained key return `422 idempotency_key_reuse`.
+The desk retains keys for at least 24 hours, then a detached best-effort sweep may
+delete them. Once deleted, the same key runs again. `MemStore` expiry can also
+remove an in-flight claim, so its TTL must exceed operation duration.
+
+A lost connection during commit leaves the caller uncertain: retry the same key
+and request against the same durable database to resolve the committed result.
+With an out-of-band store, DB commit followed by recording failure, expiry or
+process loss can permit a second effect. Shared caching alone cannot close that
+gap. The optional Redis adapter therefore carries weaker guarantees.
+No store deduplicates arbitrary external side effects or guarantees success.
+Unkeyed mutations still execute on every call. See the runtime API contract and
+[calling reference](../../spec/syntax/calling.md).
+
+### Optional Redis integration
+
+Set `REDIS_URL=redis://127.0.0.1:16379` (the local disposable Redis from
+`make dev-db-up`) before `cargo run` to select `src/redis_store.rs`. Unset it to
+return to DbStore. `make ci-example-helpdesk` runs the HTTP scenario with both stores.
+The adapter demonstrates atomic `SET NX EX` claims, fingerprint matching, response
+replay and async store injection through `Engine::with_store`; Redis remains an
+application dependency. It fails open on connection errors, and claim expiry or
+lost recording after SQL commit can permit another effect. Its TTL must exceed
+operation duration. Use it only when duplicate effects are acceptable or prevented
+independently. No Redis URL/credentials are printed by store-selection diagnostics.
+
+### Production table provisioning and growth
+
+For restricted production roles, provision `_based_idempotency` through a reviewed
+migration using `based_codegen::sql::idempotency_table_ddl`, on every database/shard,
+then use `DbStore::new` (retains forever). Existing example startup uses `with_gc`
+for convenience, so it needs DDL privileges. Retention/cleanup is an operational
+choice, not a promise that deleting keys preserves deduplication indefinitely.
+
+The current GC is a basic single-shard helper: it deletes all old entries in one
+statement, has no dedicated age index, silently ignores cleanup failures, and schedules
+per process. It is not a verified high-throughput cleanup solution. For large workloads,
+provision an age index and operate bounded cleanup with monitoring; keep records for the
+full retry horizon. Stored response size, retained key count, database log/vacuum work and
+connections occupied by concurrent retries all count toward capacity. Benchmark the
+actual workload; moving these records to Redis weakens the atomic commit guarantee.
 
 ## Where each idea is specified
 
