@@ -7,6 +7,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+# Certificate-verified server connections, selected explicitly by the consumer.
+tls = ["based-runtime/tls-rustls"]
+
 [dependencies]
 # The engine: in-process `Engine`, the `ShardRouter`/`MariaDb` driver, and the production
 # uuid id generator. The `id-gen` feature pulls in `mariadb` (the concrete driver) *and*

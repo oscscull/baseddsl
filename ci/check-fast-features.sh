@@ -14,7 +14,7 @@ echo 'ci-fast-features: no server drivers or codec-spike dependencies'
 # An embedded production generator must remain usable without the HTTP listener.
 embedded_tree=$("$cargo_bin" tree -p based-runtime --no-default-features \
     --features sqlite,id-gen -e normal,build --prefix none)
-if hits=$(printf '%s\n' "$embedded_tree" | grep -E '^(axum|hyper|tower|sqlx-mysql|sqlx-postgres) '); then
+if hits=$(printf '%s\n' "$embedded_tree" | grep -E '^(axum|hyper|tower|sqlx-mysql|sqlx-postgres|rustls|ring|aws-lc-rs|openssl) '); then
     printf 'embedded production feature boundary violated:\n%s\n' "$hits" >&2
     exit 1
 fi
