@@ -31,12 +31,12 @@ based migrate apply --database-url "$DATABASE_URL"
 cargo run
 ```
 
-Expected output (ids come from the demo `SeqIdGen`):
+Expected output (each run generates fresh production UUIDs):
 
 ```
-created order id-3 for Ada
+created order <uuid> for Ada
 paged 3 orders across 2 pages
-soft-deleted then restored order id-3
+soft-deleted then restored order <uuid>
 rejected a malformed cursor: server error 400 [bad_cursor]: invalid cursor: malformed cursor
 
 end-to-end scenario passed
@@ -85,12 +85,20 @@ based gen client -o src/client.rs --embedded   # src/client.rs (the typed client
   emits the in-process bridge, so the whole of the wiring is one line:
 
   ```rust
-  let engine = Engine::new(compiled, SqliteBackend::open(&db_path)?, SeqIdGen::default());
+  use based_runtime::id::UuidGen;
+  use based_runtime::{Engine, SqliteBackend};
+  let engine = Engine::new(compiled, SqliteBackend::open(&db_path)?, UuidGen);
   let api = client::embedded(&engine);   // typed, in-process, no socket, no bridge to write
   ```
 
 - **`$ctx`** (the request context — org, user) is a typed method argument the *app*
   supplies from its auth layer, never the caller.
+
+The runtime dependency enables `features = ["sqlite", "id-gen"]`. The production
+generator is available as `based_runtime::id::UuidGen`
+and implements the existing `IdGen` seam for UUID and ULID strategies. This feature
+does not pull in axum or the HTTP listener. Existing `serve` consumers retain the
+generator because `serve` enables `id-gen`. Keep `SeqIdGen` for deterministic tests.
 
 ## This is the SQLite slice
 
@@ -98,7 +106,7 @@ SQLite needs no live server (bundled), so this example runs anywhere. The **same
 against a live server lives in the sibling crates
 [`../mariadb-quickstart`](../mariadb-quickstart) and
 [`../postgres-quickstart`](../postgres-quickstart) — identical schema, client, and
-assertions; they differ only in the driver, the id generator, and `DATABASE_URL`.
+assertions; they differ only in the driver and `DATABASE_URL`.
 
 > Standalone crate, **outside** the cargo workspace (the root `Cargo.toml` `exclude`s
 > `examples/`). It depends on the in-repo engine crates by path, so it always tracks the
