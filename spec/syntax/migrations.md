@@ -521,3 +521,9 @@ offline LSP path.
   are data-only and their migration is `verify: partial`.
 - **Snapshot format as authored grammar** — `schema.snap` is a generated artifact; it gets a grammar
   entry only if it ever becomes hand-editable (not planned).
+
+## Failed migration recovery
+
+MariaDB DDL may persist before a completion ledger row exists. Inspect the live
+schema and ledger before retry; see the [tested recovery runbook](../../docs/migration-recovery.md)
+for transaction boundaries, backup and data-preservation requirements.
