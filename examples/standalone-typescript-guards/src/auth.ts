@@ -5,4 +5,3 @@ export function authenticates(header: string | undefined, secret: string): boole
   const supplied = Buffer.from(header ?? "");
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
-

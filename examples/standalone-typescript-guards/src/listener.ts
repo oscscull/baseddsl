@@ -15,4 +15,3 @@ export async function close(server: Server): Promise<void> {
   server.closeAllConnections();
   await once(server, "close");
 }
-
