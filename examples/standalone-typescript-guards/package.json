@@ -1,0 +1,14 @@
+{
+  "name": "based-standalone-typescript-guards",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "demo": "npm run build && node dist/demo.js",
+    "test": "npm run demo"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^5.9.3"
+  }
+}

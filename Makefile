@@ -7,6 +7,7 @@
 #
 #   make ci-workspace      # fmt + clippy + test (no infra)
 #   make ci-extension      # build + package the VS Code extension (needs node/npm)
+#   make ci-typescript-guards # standalone TypeScript guard scenario (needs node/npm)
 #   make ci-image          # build the `based serve` image + smoke-boot it (needs docker)
 #   make dev-db-up         # throwaway mariadb:11.4 + postgres:16 for local runs
 #   make ci-live-mariadb   # migrate-apply + live MariaDB suite against $(MARIADB_URL)
@@ -14,7 +15,7 @@
 #   make ci-examples       # build + run the quickstart scenarios + the helpdesk smoke
 #   make dev-db-down       # stop the throwaway servers
 #
-# `make ci` runs the infra-free gates (workspace + extension). The DB targets are separate
+# `make ci` runs the infra-free gates (workspace + extension + TypeScript guards). The DB targets are separate
 # because they need a server; `make ci-live` / `ci-examples` run them once one is up.
 #
 # Two-tier commit gate (one command per tier, so verifying a change never takes several steps):
@@ -23,7 +24,7 @@
 #                          # no examples, no MariaDB/Postgres driver build.
 #   make check             # pre-commit for execution-touching changes: the FULL workspace at
 #                          # --all-features (driver code compiled + linted), then fresh throwaway
-#                          # DBs + both live suites + all three example scenarios.
+#                          # DBs + both live suites + the runnable example scenarios.
 # `check` manages its own throwaway DBs (fresh via dev-db-up) and leaves them running for fast
 # re-runs; `make dev-db-down` cleans up. Front-end-only changes may gate on check-fast alone.
 
@@ -50,7 +51,7 @@ REDIS_URL    ?= redis://127.0.0.1:16379
 
 .PHONY: ci check check-fast ensure-nextest ci-workspace ci-workspace-full ci-coloring ci-fast-features ci-extension ci-image ci-live \
         ci-live-mariadb ci-live-postgres ci-live-sqlx ci-examples ci-example-sqlite \
-        ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-reset dev-db-down
+        ci-example-mariadb ci-example-postgres ci-example-helpdesk ci-typescript-guards based-cli dev-db-up dev-db-reset dev-db-down
 
 # The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
 # facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
@@ -58,7 +59,7 @@ FRONTEND_CRATES := based-ast based-parser based-fmt based-sema based-codegen bas
                    based-diagnostics based-manifest
 
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
-ci: ci-workspace ci-extension
+ci: ci-workspace ci-extension ci-typescript-guards
 
 ## Ensure cargo-nextest is on PATH (the test tiers run through it — see NEXTEST above). Installs
 ## on first use if missing; a no-op once present. CI installs it via a prebuilt binary instead
@@ -91,6 +92,7 @@ check: ci-workspace-full dev-db-up
 	$(MAKE) ci-live
 	$(MAKE) dev-db-reset
 	$(MAKE) ci-examples
+	$(MAKE) ci-typescript-guards
 	@echo "check: all gates green"
 
 ## Fast workspace gate: format, lint, coloring, and the full test suite — but only the
@@ -186,6 +188,12 @@ ci-live-sqlx:
 ## its own file, and the helpdesk smoke resets the shared Postgres itself (so it runs last).
 ## This is the example half of DoD #4 (the copyable examples never rot).
 ci-examples: ci-example-sqlite ci-example-mariadb ci-example-postgres ci-example-helpdesk
+
+## Standalone TypeScript permission callbacks and trusted auth edge, with disposable SQLite.
+ci-typescript-guards:
+	$(CARGO) build -p based-cli --no-default-features
+	cd examples/standalone-typescript-guards && $(NPM) ci && \
+	  BASED_BIN="$(BASED)" $(NPM) test
 
 ci-example-sqlite: based-cli
 	cd examples/sqlite-quickstart && rm -f "$(SQLITE_DB)" && \
