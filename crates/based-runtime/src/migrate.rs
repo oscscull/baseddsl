@@ -16,15 +16,19 @@
 //! ## The ledger
 //! [`ensure_ledger`] creates the engine-owned `_based_migrations` table (id + content-hash +
 //! applied_at) on first use; [`apply`] inserts one row per applied migration inside that
-//! migration's own transaction, so a crash mid-apply leaves no ledger row and a re-`apply`
-//! retries cleanly. Destructive steps refuse to apply without an explicit
-//! `--allow-destructive` ack.
+//! migration's own transaction. MariaDB DDL can commit before the ledger write; a
+//! failed migration needs schema/ledger inspection before retry. Destructive steps refuse
+//! to apply without an explicit `--allow-destructive` ack.
 //!
 //! ## Rollback
 //! Roll-forward is the default; there is no auto-generated down. An optional author-written
 //! `down.mig` (raw per-dialect SQL) is honored by [`Direction::Down`] / [`Direction::To`],
 //! each run inside a transaction that also deletes the ledger row. A migration with no
 //! `down.mig` is roll-forward only ([`MigrateError::NoDown`]).
+
+#[path = "migration_failure.rs"]
+mod failure;
+pub use failure::MigrationFailure;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -109,6 +113,8 @@ pub struct ApplyReport {
 pub enum MigrateError {
     /// The database itself failed (connection, permission, bad SQL against real data).
     Db(DbError),
+    /// A migration failed during execution; earlier migrations remain committed.
+    Execution(MigrationFailure),
     /// A filesystem error reading the `migrations/` tree.
     Io(String),
     /// A `schema.snap`/`up.mig` could not be parsed or rendered (corrupt artifact, or a step
@@ -147,6 +153,7 @@ impl std::fmt::Display for MigrateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Db(e) => write!(f, "database error: {}", e.message),
+            Self::Execution(e) => e.fmt(f),
             Self::Io(m) => write!(f, "{m}"),
             Self::Artifact(m) => write!(f, "{m}"),
             Self::Tamper { id, applied, current } => write!(
@@ -422,7 +429,8 @@ fn delete_ledger_sql(dialect: Dialect) -> String {
 /// invariant.
 ///
 /// The `migrations` slice is the full ordered set from [`load_migrations`]; already-applied
-/// ones are skipped (roll-forward) or reversed (rollback), so `apply` is safe to re-run.
+/// ones are skipped (roll-forward) or reversed (rollback). Inspect failed migrations
+/// before retry: MariaDB DDL may have persisted without a completion ledger row.
 pub async fn apply(
     backend: &dyn Backend,
     dialect: Dialect,
@@ -545,21 +553,36 @@ enum LedgerOp<'a> {
     Delete(&'a str),
 }
 
-/// Run a migration's statements + its ledger write under one engine-owned transaction on
-/// a fresh checkout. If any statement fails, the dropped [`crate::run::Tx`] rolls back and
-/// the error surfaces — a migration is all-or-nothing. (On MySQL/MariaDB, DDL implicitly
-/// commits, so the tx is best-effort there; the ledger row is still written in the same
-/// connection turn, and a re-apply skips completed migrations.)
+/// Execute statements and ledger update on one connection. MariaDB DDL can implicitly
+/// commit; failures must identify the operation without promising rollback.
 async fn run_in_tx(
     backend: &dyn Backend,
     stmts: &[String],
     ledger: LedgerOp<'_>,
     dialect: Dialect,
 ) -> Result<(), MigrateError> {
-    let db = backend.checkout("").await?;
-    let mut tx = db.begin().await.map_err(MigrateError::Db)?;
-    for s in stmts {
-        tx.execute(s, &[]).await.map_err(MigrateError::Db)?;
+    let (id, direction) = match &ledger {
+        LedgerOp::Insert { id, .. } => (*id, "up"),
+        LedgerOp::Delete(id) => (*id, "down"),
+    };
+    let failed = |stage: String, source| {
+        MigrateError::Execution(MigrationFailure {
+            id: id.to_string(),
+            direction,
+            stage,
+            dialect,
+            source,
+        })
+    };
+    let db = backend
+        .checkout("")
+        .await
+        .map_err(|e| failed("checkout".into(), e))?;
+    let mut tx = db.begin().await.map_err(|e| failed("begin".into(), e))?;
+    for (index, s) in stmts.iter().enumerate() {
+        tx.execute(s, &[])
+            .await
+            .map_err(|e| failed(format!("statement {} of {}", index + 1, stmts.len()), e))?;
     }
     let (sql, params) = match ledger {
         LedgerOp::Insert { id, hash } => (
@@ -574,8 +597,10 @@ async fn run_in_tx(
             vec![SqlValue::Text(id.to_string())],
         ),
     };
-    tx.execute(&sql, &params).await.map_err(MigrateError::Db)?;
-    tx.commit().await.map_err(MigrateError::Db)?;
+    tx.execute(&sql, &params)
+        .await
+        .map_err(|e| failed("ledger update".into(), e))?;
+    tx.commit().await.map_err(|e| failed("commit".into(), e))?;
     Ok(())
 }
 
