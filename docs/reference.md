@@ -368,4 +368,3 @@ clients call fixed signatures — the DSL never ships. Ids are phantom-typed new
 transparent over the wire. `page` returns `{ rows, cursor }` (+ `total` with count); `-> ok` returns unit;
 `-> stream` returns an async `Stream` of rows over NDJSON. An embedded in-process client is available via
 `client::embedded(&engine)`.
-
