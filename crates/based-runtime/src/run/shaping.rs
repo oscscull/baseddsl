@@ -1,5 +1,8 @@
 use super::*;
 
+mod stored_json;
+use stored_json::parse_stored_json;
+
 /// Reassemble a flat result row into the response object, nesting sub-objects/arrays.
 ///
 /// A nested to-one shape sub-object (`buyer { name, email }`) is projected by codegen
@@ -11,10 +14,10 @@ use super::*;
 /// sub-objects (their own nesting already fully formed by the SQL JSON aggregation). A
 /// `.`/`[`/`]` cannot occur in a BSL identifier, so a flat query (no nest) has no such key
 /// and passes through unchanged.
-pub(crate) fn nest_row(row: Row) -> serde_json::Value {
+pub(crate) fn nest_row(row: Row, dialect: based_codegen::Dialect) -> serde_json::Value {
     let mut root = serde_json::Map::new();
     for (key, val) in row {
-        insert_path(&mut root, &key, val);
+        insert_path(&mut root, &key, val, dialect);
     }
     let mut value = serde_json::Value::Object(root);
     collapse_absent_nests(&mut value);
@@ -46,10 +49,13 @@ pub(crate) fn collapse_absent_nests(value: &mut serde_json::Value) {
 /// type natively hands back an array already, and an empty group may arrive as NULL — all
 /// three normalize to an array here (a malformed string, which the engine never emits,
 /// degrades to `[]` rather than panicking).
-pub(crate) fn parse_array(val: serde_json::Value) -> serde_json::Value {
+pub(crate) fn parse_array(
+    val: serde_json::Value,
+    dialect: based_codegen::Dialect,
+) -> serde_json::Value {
     use serde_json::Value as J;
     match val {
-        J::String(s) => serde_json::from_str(&s).unwrap_or(J::Array(Vec::new())),
+        J::String(s) => parse_stored_json(&s, dialect).unwrap_or(J::Array(Vec::new())),
         arr @ J::Array(_) => arr,
         _ => J::Array(Vec::new()),
     }
@@ -61,20 +67,28 @@ pub(crate) fn parse_array(val: serde_json::Value) -> serde_json::Value {
 /// field round-trips as what was written, not a double-encoded string. A value already
 /// structured (a driver that decodes json natively) is left untouched, and a string that
 /// does not parse as JSON is left as-is (never a panic).
-pub(crate) fn normalize_json(row: &mut serde_json::Value, paths: &[String]) {
+pub(crate) fn normalize_json(
+    row: &mut serde_json::Value,
+    paths: &[String],
+    dialect: based_codegen::Dialect,
+) {
     for path in paths {
         let segs: Vec<&str> = path.split(based_codegen::sql::NEST_SEP).collect();
-        parse_json_at(row, &segs);
+        parse_json_at(row, &segs, dialect);
     }
 }
 
 /// Descend `value` along `segs` (a `.`-split json path; a `field[]` segment is an array to
 /// recurse into per element) and, at the leaf, parse a JSON string into structured JSON.
-pub(crate) fn parse_json_at(value: &mut serde_json::Value, segs: &[&str]) {
+pub(crate) fn parse_json_at(
+    value: &mut serde_json::Value,
+    segs: &[&str],
+    dialect: based_codegen::Dialect,
+) {
     use serde_json::Value as J;
     let Some((head, rest)) = segs.split_first() else {
         if let J::String(s) = value {
-            if let Ok(parsed) = serde_json::from_str::<J>(s) {
+            if let Some(parsed) = parse_stored_json(s, dialect) {
                 *value = parsed;
             }
         }
@@ -85,7 +99,7 @@ pub(crate) fn parse_json_at(value: &mut serde_json::Value, segs: &[&str]) {
             if let J::Object(map) = value {
                 if let Some(J::Array(arr)) = map.get_mut(key) {
                     for elem in arr.iter_mut() {
-                        parse_json_at(elem, rest);
+                        parse_json_at(elem, rest, dialect);
                     }
                 }
             }
@@ -93,7 +107,7 @@ pub(crate) fn parse_json_at(value: &mut serde_json::Value, segs: &[&str]) {
         None => {
             if let J::Object(map) = value {
                 if let Some(child) = map.get_mut(*head) {
-                    parse_json_at(child, rest);
+                    parse_json_at(child, rest, dialect);
                 }
             }
         }
@@ -108,11 +122,12 @@ pub(crate) fn insert_path(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
     val: serde_json::Value,
+    dialect: based_codegen::Dialect,
 ) {
     match key.split_once(based_codegen::sql::NEST_SEP) {
         None => match key.strip_suffix(ARRAY_MARK) {
             Some(name) => {
-                obj.insert(name.to_string(), parse_array(val));
+                obj.insert(name.to_string(), parse_array(val, dialect));
             }
             None => {
                 obj.insert(key.to_string(), val);
@@ -123,7 +138,7 @@ pub(crate) fn insert_path(
                 .entry(head.to_string())
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             if let serde_json::Value::Object(child) = entry {
-                insert_path(child, rest, val);
+                insert_path(child, rest, val, dialect);
             }
         }
     }
@@ -153,6 +168,7 @@ pub(crate) fn next_cursor(rows: &[Row], ks: KeysetPlan) -> Option<String> {
 pub(crate) async fn shape<D: DbRead + ?Sized>(
     db: &mut D,
     plan: &QueryPlan,
+    dialect: based_codegen::Dialect,
 ) -> Result<serde_json::Value, DbError> {
     use serde_json::Value as J;
     let mut rows = fetch_all(db.fetch(&plan.main.sql, &plan.main.params)).await?;
@@ -160,9 +176,9 @@ pub(crate) async fn shape<D: DbRead + ?Sized>(
     // column read back as a text string → structured JSON).
     let paths = &plan.json_paths;
     let nest = |row: Row| {
-        let mut v = nest_row(row);
+        let mut v = nest_row(row, dialect);
         if !paths.is_empty() {
-            normalize_json(&mut v, paths);
+            normalize_json(&mut v, paths, dialect);
         }
         v
     };

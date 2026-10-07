@@ -261,3 +261,14 @@ ci-database-tls:
 ci-standalone-store:
 	TEST_MARIADB_URL="$(MARIADB_URL)" TEST_POSTGRES_URL="$(POSTGRES_URL)" \
 	  $(CARGO) test -p based-cli --test serve_idempotency_live -- --test-threads=1
+
+## Fresh external consumers are expensive; run separately from the workspace loop.
+.PHONY: ci-generated-consumer-sqlite ci-generated-consumer-mariadb ci-generated-consumer-postgres
+ci-generated-consumer-sqlite: based-cli
+	$(ROOT)ci/generated-consumers.py sqlite
+
+ci-generated-consumer-mariadb: based-cli
+	TEST_MARIADB_URL="$(MARIADB_URL)" $(ROOT)ci/generated-consumers.py mariadb
+
+ci-generated-consumer-postgres: based-cli
+	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(ROOT)ci/generated-consumers.py postgres
