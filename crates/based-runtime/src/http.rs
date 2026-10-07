@@ -164,9 +164,7 @@ struct Shared {
     /// Set once when a graceful shutdown is requested (SIGTERM/SIGINT). `/readyz` reads
     /// it to fail readiness first (drain).
     draining: Arc<AtomicBool>,
-    /// Always empty: guards are host functions, and the standalone listener has no host
-    /// code to register — startup refuses a guarded schema. Held so dispatch takes the
-    /// one registry shape on every door.
+    /// Operator-registered callbacks, checked at startup.
     guards: Guards,
 }
 
@@ -193,7 +191,7 @@ impl Handle {
     }
 }
 
-/// Failure to *start* serving (bind the socket). Once serving, per-request failures
+/// Failure to *start* serving (validate guards or bind the socket). Once serving, per-request failures
 /// are [`WireResponse`]s, never errors out of here.
 #[derive(Debug)]
 pub struct ServeError(pub String);
@@ -323,13 +321,33 @@ pub async fn serve_with_store(
     config: ServeConfig,
     on_start: impl FnOnce(Handle),
 ) -> Result<(), ServeError> {
-    // A guard is a host function only an embedding app can register; this listener has
-    // no host code, so a guarded schema must not come up here — refusing at startup is
-    // what keeps a declared check from silently not running.
-    if let Some((m, g)) = compiled.declared_guards().next() {
+    serve_with_guards(
+        compiled,
+        backend,
+        ctx_source,
+        store,
+        Guards::new(),
+        config,
+        on_start,
+    )
+    .await
+}
+
+/// Serve with registered guards and an explicit store, using the same dispatch enforcement as embeds.
+pub async fn serve_with_guards(
+    compiled: Compiled,
+    backend: impl Backend + 'static,
+    ctx_source: impl ContextSource + 'static,
+    store: Box<dyn IdempotencyStore>,
+    guards: Guards,
+    config: ServeConfig,
+    on_start: impl FnOnce(Handle),
+) -> Result<(), ServeError> {
+    let missing = guards.missing_for(&compiled);
+    if !missing.is_empty() {
         return Err(ServeError(format!(
-            "mutation `{m}` declares guard `{g}` — guards are host functions this listener \
-             cannot register; embed the engine (Engine::with_guards) instead"
+            "{}; configure HTTP guards or use Engine::with_guards",
+            crate::guard::GuardSetupError { missing }
         )));
     }
     let draining = Arc::new(AtomicBool::new(false));
@@ -339,7 +357,7 @@ pub async fn serve_with_store(
         ctx_source: Box::new(ctx_source),
         idempotency: store,
         draining: Arc::clone(&draining),
-        guards: Guards::new(),
+        guards,
     });
 
     let app = Router::new()
@@ -423,8 +441,7 @@ async fn handle(
             &id_gen,
             shared.idempotency.as_ref(),
             &shared.guards,
-            // The standalone listener refuses a guarded schema at startup, so no guard
-            // ever runs here — there is no re-entry handle to hand out.
+            // HTTP callbacks receive protocol data, not an embedded re-entry handle.
             None,
             method.as_str(),
             uri.path(),

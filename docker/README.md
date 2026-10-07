@@ -23,6 +23,7 @@ the binary + entrypoint (~120 MB). Runs as an unprivileged user.
 | env | meaning |
 |-----|---------|
 | `BASED_DATABASE_URL` | one shard URL, or comma-separated for a sharded fleet. **Required.** The standard `DATABASE_URL` is also honored. |
+| `BASED_GUARD_CONFIG` | trusted TOML callback mapping path; see [HTTP guards](../docs/http-guards.md). Pass callback secret variables separately and mount the configuration read-only. |
 | `BASED_PROJECT` | served schema root — mount your project here. Default `/app`. |
 | `BASED_LISTEN` | bind address, read natively by `based serve`. Default `0.0.0.0:8080`. |
 | `BASED_IDEMPOTENCY_STORE` | `database` (default), `memory`, or `none`; see [store contracts](../docs/standalone-idempotency.md). |
