@@ -23,6 +23,16 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: make ci-workspace
 
+  typescript-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: make ci-typescript-guards
+
   # Build + package the VS Code extension so it never rots.
   extension:
     runs-on: ubuntu-latest

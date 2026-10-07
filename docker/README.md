@@ -105,3 +105,7 @@ docker run --rm -v "$PWD/examples/postgres-quickstart:/app:ro" \
 ```
 
 CI builds + smoke-boots this image on every push (`make ci-image`).
+
+For a runnable backend that authenticates users, derives tenant context and checks
+permission through TypeScript callbacks, see the
+[standalone orders example](../examples/standalone-typescript-guards/README.md).
