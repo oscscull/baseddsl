@@ -89,3 +89,14 @@ source (E0214 — pass a typed param); a scoped target requires `unscoped("reaso
 (`scoped` would promise an injection that can't happen, E0211); `-> stream` is
 rejected (E0212); the return shape must be flat (nests need engine-built projections,
 E0213). No sort cascade, no `page`, no index lint — the SQL owns all of it.
+
+## Scope boundaries inside raw values
+
+A raw predicate/value leaf keeps scope and soft-delete filters on the engine-built
+root and joins. The leaf is opaque: a hand-written subquery inside that expression
+does not receive injected filters on its own tables. For example, a scoped note
+projection using ``raw`(SELECT COUNT(*) FROM note)` `` can count notes from other
+tenants even though the outer rows remain scoped. Author those subquery filters
+explicitly or use modeled relations. Whole raw query bodies require an explicit
+`unscoped("reason")` for scoped targets and own all scope predicates. See the
+[scope contract matrix](../../docs/scope-contracts.md) for executable evidence.

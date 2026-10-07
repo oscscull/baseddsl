@@ -34,8 +34,11 @@ query feed() -> PostCard[] unscoped("public: owner's posts plus anything public"
 ```
 Signed-in caller (`$ctx.user` present) → the leaf is `author = <that id>`: they see their own posts
 **and** public ones. Anonymous caller (`$ctx.user` absent) → the leaf is `author IS NULL`, matching only
-*unowned* posts (none, when `author` is a required relation), so the endpoint returns just `visibility =
-"public"` — no `missing_ctx`, and **no private post leaks**. This is the whole point of the null-safe
+*unowned* posts (none, when `author` is a required relation). Required ownership therefore
+returns just public posts. A nullable `author` also
+returns unowned private posts: anonymous does not mean public-only. No private post
+owned by another user matches, and missing optional context does not cause `missing_ctx`.
+This is the whole point of the null-safe
 lowering: a widen-to-TRUE leaf under an `or` would collapse the group to TRUE and expose every row the
 co-guard was gating. The generated client carries an optional field as `Option<T>` (calling.md); `None`
 binds NULL server-side.

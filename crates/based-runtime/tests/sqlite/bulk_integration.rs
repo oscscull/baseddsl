@@ -922,6 +922,8 @@ async fn bulk_to_many_nested_write_fans_children_to_the_right_parent() {
     let (c, b) = load().await;
     let ids = SeqIdGen::default();
     let ctx = seed_org(&c, &b, &ids, "Acme").await;
+    let foreign_ctx = seed_org(&c, &b, &ids, "Beta").await;
+    seed_foreign_order(&c, &b, &ids, foreign_ctx.clone()).await;
 
     // Two orders with different-sized item collections — each child must link to its own
     // parent (per-parent fan-out across the flattened child insert).
@@ -985,4 +987,32 @@ async fn bulk_to_many_nested_write_fans_children_to_the_right_parent() {
         .unwrap()
         .clone()
     );
+    assert_foreign_order_unchanged(&c, &b, &ids, foreign_ctx).await;
+}
+
+async fn seed_foreign_order(c: &Compiled, b: &SqliteBackend, ids: &SeqIdGen, ctx: Value) {
+    let row = json!({"total": 99, "customer": {"name":"Foreign", "email":"private@b.io"}, "items":[{"sku":"PRIVATE", "qty":9}]});
+    let response = call(c, b, ids, "/m/place_full", json!({"row":row}), ctx).await;
+    assert_eq!(response.status, 200, "{:?}", response.body);
+}
+
+async fn assert_foreign_order_unchanged(
+    c: &Compiled,
+    b: &SqliteBackend,
+    ids: &SeqIdGen,
+    ctx: Value,
+) {
+    let orders = call(c, b, ids, "/q/all_orders_full", json!({}), ctx.clone()).await;
+    assert_eq!(orders.status, 200, "{:?}", orders.body);
+    assert_eq!(
+        orders.body,
+        json!([{"total":99,"customer":{"name":"Foreign","email":"private@b.io"},"items":[{"sku":"PRIVATE","qty":9}]}])
+    );
+    let customers = call(c, b, ids, "/q/all_customers", json!({}), ctx.clone()).await;
+    assert_eq!(
+        customers.body,
+        json!([{"name":"Foreign","email":"private@b.io"}])
+    );
+    let lines = call(c, b, ids, "/q/all_lines", json!({}), ctx).await;
+    assert_eq!(lines.body, json!([{"sku":"PRIVATE","qty":9}]));
 }
