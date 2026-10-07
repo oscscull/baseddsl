@@ -322,8 +322,8 @@ pub(crate) async fn run_bulk_readback<D: DbRead + ?Sized>(
         for c in 0..rb.key_count {
             kparts.push(row.remove(&format!("{alias_prefix}{c}")).unwrap_or(J::Null));
         }
-        let mut v = nest_row(row);
-        normalize_json(&mut v, &plan.json_paths);
+        let mut v = nest_row(row, plan.dialect);
+        normalize_json(&mut v, &plan.json_paths, plan.dialect);
         by_key.insert(norm_key(&kparts), v);
     }
     let mut out: Vec<J> = Vec::with_capacity(keys.len());

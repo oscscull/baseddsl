@@ -15,7 +15,7 @@ pub async fn run_query<D: DbRead + ?Sized>(
     req: &Request,
 ) -> Result<serde_json::Value, RunError> {
     let plan = plan_query(compiled, req)?;
-    Ok(shape(db, &plan).await?)
+    Ok(shape(db, &plan, compiled.dialect).await?)
 }
 
 /// Plan a query request and return its rows as an owned [`ShapedStream`] — the
@@ -33,14 +33,15 @@ pub fn run_query_stream(
 ) -> Result<ShapedStream, PlanError> {
     use futures_util::StreamExt;
     let plan = plan_query(compiled, req)?;
+    let dialect = compiled.dialect;
     Ok(Box::pin(async_stream::stream! {
         let mut rows = db.fetch(&plan.main.sql, &plan.main.params);
         while let Some(item) = rows.next().await {
             match item {
                 Ok(row) => {
-                    let mut v = nest_row(row);
+                    let mut v = nest_row(row, dialect);
                     if !plan.json_paths.is_empty() {
-                        normalize_json(&mut v, &plan.json_paths);
+                        normalize_json(&mut v, &plan.json_paths, dialect);
                     }
                     yield Ok(v);
                 }

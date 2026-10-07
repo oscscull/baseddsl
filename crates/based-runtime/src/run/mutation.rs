@@ -308,8 +308,8 @@ pub(crate) async fn run_writes<D: DbRead + ?Sized>(
             let rows = fetch_all(db.fetch(&sql, &params)).await?;
             match rows.into_iter().next() {
                 Some(row) => {
-                    let mut v = nest_row(row);
-                    normalize_json(&mut v, &plan.json_paths);
+                    let mut v = nest_row(row, plan.dialect);
+                    normalize_json(&mut v, &plan.json_paths, plan.dialect);
                     v
                 }
                 None => return Ok(TxOutcome::NotFound),
