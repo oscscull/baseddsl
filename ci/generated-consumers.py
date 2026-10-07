@@ -45,7 +45,7 @@ def verify_ids(project, env, dialect):
     shutil.copy(ROOT / "ci/fixtures/generated-consumer/wrong.rs", project / "src/wrong.rs")
     with (project / "Cargo.toml").open("a") as manifest:
         manifest.write('\n[[bin]]\nname = "wrong"\npath = "src/wrong.rs"\n')
-    result = subprocess.run([CARGO, "check", "--offline", "--features", dialect, "--bin", "wrong"],
+    result = subprocess.run([CARGO, "check", "--locked", "--offline", "--features", dialect, "--bin", "wrong"],
                             cwd=project, env=env, capture_output=True, text=True)
     assert result.returncode != 0, "entity IDs were interchangeable"
     assert "mismatched types" in result.stderr and "Owner" in result.stderr and "Item" in result.stderr, result.stderr
@@ -65,7 +65,7 @@ def verify(dialect, binary):
         env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/consumer-contract"))
         url_key = f"TEST_{dialect.upper()}_URL"
         env["DATABASE_URL"] = str(project / "database.db") if dialect == "sqlite" else os.environ[url_key]
-        run([CARGO, "run", "--offline", "--features", dialect, "--bin", "based-consumer-contract"], project, env)
+        run([CARGO, "run", "--features", dialect, "--bin", "based-consumer-contract"], project, env)
         verify_ids(project, env, dialect)
         print(f"generated-consumer: {dialect} passed (including rejected mixed entity IDs)", flush=True)
 

@@ -36,8 +36,9 @@ make ci-generated-consumer-mariadb ci-generated-consumer-postgres
 
 The server targets use the disposable local servers from `make dev-db-up`; override
 `MARIADB_URL`/`POSTGRES_URL` for provided servers. Python 3 and Cargo are required.
-The harness uses offline Cargo resolution after the CLI build fetched the shared
-dependencies. Consumers share only a compilation cache under `target/consumer-contract`,
+The initial consumer build resolves and fetches its own dependencies, so it works
+with a cold Cargo cache. The negative ID check then uses that lockfile offline.
+Consumers share only a compilation cache under `target/consumer-contract`,
 not source files, generated artifacts or database state. This expensive gate runs
 in its own CI job, preserving the fast workspace build budget.
 
