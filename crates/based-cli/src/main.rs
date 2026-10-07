@@ -11,6 +11,7 @@
 mod check;
 mod error;
 mod gen;
+mod http_guards;
 mod idempotency_store;
 mod idempotency_table;
 mod local_config;
@@ -85,6 +86,8 @@ enum Command {
         pool_max: usize,
         #[command(flatten)]
         idempotency: idempotency_store::StoreOptions,
+        #[command(flatten)]
+        guards: http_guards::GuardOptions,
     },
 }
 
@@ -272,6 +275,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             pool_min,
             pool_max,
             idempotency,
+            guards,
         } => {
             serve::cmd_serve(
                 &project_root::resolve(root.as_deref())?,
@@ -280,6 +284,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 pool_min,
                 pool_max,
                 idempotency,
+                guards,
             )
             .await
         }

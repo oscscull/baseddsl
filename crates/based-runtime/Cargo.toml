@@ -40,6 +40,7 @@ sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:base64"]
 # plus the production uuid id-gen. Off by default so the core stays a plain library.
 serve = ["dep:axum", "id-gen", "tokio/net"]
 # Production UUID/ULID generation for embedded apps, without the HTTP listener.
+external-guards = ["dep:reqwest", "dep:serde", "dep:webpki-root-certs"]
 id-gen = ["dep:uuid", "dep:ulid"]
 # The Docker-backed real-DB integration harness + live suites. Brings up ephemeral
 # MariaDB/Postgres containers (via the `docker` CLI) — or connects to provided servers
@@ -49,6 +50,9 @@ id-gen = ["dep:uuid", "dep:ulid"]
 docker-tests = ["mariadb", "serve", "postgres", "sqlite", "tls-rustls", "sqlx/rust_decimal"]
 
 [dependencies]
+webpki-root-certs = { version = "1", optional = true }
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["rustls"] }
+serde = { workspace = true, optional = true }
 based-ast.workspace = true
 based-diagnostics.workspace = true
 based-manifest.workspace = true

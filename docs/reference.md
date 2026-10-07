@@ -3,7 +3,8 @@
 Every feature of `.bsl`, with the syntax to use it. One page; skim the index, jump to a section.
 For *why* the language is shaped this way, see [`spec/`](../spec/); this page is *how*.
 For supported deployment paths and versioning, see the [support policy](support-policy.md).
-For the planned standalone guard adapter, see the [external guard protocol v1](../spec/external-guards.md).
+For standalone guards, see [HTTP guard configuration](http-guards.md) and the
+[external guard protocol v1](../spec/external-guards.md).
 
 ## Index
 
@@ -367,3 +368,4 @@ clients call fixed signatures — the DSL never ships. Ids are phantom-typed new
 transparent over the wire. `page` returns `{ rows, cursor }` (+ `total` with count); `-> ok` returns unit;
 `-> stream` returns an async `Stream` of rows over NDJSON. An embedded in-process client is available via
 `client::embedded(&engine)`.
+

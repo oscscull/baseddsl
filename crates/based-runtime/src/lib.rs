@@ -116,8 +116,8 @@ pub use sqlx;
 
 #[cfg(feature = "serve")]
 pub use http::{
-    serve, serve_with_handle, serve_with_store, Context, ContextSource, Handle, HeaderView,
-    ServeConfig, ServeError, TrustedHeaderContext,
+    serve, serve_with_guards, serve_with_handle, serve_with_store, Context, ContextSource, Handle,
+    HeaderView, ServeConfig, ServeError, TrustedHeaderContext,
 };
 
 #[cfg(feature = "sqlite")]
@@ -128,3 +128,6 @@ pub use postgres::{AdoptedPg, PgRouter, PostgresDb};
 
 #[cfg(feature = "mariadb")]
 pub use driver::AdoptedMaria;
+
+#[cfg(feature = "external-guards")]
+pub mod external_guard;

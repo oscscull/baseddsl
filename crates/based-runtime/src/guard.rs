@@ -48,8 +48,7 @@ impl GuardRequest {
     ///
     /// # Panics
     /// When the guard was invoked outside an [`Engine`] (a raw [`crate::dispatch`]
-    /// call). Every embedded app dispatches through an `Engine`, and the standalone
-    /// listener cannot run guards at all, so a production guard always has the handle.
+    /// call). Every embedded app dispatches through an `Engine`, or from a standalone HTTP callback. Only embedded guards have this handle.
     pub fn engine(&self) -> &Engine {
         self.engine
             .as_ref()

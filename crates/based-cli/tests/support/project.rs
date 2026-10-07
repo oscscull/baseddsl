@@ -34,7 +34,8 @@ impl Project {
             .env_remove("BASED_DATABASE_URL")
             .env_remove("DATABASE_URL")
             .env_remove("BASED_IDEMPOTENCY_STORE")
-            .env_remove("BASED_INIT_IDEMPOTENCY_TABLE");
+            .env_remove("BASED_INIT_IDEMPOTENCY_TABLE")
+            .env_remove("BASED_GUARD_CONFIG");
         cmd
     }
 

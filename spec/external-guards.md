@@ -1,8 +1,7 @@
 # Standalone external guards: protocol v1
 
-This is the normative contract for the HTTP adapter in
-[#75](https://github.com/oscscull/baseddsl/issues/75), not an available CLI
-feature. Today `based serve` rejects schemas declaring guards. Embedded Rust
+This is the normative contract for the [HTTP adapter](../docs/http-guards.md)
+in `based serve`. Operator-configured mappings enable schemas declaring guards. Embedded Rust
 closures remain supported through `Guards`. Both implementations must use the
 same [preflight enforcement semantics](syntax/auth.md#handle-3--guard-hook-into-caller-code).
 
