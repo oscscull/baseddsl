@@ -32,6 +32,8 @@ For certificate-verified Postgres and MariaDB connections, see
 
 Standalone keyed mutation storage and explicit table setup are documented in
 [standalone idempotency](docs/standalone-idempotency.md).
+For a runnable TypeScript backend with permission callbacks and a trusted auth edge,
+see [standalone orders](examples/standalone-typescript-guards/README.md).
 
 ## License
 

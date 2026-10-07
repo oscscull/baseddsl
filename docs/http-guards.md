@@ -62,3 +62,7 @@ The runtime API is available through the optional `external-guards` feature:
 `HttpGuard::new(...).register(Guards::new(), name)` supplies a registry to
 `http::serve_with_guards`, together with an explicit idempotency store. Embedded
 consumers choosing Rust closures need no HTTP callback dependencies.
+
+The [TypeScript orders example](../examples/standalone-typescript-guards/README.md)
+runs an authenticated callback and a trusted auth edge with allowed, denied and
+unavailable callback scenarios against a disposable SQLite database.
