@@ -298,3 +298,8 @@ ci-cargo-generation:
 ci-consumer-build:
 	$(CARGO) build -p based-cli --no-default-features
 	python3 benchmarks/consumer-build/verify.py --based "$(abspath $(BASED))" --cargo "$(CARGO)"
+
+.PHONY: ci-initializer
+ci-initializer:
+	$(CARGO) build --locked -p based-cli
+	python3 ci/check-initializer.py --based $(BASED)

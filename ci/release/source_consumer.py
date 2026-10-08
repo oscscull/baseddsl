@@ -7,16 +7,14 @@ import subprocess
 import tempfile
 
 from metadata import ROOT, git
+from source import mirror
 
 
 def probe(based, commit, cargo):
     fixture = ROOT / "benchmarks/consumer-build/fixture"
     with tempfile.TemporaryDirectory(prefix="based-release-source-") as scratch:
         directory = Path(scratch)
-        mirror = directory / "source.git"
-        subprocess.run(["git", "init", "--bare", "--initial-branch=release-source", str(mirror)], check=True)
-        subprocess.run(["git", "--git-dir", str(mirror), "fetch", "--no-tags", str(ROOT), commit], check=True)
-        subprocess.run(["git", "--git-dir", str(mirror), "update-ref", "refs/heads/release-source", commit], check=True)
+        source_url = mirror(ROOT, commit, directory / "source.git")
         app = directory / "consumer"
         shutil.copytree(fixture, app, ignore=shutil.ignore_patterns("target", "Cargo.lock", "build.rs"))
         # No repository-relative paths remain in the consuming Cargo manifest.
@@ -31,7 +29,7 @@ embedded = []
 direct = []
 cargo-generation = []
 [dependencies]
-based-runtime = {{ git = "{mirror.as_uri()}", rev = "{commit}", features = ["sqlite", "id-gen"] }}
+based-runtime = {{ git = "{source_url}", rev = "{commit}", features = ["sqlite", "id-gen"] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}

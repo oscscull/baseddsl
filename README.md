@@ -10,6 +10,10 @@ databases, deployment paths, and current limits.
 
 WIP — progress and open work are tracked in [GitHub issues](https://github.com/oscscull/baseddsl/issues).
 
+Start an empty project with `based init --mode embedded` or `based init --mode standalone`.
+Both default to SQLite; follow the two printed commands for a create/read demo.
+See the [initializer walkthrough](docs/initializing.md) for prerequisites and schema updates.
+
 ## Try it
 
 See [versioned installation](docs/installation.md) for matching CLI/LSP archives
