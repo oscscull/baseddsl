@@ -10,12 +10,13 @@ pub(super) fn handle() -> Option<ExitCode> {
         return Some(usage_error());
     }
     match args[0].to_str() {
+        Some("--stdio") => None,
         Some("--version" | "-V") => {
             println!("based-lsp {}", based_version::LONG);
             Some(ExitCode::SUCCESS)
         }
         Some("--help" | "-h") => {
-            println!("based-lsp: Based DSL language server\n\nUsage: based-lsp [--version | --help]\nWithout arguments, serves the Language Server Protocol over stdin/stdout.");
+            println!("based-lsp: Based DSL language server\n\nUsage: based-lsp [--stdio | --version | --help]\nWithout arguments or with --stdio, serves the Language Server Protocol over stdin/stdout.");
             Some(ExitCode::SUCCESS)
         }
         _ => Some(usage_error()),
