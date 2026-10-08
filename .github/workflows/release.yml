@@ -97,7 +97,7 @@ jobs:
       # Exercise the declared source-install floor, not only newest stable.
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

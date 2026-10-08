@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
 
 
 def require_cli(based):
@@ -14,6 +15,14 @@ def require(based, path=None):
     for tool in ("cargo", "rustc", "git", "rustfmt"):
         if shutil.which(tool, path=path) is None:
             raise RuntimeError(f"Missing {tool}; install Rust 1.94+, Git, and rustup component add rustfmt clippy")
+    require_component("fmt", "rustfmt")
+    require_component("clippy", "clippy")
+
+
+def require_component(command, component):
+    result = subprocess.run(["cargo", command, "--version"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Missing {component} for the active Rust toolchain; run rustup component add {component}")
 
 
 def verify_missing(based, empty_path):
