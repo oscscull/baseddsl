@@ -1,5 +1,5 @@
 //! Preflight the complete set, stage all changed outputs, then publish each atomically.
-use crate::{stage::stage, Artifact, Error, Policy, Report};
+use crate::{stage::stage, Artifact, Error, Format, Policy, Report};
 use std::{collections::HashSet, fs, io::ErrorKind};
 
 pub fn publish(artifacts: &[Artifact], policy: Policy) -> Result<Report, Error> {
@@ -88,7 +88,7 @@ fn current(artifact: &Artifact, policy: Policy) -> Result<bool, Error> {
         Policy::Write {
             overwrite_user_owned: false
         }
-    ) && !artifact.format.owns(&bytes)
+    ) && !Format::owns_any(&bytes)
     {
         return Err(Error::UserOwned(artifact.path.clone()));
     }
