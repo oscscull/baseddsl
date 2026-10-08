@@ -96,3 +96,9 @@ or marketplace account is required. Do not overwrite published tags or replace
 public binaries under a version; publish a new version with clear upgrade notes.
 For a bad release, mark it with a clear advisory and direct users to a known good
 pinned version. Tool rollback and database rollback are separate operations.
+
+The `vsix` job installs the packaged extension in an isolated VS Code profile and
+checks diagnostics, hover, completion, and rename using the Linux x64 prebuilt
+LSP archive from the same run. Collection verifies the VSIX version, license,
+and required runtime files, then includes it in the combined checksums. This
+produces a locally installable extension; it does not publish to the Marketplace.

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import checksums
 import metadata
+from extension import verify as verify_extension
 
 
 
@@ -29,6 +30,9 @@ def main():
     archives = sorted(list(options.directory.glob("*.tar.gz")) + list(options.directory.glob("*.zip")))
     assert len(archives) == options.expected_count, [path.name for path in archives]
     source = metadata.source()
+    extensions = list(options.directory.glob("*.vsix"))
+    assert len(extensions) == 1, extensions
+    verify_extension(extensions[0], source["version"])
     targets = []
     for archive in archives:
         record = manifest(archive)

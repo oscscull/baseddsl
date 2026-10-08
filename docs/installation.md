@@ -111,3 +111,11 @@ packages or repository-relative dependencies.
 
 Registry and marketplace publication can be added separately. This initial
 route is versioned native artifacts plus pinned Git source.
+
+## VS Code
+
+Install `based-vscode-0.1.12.vsix` from the same release or dry-run artifact set as
+your native `based-lsp`. The VSIX is included in `SHA256SUMS`. Follow the
+[extension installation guide](../editors/vscode/README.md) to use PATH or
+`basedls.serverPath`. Upgrade and roll back both together; no Rust/npm build is
+needed for the installed editor.

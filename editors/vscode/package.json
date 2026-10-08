@@ -80,7 +80,7 @@
         "basedls.serverPath": {
           "type": "string",
           "default": "based-lsp",
-          "description": "Path to the based-lsp language server binary. Defaults to `based-lsp` on your PATH. Build it with `cargo build -p based-lsp` and point this at the resulting binary (e.g. target/debug/based-lsp) if it is not on PATH."
+          "description": "Path to the matching based-lsp release executable. Defaults to based-lsp on PATH. Download the native archive for this extension version and set an absolute executable path when it is not on PATH."
         },
         "basedls.trace.server": {
           "type": "string",
@@ -99,7 +99,9 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "node test/preflight.cjs",
+    "test:installed": "node test/run.cjs"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
@@ -107,6 +109,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.75.0",
+    "@vscode/test-electron": "2.5.2",
     "@vscode/vsce": "^2.24.0",
     "typescript": "^5.4.0"
   }

@@ -11,63 +11,67 @@ inverses, join-key indexes, per-callable `$ctx` requirements, resolved query sha
 The extension is a thin client. All the intelligence lives in `based-lsp` (see
 `crates/based-lsp`), which speaks standard LSP over stdio.
 
-## Prerequisites
+## Install the matching release
 
-1. **Build the language server** from the repo root:
+Download `based-vscode-0.1.12.vsix` and the native archive for your platform
+from the **same release**. Version `0.1.12` is currently a candidate; before an
+owner-approved release, use artifacts from the same successful
+[distribution workflow](../../docs/releasing.md) run. See the
+[installation guide](../../docs/installation.md) for native platforms and checksums.
 
-   ```sh
-   cargo build -p based-lsp
-   ```
-
-   This produces `target/debug/based-lsp` (or `target/release/based-lsp` with
-   `--release`). Put it on your `PATH` as `based-lsp`, or point the extension at it
-   with the `basedls.serverPath` setting (see below).
-
-2. **Node.js + npm** (Node 18+; developed against Node 20).
-
-## Build the extension
-
-From `editors/vscode/`:
+Extract the archive and install the VSIX:
 
 ```sh
-npm install       # install vscode-languageclient + build deps
-npm run compile   # tsc -> ./out/extension.js
+code --install-extension based-vscode-0.1.12.vsix
 ```
 
-## Configure the server path
-
-By default the extension runs `based-lsp` from your `PATH`. If the binary lives
-elsewhere (e.g. you didn't install it), set the path in VS Code settings:
+Put the extracted `based-lsp` on PATH, or configure its absolute path:
 
 ```jsonc
 {
-  // absolute path, or relative to the workspace root
-  "basedls.serverPath": "/path/to/baseddsl/target/debug/based-lsp"
+  "basedls.serverPath": "/absolute/path/to/based-0.1.12/based-lsp"
 }
 ```
 
-`basedls.trace.server` (`off` | `messages` | `verbose`) turns on LSP wire tracing in the
-"Based DSL Language Server" output channel for debugging.
+On Windows, select `based-lsp.exe`. Open a folder containing your `.bsl` project.
+Installed evaluation needs **no Rust or npm build**. The extension checks the
+server version before opening a stdio session; a missing executable or mismatched
+version reports how to install the matching server and configure its path.
+Upgrade or roll back the VSIX and LSP together, then reload VS Code.
 
-## Run it (development)
+`basedls.trace.server` (`off` | `messages` | `verbose`) turns on LSP wire tracing
+in the "Based DSL Language Server" output channel.
 
-Open `editors/vscode/` in VS Code and press **F5** ("Run Extension"). A new
-Extension Development Host window opens; open a folder containing `.bsl` files (for
-example `spec/examples/commerce`) and you should see inlay hints and diagnostics.
+## Develop and package locally
 
-## Package a `.vsix`
+Development requires Rust at the workspace minimum, Node 20+, and npm. From the
+repository root, build `cargo build -p based-lsp`. Point `basedls.serverPath` at
+that binary. From `editors/vscode/`:
 
 ```sh
+npm ci
+npm run compile
+npm test
 npm run package
-# or, without a devDependency on vsce:
-npx @vscode/vsce package
 ```
 
-This produces `based-vscode-<version>.vsix`. Install it into VS Code with:
+The workspace and extension versions must match. Open `editors/vscode/` in VS Code
+and press **F5** to launch an Extension Development Host.
+
+The package smoke uses a separate temporary profile and installs the actual VSIX;
+only its test harness is loaded in development mode. It checks diagnostics,
+hover, model completion, and rename against the supplied prebuilt server:
 
 ```sh
-code --install-extension based-vscode-0.1.0.vsix
+BASED_LSP=/absolute/path/to/based-lsp npm run test:installed
 ```
+
+It uses the official [VS Code test runner](https://code.visualstudio.com/api/working-with-extensions/testing-extension)
+and downloads a stable VS Code test executable. To use an existing installation,
+set `VSCODE_EXECUTABLE` to its executable (on macOS, `Contents/MacOS/Code`).
+On headless Linux, use `xvfb-run -a npm run test:installed`. User settings and
+installed extensions are isolated in a temporary directory that is removed after
+verification.
 
 ## What the server surfaces today
 

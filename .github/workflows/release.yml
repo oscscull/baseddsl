@@ -9,7 +9,7 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'editors/vscode/package*.json'
+      - 'editors/vscode/**'
       - 'docs/release-notes.md'
   push:
     tags: ['v*']
@@ -95,8 +95,37 @@ jobs:
       - run: cargo build --locked -p based-cli -p based-lsp
       - run: python ci/release/source_consumer.py --based target/debug/based
 
+  vsix:
+    needs: native
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: based-native-x86_64-unknown-linux-gnu
+          path: native
+      - run: make ci-extension
+      - name: Exercise installed VSIX with prebuilt LSP
+        run: |
+          mkdir native/installed
+          tar -xzf native/*.tar.gz -C native/installed
+          cd editors/vscode
+          BASED_LSP="$GITHUB_WORKSPACE/native/installed/based-lsp" xvfb-run -a npm run test:installed
+      - run: python ci/release/extension.py editors/vscode "$RUNNER_TEMP/vsix-assets"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: based-vsix
+          path: ${{ runner.temp }}/vsix-assets/*
+          if-no-files-found: error
+
   collect:
-    needs: [native, source-consumer]
+    needs: [native, source-consumer, vsix]
     runs-on: ubuntu-22.04
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -109,6 +138,10 @@ jobs:
         with:
           pattern: based-native-*
           merge-multiple: true
+          path: ${{ runner.temp }}/release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: based-vsix
           path: ${{ runner.temp }}/release-assets
       - run: python ci/release/collect.py "$RUNNER_TEMP/release-assets"
       - uses: actions/upload-artifact@v4
