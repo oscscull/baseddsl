@@ -117,3 +117,6 @@ command. Optional Cargo `OUT_DIR` generation is subject to the measured build-co
 gate before starter selection. Explicit generation remains the current default;
 client generation does not load runtime schema assets into the executable or run
 database migrations. Continue to ship/load the schema and run migrations explicitly.
+
+The optional [Cargo generation prototype](cargo-generation.md) shares the compiler
+and emitter, writes only to `OUT_DIR`, and remains behind the build-cost gate.

@@ -25,6 +25,7 @@ cargo run   # from inside an example project
 - [`docs/compile-time.md`](docs/compile-time.md) — build profiles, feature boundaries, and measured compilation costs.
 - [`docs/runtime-performance.md`](docs/runtime-performance.md) — matched embedded-runtime/direct-SQLx measurements and limits.
 - [`docs/generated-artifacts.md`](docs/generated-artifacts.md) — configured generation, safe replacement, and non-writing freshness checks.
+- [`docs/cargo-generation.md`](docs/cargo-generation.md) — optional OUT_DIR prototype awaiting the build-cost gate.
 - [`spec/`](spec/) — language design docs; start with [`spec/principles.md`](spec/principles.md).
 - [`crates/`](crates/) — the Rust compiler + runtime workspace.
 - [`examples/`](examples/) — runnable quickstart projects.
