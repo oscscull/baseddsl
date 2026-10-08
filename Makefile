@@ -303,3 +303,4 @@ ci-consumer-build:
 ci-initializer:
 	$(CARGO) build --locked -p based-cli
 	python3 ci/check-initializer.py --based $(BASED)
+	python3 ci/check-embedded-tutorial.py --based $(BASED)

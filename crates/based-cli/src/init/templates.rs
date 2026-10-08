@@ -37,6 +37,18 @@ fn embedded(dialect: Dialect) -> Vec<(&'static str, String)> {
             "src/main.rs",
             include_str!("../../starter/embedded/main.rs").into(),
         ),
+        (
+            "src/demo.rs",
+            include_str!("../../starter/embedded/demo.rs").into(),
+        ),
+        (
+            "src/session.rs",
+            include_str!("../../starter/embedded/session.rs").into(),
+        ),
+        (
+            "src/lookup.rs",
+            include_str!("../../starter/embedded/lookup.rs").into(),
+        ),
         ("src/database.rs", backend.into()),
     ]
 }

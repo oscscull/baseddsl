@@ -8,6 +8,9 @@ or provisions a database server.
 
 ## Embedded walkthrough
 
+Continue with the [embedded tutorial](embedded-tutorial.md) for the parent relation,
+host context, error handling, and a data-preserving rename.
+
 Prerequisites: `based`, Rust 1.94+, Cargo/Git, and platform C build tools. In an
 empty directory, run:
 
@@ -23,7 +26,8 @@ needed. The two commands after init apply the reviewed initial migration and run
 the typed consumer. Output includes `created:` and `read:` with the same UUID and
 `Hello Based` name.
 
-The app uses `generated/client.rs` through `include!`, a Git library revision
+The app demonstrates one optional parent relation and an owner scope, and uses
+`generated/client.rs` through `include!`, a Git library revision
 pinned to the CLI's source commit, and the production UUID generator. There is no
 build script. The explicit-generation default follows the
 [consumer build-cost decision](consumer-build-cost.md). `cargo fmt --check` formats
@@ -49,7 +53,7 @@ installed `based serve` on an available loopback port, waits for readiness, post
 its child service. Local replay storage is explicitly process-memory and disappears
 on restart. Generated SQL and OpenAPI live under `generated/`.
 
-This example has public callables for local learning. Use the
+This local demo supplies a fixed owner context directly; owner UUIDs are not credentials. Use the
 [trusted-edge deployment guide](standalone-deployment.md) before exposing a
 service. TypeScript authentication/guard integration is an optional later lesson.
 
@@ -68,7 +72,7 @@ cargo run
 
 Review the new `migrations/` files before applying them. Generation and offline
 migration planning do not change the database. Both demos run again without
-consumer code edits and return the new optional field. Commit source, generated
+consumer code edits. Add the field to `ItemView` if you also want it in the returned projection. Commit source, generated
 artifacts, migrations, and an embedded app's `Cargo.lock`.
 
 ## Choose a server dialect

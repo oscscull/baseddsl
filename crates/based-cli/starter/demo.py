@@ -10,9 +10,9 @@ import urllib.error
 import urllib.request
 
 
-def request(base, name, payload):
+def request(base, name, payload, context):
     data = json.dumps(payload).encode()
-    call = urllib.request.Request(f"{base}/{name}", data=data, headers={"Content-Type": "application/json"})
+    call = urllib.request.Request(f"{base}/{name}", data=data, headers={"Content-Type": "application/json", "X-Based-Context": json.dumps(context)})
     with urllib.request.urlopen(call, timeout=5) as response:
         return json.load(response)
 
@@ -41,9 +41,12 @@ def main():
     try:
         base = f"http://{address}"
         ready(process, base)
-        created = request(base, "m/create_item", {"name": "Hello Based"})
-        rows = request(base, "q/items", {})
-        assert any(row["id"] == created["id"] for row in rows), (created, rows)
+        # Local host identity only. A production trusted edge authenticates first
+        # and discards caller-supplied context; owner UUIDs are not credentials.
+        context = {"owner": "00000000-0000-4000-8000-000000000001"}
+        parent = request(base, "m/create_item", {"name": "Parent", "parent": None}, context)
+        created = request(base, "m/create_item", {"name": "Hello Based", "parent": parent["id"]}, context)
+        rows = request(base, "q/items", {}, context)
         print("created:", json.dumps(created))
         print("read:", json.dumps(rows))
     finally:

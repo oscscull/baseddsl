@@ -45,7 +45,7 @@ platform C build tools; the standalone demo needs Python's standard library.
 
 | Embedded Rust | Standalone HTTP |
 |---|---|
-| [Embedded walkthrough](docs/initializing.md#embedded-walkthrough) | [Standalone walkthrough](docs/initializing.md#standalone-walkthrough) |
+| [Embedded tutorial](docs/embedded-tutorial.md) | [Standalone walkthrough](docs/initializing.md#standalone-walkthrough) |
 | `based init --mode embedded` | `based init --mode standalone` |
 | Apply the initial migration, then `cargo run`. | Apply the initial migration, then run the Python HTTP demo. |
 | Your app calls the generated typed client in process. | Other applications call the service's query/mutation routes. |
