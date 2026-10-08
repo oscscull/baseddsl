@@ -10,6 +10,7 @@
 
 mod check;
 mod error;
+mod external_guards;
 mod gen;
 mod idempotency_store;
 mod idempotency_table;
@@ -19,6 +20,7 @@ mod project;
 mod project_root;
 mod render;
 mod serve;
+mod serve_options;
 
 use clap::{Parser, Subcommand};
 use error::CliError;
@@ -66,26 +68,7 @@ enum Command {
         action: MigrateAction,
     },
     /// Serve the checked schema as a live RPC service (`POST /q|m/<name>`).
-    Serve {
-        /// Explicit project root; otherwise find the nearest ancestor based.toml.
-        root: Option<PathBuf>,
-        /// Address to bind the HTTP listener on. `BASED_LISTEN` overrides the default —
-        /// a container sets `0.0.0.0:8080` there so the port is reachable from outside.
-        #[arg(long, env = "BASED_LISTEN", default_value = "127.0.0.1:8080")]
-        listen: String,
-        /// A database URL per physical shard (repeat for a sharded fleet). Falls back
-        /// to `BASED_DATABASE_URL` (comma-separated) when none is passed.
-        #[arg(long = "database-url")]
-        database_url: Vec<String>,
-        /// Warm connections kept per shard pool.
-        #[arg(long, default_value_t = 4)]
-        pool_min: usize,
-        /// Max connections per shard pool (the per-box concurrency cap).
-        #[arg(long, default_value_t = 32)]
-        pool_max: usize,
-        #[command(flatten)]
-        idempotency: idempotency_store::StoreOptions,
-    },
+    Serve(serve_options::ServeOptions),
 }
 
 #[derive(Subcommand)]
@@ -265,23 +248,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Facts { root, json } => {
             project::cmd_facts(&project_root::resolve(root.as_deref())?, json)
         }
-        Command::Serve {
-            root,
-            listen,
-            database_url,
-            pool_min,
-            pool_max,
-            idempotency,
-        } => {
-            serve::cmd_serve(
-                &project_root::resolve(root.as_deref())?,
-                &listen,
-                database_url,
-                pool_min,
-                pool_max,
-                idempotency,
-            )
-            .await
+        Command::Serve(options) => {
+            let root = project_root::resolve(options.root.as_deref())?;
+            serve::cmd_serve(&root, options).await
         }
     }
 }

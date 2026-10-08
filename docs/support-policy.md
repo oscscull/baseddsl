@@ -25,7 +25,7 @@ every patch or older version within that series.
 | Database TLS | Dedicated `database-tls` gate provisions test-CA Postgres 16 and MariaDB 11.4 fixtures, runs CLI/embedded quickstarts and live suites, and rejects untrusted CA/wrong hostname. | Explicit certificate and hostname verification through SQLx with Rustls; see [configuration](database-tls.md). SQLite-only consumers remain TLS-free. |
 | MySQL | Code paths and some tests exist, but CI provisions MariaDB, not MySQL. | Do not infer MySQL server support from MariaDB CI; add MySQL server evidence before listing a version as supported. |
 | Embedded Rust | Generated client, runtime tests, and three database quickstarts in `ci-examples`. | First-class typed async Rust output. The application supplies its database connection, context, and host guard functions. |
-| Standalone HTTP | `ci-image` boots the server with SQLite; HTTP and runtime tests run in `ci-workspace`. | First-class service path; release verification must cover create/read and authenticated guard callbacks on the supported databases. Named external guard callbacks are pending [#74](https://github.com/oscscull/baseddsl/issues/74) and [#75](https://github.com/oscscull/baseddsl/issues/75). |
+| Standalone HTTP | `ci-image` boots the server with SQLite; HTTP and runtime tests run in `ci-workspace`. | First-class service path; release verification must cover create/read and authenticated guard callbacks on the supported databases. Named external guard callbacks use [operator-configured authenticated HTTP endpoints](standalone-guards.md). |
 | VS Code extension | `ci-extension` compiles and packages the extension with Node 20. Its manifest accepts VS Code `^1.75.0`; CI does not launch every VS Code version. | Editor installation and matching LSP distribution need the separate [#57](https://github.com/oscscull/baseddsl/issues/57) gate. |
 
 The repository examples show current source-based setup:
@@ -68,8 +68,8 @@ mutation. In embedded Rust, the application registers an async closure by name
 through `Guards`; engine construction rejects missing registrations. The
 standalone v1 contract requires authenticated, named HTTP callbacks supplied
 by a trusted backend, with missing mappings rejected at startup and callback
-failures denying the write. This protocol is planned, not implemented yet:
-the current `based serve` rejects schemas declaring guards. Callbacks decide
+failures denying the write. The callback contract is implemented by the optional
+`external-guards` adapter, enabled by the CLI. Callbacks decide
 authorization; database write conditions must still enforce atomic invariants.
 The application or trusted edge derives `$ctx` and protects callback credentials.
 

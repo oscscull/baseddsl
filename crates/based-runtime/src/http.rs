@@ -164,9 +164,7 @@ struct Shared {
     /// Set once when a graceful shutdown is requested (SIGTERM/SIGINT). `/readyz` reads
     /// it to fail readiness first (drain).
     draining: Arc<AtomicBool>,
-    /// Always empty: guards are host functions, and the standalone listener has no host
-    /// code to register — startup refuses a guarded schema. Held so dispatch takes the
-    /// one registry shape on every door.
+    /// Registered checks share the embedded dispatch enforcement path.
     guards: Guards,
 }
 
@@ -323,14 +321,33 @@ pub async fn serve_with_store(
     config: ServeConfig,
     on_start: impl FnOnce(Handle),
 ) -> Result<(), ServeError> {
-    // A guard is a host function only an embedding app can register; this listener has
-    // no host code, so a guarded schema must not come up here — refusing at startup is
-    // what keeps a declared check from silently not running.
-    if let Some((m, g)) = compiled.declared_guards().next() {
-        return Err(ServeError(format!(
-            "mutation `{m}` declares guard `{g}` — guards are host functions this listener \
-             cannot register; embed the engine (Engine::with_guards) instead"
-        )));
+    serve_with_guards(
+        compiled,
+        backend,
+        ctx_source,
+        store,
+        Guards::new(),
+        config,
+        on_start,
+    )
+    .await
+}
+
+/// Serve with registered guards and an explicit idempotency store. Missing registrations
+/// refuse startup before binding. External callbacks and embedded closures use the same
+/// pre-write dispatch checks, including permission checks on replays.
+pub async fn serve_with_guards(
+    compiled: Compiled,
+    backend: impl Backend + 'static,
+    ctx_source: impl ContextSource + 'static,
+    store: Box<dyn IdempotencyStore>,
+    guards: Guards,
+    config: ServeConfig,
+    on_start: impl FnOnce(Handle),
+) -> Result<(), ServeError> {
+    let missing = guards.missing_for(&compiled);
+    if !missing.is_empty() {
+        return Err(ServeError(crate::GuardSetupError { missing }.to_string()));
     }
     let draining = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Shared {
@@ -339,7 +356,7 @@ pub async fn serve_with_store(
         ctx_source: Box::new(ctx_source),
         idempotency: store,
         draining: Arc::clone(&draining),
-        guards: Guards::new(),
+        guards,
     });
 
     let app = Router::new()
