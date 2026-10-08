@@ -278,3 +278,12 @@ ci-generated-consumer-postgres: based-cli
 ci-typescript-guards:
 	$(CARGO) build -p based-cli --no-default-features
 	cd examples/standalone-typescript-guards && $(NPM) ci && BASED_BIN="$(BASED)" $(NPM) test
+
+.PHONY: ci-runtime-benchmark
+# Parity and generated-artifact gate, never a latency threshold.
+ci-runtime-benchmark:
+	$(CARGO) build -p based-cli --no-default-features
+	BASED_BIN="$(BASED)" python3 $(ROOT)ci/check-runtime-benchmark.py
+	$(CARGO) fmt --manifest-path benchmarks/embedded-runtime/Cargo.toml --check
+	$(CARGO) clippy --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- -D warnings
+	$(CARGO) run --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- 5

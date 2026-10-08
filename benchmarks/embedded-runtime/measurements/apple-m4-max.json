@@ -1,0 +1,995 @@
+{
+  "measured_on": "2026-10-08",
+  "source": "Issue 55 benchmark working tree on 330f1a2; runtime unchanged from that commit",
+  "cpu": "Apple M4 Max",
+  "os": "macOS 27.0.1 (26A434)",
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "cargo_lock_sha256": "b85d4fb5ee0084af22de93f22f0de02ac97855c99c319d378cc7e6b61341d301",
+  "conditions": "Release thin LTO; warm pool/statement caches; three sequential fresh processes; builds finished before sampling; normal desktop background load and power state not controlled.",
+  "sql_evidence": [
+    {
+      "case": "Flat(8)",
+      "statements": 1,
+      "evidence": [
+        {
+          "sql": "SELECT\n  `item`.`id` AS `id`,\n  `item`.`name` AS `name`,\n  `item`.`value` AS `value`\nFROM `item`\nWHERE `item`.`id` <= ?\nORDER BY `item`.`id` ASC;\n",
+          "binds": "[Int(8)]",
+          "query_plan": [
+            "SEARCH item USING INTEGER PRIMARY KEY (rowid<?)"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "Flat(1024)",
+      "statements": 1,
+      "evidence": [
+        {
+          "sql": "SELECT\n  `item`.`id` AS `id`,\n  `item`.`name` AS `name`,\n  `item`.`value` AS `value`\nFROM `item`\nWHERE `item`.`id` <= ?\nORDER BY `item`.`id` ASC;\n",
+          "binds": "[Int(1024)]",
+          "query_plan": [
+            "SEARCH item USING INTEGER PRIMARY KEY (rowid<?)"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "Nested(1)",
+      "statements": 1,
+      "evidence": [
+        {
+          "sql": "SELECT\n  `owner`.`id` AS `id`,\n  `owner`.`name` AS `name`,\n  (SELECT json_group_array(json_object('id', `s1_item`.`id`, 'name', `s1_item`.`name`, 'value', `s1_item`.`value`) ORDER BY `s1_item`.`id` ASC) FROM `item` AS `s1_item` WHERE `s1_item`.`owner_id` = `owner`.`id`) AS `items[]`\nFROM `owner`\nWHERE `owner`.`id` <= ?\nORDER BY `owner`.`id` ASC;\n",
+          "binds": "[Int(1)]",
+          "query_plan": [
+            "SEARCH owner USING INTEGER PRIMARY KEY (rowid<?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "USE TEMP B-TREE FOR json_group_array(ORDER BY)",
+            "SEARCH s1_item USING INDEX idx_item_owner (owner_id=?)"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "Nested(128)",
+      "statements": 1,
+      "evidence": [
+        {
+          "sql": "SELECT\n  `owner`.`id` AS `id`,\n  `owner`.`name` AS `name`,\n  (SELECT json_group_array(json_object('id', `s1_item`.`id`, 'name', `s1_item`.`name`, 'value', `s1_item`.`value`) ORDER BY `s1_item`.`id` ASC) FROM `item` AS `s1_item` WHERE `s1_item`.`owner_id` = `owner`.`id`) AS `items[]`\nFROM `owner`\nWHERE `owner`.`id` <= ?\nORDER BY `owner`.`id` ASC;\n",
+          "binds": "[Int(128)]",
+          "query_plan": [
+            "SEARCH owner USING INTEGER PRIMARY KEY (rowid<?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "USE TEMP B-TREE FOR json_group_array(ORDER BY)",
+            "SEARCH s1_item USING INDEX idx_item_owner (owner_id=?)"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "Page",
+      "statements": 2,
+      "evidence": [
+        {
+          "sql": "SELECT\n  `item`.`id` AS `id`,\n  `item`.`name` AS `name`,\n  `item`.`value` AS `value`\nFROM `item`\nORDER BY `item`.`id` ASC\nLIMIT 32 OFFSET ?;\n",
+          "binds": "[Int(32)]",
+          "query_plan": [
+            "SCAN item"
+          ]
+        },
+        {
+          "sql": "SELECT COUNT(*) AS `count`\nFROM `item`;\n",
+          "binds": "[]",
+          "query_plan": [
+            "SCAN item USING COVERING INDEX idx_item_owner"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "Bulk(8)",
+      "statements": 1,
+      "evidence": [
+        {
+          "sql": "INSERT INTO `item` (`owner_id`, `name`, `value`)\nVALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?);\n",
+          "binds": "[Int(1), Text(\"bulk-0\"), Int(0), Int(1), Text(\"bulk-1\"), Int(1), Int(1), Text(\"bulk-2\"), Int(2), Int(1), Text(\"bulk-3\"), Int(3), Int(1), Text(\"bulk-4\"), Int(4), Int(1), Text(\"bulk-5\"), Int(5), Int(1), Text(\"bulk-6\"), Int(6), Int(1), Text(\"bulk-7\"), Int(7)]",
+          "query_plan": [
+            "SCAN 8-ROW VALUES CLAUSE"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "Bulk(512)",
+      "statements": 2,
+      "evidence": [
+        {
+          "sql": "INSERT INTO `item` (`owner_id`, `name`, `value`)\nVALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?);\n",
+          "binds": "[Int(1), Text(\"bulk-0\"), Int(0), Int(1), Text(\"bulk-1\"), Int(1), Int(1), Text(\"bulk-2\"), Int(2), Int(1), Text(\"bulk-3\"), Int(3), Int(1), Text(\"bulk-4\"), Int(4), Int(1), Text(\"bulk-5\"), Int(5), Int(1), Text(\"bulk-6\"), Int(6), Int(1), Text(\"bulk-7\"), Int(7), Int(1), Text(\"bulk-8\"), Int(8), Int(1), Text(\"bulk-9\"), Int(9), Int(1), Text(\"bulk-10\"), Int(10), Int(1), Text(\"bulk-11\"), Int(11), Int(1), Text(\"bulk-12\"), Int(12), Int(1), Text(\"bulk-13\"), Int(13), Int(1), Text(\"bulk-14\"), Int(14), Int(1), Text(\"bulk-15\"), Int(15), Int(1), Text(\"bulk-16\"), Int(16), Int(1), Text(\"bulk-17\"), Int(17), Int(1), Text(\"bulk-18\"), Int(18), Int(1), Text(\"bulk-19\"), Int(19), Int(1), Text(\"bulk-20\"), Int(20), Int(1), Text(\"bulk-21\"), Int(21), Int(1), Text(\"bulk-22\"), Int(22), Int(1), Text(\"bulk-23\"), Int(23), Int(1), Text(\"bulk-24\"), Int(24), Int(1), Text(\"bulk-25\"), Int(25), Int(1), Text(\"bulk-26\"), Int(26), Int(1), Text(\"bulk-27\"), Int(27), Int(1), Text(\"bulk-28\"), Int(28), Int(1), Text(\"bulk-29\"), Int(29), Int(1), Text(\"bulk-30\"), Int(30), Int(1), Text(\"bulk-31\"), Int(31), Int(1), Text(\"bulk-32\"), Int(32), Int(1), Text(\"bulk-33\"), Int(33), Int(1), Text(\"bulk-34\"), Int(34), Int(1), Text(\"bulk-35\"), Int(35), Int(1), Text(\"bulk-36\"), Int(36), Int(1), Text(\"bulk-37\"), Int(37), Int(1), Text(\"bulk-38\"), Int(38), Int(1), Text(\"bulk-39\"), Int(39), Int(1), Text(\"bulk-40\"), Int(40), Int(1), Text(\"bulk-41\"), Int(41), Int(1), Text(\"bulk-42\"), Int(42), Int(1), Text(\"bulk-43\"), Int(43), Int(1), Text(\"bulk-44\"), Int(44), Int(1), Text(\"bulk-45\"), Int(45), Int(1), Text(\"bulk-46\"), Int(46), Int(1), Text(\"bulk-47\"), Int(47), Int(1), Text(\"bulk-48\"), Int(48), Int(1), Text(\"bulk-49\"), Int(49), Int(1), Text(\"bulk-50\"), Int(50), Int(1), Text(\"bulk-51\"), Int(51), Int(1), Text(\"bulk-52\"), Int(52), Int(1), Text(\"bulk-53\"), Int(53), Int(1), Text(\"bulk-54\"), Int(54), Int(1), Text(\"bulk-55\"), Int(55), Int(1), Text(\"bulk-56\"), Int(56), Int(1), Text(\"bulk-57\"), Int(57), Int(1), Text(\"bulk-58\"), Int(58), Int(1), Text(\"bulk-59\"), Int(59), Int(1), Text(\"bulk-60\"), Int(60), Int(1), Text(\"bulk-61\"), Int(61), Int(1), Text(\"bulk-62\"), Int(62), Int(1), Text(\"bulk-63\"), Int(63), Int(1), Text(\"bulk-64\"), Int(64), Int(1), Text(\"bulk-65\"), Int(65), Int(1), Text(\"bulk-66\"), Int(66), Int(1), Text(\"bulk-67\"), Int(67), Int(1), Text(\"bulk-68\"), Int(68), Int(1), Text(\"bulk-69\"), Int(69), Int(1), Text(\"bulk-70\"), Int(70), Int(1), Text(\"bulk-71\"), Int(71), Int(1), Text(\"bulk-72\"), Int(72), Int(1), Text(\"bulk-73\"), Int(73), Int(1), Text(\"bulk-74\"), Int(74), Int(1), Text(\"bulk-75\"), Int(75), Int(1), Text(\"bulk-76\"), Int(76), Int(1), Text(\"bulk-77\"), Int(77), Int(1), Text(\"bulk-78\"), Int(78), Int(1), Text(\"bulk-79\"), Int(79), Int(1), Text(\"bulk-80\"), Int(80), Int(1), Text(\"bulk-81\"), Int(81), Int(1), Text(\"bulk-82\"), Int(82), Int(1), Text(\"bulk-83\"), Int(83), Int(1), Text(\"bulk-84\"), Int(84), Int(1), Text(\"bulk-85\"), Int(85), Int(1), Text(\"bulk-86\"), Int(86), Int(1), Text(\"bulk-87\"), Int(87), Int(1), Text(\"bulk-88\"), Int(88), Int(1), Text(\"bulk-89\"), Int(89), Int(1), Text(\"bulk-90\"), Int(90), Int(1), Text(\"bulk-91\"), Int(91), Int(1), Text(\"bulk-92\"), Int(92), Int(1), Text(\"bulk-93\"), Int(93), Int(1), Text(\"bulk-94\"), Int(94), Int(1), Text(\"bulk-95\"), Int(95), Int(1), Text(\"bulk-96\"), Int(96), Int(1), Text(\"bulk-97\"), Int(97), Int(1), Text(\"bulk-98\"), Int(98), Int(1), Text(\"bulk-99\"), Int(99), Int(1), Text(\"bulk-100\"), Int(100), Int(1), Text(\"bulk-101\"), Int(101), Int(1), Text(\"bulk-102\"), Int(102), Int(1), Text(\"bulk-103\"), Int(103), Int(1), Text(\"bulk-104\"), Int(104), Int(1), Text(\"bulk-105\"), Int(105), Int(1), Text(\"bulk-106\"), Int(106), Int(1), Text(\"bulk-107\"), Int(107), Int(1), Text(\"bulk-108\"), Int(108), Int(1), Text(\"bulk-109\"), Int(109), Int(1), Text(\"bulk-110\"), Int(110), Int(1), Text(\"bulk-111\"), Int(111), Int(1), Text(\"bulk-112\"), Int(112), Int(1), Text(\"bulk-113\"), Int(113), Int(1), Text(\"bulk-114\"), Int(114), Int(1), Text(\"bulk-115\"), Int(115), Int(1), Text(\"bulk-116\"), Int(116), Int(1), Text(\"bulk-117\"), Int(117), Int(1), Text(\"bulk-118\"), Int(118), Int(1), Text(\"bulk-119\"), Int(119), Int(1), Text(\"bulk-120\"), Int(120), Int(1), Text(\"bulk-121\"), Int(121), Int(1), Text(\"bulk-122\"), Int(122), Int(1), Text(\"bulk-123\"), Int(123), Int(1), Text(\"bulk-124\"), Int(124), Int(1), Text(\"bulk-125\"), Int(125), Int(1), Text(\"bulk-126\"), Int(126), Int(1), Text(\"bulk-127\"), Int(127), Int(1), Text(\"bulk-128\"), Int(128), Int(1), Text(\"bulk-129\"), Int(129), Int(1), Text(\"bulk-130\"), Int(130), Int(1), Text(\"bulk-131\"), Int(131), Int(1), Text(\"bulk-132\"), Int(132), Int(1), Text(\"bulk-133\"), Int(133), Int(1), Text(\"bulk-134\"), Int(134), Int(1), Text(\"bulk-135\"), Int(135), Int(1), Text(\"bulk-136\"), Int(136), Int(1), Text(\"bulk-137\"), Int(137), Int(1), Text(\"bulk-138\"), Int(138), Int(1), Text(\"bulk-139\"), Int(139), Int(1), Text(\"bulk-140\"), Int(140), Int(1), Text(\"bulk-141\"), Int(141), Int(1), Text(\"bulk-142\"), Int(142), Int(1), Text(\"bulk-143\"), Int(143), Int(1), Text(\"bulk-144\"), Int(144), Int(1), Text(\"bulk-145\"), Int(145), Int(1), Text(\"bulk-146\"), Int(146), Int(1), Text(\"bulk-147\"), Int(147), Int(1), Text(\"bulk-148\"), Int(148), Int(1), Text(\"bulk-149\"), Int(149), Int(1), Text(\"bulk-150\"), Int(150), Int(1), Text(\"bulk-151\"), Int(151), Int(1), Text(\"bulk-152\"), Int(152), Int(1), Text(\"bulk-153\"), Int(153), Int(1), Text(\"bulk-154\"), Int(154), Int(1), Text(\"bulk-155\"), Int(155), Int(1), Text(\"bulk-156\"), Int(156), Int(1), Text(\"bulk-157\"), Int(157), Int(1), Text(\"bulk-158\"), Int(158), Int(1), Text(\"bulk-159\"), Int(159), Int(1), Text(\"bulk-160\"), Int(160), Int(1), Text(\"bulk-161\"), Int(161), Int(1), Text(\"bulk-162\"), Int(162), Int(1), Text(\"bulk-163\"), Int(163), Int(1), Text(\"bulk-164\"), Int(164), Int(1), Text(\"bulk-165\"), Int(165), Int(1), Text(\"bulk-166\"), Int(166), Int(1), Text(\"bulk-167\"), Int(167), Int(1), Text(\"bulk-168\"), Int(168), Int(1), Text(\"bulk-169\"), Int(169), Int(1), Text(\"bulk-170\"), Int(170), Int(1), Text(\"bulk-171\"), Int(171), Int(1), Text(\"bulk-172\"), Int(172), Int(1), Text(\"bulk-173\"), Int(173), Int(1), Text(\"bulk-174\"), Int(174), Int(1), Text(\"bulk-175\"), Int(175), Int(1), Text(\"bulk-176\"), Int(176), Int(1), Text(\"bulk-177\"), Int(177), Int(1), Text(\"bulk-178\"), Int(178), Int(1), Text(\"bulk-179\"), Int(179), Int(1), Text(\"bulk-180\"), Int(180), Int(1), Text(\"bulk-181\"), Int(181), Int(1), Text(\"bulk-182\"), Int(182), Int(1), Text(\"bulk-183\"), Int(183), Int(1), Text(\"bulk-184\"), Int(184), Int(1), Text(\"bulk-185\"), Int(185), Int(1), Text(\"bulk-186\"), Int(186), Int(1), Text(\"bulk-187\"), Int(187), Int(1), Text(\"bulk-188\"), Int(188), Int(1), Text(\"bulk-189\"), Int(189), Int(1), Text(\"bulk-190\"), Int(190), Int(1), Text(\"bulk-191\"), Int(191), Int(1), Text(\"bulk-192\"), Int(192), Int(1), Text(\"bulk-193\"), Int(193), Int(1), Text(\"bulk-194\"), Int(194), Int(1), Text(\"bulk-195\"), Int(195), Int(1), Text(\"bulk-196\"), Int(196), Int(1), Text(\"bulk-197\"), Int(197), Int(1), Text(\"bulk-198\"), Int(198), Int(1), Text(\"bulk-199\"), Int(199), Int(1), Text(\"bulk-200\"), Int(200), Int(1), Text(\"bulk-201\"), Int(201), Int(1), Text(\"bulk-202\"), Int(202), Int(1), Text(\"bulk-203\"), Int(203), Int(1), Text(\"bulk-204\"), Int(204), Int(1), Text(\"bulk-205\"), Int(205), Int(1), Text(\"bulk-206\"), Int(206), Int(1), Text(\"bulk-207\"), Int(207), Int(1), Text(\"bulk-208\"), Int(208), Int(1), Text(\"bulk-209\"), Int(209), Int(1), Text(\"bulk-210\"), Int(210), Int(1), Text(\"bulk-211\"), Int(211), Int(1), Text(\"bulk-212\"), Int(212), Int(1), Text(\"bulk-213\"), Int(213), Int(1), Text(\"bulk-214\"), Int(214), Int(1), Text(\"bulk-215\"), Int(215), Int(1), Text(\"bulk-216\"), Int(216), Int(1), Text(\"bulk-217\"), Int(217), Int(1), Text(\"bulk-218\"), Int(218), Int(1), Text(\"bulk-219\"), Int(219), Int(1), Text(\"bulk-220\"), Int(220), Int(1), Text(\"bulk-221\"), Int(221), Int(1), Text(\"bulk-222\"), Int(222), Int(1), Text(\"bulk-223\"), Int(223), Int(1), Text(\"bulk-224\"), Int(224), Int(1), Text(\"bulk-225\"), Int(225), Int(1), Text(\"bulk-226\"), Int(226), Int(1), Text(\"bulk-227\"), Int(227), Int(1), Text(\"bulk-228\"), Int(228), Int(1), Text(\"bulk-229\"), Int(229), Int(1), Text(\"bulk-230\"), Int(230), Int(1), Text(\"bulk-231\"), Int(231), Int(1), Text(\"bulk-232\"), Int(232), Int(1), Text(\"bulk-233\"), Int(233), Int(1), Text(\"bulk-234\"), Int(234), Int(1), Text(\"bulk-235\"), Int(235), Int(1), Text(\"bulk-236\"), Int(236), Int(1), Text(\"bulk-237\"), Int(237), Int(1), Text(\"bulk-238\"), Int(238), Int(1), Text(\"bulk-239\"), Int(239), Int(1), Text(\"bulk-240\"), Int(240), Int(1), Text(\"bulk-241\"), Int(241), Int(1), Text(\"bulk-242\"), Int(242), Int(1), Text(\"bulk-243\"), Int(243), Int(1), Text(\"bulk-244\"), Int(244), Int(1), Text(\"bulk-245\"), Int(245), Int(1), Text(\"bulk-246\"), Int(246), Int(1), Text(\"bulk-247\"), Int(247), Int(1), Text(\"bulk-248\"), Int(248), Int(1), Text(\"bulk-249\"), Int(249), Int(1), Text(\"bulk-250\"), Int(250), Int(1), Text(\"bulk-251\"), Int(251), Int(1), Text(\"bulk-252\"), Int(252), Int(1), Text(\"bulk-253\"), Int(253), Int(1), Text(\"bulk-254\"), Int(254), Int(1), Text(\"bulk-255\"), Int(255), Int(1), Text(\"bulk-256\"), Int(256), Int(1), Text(\"bulk-257\"), Int(257), Int(1), Text(\"bulk-258\"), Int(258), Int(1), Text(\"bulk-259\"), Int(259), Int(1), Text(\"bulk-260\"), Int(260), Int(1), Text(\"bulk-261\"), Int(261), Int(1), Text(\"bulk-262\"), Int(262), Int(1), Text(\"bulk-263\"), Int(263), Int(1), Text(\"bulk-264\"), Int(264), Int(1), Text(\"bulk-265\"), Int(265), Int(1), Text(\"bulk-266\"), Int(266), Int(1), Text(\"bulk-267\"), Int(267), Int(1), Text(\"bulk-268\"), Int(268), Int(1), Text(\"bulk-269\"), Int(269), Int(1), Text(\"bulk-270\"), Int(270), Int(1), Text(\"bulk-271\"), Int(271), Int(1), Text(\"bulk-272\"), Int(272), Int(1), Text(\"bulk-273\"), Int(273), Int(1), Text(\"bulk-274\"), Int(274), Int(1), Text(\"bulk-275\"), Int(275), Int(1), Text(\"bulk-276\"), Int(276), Int(1), Text(\"bulk-277\"), Int(277), Int(1), Text(\"bulk-278\"), Int(278), Int(1), Text(\"bulk-279\"), Int(279), Int(1), Text(\"bulk-280\"), Int(280), Int(1), Text(\"bulk-281\"), Int(281), Int(1), Text(\"bulk-282\"), Int(282), Int(1), Text(\"bulk-283\"), Int(283), Int(1), Text(\"bulk-284\"), Int(284), Int(1), Text(\"bulk-285\"), Int(285), Int(1), Text(\"bulk-286\"), Int(286), Int(1), Text(\"bulk-287\"), Int(287), Int(1), Text(\"bulk-288\"), Int(288), Int(1), Text(\"bulk-289\"), Int(289), Int(1), Text(\"bulk-290\"), Int(290), Int(1), Text(\"bulk-291\"), Int(291), Int(1), Text(\"bulk-292\"), Int(292), Int(1), Text(\"bulk-293\"), Int(293), Int(1), Text(\"bulk-294\"), Int(294), Int(1), Text(\"bulk-295\"), Int(295), Int(1), Text(\"bulk-296\"), Int(296), Int(1), Text(\"bulk-297\"), Int(297), Int(1), Text(\"bulk-298\"), Int(298), Int(1), Text(\"bulk-299\"), Int(299)]",
+          "query_plan": [
+            "SCAN 300-ROW VALUES CLAUSE"
+          ]
+        },
+        {
+          "sql": "INSERT INTO `item` (`owner_id`, `name`, `value`)\nVALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?);\n",
+          "binds": "[Int(1), Text(\"bulk-300\"), Int(300), Int(1), Text(\"bulk-301\"), Int(301), Int(1), Text(\"bulk-302\"), Int(302), Int(1), Text(\"bulk-303\"), Int(303), Int(1), Text(\"bulk-304\"), Int(304), Int(1), Text(\"bulk-305\"), Int(305), Int(1), Text(\"bulk-306\"), Int(306), Int(1), Text(\"bulk-307\"), Int(307), Int(1), Text(\"bulk-308\"), Int(308), Int(1), Text(\"bulk-309\"), Int(309), Int(1), Text(\"bulk-310\"), Int(310), Int(1), Text(\"bulk-311\"), Int(311), Int(1), Text(\"bulk-312\"), Int(312), Int(1), Text(\"bulk-313\"), Int(313), Int(1), Text(\"bulk-314\"), Int(314), Int(1), Text(\"bulk-315\"), Int(315), Int(1), Text(\"bulk-316\"), Int(316), Int(1), Text(\"bulk-317\"), Int(317), Int(1), Text(\"bulk-318\"), Int(318), Int(1), Text(\"bulk-319\"), Int(319), Int(1), Text(\"bulk-320\"), Int(320), Int(1), Text(\"bulk-321\"), Int(321), Int(1), Text(\"bulk-322\"), Int(322), Int(1), Text(\"bulk-323\"), Int(323), Int(1), Text(\"bulk-324\"), Int(324), Int(1), Text(\"bulk-325\"), Int(325), Int(1), Text(\"bulk-326\"), Int(326), Int(1), Text(\"bulk-327\"), Int(327), Int(1), Text(\"bulk-328\"), Int(328), Int(1), Text(\"bulk-329\"), Int(329), Int(1), Text(\"bulk-330\"), Int(330), Int(1), Text(\"bulk-331\"), Int(331), Int(1), Text(\"bulk-332\"), Int(332), Int(1), Text(\"bulk-333\"), Int(333), Int(1), Text(\"bulk-334\"), Int(334), Int(1), Text(\"bulk-335\"), Int(335), Int(1), Text(\"bulk-336\"), Int(336), Int(1), Text(\"bulk-337\"), Int(337), Int(1), Text(\"bulk-338\"), Int(338), Int(1), Text(\"bulk-339\"), Int(339), Int(1), Text(\"bulk-340\"), Int(340), Int(1), Text(\"bulk-341\"), Int(341), Int(1), Text(\"bulk-342\"), Int(342), Int(1), Text(\"bulk-343\"), Int(343), Int(1), Text(\"bulk-344\"), Int(344), Int(1), Text(\"bulk-345\"), Int(345), Int(1), Text(\"bulk-346\"), Int(346), Int(1), Text(\"bulk-347\"), Int(347), Int(1), Text(\"bulk-348\"), Int(348), Int(1), Text(\"bulk-349\"), Int(349), Int(1), Text(\"bulk-350\"), Int(350), Int(1), Text(\"bulk-351\"), Int(351), Int(1), Text(\"bulk-352\"), Int(352), Int(1), Text(\"bulk-353\"), Int(353), Int(1), Text(\"bulk-354\"), Int(354), Int(1), Text(\"bulk-355\"), Int(355), Int(1), Text(\"bulk-356\"), Int(356), Int(1), Text(\"bulk-357\"), Int(357), Int(1), Text(\"bulk-358\"), Int(358), Int(1), Text(\"bulk-359\"), Int(359), Int(1), Text(\"bulk-360\"), Int(360), Int(1), Text(\"bulk-361\"), Int(361), Int(1), Text(\"bulk-362\"), Int(362), Int(1), Text(\"bulk-363\"), Int(363), Int(1), Text(\"bulk-364\"), Int(364), Int(1), Text(\"bulk-365\"), Int(365), Int(1), Text(\"bulk-366\"), Int(366), Int(1), Text(\"bulk-367\"), Int(367), Int(1), Text(\"bulk-368\"), Int(368), Int(1), Text(\"bulk-369\"), Int(369), Int(1), Text(\"bulk-370\"), Int(370), Int(1), Text(\"bulk-371\"), Int(371), Int(1), Text(\"bulk-372\"), Int(372), Int(1), Text(\"bulk-373\"), Int(373), Int(1), Text(\"bulk-374\"), Int(374), Int(1), Text(\"bulk-375\"), Int(375), Int(1), Text(\"bulk-376\"), Int(376), Int(1), Text(\"bulk-377\"), Int(377), Int(1), Text(\"bulk-378\"), Int(378), Int(1), Text(\"bulk-379\"), Int(379), Int(1), Text(\"bulk-380\"), Int(380), Int(1), Text(\"bulk-381\"), Int(381), Int(1), Text(\"bulk-382\"), Int(382), Int(1), Text(\"bulk-383\"), Int(383), Int(1), Text(\"bulk-384\"), Int(384), Int(1), Text(\"bulk-385\"), Int(385), Int(1), Text(\"bulk-386\"), Int(386), Int(1), Text(\"bulk-387\"), Int(387), Int(1), Text(\"bulk-388\"), Int(388), Int(1), Text(\"bulk-389\"), Int(389), Int(1), Text(\"bulk-390\"), Int(390), Int(1), Text(\"bulk-391\"), Int(391), Int(1), Text(\"bulk-392\"), Int(392), Int(1), Text(\"bulk-393\"), Int(393), Int(1), Text(\"bulk-394\"), Int(394), Int(1), Text(\"bulk-395\"), Int(395), Int(1), Text(\"bulk-396\"), Int(396), Int(1), Text(\"bulk-397\"), Int(397), Int(1), Text(\"bulk-398\"), Int(398), Int(1), Text(\"bulk-399\"), Int(399), Int(1), Text(\"bulk-400\"), Int(400), Int(1), Text(\"bulk-401\"), Int(401), Int(1), Text(\"bulk-402\"), Int(402), Int(1), Text(\"bulk-403\"), Int(403), Int(1), Text(\"bulk-404\"), Int(404), Int(1), Text(\"bulk-405\"), Int(405), Int(1), Text(\"bulk-406\"), Int(406), Int(1), Text(\"bulk-407\"), Int(407), Int(1), Text(\"bulk-408\"), Int(408), Int(1), Text(\"bulk-409\"), Int(409), Int(1), Text(\"bulk-410\"), Int(410), Int(1), Text(\"bulk-411\"), Int(411), Int(1), Text(\"bulk-412\"), Int(412), Int(1), Text(\"bulk-413\"), Int(413), Int(1), Text(\"bulk-414\"), Int(414), Int(1), Text(\"bulk-415\"), Int(415), Int(1), Text(\"bulk-416\"), Int(416), Int(1), Text(\"bulk-417\"), Int(417), Int(1), Text(\"bulk-418\"), Int(418), Int(1), Text(\"bulk-419\"), Int(419), Int(1), Text(\"bulk-420\"), Int(420), Int(1), Text(\"bulk-421\"), Int(421), Int(1), Text(\"bulk-422\"), Int(422), Int(1), Text(\"bulk-423\"), Int(423), Int(1), Text(\"bulk-424\"), Int(424), Int(1), Text(\"bulk-425\"), Int(425), Int(1), Text(\"bulk-426\"), Int(426), Int(1), Text(\"bulk-427\"), Int(427), Int(1), Text(\"bulk-428\"), Int(428), Int(1), Text(\"bulk-429\"), Int(429), Int(1), Text(\"bulk-430\"), Int(430), Int(1), Text(\"bulk-431\"), Int(431), Int(1), Text(\"bulk-432\"), Int(432), Int(1), Text(\"bulk-433\"), Int(433), Int(1), Text(\"bulk-434\"), Int(434), Int(1), Text(\"bulk-435\"), Int(435), Int(1), Text(\"bulk-436\"), Int(436), Int(1), Text(\"bulk-437\"), Int(437), Int(1), Text(\"bulk-438\"), Int(438), Int(1), Text(\"bulk-439\"), Int(439), Int(1), Text(\"bulk-440\"), Int(440), Int(1), Text(\"bulk-441\"), Int(441), Int(1), Text(\"bulk-442\"), Int(442), Int(1), Text(\"bulk-443\"), Int(443), Int(1), Text(\"bulk-444\"), Int(444), Int(1), Text(\"bulk-445\"), Int(445), Int(1), Text(\"bulk-446\"), Int(446), Int(1), Text(\"bulk-447\"), Int(447), Int(1), Text(\"bulk-448\"), Int(448), Int(1), Text(\"bulk-449\"), Int(449), Int(1), Text(\"bulk-450\"), Int(450), Int(1), Text(\"bulk-451\"), Int(451), Int(1), Text(\"bulk-452\"), Int(452), Int(1), Text(\"bulk-453\"), Int(453), Int(1), Text(\"bulk-454\"), Int(454), Int(1), Text(\"bulk-455\"), Int(455), Int(1), Text(\"bulk-456\"), Int(456), Int(1), Text(\"bulk-457\"), Int(457), Int(1), Text(\"bulk-458\"), Int(458), Int(1), Text(\"bulk-459\"), Int(459), Int(1), Text(\"bulk-460\"), Int(460), Int(1), Text(\"bulk-461\"), Int(461), Int(1), Text(\"bulk-462\"), Int(462), Int(1), Text(\"bulk-463\"), Int(463), Int(1), Text(\"bulk-464\"), Int(464), Int(1), Text(\"bulk-465\"), Int(465), Int(1), Text(\"bulk-466\"), Int(466), Int(1), Text(\"bulk-467\"), Int(467), Int(1), Text(\"bulk-468\"), Int(468), Int(1), Text(\"bulk-469\"), Int(469), Int(1), Text(\"bulk-470\"), Int(470), Int(1), Text(\"bulk-471\"), Int(471), Int(1), Text(\"bulk-472\"), Int(472), Int(1), Text(\"bulk-473\"), Int(473), Int(1), Text(\"bulk-474\"), Int(474), Int(1), Text(\"bulk-475\"), Int(475), Int(1), Text(\"bulk-476\"), Int(476), Int(1), Text(\"bulk-477\"), Int(477), Int(1), Text(\"bulk-478\"), Int(478), Int(1), Text(\"bulk-479\"), Int(479), Int(1), Text(\"bulk-480\"), Int(480), Int(1), Text(\"bulk-481\"), Int(481), Int(1), Text(\"bulk-482\"), Int(482), Int(1), Text(\"bulk-483\"), Int(483), Int(1), Text(\"bulk-484\"), Int(484), Int(1), Text(\"bulk-485\"), Int(485), Int(1), Text(\"bulk-486\"), Int(486), Int(1), Text(\"bulk-487\"), Int(487), Int(1), Text(\"bulk-488\"), Int(488), Int(1), Text(\"bulk-489\"), Int(489), Int(1), Text(\"bulk-490\"), Int(490), Int(1), Text(\"bulk-491\"), Int(491), Int(1), Text(\"bulk-492\"), Int(492), Int(1), Text(\"bulk-493\"), Int(493), Int(1), Text(\"bulk-494\"), Int(494), Int(1), Text(\"bulk-495\"), Int(495), Int(1), Text(\"bulk-496\"), Int(496), Int(1), Text(\"bulk-497\"), Int(497), Int(1), Text(\"bulk-498\"), Int(498), Int(1), Text(\"bulk-499\"), Int(499), Int(1), Text(\"bulk-500\"), Int(500), Int(1), Text(\"bulk-501\"), Int(501), Int(1), Text(\"bulk-502\"), Int(502), Int(1), Text(\"bulk-503\"), Int(503), Int(1), Text(\"bulk-504\"), Int(504), Int(1), Text(\"bulk-505\"), Int(505), Int(1), Text(\"bulk-506\"), Int(506), Int(1), Text(\"bulk-507\"), Int(507), Int(1), Text(\"bulk-508\"), Int(508), Int(1), Text(\"bulk-509\"), Int(509), Int(1), Text(\"bulk-510\"), Int(510), Int(1), Text(\"bulk-511\"), Int(511)]",
+          "query_plan": [
+            "SCAN 212-ROW VALUES CLAUSE"
+          ]
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "platform": "macos-aarch64",
+      "sqlite_version": "3.51.3",
+      "profile": "release",
+      "connections": 1,
+      "startup_schema_load_us": 857.25,
+      "workloads": [
+        {
+          "case": "Flat(8)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 88.667,
+            "p95_us": 109.916,
+            "min_us": 46.458,
+            "max_us": 150.16699999999997,
+            "operations_per_second": 11991.395454277821
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 114.0,
+            "p95_us": 142.542,
+            "min_us": 60.166,
+            "max_us": 448.125,
+            "operations_per_second": 9142.458009261765
+          },
+          "conversion": {
+            "input_json_bytes": 10,
+            "result_json_bytes": 286,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.08399999999999999,
+              "min_us": 0.041,
+              "max_us": 0.125,
+              "operations_per_second": 13297872.340425532
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 1.25,
+              "p95_us": 3.125,
+              "min_us": 1.125,
+              "max_us": 68.041,
+              "operations_per_second": 467832.9742715256
+            }
+          }
+        },
+        {
+          "case": "Flat(1024)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 1800.938,
+            "p95_us": 2816.167,
+            "min_us": 1133.709,
+            "max_us": 10088.541,
+            "operations_per_second": 518.3570633482042
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 3473.438,
+            "p95_us": 5263.583,
+            "min_us": 2250.8340000000003,
+            "max_us": 10876.291,
+            "operations_per_second": 272.75803475037475
+          },
+          "conversion": {
+            "input_json_bytes": 13,
+            "result_json_bytes": 42474,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.125,
+              "p95_us": 0.167,
+              "min_us": 0.125,
+              "max_us": 0.75,
+              "operations_per_second": 7048209.754722282
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 281.125,
+              "p95_us": 408.292,
+              "min_us": 151.708,
+              "max_us": 540.167,
+              "operations_per_second": 3576.5989283865824
+            }
+          }
+        },
+        {
+          "case": "Nested(1)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 99.8335,
+            "p95_us": 139.084,
+            "min_us": 57.958000000000006,
+            "max_us": 174.5,
+            "operations_per_second": 10482.385216440554
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 111.792,
+            "p95_us": 168.20800000000003,
+            "min_us": 62.62500000000001,
+            "max_us": 367.084,
+            "operations_per_second": 8965.108648824102
+          },
+          "conversion": {
+            "input_json_bytes": 10,
+            "result_json_bytes": 322,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.125,
+              "p95_us": 0.125,
+              "min_us": 0.083,
+              "max_us": 0.20900000000000002,
+              "operations_per_second": 8954956.568460647
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 1.417,
+              "p95_us": 1.708,
+              "min_us": 1.333,
+              "max_us": 27.166999999999998,
+              "operations_per_second": 584518.4444795158
+            }
+          }
+        },
+        {
+          "case": "Nested(128)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 1848.8335,
+            "p95_us": 2912.834,
+            "min_us": 1049.375,
+            "max_us": 4479.791,
+            "operations_per_second": 504.89096333102395
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 2500.7290000000003,
+            "p95_us": 3636.25,
+            "min_us": 1619.9160000000002,
+            "max_us": 5752.5,
+            "operations_per_second": 379.4153908847862
+          },
+          "conversion": {
+            "input_json_bytes": 12,
+            "result_json_bytes": 47378,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.08399999999999999,
+              "min_us": 0.041,
+              "max_us": 0.25,
+              "operations_per_second": 13952839.402818475
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 331.75,
+              "p95_us": 467.708,
+              "min_us": 179.042,
+              "max_us": 516.5,
+              "operations_per_second": 3120.793852560404
+            }
+          }
+        },
+        {
+          "case": "Page",
+          "statements": 2,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 177.0205,
+            "p95_us": 228.125,
+            "min_us": 82.41699999999999,
+            "max_us": 331.58299999999997,
+            "operations_per_second": 6163.843528736315
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 159.875,
+            "p95_us": 398.95799999999997,
+            "min_us": 104.75,
+            "max_us": 1853.916,
+            "operations_per_second": 4328.696541815156
+          },
+          "conversion": {
+            "input_json_bytes": 13,
+            "result_json_bytes": 1284,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.125,
+              "p95_us": 0.167,
+              "min_us": 0.08399999999999999,
+              "max_us": 0.25,
+              "operations_per_second": 7464636.2855969705
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 8.959,
+              "p95_us": 13.5,
+              "min_us": 4.75,
+              "max_us": 581.792,
+              "operations_per_second": 84064.30751396205
+            }
+          }
+        },
+        {
+          "case": "Bulk(8)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 86.062,
+            "p95_us": 168.20800000000003,
+            "min_us": 67.58300000000001,
+            "max_us": 983.541,
+            "operations_per_second": 9563.240129038713
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 112.229,
+            "p95_us": 218.5,
+            "min_us": 90.75,
+            "max_us": 347.875,
+            "operations_per_second": 7555.963812675872
+          },
+          "conversion": {
+            "input_json_bytes": 370,
+            "result_json_bytes": 2,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 2.2915,
+              "p95_us": 2.375,
+              "min_us": 2.2079999999999997,
+              "max_us": 5.167,
+              "operations_per_second": 430607.5873056894
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 0.041999999999999996,
+              "p95_us": 0.041999999999999996,
+              "min_us": 0.0,
+              "max_us": 0.5840000000000001,
+              "operations_per_second": 25135101.168782275
+            }
+          }
+        },
+        {
+          "case": "Bulk(512)",
+          "statements": 2,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 616.375,
+            "p95_us": 1348.5,
+            "min_us": 464.04200000000003,
+            "max_us": 1942.791,
+            "operations_per_second": 1293.6471620443972
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 1819.396,
+            "p95_us": 2771.0,
+            "min_us": 1117.125,
+            "max_us": 3437.833,
+            "operations_per_second": 521.1102803773676
+          },
+          "conversion": {
+            "input_json_bytes": 24878,
+            "result_json_bytes": 2,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 201.2495,
+              "p95_us": 349.666,
+              "min_us": 132.667,
+              "max_us": 393.833,
+              "operations_per_second": 4292.79727857258
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 0.041999999999999996,
+              "p95_us": 0.041999999999999996,
+              "min_us": 0.0,
+              "max_us": 0.6659999999999999,
+              "operations_per_second": 23769907.297361612
+            }
+          }
+        }
+      ],
+      "whole_process_peak_rss_bytes": 12926976
+    },
+    {
+      "platform": "macos-aarch64",
+      "sqlite_version": "3.51.3",
+      "profile": "release",
+      "connections": 1,
+      "startup_schema_load_us": 557.25,
+      "workloads": [
+        {
+          "case": "Flat(8)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 81.6875,
+            "p95_us": 125.49999999999999,
+            "min_us": 44.75,
+            "max_us": 476.5,
+            "operations_per_second": 11959.452910042857
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 85.95849999999999,
+            "p95_us": 146.209,
+            "min_us": 59.542,
+            "max_us": 168.291,
+            "operations_per_second": 10451.026593891289
+          },
+          "conversion": {
+            "input_json_bytes": 10,
+            "result_json_bytes": 286,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.167,
+              "p95_us": 0.20900000000000002,
+              "min_us": 0.125,
+              "max_us": 0.25,
+              "operations_per_second": 5448403.617740001
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 3.125,
+              "p95_us": 3.167,
+              "min_us": 3.0,
+              "max_us": 10.959,
+              "operations_per_second": 317966.54038095556
+            }
+          }
+        },
+        {
+          "case": "Flat(1024)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 1610.1455,
+            "p95_us": 2959.042,
+            "min_us": 1042.042,
+            "max_us": 4621.375,
+            "operations_per_second": 553.6336179885793
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 3248.6245,
+            "p95_us": 4980.625,
+            "min_us": 2104.959,
+            "max_us": 5882.2919999999995,
+            "operations_per_second": 291.83759673746937
+          },
+          "conversion": {
+            "input_json_bytes": 13,
+            "result_json_bytes": 42474,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.125,
+              "min_us": 0.083,
+              "max_us": 0.541,
+              "operations_per_second": 10550192.541013878
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 246.27100000000002,
+              "p95_us": 406.54200000000003,
+              "min_us": 152.167,
+              "max_us": 459.33299999999997,
+              "operations_per_second": 3652.0261139588088
+            }
+          }
+        },
+        {
+          "case": "Nested(1)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 112.5415,
+            "p95_us": 136.708,
+            "min_us": 58.167,
+            "max_us": 172.75,
+            "operations_per_second": 10349.288486416555
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 87.5415,
+            "p95_us": 146.458,
+            "min_us": 60.083,
+            "max_us": 330.416,
+            "operations_per_second": 10285.443161432553
+          },
+          "conversion": {
+            "input_json_bytes": 10,
+            "result_json_bytes": 322,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.167,
+              "p95_us": 0.20900000000000002,
+              "min_us": 0.166,
+              "max_us": 0.458,
+              "operations_per_second": 5351456.934150325
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 3.5,
+              "p95_us": 3.667,
+              "min_us": 1.625,
+              "max_us": 19.708,
+              "operations_per_second": 295074.4694192202
+            }
+          }
+        },
+        {
+          "case": "Nested(128)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 1586.333,
+            "p95_us": 2826.7090000000003,
+            "min_us": 1094.667,
+            "max_us": 3499.375,
+            "operations_per_second": 575.6174862472968
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 2423.687,
+            "p95_us": 3758.709,
+            "min_us": 1547.083,
+            "max_us": 4010.5840000000003,
+            "operations_per_second": 388.9307349189857
+          },
+          "conversion": {
+            "input_json_bytes": 12,
+            "result_json_bytes": 47378,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.08399999999999999,
+              "min_us": 0.041,
+              "max_us": 0.375,
+              "operations_per_second": 13636053.726051683
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 264.4375,
+              "p95_us": 468.25,
+              "min_us": 179.458,
+              "max_us": 702.1669999999999,
+              "operations_per_second": 3402.7013705910986
+            }
+          }
+        },
+        {
+          "case": "Page",
+          "statements": 2,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 121.0415,
+            "p95_us": 226.292,
+            "min_us": 89.625,
+            "max_us": 370.292,
+            "operations_per_second": 6813.566246464951
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 155.5625,
+            "p95_us": 281.5,
+            "min_us": 110.625,
+            "max_us": 499.834,
+            "operations_per_second": 6006.358270801887
+          },
+          "conversion": {
+            "input_json_bytes": 13,
+            "result_json_bytes": 1284,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.125,
+              "min_us": 0.041,
+              "max_us": 0.20900000000000002,
+              "operations_per_second": 11534690.58192514
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 4.958,
+              "p95_us": 6.167000000000001,
+              "min_us": 4.75,
+              "max_us": 27.25,
+              "operations_per_second": 184730.37216704426
+            }
+          }
+        },
+        {
+          "case": "Bulk(8)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 108.9375,
+            "p95_us": 190.958,
+            "min_us": 67.75,
+            "max_us": 360.416,
+            "operations_per_second": 8156.095266128901
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 138.08350000000002,
+            "p95_us": 225.583,
+            "min_us": 90.5,
+            "max_us": 820.833,
+            "operations_per_second": 6565.800864052833
+          },
+          "conversion": {
+            "input_json_bytes": 370,
+            "result_json_bytes": 2,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 2.25,
+              "p95_us": 4.25,
+              "min_us": 2.166,
+              "max_us": 33.458,
+              "operations_per_second": 363362.85050889
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 0.041999999999999996,
+              "p95_us": 0.041999999999999996,
+              "min_us": 0.0,
+              "max_us": 0.5,
+              "operations_per_second": 25806451.612903304
+            }
+          }
+        },
+        {
+          "case": "Bulk(512)",
+          "statements": 2,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 777.1875,
+            "p95_us": 1155.166,
+            "min_us": 449.917,
+            "max_us": 1784.667,
+            "operations_per_second": 1283.472925773951
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 1982.5205,
+            "p95_us": 2879.333,
+            "min_us": 1203.375,
+            "max_us": 4503.4580000000005,
+            "operations_per_second": 492.4208782010722
+          },
+          "conversion": {
+            "input_json_bytes": 24878,
+            "result_json_bytes": 2,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 202.0625,
+              "p95_us": 345.95799999999997,
+              "min_us": 132.709,
+              "max_us": 483.417,
+              "operations_per_second": 4351.751082623194
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 0.041999999999999996,
+              "p95_us": 0.041999999999999996,
+              "min_us": 0.0,
+              "max_us": 0.583,
+              "operations_per_second": 24242424.24242431
+            }
+          }
+        }
+      ],
+      "whole_process_peak_rss_bytes": 12894208
+    },
+    {
+      "platform": "macos-aarch64",
+      "sqlite_version": "3.51.3",
+      "profile": "release",
+      "connections": 1,
+      "startup_schema_load_us": 886.5,
+      "workloads": [
+        {
+          "case": "Flat(8)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 67.6455,
+            "p95_us": 121.166,
+            "min_us": 50.208,
+            "max_us": 162.375,
+            "operations_per_second": 12994.861376991399
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 94.8335,
+            "p95_us": 152.542,
+            "min_us": 59.416000000000004,
+            "max_us": 293.917,
+            "operations_per_second": 9584.053974325088
+          },
+          "conversion": {
+            "input_json_bytes": 10,
+            "result_json_bytes": 286,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.08399999999999999,
+              "min_us": 0.041,
+              "max_us": 0.125,
+              "operations_per_second": 14160294.534126313
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 3.042,
+              "p95_us": 3.125,
+              "min_us": 1.208,
+              "max_us": 3.917,
+              "operations_per_second": 385047.8229396093
+            }
+          }
+        },
+        {
+          "case": "Flat(1024)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 1754.688,
+            "p95_us": 2777.792,
+            "min_us": 1070.709,
+            "max_us": 3145.75,
+            "operations_per_second": 528.8260264224964
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 3228.667,
+            "p95_us": 4945.416,
+            "min_us": 2089.791,
+            "max_us": 5616.875,
+            "operations_per_second": 295.44512676462415
+          },
+          "conversion": {
+            "input_json_bytes": 13,
+            "result_json_bytes": 42474,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.08399999999999999,
+              "min_us": 0.041,
+              "max_us": 0.583,
+              "operations_per_second": 12663036.596175766
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 181.79149999999998,
+              "p95_us": 403.209,
+              "min_us": 151.708,
+              "max_us": 741.667,
+              "operations_per_second": 4111.1338137056155
+            }
+          }
+        },
+        {
+          "case": "Nested(1)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 75.3955,
+            "p95_us": 122.166,
+            "min_us": 56.042,
+            "max_us": 248.709,
+            "operations_per_second": 11956.11912981452
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 82.146,
+            "p95_us": 143.875,
+            "min_us": 64.833,
+            "max_us": 253.95799999999997,
+            "operations_per_second": 11265.25294125897
+          },
+          "conversion": {
+            "input_json_bytes": 10,
+            "result_json_bytes": 322,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.167,
+              "p95_us": 0.20900000000000002,
+              "min_us": 0.166,
+              "max_us": 0.29200000000000004,
+              "operations_per_second": 5510552.70843665
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 3.5415,
+              "p95_us": 3.625,
+              "min_us": 3.416,
+              "max_us": 4.042,
+              "operations_per_second": 282619.2017138037
+            }
+          }
+        },
+        {
+          "case": "Nested(128)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 1784.7915,
+            "p95_us": 2799.167,
+            "min_us": 1105.375,
+            "max_us": 2961.875,
+            "operations_per_second": 529.0735337533188
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 2526.4584999999997,
+            "p95_us": 3592.125,
+            "min_us": 1535.375,
+            "max_us": 6823.709,
+            "operations_per_second": 381.1456210562648
+          },
+          "conversion": {
+            "input_json_bytes": 12,
+            "result_json_bytes": 47378,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.20800000000000002,
+              "p95_us": 0.20900000000000002,
+              "min_us": 0.166,
+              "max_us": 0.5,
+              "operations_per_second": 5269814.502529515
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 269.0625,
+              "p95_us": 461.875,
+              "min_us": 178.75,
+              "max_us": 523.5409999999999,
+              "operations_per_second": 3317.0125810472623
+            }
+          }
+        },
+        {
+          "case": "Page",
+          "statements": 2,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 123.5,
+            "p95_us": 220.583,
+            "min_us": 82.0,
+            "max_us": 365.25,
+            "operations_per_second": 7090.733163373186
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 212.64600000000002,
+            "p95_us": 297.20799999999997,
+            "min_us": 113.125,
+            "max_us": 684.25,
+            "operations_per_second": 4967.11780431339
+          },
+          "conversion": {
+            "input_json_bytes": 13,
+            "result_json_bytes": 1284,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 0.125,
+              "p95_us": 0.167,
+              "min_us": 0.125,
+              "max_us": 0.20800000000000002,
+              "operations_per_second": 7500468.779298695
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 4.875,
+              "p95_us": 12.458,
+              "min_us": 4.707999999999999,
+              "max_us": 23.791999999999998,
+              "operations_per_second": 145085.23757707636
+            }
+          }
+        },
+        {
+          "case": "Bulk(8)",
+          "statements": 1,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 105.479,
+            "p95_us": 192.54100000000003,
+            "min_us": 75.084,
+            "max_us": 331.125,
+            "operations_per_second": 8188.5696575007905
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 140.35399999999998,
+            "p95_us": 226.75,
+            "min_us": 90.75,
+            "max_us": 935.3340000000001,
+            "operations_per_second": 6515.453417570328
+          },
+          "conversion": {
+            "input_json_bytes": 370,
+            "result_json_bytes": 2,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 2.292,
+              "p95_us": 4.958,
+              "min_us": 2.1670000000000003,
+              "max_us": 96.792,
+              "operations_per_second": 231761.52665952843
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 0.083,
+              "p95_us": 0.125,
+              "min_us": 0.041,
+              "max_us": 0.792,
+              "operations_per_second": 13186523.373112679
+            }
+          }
+        },
+        {
+          "case": "Bulk(512)",
+          "statements": 2,
+          "direct_sqlx": {
+            "samples": 200,
+            "median_us": 807.979,
+            "p95_us": 1201.875,
+            "min_us": 466.625,
+            "max_us": 5308.0,
+            "operations_per_second": 1153.1306673129122
+          },
+          "embedded": {
+            "samples": 200,
+            "median_us": 1862.0,
+            "p95_us": 2882.625,
+            "min_us": 1186.75,
+            "max_us": 5393.916,
+            "operations_per_second": 517.4732340850719
+          },
+          "conversion": {
+            "input_json_bytes": 24878,
+            "result_json_bytes": 2,
+            "input_to_value": {
+              "samples": 200,
+              "median_us": 186.4375,
+              "p95_us": 340.791,
+              "min_us": 132.542,
+              "max_us": 485.0,
+              "operations_per_second": 5150.801031973288
+            },
+            "result_from_value": {
+              "samples": 200,
+              "median_us": 0.041999999999999996,
+              "p95_us": 0.041999999999999996,
+              "min_us": 0.0,
+              "max_us": 0.541,
+              "operations_per_second": 23304591.00442794
+            }
+          }
+        }
+      ],
+      "whole_process_peak_rss_bytes": 12910592
+    }
+  ],
+  "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)"
+}
