@@ -68,7 +68,7 @@ PY
     if "$root/target/debug/based" migrate status "$example" --database-url "$bad_url" >"$fixture_dir/out" 2>"$fixture_dir/err"; then
       echo 'CLI accepted an invalid TLS certificate/hostname' >&2; exit 1
     fi
-    if rg -q 'based_tls_test_pw' "$fixture_dir/out" "$fixture_dir/err"; then
+    if grep -q 'based_tls_test_pw' "$fixture_dir/out" "$fixture_dir/err"; then
       echo 'CLI exposed a database credential' >&2; exit 1
     fi
   done

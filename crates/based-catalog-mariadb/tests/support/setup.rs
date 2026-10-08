@@ -1,5 +1,5 @@
 use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlConnection, MySqlSslMode},
+    mysql::{MySqlConnectOptions, MySqlConnection},
     Connection,
 };
 
@@ -32,7 +32,6 @@ impl Fixture {
             .username("based_catalog_reader")
             .password("fixture_metadata_only")
             .database("based_catalog_fixture")
-            .ssl_mode(MySqlSslMode::Disabled)
     }
 
     pub async fn verify_no_row_access_or_changes(&self) {

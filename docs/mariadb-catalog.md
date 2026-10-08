@@ -14,9 +14,8 @@ Non-InnoDB tables and unverified native table options receive blocking findings.
 
 The host supplies SQLx `MySqlConnectOptions`; the reader honors those options and
 disables statement logging. Production hosts must select certificate-verified TLS
-(`MySqlSslMode::VerifyIdentity`) and the correct trust roots. The live fixture
-explicitly disables TLS only for its disposable local service; this is not a
-production connection template. Connection/query failures become fixed redacted
+(`MySqlSslMode::VerifyIdentity`) and the correct trust roots. The live fixture preserves the administrator URL's TLS settings when replacing
+its credentials, so the same proof also runs against the TLS-required CI server. Connection/query failures become fixed redacted
 `CatalogReadError` values; the reader exposes no driver error or connection URL.
 
 Grant the discovery account **REFERENCES** on each selected whole table or on its
