@@ -30,6 +30,9 @@ cargo run   # from inside an example project
 For certificate-verified Postgres and MariaDB connections, see
 [database TLS configuration](docs/database-tls.md).
 
+Standalone deployment requires a [trusted authentication edge](docs/standalone-deployment.md)
+that strips caller-supplied context/shard headers and prevents direct listener access.
+
 Standalone keyed mutation storage and explicit table setup are documented in
 [standalone idempotency](docs/standalone-idempotency.md).
 For custom standalone permission checks, run the

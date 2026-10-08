@@ -67,7 +67,10 @@ enum Command {
         #[command(subcommand)]
         action: MigrateAction,
     },
-    /// Serve the checked schema as a live RPC service (`POST /q|m/<name>`).
+    /// Serve the checked schema behind a trusted authentication edge.
+    ///
+    /// Strip caller-supplied X-Based-* headers and prevent direct listener access.
+    /// Deployment guide: https://github.com/oscscull/baseddsl/blob/main/docs/standalone-deployment.md
     Serve(serve_options::ServeOptions),
 }
 

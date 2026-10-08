@@ -32,10 +32,13 @@ forged callback: rejected (401); stopped callback: denied (403); persisted order
 ```
 
 It also verifies a matching keyed retry returns the original order, unsigned
-requests are rejected, the internal Org setup route is unavailable through the
+requests are rejected, a private scoped query without required context fails,
+the internal Org setup route is unavailable through the
 edge, and the same replay is denied after the callback stops. All processes,
 listeners and temporary data are cleaned up on exit. `npm test` runs this same
-scenario; `make ci-typescript-guards` builds the CLI and runs it in CI.
+scenario; `make ci-typescript-guards` builds the CLI and runs it in CI. A controlled
+upstream also verifies the actual forwarded header set contains only derived
+context, without caller shard, verdict, or authorization headers.
 
 The fixed `local-buyer-token` and `local-viewer-token` credentials are **local-only
 examples**, not production authentication. `identity.ts` maps them to verified

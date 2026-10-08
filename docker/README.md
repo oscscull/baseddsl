@@ -5,6 +5,11 @@ dispatch core, with `/healthz` (liveness) + `/readyz` (readiness) probes and gra
 on `SIGTERM`. It serves whichever dialect the project's `based.toml` targets
 (MariaDB, Postgres, or SQLite).
 
+Before publishing any port, read the [trusted-edge deployment guide](../docs/standalone-deployment.md).
+Authenticate at the edge, strip all caller-supplied `X-Based-*` headers, inject
+authorized context, and prevent direct listener/callback access. The image is not
+a public authenticator.
+
 The image carries **no schema** — you supply your project (`based.toml` + `**/*.bsl`
 [+ `migrations/`]) at `/app`, and configure everything else by env. One image, any project.
 
@@ -31,14 +36,20 @@ the binary + entrypoint (~120 MB). Runs as an unprivileged user.
 
 `$ctx` (auth/scope) is **server-supplied, never the request body**: front the
 container with an auth proxy that sets `X-Based-Context` (a JSON object) after
-authenticating the caller. See `spec/syntax/auth.md`.
+authenticating the caller. The proxy must strip caller copies and direct access must be restricted; see the
+[deployment guide](../docs/standalone-deployment.md).
 
 ## Run (Postgres example)
 
+This publishes only a loopback diagnostics port. Obtain your database's CA as
+`db-ca.pem`, use its certificate hostname, and URL-encode real credentials.
+For public traffic, publish only your authenticated edge on a private deployment network.
+
 ```sh
-docker run -d --name based-serve -p 8080:8080 \
+docker run -d --name based-serve -p 127.0.0.1:8080:8080 \
   -v "$PWD/examples/postgres-quickstart:/app:ro" \
-  -e DATABASE_URL="postgres://user:pw@db-host:5432/mydb" \
+  -v "$PWD/db-ca.pem:/run/based-db-ca.pem:ro" \
+  -e DATABASE_URL="postgres://user:pw@db.example.com:5432/mydb?sslmode=verify-full&sslrootcert=/run/based-db-ca.pem" \
   -e BASED_MIGRATE_ON_START=1 \
   -e BASED_INIT_IDEMPOTENCY_TABLE=true \
   based-serve
@@ -74,7 +85,7 @@ SQLite is bundled (no service). Point `DATABASE_URL` at a file **on a writable v
 (the mounted project is read-only, so the DB file cannot live under `/app`):
 
 ```sh
-docker run -d -p 8080:8080 \
+docker run -d -p 127.0.0.1:8080:8080 \
   -v "$PWD/examples/sqlite-quickstart:/app:ro" \
   -v based-data:/data \
   -e DATABASE_URL=/data/app.db -e BASED_MIGRATE_ON_START=1 \
@@ -86,13 +97,19 @@ For certificate-verified Postgres/MariaDB connections, use the URL options in
 [database TLS](../docs/database-tls.md). Mount the CA file read-only and reference
 its absolute **container** path in the URL. The image's default CLI includes Rustls.
 
+Pass `--guard-config /app/guards.toml` after the image name for declared guards,
+and supply the mapping's named secrets through process environment. Missing mappings
+reject startup; configured authenticated callbacks are supported. See
+[guard configuration](../docs/standalone-guards.md).
+
 ## Health & shutdown
 
 - `HEALTHCHECK` probes `/healthz` — never touches the DB, so a DB blip drains via `/readyz`
   rather than restarting an otherwise-healthy box.
 - On `SIGTERM`/`SIGINT` the server flips `/readyz` to `503` first (a load balancer pulls the
-  instance out of rotation), lets in-flight requests finish, then exits — zero-downtime
-  rolling deploys. `docker stop` (SIGTERM) drains cleanly.
+  instance out of rotation), keeps the socket open for one second, then waits for
+  in-flight requests before exiting. Configure load-balancer removal and termination
+  grace explicitly; there is no forced drain deadline or automatic zero-downtime guarantee.
 
 ## Overriding the command
 
