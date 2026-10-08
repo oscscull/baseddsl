@@ -22,6 +22,11 @@ Native enums/domains retain qualified identity; SQLite retains declared affinity
 rowid/autoincrement, STRICT and WITHOUT ROWID facts. An unavailable individual
 expression can be marked absent with its original table/index definition retained;
 it must carry a blocking incomplete/unsupported finding, never a guessed value.
+Unavailable FK timing is explicitly `Deferral::Unknown`, not non-deferrable.
+SQLite's valid empty native declaration retains BLOB affinity and an unsupported
+unknown type; it is not mislabeled as missing catalog metadata. Its PRAGMA-only
+reader reports unavailable expressions/collation details with blocking findings;
+see the [SQLite reader boundaries](sqlite-catalog.md).
 
 Readers use a genuinely read-only connection/transaction and metadata queries
 only. They never sample application rows, mutate schema/data, initialize a
