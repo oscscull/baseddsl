@@ -254,6 +254,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "based-catalog"
+version = "0.1.12"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "based-cli"
 version = "0.1.12"
 dependencies = [

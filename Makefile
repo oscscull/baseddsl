@@ -55,7 +55,7 @@ REDIS_URL    ?= redis://127.0.0.1:16379
 # The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
 # facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
 FRONTEND_CRATES := based-ast based-parser based-fmt based-sema based-codegen based-facts \
-                   based-diagnostics based-manifest based-project based-build
+                   based-diagnostics based-manifest based-project based-build based-catalog
 
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
 ci: ci-workspace ci-extension
