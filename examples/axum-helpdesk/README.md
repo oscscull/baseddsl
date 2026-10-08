@@ -6,8 +6,9 @@ engine**. The app owns its own sqlx `PgPool`; the engine runs over it
 (`PgRouter::from_pool`), so the app's queries and the engine's share one set of
 connections; every handler is a single call on the **generated typed async client**.
 
-This is the full-surface example. The [quickstarts](../sqlite-quickstart) are the minimal
-first run; this desk is the guided tour of the language — scoped multi-tenancy, enums,
+This is the advanced example. Start with the [embedded](../../docs/embedded-tutorial.md)
+or [standalone](../../docs/standalone-tutorial.md) tutorial and the
+[task recipes](../../docs/recipes.md); this desk is the guided tour — scoped multi-tenancy, enums,
 decimals, ordered nested shapes, a host-code `guard`, keyed (idempotent) writes, a
 streaming NDJSON export, raw-SQL leaves, migrations with a data-preserving rename.
 
@@ -122,9 +123,11 @@ scope Tenant (org: Org = $ctx.org)
 
 `Ticket` stacks two scopes — **stacked `@scope` lines are OR** (agents see the whole org,
 requesters see their own tickets); the agent's private `DraftNote` declares
-`@scope Tenant, Author` — **one line, two names, is AND**. Cross-tenant access is
-inexpressible without a greppable `unscoped("reason")`; this app has exactly four, all in
-auth and ops, each carrying its reason.
+`@scope Tenant, Author` — **one line, two names, is AND**. Modeled row access is
+confined by the callable's selected axes using trusted host
+context. This app has four explicit `unscoped("reason")` sites in auth and ops.
+Raw query bodies, subqueries inside raw leaves, and host SQL own their filters;
+incorrect host context can select another tenant. Audit those boundaries separately.
 
 **2. The ticket model reads like the domain** (`schema/ticket/model.bsl`): a string enum
 whose `waiting` variant maps to a legacy stored value, an ordered int `Priority`,

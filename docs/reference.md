@@ -4,6 +4,7 @@ Every feature of `.bsl`, with the syntax to use it. One page; skim the index, ju
 This reference describes the current usable syntax surface. For detailed design
 semantics and priorities, see the [specification index](../spec/README.md); for a
 first executable run, choose an [embedded or standalone walkthrough](initializing.md).
+Use [task recipes](recipes.md) for small examples and their guarantee boundaries.
 The support policy and its tests establish release support, rather than design
 intent alone.
 For supported deployment paths and versioning, see the [support policy](support-policy.md).
@@ -315,7 +316,7 @@ create Card[] from $rows on conflict (oracle_id) update { ...incoming, hits = hi
 
 Three layers, smallest to largest:
 
-1. **`$ctx`** — the request-context bag: `where (org = $ctx.org)`. A read is **required** by default (absent → `missing_ctx`). A trailing `?` on the use site makes it **optional** — `where (author = $ctx.user? or visibility = "public")` — so an absent field binds NULL and its `=` leaf becomes null-safe (`author IS NULL`), matching the unset rows rather than widening to TRUE (anonymous caller → public rows, no error, no leak); client carries it as `Option<T>`. Query-`where` only: a `?` on a scope term, a write, a filter body, or a plain param is `E0339`; reading one field both optional and required in a callable is `E0349`.
+1. **`$ctx`** — the request-context bag: `where (org = $ctx.org)`. A read is **required** by default (absent → `missing_ctx`). A trailing `?` on the use site makes it **optional** — `where (author = $ctx.user? or visibility = "public")` — so an absent field binds NULL and its `=` leaf becomes null-safe (`author IS NULL`), matching the unset rows rather than widening to TRUE (anonymous caller → public rows plus unowned rows when ownership is nullable); client carries it as `Option<T>`. Query-`where` only: a `?` on a scope term, a write, a filter body, or a plain param is `E0339`; reading one field both optional and required in a callable is `E0349`.
 2. **Named scope** — declare once, attach to models, acknowledge per callable:
 
 ```
@@ -351,6 +352,9 @@ query heavy(min: int) -> UserRow[] {                     # whole-query raw body
 ```
 
 Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate safely.
+Engine-built outer rows keep scope/soft-delete filters, but tables inside a raw
+subquery own theirs. A whole raw body on a scoped model requires explicit
+`unscoped("reason")` and owns all its predicates. See [raw boundaries](recipes/raw.md).
 
 ## Migrations
 

@@ -133,7 +133,7 @@ Tenant` on the callable.
 - OR model (`@scope Page` + `@scope Author`): `scoped Page` **or** `scoped Author` each satisfies one
   alternative — either is enough.
 - Naming *extra* / narrower axes (any superset of an alternative) is allowed and safe — more confinement
-  never leaks. Naming an axis the model has no `@scope` for is `E0185`. Naming none requires `unscoped`.
+  narrows modeled row access under the supplied context. Naming an axis the model has no `@scope` for is `E0185`. Naming none requires `unscoped`.
 
 This vindicates the "input ⊇ allowed scopes" intuition, now precise: the callable's confinement axes
 must ⊇ one declared alternative.
@@ -205,11 +205,15 @@ It forfeits *only* scope — soft-delete still applies. `unscoped` and `scoped` 
 (a callable does one or the other). `W0106` flags a stale `unscoped` (target is in no scope).
 
 ### What the compiler guarantees / does not
-It guarantees the scope predicate is injected everywhere — root `WHERE`, write-target `WHERE`, joined
-`ON`, and the create auto-set — except explicit `unscoped` sites, and that cross-scope creates are
-inexpressible; it kills accidental leaks and forces every crossing to be *named* in source. It does
-**not** verify the predicate is the *right* rule, or evaluate any role matrix (that's Handle 3). A
-scope is a row-visibility filter, not a checked authorization model.
+For modeled operations it injects the selected scope predicates into root and
+write-target `WHERE`, modeled joined `ON`, and create ownership, except explicit
+`unscoped` sites. A scoped create cannot assign the managed ownership column;
+it uses trusted host context. The compiler does not verify that context is the
+right identity, enforce a role matrix, or sandbox host SQL. Tables inside raw
+subqueries and whole raw bodies own their scope/soft-delete filters. A scope is
+row confinement on modeled operations, not a complete authorization model. See
+[raw boundaries](raw.md#scope-boundaries-inside-raw-values) and the
+[scope contract matrix](../../docs/scope-contracts.md).
 
 ### Not a scope
 Not uniform (differs by operation) or multi-owner (`org in $ctx.orgs`)? That is not a scope — use a
@@ -228,7 +232,7 @@ rows come back*, it is a set of `@scope` alternatives (each an un-forgettable fi
 | Code | Triggers |
 |------|----------|
 | `E0180` | a `scope` decl's predicate isn't a conjunction of `col = $ctx.field` |
-| `E0181` | a `create` assigns a scope column (engine-managed — cross-scope create is inexpressible) |
+| `E0181` | a `create` assigns a scope column (engine-managed from host context for modeled creates) |
 | `E0182` | a callable whose target is scoped writes *neither* `scoped …` *nor* `unscoped(…)` (the required-declaration rule) |
 | `E0183` | `@scope Name` / `scoped Name` references a `scope` decl that doesn't exist |
 | `E0184` | a `@scope` model lacks the scope's column, or declares it at a non-conforming type (per decorator) |
