@@ -108,6 +108,8 @@ jobs:
         with:
           fetch-depth: 0 # Fresh exact-commit Git consumers require complete source history.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - run: make ci-live-mariadb MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test
       - run: TEST_MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test cargo test -p based-cli --test serve_idempotency_live mariadb_
 
@@ -130,6 +132,8 @@ jobs:
         with:
           fetch-depth: 0 # Fresh exact-commit Git consumers require complete source history.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - run: make ci-live-postgres POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
       - run: TEST_POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test cargo test -p based-cli --test serve_idempotency_live postgres_
 
@@ -184,6 +188,8 @@ jobs:
         with:
           fetch-depth: 0 # Fresh exact-commit Git consumers require complete source history.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - run: make ci-database-tls
 
   # Fresh Cargo consumers compile in a separate tier, outside the fast workspace gate.
