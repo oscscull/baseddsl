@@ -1,0 +1,36 @@
+name: Bug report
+description: A safe, minimal reproduction of unexpected behavior.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, tokens, connection secrets, private rows and unapproved source.
+        Report sensitive behavior [privately](https://github.com/oscscull/baseddsl/security/advisories/new).
+        A small example using fabricated data is enough; compiler-internal knowledge is not required.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Include the CLI/runtime versions if they differ.
+      placeholder: "based --version; runtime Git commit"
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual result
+      description: What did you try, what should happen, and what happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Safe reproduction
+      description: Minimal relevant BSL/query, command or typed call, and steps using fabricated data. Remove secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment (optional)
+      description: Deployment mode, database version, OS and Rust version when relevant. Do not include a connection URL with secrets.

@@ -11,9 +11,10 @@ tracks the remaining release gates.
 The [CI workflow](../.github/workflows/ci.yml) runs the
 [portable Makefile gates](../Makefile). The matrix distinguishes configurations
 tested in CI from configurations that currently have only implementation or
-local evidence. The [successful main CI run at a8871be](https://github.com/oscscull/baseddsl/actions/runs/37337539542)
-passed all six jobs. Server image tags identify the tested release series, not
-every patch or older version within that series.
+local evidence. Review all triggered checks on the candidate's exact PR head,
+including the [native release dry run](../.github/workflows/release.yml); a historical
+green run does not verify later changes. Server image tags identify the tested
+release series, not every patch or older version within that series.
 
 | Surface | Current automated evidence | V1 support boundary |
 | --- | --- | --- |
@@ -26,7 +27,7 @@ every patch or older version within that series.
 | MySQL | Code paths and some tests exist, but CI provisions MariaDB, not MySQL. | Do not infer MySQL server support from MariaDB CI; add MySQL server evidence before listing a version as supported. |
 | Embedded Rust | Generated client, runtime tests, and three database quickstarts in `ci-examples`. | First-class typed async Rust output. The application supplies its database connection, context, and host guard functions. |
 | Standalone HTTP | `ci-image` boots the server with SQLite; HTTP and runtime tests run in `ci-workspace`. | First-class service path; release verification must cover create/read and authenticated guard callbacks on the supported databases. Named external guard callbacks use [operator-configured authenticated HTTP endpoints](standalone-guards.md). |
-| VS Code extension | `ci-extension` compiles and packages the extension with Node 20. Its manifest accepts VS Code `^1.75.0`; CI does not launch every VS Code version. | Editor installation and matching LSP distribution need the separate [#57](https://github.com/oscscull/baseddsl/issues/57) gate. |
+| VS Code extension | `ci-extension` packages the extension; the native release `vsix` job runs diagnostics, hover, completion and rename in an isolated VS Code profile with the matching LSP. Its manifest accepts VS Code `^1.75.0`; CI does not launch every VS Code version. | Install the matching versioned extension/LSP from the [distribution matrix](installation.md); there is no Marketplace or all-editor-version promise. |
 
 The repository examples show current source-based setup:
 [embedded SQLite](../examples/sqlite-quickstart/README.md),
@@ -34,8 +35,9 @@ The repository examples show current source-based setup:
 [embedded PostgreSQL](../examples/postgres-quickstart/README.md). The CLI's
 `based serve` command is the current standalone entry point. Versioned
 [installation and pinned source/library routes](installation.md) have a
-[non-publishing dry-run workflow](releasing.md). A complete standalone tutorial
-remains tracked by [#70](https://github.com/oscscull/baseddsl/issues/70). Both paths
+[non-publishing dry-run workflow](releasing.md). The
+[embedded](embedded-tutorial.md) and [standalone](standalone-tutorial.md) tutorials
+are replayed by the [onboarding gate](onboarding-gate.md). Both paths
 must pass their documented onboarding and owner release checks before v1 is
 declared ready. Public release assets are not assumed to exist before those gates.
 
@@ -84,3 +86,22 @@ to the following public surfaces require a major version and migration notes:
 The v1 target does not include new client languages, a hosted platform, a broad
 syntax redesign, or replacement database drivers. Async support is part of the
 Rust API, not a claim that other tools lack it.
+
+## Reports and maintainer commitment
+
+Ordinary bugs use [GitHub issues](https://github.com/oscscull/baseddsl/issues/new/choose).
+Provide the version, relevant model/query or typed call, expected/actual behavior
+and a minimal safe reproduction. Use fabricated data; remove credentials, tokens,
+private rows and unapproved source. Security-sensitive behavior goes through the
+[enabled private reporting route](../SECURITY.md).
+
+Support and review are best effort. There is no response-time SLA, paid support
+promise or commitment to implement every feature request or support every historical
+version. Recurring, reproducible barriers to useful work are actionable evidence;
+reporters need not understand compiler internals. See [contribution guidance](../CONTRIBUTING.md)
+for SRP and the focused/full verification tiers.
+
+[One-shot database import](import-existing-database.md) preserves external migration
+ownership; it does not provide continuous sync, a merge engine or implicit baseline.
+Generated artifacts and stored migration history retain their documented ownership
+and compatibility boundaries.

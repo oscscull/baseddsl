@@ -99,6 +99,12 @@ Based source, Rust crates, and the VS Code extension are
 clients, SQL, OpenAPI documents, and migration artifacts produced from your schemas.
 Your schemas and data remain yours.
 
+[Contribution guidance](CONTRIBUTING.md) explains SRP and verification tiers.
+Report ordinary bugs with a minimal safe reproduction in
+[GitHub issues](https://github.com/oscscull/baseddsl/issues/new/choose); suspected
+vulnerabilities use the [enabled private security route](SECURITY.md). Maintainer
+support is best effort, with no response-time SLA.
+
 The implementation lives in [`crates/`](crates/); portable verification targets
 live in the [`Makefile`](Makefile). Generator changes also run the fresh external
 consumer gates described above.
