@@ -74,9 +74,10 @@ are part of the candidate. No support SLA or every-feature commitment is implied
 
 - Review/merge the complete verified stack in dependency order. These PRs remain
   unmerged until explicitly authorized; verify the final main commit again.
-- Approve the public evidence/demo in [#71](https://github.com/oscscull/baseddsl/issues/71).
-  Its approval condition is separate from whether a fabricated fixture passes.
-  Do not publish unapproved private source or claim production adoption from a demo.
+- Use the verified public tutorials for the reveal demonstration. The owner
+  [closed #71](https://github.com/oscscull/baseddsl/issues/71#issuecomment-5928142400)
+  as not worth pursuing; that case study is not a release prerequisite. Do not
+  publish private source or claim production adoption from a tutorial.
 - Choose the release version, update all matching workspace/extension metadata and
   notes, and approve the compatibility/support scope. `0.1.12` is not a v1 tag.
 - Run the final commit's ordinary/native gates, review extracted artifacts and

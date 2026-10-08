@@ -117,7 +117,7 @@ for an agent to merge, tag, publish or post. It requires the owner-reviewed vers
 metadata and the final merged main commit; PR dry-run artifacts are not a substitute
 for verifying that commit.
 
-1. Review the dependency-ordered stack, #71 public-excerpt approval, supported
+1. Review the dependency-ordered stack, verified public tutorial evidence, supported
    surfaces, candidate notes and [upgrade guide](upgrading.md). Merge only with
    explicit authorization. Choose the release version and update workspace/VSIX
    metadata together. Do not label the current `0.1.12` candidate as v1.
