@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Repeated matched consumer builds; all source edits and target dirs are scratch-only."""
 import argparse
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -10,6 +9,7 @@ import cargo
 import environment
 import prepare
 import scenario
+import storage
 
 
 def sample(directory, variant, trial, options):
@@ -70,8 +70,7 @@ def main():
                 directory = Path(scratch) / f"{trial}-{variant}"
                 directory.mkdir()
                 result["samples"].extend(sample(directory, variant, trial, options))
-                options.output.parent.mkdir(parents=True, exist_ok=True)
-                options.output.write_text(json.dumps(result, indent=2) + "\n")
+                storage.write(options.output, result)
 
 
 if __name__ == "__main__":
