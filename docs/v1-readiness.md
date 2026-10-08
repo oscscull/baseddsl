@@ -83,8 +83,8 @@ are part of the candidate. No support SLA or every-feature commitment is implied
 - Run the final commit's ordinary/native gates, review extracted artifacts and
   checksums, and record the exact approved commit/version before tagging.
 - Follow the [owner publication/rollback checklist](releasing.md#final-owner-checklist).
-  The [reveal preparation issue](https://github.com/oscscull/baseddsl/issues/72) remains
-  preparation; posting requires a separate explicit instruction.
+  The [prepared public reveal](public-reveal.md) remains preparation; posting
+  requires a separate explicit instruction.
 
 Known rejected import representations stay outside the initial matrix:
 [signed native defaults](https://github.com/oscscull/baseddsl/issues/122) and
