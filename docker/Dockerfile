@@ -9,7 +9,7 @@
 
 # --- build stage --------------------------------------------------------------------
 # Tracks stable 1.x (matches CI's `dtolnay/rust-toolchain@stable`); the workspace floor is
-# 1.85 but the resolved lockfile pulls deps needing a newer stable, so we don't pin below it.
+# 1.94 (the SQLx floor); use stable rather than pinning below resolved dependency requirements.
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY . .

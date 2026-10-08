@@ -27,7 +27,7 @@ exclude = ["examples", "benchmarks"]
 version = "0.1.12"
 edition = "2021"
 license = "AGPL-3.0-only"
-rust-version = "1.85"
+rust-version = "1.94"
 
 [workspace.dependencies]
 # internal

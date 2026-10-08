@@ -1,0 +1,136 @@
+# Native packaging is reusable and non-publishing; only explicit version tags can create drafts.
+name: release-dry-run
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'ci/release/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'editors/vscode/package*.json'
+      - 'docs/release-notes.md'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      create_draft:
+        description: Create a draft release when run from an existing version tag
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rustflags: ''
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            rustflags: ''
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            rustflags: ''
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            rustflags: ''
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            rustflags: '-C target-feature=+crt-static'
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --release --locked --target "$TARGET" -p based-cli -p based-lsp
+        env:
+          TARGET: ${{ matrix.target }}
+      - name: Package and execute extracted artifacts
+        run: |
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--tag "${GITHUB_REF#refs/tags/}"); fi
+          python ci/release/package.py --binary-dir "target/$TARGET/release" \
+            --output "$RUNNER_TEMP/native-assets" --target "$TARGET" "${args[@]}"
+        env:
+          TARGET: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: based-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-assets/*
+          if-no-files-found: error
+
+  source-consumer:
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      # Exercise the declared source-install floor, not only newest stable.
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --locked -p based-cli -p based-lsp
+      - run: python ci/release/source_consumer.py --based target/debug/based
+
+  collect:
+    needs: [native, source-consumer]
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: based-native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release-assets
+      - run: python ci/release/collect.py "$RUNNER_TEMP/release-assets"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: based-release-assets
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+
+  draft:
+    needs: collect
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.create_draft == true)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: based-release-assets
+          path: assets
+      - name: Create draft for owner review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" assets/* --draft --verify-tag \
+            --title "Based $TAG" --notes-file docs/release-notes.md

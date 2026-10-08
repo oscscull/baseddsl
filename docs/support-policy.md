@@ -17,8 +17,8 @@ every patch or older version within that series.
 
 | Surface | Current automated evidence | V1 support boundary |
 | --- | --- | --- |
-| Rust toolchain | CI uses `stable`; workspace metadata declares 1.85, but the current lockfile's SQLx 0.9 requires 1.94. The minimum toolchain is not separately built in CI. | Use current stable for source installation. Rust 1.85 is not a supported full-runtime floor today; reconcile metadata and verify a minimum toolchain in the [distribution gate](https://github.com/oscscull/baseddsl/issues/56). |
-| Host platform | GitHub Actions runs on `ubuntu-latest` for all jobs. | Linux is CI verified. macOS and Windows are not currently CI verified. |
+| Rust toolchain | Workspace metadata requires 1.94, matching SQLx 0.9. The release source job builds CLI/LSP and a fresh pinned-Git library consumer on 1.94; other CI jobs use stable. | Rust 1.94+ with platform C tools for source builds; see [versioned installation](installation.md). |
+| Host platform | Native release dry runs build and execute extracted CLI/LSP/SQLite migration smoke on Linux x86_64/arm64, macOS arm64/Intel, and Windows x86_64. | The exact OS/glibc/native architecture boundaries are in the [installation matrix](installation.md); other hosts have no prebuilt-binary support promise. |
 | SQLite | Workspace tests, image smoke, and a file-backed quickstart in `ci-examples`; SQLx 0.9 bundles SQLite through the locked `libsqlite3-sys` dependency. No external server. | Support the bundled engine selected by the release lockfile; arbitrary system SQLite versions are unverified. Embedded Rust and standalone HTTP are both release paths. |
 | MariaDB 11.4 | Dedicated live integration job and quickstart on `mariadb:11.4`. | Explicit MariaDB support; its SQL features and tests are distinct from MySQL. |
 | PostgreSQL 16 | Dedicated live integration job and quickstart on `postgres:16`. | Explicit PostgreSQL support. |
@@ -33,16 +33,11 @@ The repository examples show current source-based setup:
 [embedded MariaDB](../examples/mariadb-quickstart/README.md), and
 [embedded PostgreSQL](../examples/postgres-quickstart/README.md). The CLI's
 `based serve` command is the current standalone entry point. Versioned
-installation and a complete standalone tutorial are tracked by
-[#56](https://github.com/oscscull/baseddsl/issues/56) and
-[#70](https://github.com/oscscull/baseddsl/issues/70). Both paths must pass
-their documented onboarding and release checks before v1 is declared ready.
-For source installation today, use current stable and run from this checkout:
-
-```sh
-cargo install --locked --path crates/based-cli
-cargo install --locked --path crates/based-lsp
-```
+[installation and pinned source/library routes](installation.md) have a
+[non-publishing dry-run workflow](releasing.md). A complete standalone tutorial
+remains tracked by [#70](https://github.com/oscscull/baseddsl/issues/70). Both paths
+must pass their documented onboarding and owner release checks before v1 is
+declared ready. Public release assets are not assumed to exist before those gates.
 
 For embedded execution, follow a database quickstart and its runtime feature and
 client dependency declarations. For standalone execution, use `based serve --help`
@@ -59,9 +54,8 @@ The generated embedded client converts typed Rust arguments and context to JSON
 values, calls the in-process engine, and decodes JSON values back to Rust types.
 It avoids an HTTP socket, but it still uses the engine and this JSON conversion;
 it is not native Rust execution of a compiled query. The standalone listener
-uses the same engine behind HTTP and the documented wire format. No overhead
-comparison is asserted until [#55](https://github.com/oscscull/baseddsl/issues/55)
-measures it.
+uses the same engine behind HTTP and the documented wire format. The [matched runtime benchmark](runtime-performance.md) reports measured costs
+and their limits; it does not establish a universal runtime overhead ratio.
 
 A declared guard names an application decision that must run before its
 mutation. In embedded Rust, the application registers an async closure by name

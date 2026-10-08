@@ -12,6 +12,9 @@ WIP — progress and open work are tracked in [GitHub issues](https://github.com
 
 ## Try it
 
+See [versioned installation](docs/installation.md) for matching CLI/LSP archives
+and pinned Git library/source installation outside this checkout.
+
 Runnable quickstarts (one per database) are in [`examples/`](examples/) —
 [`sqlite-quickstart`](examples/sqlite-quickstart/) runs in-memory with no setup:
 
@@ -21,6 +24,7 @@ cargo run   # from inside an example project
 
 ## Layout
 
+- [`docs/installation.md`](docs/installation.md) — versioned tools, source/library pinning and rollback.
 - [`docs/reference.md`](docs/reference.md) — the language reference (what to write).
 - [`docs/compile-time.md`](docs/compile-time.md) — build profiles, feature boundaries, and measured compilation costs.
 - [`docs/runtime-performance.md`](docs/runtime-performance.md) — matched embedded-runtime/direct-SQLx measurements and limits.
