@@ -271,6 +271,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "based-catalog-postgres"
+version = "0.1.12"
+dependencies = [
+ "based-catalog",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "based-cli"
 version = "0.1.12"
 dependencies = [

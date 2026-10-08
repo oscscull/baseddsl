@@ -8,6 +8,7 @@ members = [
     "crates/based-project",
     "crates/based-catalog",
     "crates/based-catalog-mariadb",
+    "crates/based-catalog-postgres",
     "crates/based-build",
     "crates/based-parser",
     "crates/based-fmt",
