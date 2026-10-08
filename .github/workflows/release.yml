@@ -83,6 +83,8 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # Exercise the declared source-install floor, not only newest stable.
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
