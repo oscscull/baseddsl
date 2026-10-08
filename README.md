@@ -39,6 +39,10 @@ release. Use [versioned installation](docs/installation.md) for native CLI/LSP
 artifacts, a matching VS Code extension, or explicitly pinned Git source/library
 installation. Available assets and exact host prerequisites are described there.
 
+To adopt an existing database, follow [one-shot model import](docs/import-existing-database.md).
+It preserves your current migration ownership and proves a typed read against the
+original database before any schema change.
+
 Choose one starting path. SQLite uses a **local file** with an explicit migration
 step and needs no database server. The embedded path also needs Rust/Cargo/Git and
 platform C build tools; the standalone demo needs Python's standard library.

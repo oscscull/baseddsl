@@ -145,3 +145,7 @@ schemas, add policy, or create an alternative project setup system. See the
 [model/key/namespace semantics](../spec/syntax/models.md),
 [relations](../spec/syntax/relations.md), [raw boundaries](../spec/syntax/raw.md),
 and [principles](../spec/principles.md) when implementing the mappings.
+
+The [one-shot CLI guide](import-existing-database.md) connects these readers and the
+shared emitter, preserves hand-owned source and external migration ownership, and
+provides the fresh typed-consumer proof for all three original databases.

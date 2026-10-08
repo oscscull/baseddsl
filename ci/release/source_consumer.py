@@ -12,8 +12,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--based", type=Path, required=True)
     options = parser.parse_args()
-    subprocess.run([sys.executable, str(ROOT / "ci/check-embedded-tutorial.py"),
-                    "--based", str(options.based.resolve())], check=True)
+    for script in ("check-embedded-tutorial.py", "check-import-consumer.py"):
+        subprocess.run([sys.executable, str(ROOT / "ci" / script),
+                        "--based", str(options.based.resolve())], check=True)
 
 
 if __name__ == "__main__":

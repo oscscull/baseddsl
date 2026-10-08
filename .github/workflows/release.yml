@@ -17,6 +17,9 @@ on:
       - 'ci/check-embedded-tutorial.py'
       - 'ci/initializer.py'
       - 'ci/onboarding/**'
+      - 'ci/import_workflow/**'
+      - 'ci/check-import-consumer.py'
+      - 'ci/check-import-server-consumer.py'
       - 'docs/embedded-tutorial.md'
       - 'docs/standalone-tutorial.md'
   push:
