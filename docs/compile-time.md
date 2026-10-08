@@ -1,5 +1,9 @@
 # Compilation costs
 
+For the newer matched OUT_DIR-versus-explicit consumer experiment and starter
+decision, see [Cargo generation build costs](consumer-build-cost.md). The
+measurements below retain the earlier workspace/profile comparison.
+
 Measured on 2026-10-05 against main `d622856`, using stable Rust 1.97.0 on an
 Apple M4 Max (14 CPU cores, 36 GiB RAM), with 14 Cargo jobs. Samples were captured
 at `84f57b7`, before the async-trait 0.1.92 compatibility update for Rust 1.99

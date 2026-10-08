@@ -292,3 +292,9 @@ ci-runtime-benchmark:
 ## Fresh optional build-helper consumer: lifecycle, formatter isolation and dependency boundary.
 ci-cargo-generation:
 	python3 ci/check-cargo-generation.py
+
+.PHONY: ci-consumer-build
+## Validate build-cost fixtures/results/invalidation; timings have no CI threshold.
+ci-consumer-build:
+	$(CARGO) build -p based-cli --no-default-features
+	python3 benchmarks/consumer-build/verify.py --based "$(abspath $(BASED))" --cargo "$(CARGO)"

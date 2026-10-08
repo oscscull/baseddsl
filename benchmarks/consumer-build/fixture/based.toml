@@ -1,0 +1,5 @@
+dialect = "sqlite"
+root = "schema"
+[generate]
+client = "generated/client.rs"
+client_mode = "embedded"

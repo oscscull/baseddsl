@@ -1,11 +1,13 @@
 # Optional Cargo client generation prototype
 
-`based-build` is an optional **build dependency**, currently a prototype for
-[#80](https://github.com/oscscull/baseddsl/issues/80). It is not a runtime dependency
-or the starter default. The cold and incremental consumer comparison in
-[#54](https://github.com/oscscull/baseddsl/issues/54) must establish acceptable cost
-before adopting it. Significant or inconclusive cost means keeping explicit
-[generation into an isolated directory](generated-artifacts.md).
+`based-build` is an optional **build dependency**, retained as the
+[#80](https://github.com/oscscull/baseddsl/issues/80) prototype. It is not a runtime
+dependency or the starter default. The completed
+[#54](https://github.com/oscscull/baseddsl/issues/54)
+[build-cost comparison](consumer-build-cost.md) selects explicit
+[generation into an isolated directory](generated-artifacts.md) because of the
+measured edit-loop penalty and uncertainty in the initial cold series. Use this
+helper only when deliberately choosing that tradeoff.
 
 ## Minimal integration
 
@@ -132,5 +134,5 @@ also included in CI. `make ci-workspace` checks the shared CLI compiler adapter.
 A clean build compiles host-side compiler dependencies in addition to application
 runtime dependencies; Cargo may compile overlapping crates twice for different
 roles/features. Neither this cost nor generator/cache work is treated as free.
-Timing claims and a default workflow decision belong to #54's matched consumer
-benchmark, not to this correctness gate. No timing threshold is imposed in CI.
+The [matched consumer benchmark and decision](consumer-build-cost.md) record
+these costs and select explicit generation for the starter. No timing threshold is imposed in CI.

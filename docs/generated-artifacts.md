@@ -113,10 +113,10 @@ absent, the helper is intentionally omitted and its scoped `unexpected_cfgs`
 allowance avoids noise. Ordinary embedded calls need no consumer feature alias.
 
 The examples configure explicit `generated/` artifacts and one regeneration
-command. Optional Cargo `OUT_DIR` generation is subject to the measured build-cost
-gate before starter selection. Explicit generation remains the current default;
-client generation does not load runtime schema assets into the executable or run
+command. The [measured build-cost gate](consumer-build-cost.md) selects explicit
+generation for the starter; optional Cargo `OUT_DIR` generation remains a prototype.
+Client generation does not load runtime schema assets into the executable or run
 database migrations. Continue to ship/load the schema and run migrations explicitly.
 
 The optional [Cargo generation prototype](cargo-generation.md) shares the compiler
-and emitter, writes only to `OUT_DIR`, and remains behind the build-cost gate.
+and emitter and writes only to `OUT_DIR`; the starter uses the explicit workflow.
