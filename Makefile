@@ -53,7 +53,7 @@ REDIS_URL    ?= redis://127.0.0.1:16379
         ci-example-mariadb ci-example-postgres ci-example-helpdesk based-cli dev-db-up dev-db-reset dev-db-down
 
 # The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
-# facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
+# facts stay sync + pure; only adapters, the runtime and binaries may depend on tokio/sqlx).
 FRONTEND_CRATES := based-ast based-parser based-fmt based-sema based-codegen based-facts \
                    based-diagnostics based-manifest based-project based-build based-catalog
 
@@ -162,6 +162,7 @@ ci-live: ci-live-mariadb ci-live-postgres ci-live-sqlx ci-standalone-store
 ## server. `TEST_MARIADB_URL` makes the harness connect there instead of spinning a container
 ## (support/docker_mariadb.rs); `--test-threads=1` keeps the shared DB's per-test resets serial.
 ci-live-mariadb:
+	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-catalog-mariadb --features mariadb --test live -- --include-ignored --nocapture
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-cli --test migration_failure mariadb_ -- --nocapture
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test mariadb_integration --test migrate_apply_mariadb -- --test-threads=1 --nocapture
