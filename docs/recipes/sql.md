@@ -19,7 +19,7 @@ bind values, with that host's access controls.
 
 The [artifact guide](../generated-artifacts.md) owns output paths, freshness,
 and overwrite behavior. For a migration inspect its rendered SQL with
-`based migrate render . NUMBER` before explicit application, as in the
+`based migrate render . --number NUMBER` before explicit application, as in the
 [embedded rename](../embedded-tutorial.md#rename-a-field-without-losing-data).
 Use the [reference](../reference.md) for syntax and
 [measured runtime workloads](../runtime-performance.md) for performance evidence.

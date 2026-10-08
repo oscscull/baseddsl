@@ -169,7 +169,7 @@ based check
 based gen all
 based migrate gen . rename_item_title
 based migrate verify
-based migrate render . 2
+based migrate render . --number 2
 ```
 
 Review the rename SQL before applying it:
@@ -191,7 +191,8 @@ has its usual single-writer constraints. MariaDB/PostgreSQL use the same schema
 but need provisioned servers and corresponding backend configuration; this lesson's
 runner is deliberately SQLite-specific. See [support](support-policy.md).
 
-Assertions are separate: `make ci-standalone-tutorial` checks authentication,
+Assertions are separate: `make ci-onboarding` covers both tutorials;
+`make ci-standalone-tutorial` checks authentication,
 spoofed headers, scoped relations, guard failures, restart replay, stale conditions,
 and data-preserving regeneration. The release collector repeats it with extracted
 native/lesson artifacts and no Rust/npm build. Continue with the

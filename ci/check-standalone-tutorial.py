@@ -19,6 +19,10 @@ import headers
 from evolution import evolve
 import replay
 
+sys.path.insert(0, str(ROOT / "ci/onboarding"))
+from commands import verify as verify_commands
+from prerequisites import require_cli
+
 
 def invoke(based, app, *args):
     subprocess.run([str(based), *args], cwd=app, check=True)
@@ -51,6 +55,9 @@ def lesson(based, app, settings):
         try:
             headers.verify(settings)
             item = boundary.verify(settings)
+            output = subprocess.check_output([sys.executable, "tutorial/client.py", "editor", "/q/items", "{}"], text=True)
+            lines = output.splitlines()
+            assert lines[0] == "HTTP 200" and len(json.loads(lines[1])) == 2, output
             payload, first = replay.rename(settings, item)
         finally:
             backend.stop(process)
@@ -77,9 +84,15 @@ def main():
     parser.add_argument("--archive", type=Path, help="exercise the extracted release lesson, not source files")
     args = parser.parse_args()
     based = args.based.resolve()
+    try:
+        require_cli(based)
+    except RuntimeError as error:
+        parser.error(str(error))
+    verify_commands(ROOT)
     with tempfile.TemporaryDirectory(prefix="based-standalone-lesson-") as scratch:
         app = Path(scratch) / "app"
-        invoke(based, ROOT, "init", str(app), "--mode", "standalone")
+        app.mkdir()
+        invoke(based, app, "init", "--mode", "standalone")
         if args.archive:
             with zipfile.ZipFile(args.archive) as archive:
                 archive.extractall(app)
@@ -90,6 +103,7 @@ def main():
         subprocess.run([sys.executable, str(app / "tutorial/setup.py"),
                         *[arg for name, port in chosen.items() for arg in (f"--{name}-port", str(port))]],
                        cwd=app, check=True)
+        invoke(based, app, "check")
         invoke(based, app, "gen", "all")
         invoke(based, app, "migrate", "apply", "--database-url", "local.db")
         sys.path.insert(0, str(app / "tutorial"))

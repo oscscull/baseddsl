@@ -14,6 +14,11 @@ on:
       - 'examples/standalone-tutorial/**'
       - 'ci/standalone_tutorial/**'
       - 'ci/check-standalone-tutorial.py'
+      - 'ci/check-embedded-tutorial.py'
+      - 'ci/initializer.py'
+      - 'ci/onboarding/**'
+      - 'docs/embedded-tutorial.md'
+      - 'docs/standalone-tutorial.md'
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -81,6 +86,7 @@ jobs:
           if-no-files-found: error
 
   source-consumer:
+    needs: native
     runs-on: ubuntu-22.04
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -96,7 +102,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: cargo build --locked -p based-cli -p based-lsp
-      - run: python ci/release/source_consumer.py --based target/debug/based
+      - uses: actions/download-artifact@v4
+        with:
+          name: based-native-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/onboarding-native
+      - name: Install matching candidate CLI and run published embedded path
+        run: |
+          mkdir "$RUNNER_TEMP/onboarding-cli"
+          tar -xzf "$RUNNER_TEMP/onboarding-native/"*.tar.gz -C "$RUNNER_TEMP/onboarding-cli"
+          python ci/release/source_consumer.py --based "$RUNNER_TEMP/onboarding-cli/based"
 
   vsix:
     needs: native

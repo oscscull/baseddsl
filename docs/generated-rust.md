@@ -36,6 +36,6 @@ there with your existing options, replace `mod client;` with the wrapper above,
 and remove the old generated `src/client.rs`. Existing call sites remain the
 same. See the [SQLite quickstart](../examples/sqlite-quickstart/README.md).
 
-Cargo `OUT_DIR` integration is a separate optional prototype in #80. It may
-become the starter default only after the measured build-cost gate in #54 is
-accepted; until then explicit generation plus `include!` is the supported path.
+The [build-cost gate](consumer-build-cost.md) selects explicit isolated generation
+plus `include!` as the starter default. Optional `based-build` integration keeps
+Cargo `OUT_DIR` generation available; it is not required by these tutorials.

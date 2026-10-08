@@ -109,7 +109,7 @@ based check
 based gen all
 based migrate gen . rename_item_title
 based migrate verify
-based migrate render . 2
+based migrate render . --number 2
 ```
 
 Review `migrations/0002_rename_item_title/up.mig` and the rendered SQL. The stored
@@ -170,8 +170,9 @@ The helpdesk remains an advanced application example, not a prerequisite.
 
 ## Separate verification
 
-`make ci-initializer` runs the shared starter contract and the separate
-[`ci/check-embedded-tutorial.py`](../ci/check-embedded-tutorial.py) rename smoke.
+`make ci-initializer` runs the shared starter contract. `make ci-onboarding` runs
+the separate [`ci/check-embedded-tutorial.py`](../ci/check-embedded-tutorial.py) rename smoke
+and the standalone tutorial; the release gate uses extracted candidate tools.
 It uses a fresh external consumer, retains existing row/owner/parent IDs across
 migration, and verifies regenerated typed calls, formatting, linting, and output
 freshness. Readers need none of its harness internals to run the commands above.

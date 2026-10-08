@@ -21,8 +21,8 @@ def evolve(based, app):
     invoke(based, app, "gen", "all")
     invoke(based, app, "migrate", "gen", ".", "rename_item_title")
     invoke(based, app, "migrate", "verify")
+    invoke(based, app, "migrate", "render", ".", "--number", "2")
     invoke(based, app, "migrate", "apply", "--database-url", "local.db")
     invoke(based, app, "gen", "all", "--check")
     with sqlite3.connect(app / "local.db") as database:
         assert database.execute("SELECT id, title, owner, parent_id FROM item ORDER BY id").fetchall() == before
-
