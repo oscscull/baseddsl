@@ -328,6 +328,10 @@ On a `create`, scope columns are set from `$ctx` automatically (assigning one yo
 mutation refund(id) -> RefundResult guard caller_can_refund scoped Tenant { … }
 ```
 
+Run the [TypeScript standalone guard example](../examples/standalone-typescript-guards/README.md)
+or the [embedded Rust helpdesk guard](../examples/axum-helpdesk/README.md).
+Both use the same pre-write enforcement; atomic invariants belong in database conditions.
+
 ## Raw
 
 The escape hatch — `raw`, never `sql`.

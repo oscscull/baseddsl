@@ -32,6 +32,9 @@ For certificate-verified Postgres and MariaDB connections, see
 
 Standalone keyed mutation storage and explicit table setup are documented in
 [standalone idempotency](docs/standalone-idempotency.md).
+For custom standalone permission checks, run the
+[TypeScript guard example](examples/standalone-typescript-guards/README.md);
+[embedded Rust guards](examples/axum-helpdesk/README.md) remain equally supported.
 
 ## License
 
