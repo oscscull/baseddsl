@@ -11,6 +11,9 @@ on:
       - 'Cargo.lock'
       - 'editors/vscode/**'
       - 'docs/release-notes.md'
+      - 'examples/standalone-tutorial/**'
+      - 'ci/standalone_tutorial/**'
+      - 'ci/check-standalone-tutorial.py'
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -143,6 +146,13 @@ jobs:
         with:
           name: based-vsix
           path: ${{ runner.temp }}/release-assets
+      - run: python ci/release/tutorial.py "$RUNNER_TEMP/release-assets"
+      - name: Replay standalone lesson using extracted release artifacts
+        run: |
+          mkdir "$RUNNER_TEMP/native-cli"
+          tar -xzf "$RUNNER_TEMP/release-assets/based-"*-x86_64-unknown-linux-gnu.tar.gz -C "$RUNNER_TEMP/native-cli"
+          python ci/check-standalone-tutorial.py --based "$RUNNER_TEMP/native-cli/based" \
+            --archive "$RUNNER_TEMP/release-assets/based-standalone-tutorial-"*.zip
       - run: python ci/release/collect.py "$RUNNER_TEMP/release-assets"
       - uses: actions/upload-artifact@v4
         with:

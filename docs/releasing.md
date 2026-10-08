@@ -48,6 +48,11 @@ manifest.json. Its filename is `based-VERSION-TARGET.tar.gz` or `.zip` on Window
 `SHA256SUMS` covers every final uploaded asset. The collector rejects mismatched
 versions, commits, dirty native sources and duplicate target identities.
 
+The collector also packages `based-standalone-tutorial-VERSION.zip`, verifies its
+matching clean source manifest, and executes the extracted lesson against the
+Linux x64 native CLI. That path needs only Python, with no Rust/npm consumer build.
+The lesson zip and VSIX are included in the final combined inventory.
+
 ## Before an owner-approved version tag
 
 Complete the [v1 readiness issue](https://github.com/oscscull/baseddsl/issues/73)

@@ -9,6 +9,7 @@ from pathlib import Path
 import checksums
 import metadata
 from extension import verify as verify_extension
+from tutorial import verify as verify_tutorial
 
 
 
@@ -27,9 +28,12 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--expected-count", type=int, default=5)
     options = parser.parse_args()
-    archives = sorted(list(options.directory.glob("*.tar.gz")) + list(options.directory.glob("*.zip")))
-    assert len(archives) == options.expected_count, [path.name for path in archives]
     source = metadata.source()
+    prefix = f'based-{source["version"]}-'
+    archives = sorted(path for path in options.directory.iterdir()
+                      if path.name.startswith(prefix) and path.name.endswith((".tar.gz", ".zip")))
+    assert len(archives) == options.expected_count, [path.name for path in archives]
+    verify_tutorial(options.directory / f'based-standalone-tutorial-{source["version"]}.zip', source)
     extensions = list(options.directory.glob("*.vsix"))
     assert len(extensions) == 1, extensions
     verify_extension(extensions[0], source["version"])

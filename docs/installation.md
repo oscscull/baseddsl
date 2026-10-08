@@ -119,3 +119,11 @@ your native `based-lsp`. The VSIX is included in `SHA256SUMS`. Follow the
 [extension installation guide](../editors/vscode/README.md) to use PATH or
 `basedls.serverPath`. Upgrade and roll back both together; no Rust/npm build is
 needed for the installed editor.
+
+## Standalone lesson
+
+The same artifact set includes `based-standalone-tutorial-0.1.12.zip` in
+`SHA256SUMS`. Its manifest records the matching version and source commit.
+Extract it into a fresh initialized standalone project and follow the
+[standalone tutorial](standalone-tutorial.md). The helpers use Python's standard
+library and need no Rust/npm build or external packages.

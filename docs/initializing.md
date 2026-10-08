@@ -37,6 +37,9 @@ allowance on the generated client module covers its intentionally unused API.
 
 ## Standalone walkthrough
 
+Continue with the [standalone tutorial](standalone-tutorial.md) for authenticated
+host context, a named callback, durable replay across restart, and schema evolution.
+
 Prerequisites: `based` and Python 3.9+ with its standard library. In another empty
 directory:
 
