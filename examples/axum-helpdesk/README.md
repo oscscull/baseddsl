@@ -17,7 +17,7 @@ streaming NDJSON export, raw-SQL leaves, migrations with a data-preserving renam
 |---|---|
 | `schema/` | the whole desk in `.bsl`, by domain — `ticket/model.bsl` + `ticket/queries.bsl`, etc. |
 | `migrations/` | checked-in artifacts of `based migrate gen` — `0002` renames a column via `@was`, preserving data |
-| `generated/client.rs` | **verbatim** output of `based gen client -o generated/client.rs --embedded`; regenerate after a schema change, never edit |
+| `generated/client.rs` | **verbatim** output of `based gen all` (configured embedded client); regenerate after a schema change, never edit |
 | `src/app.rs` | the wiring: the app's `PgPool` → `PgRouter::from_pool` → `Engine`, plus the close-policy guard and the idempotency store |
 | `src/redis_store.rs` | optional Redis response-replay adapter; see its failure boundaries below |
 | `src/auth.rs` | bearer middleware: the token resolves to a session **through the client itself** |

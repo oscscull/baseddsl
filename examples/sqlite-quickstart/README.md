@@ -76,12 +76,12 @@ Regenerate them whenever `schema/*.bsl` changes:
 
 ```sh
 based migrate gen                              # migrations/NNNN_*/{up.mig, schema.snap}
-based gen client -o generated/client.rs --embedded   # generated/client.rs (the typed client)
+based gen all   # configured generated/client.rs in embedded mode
 ```
 
 - **`migrations/`** — schema setup is `based migrate apply`, the real convention, not
   a raw-DDL string in the program. `main.rs` never issues DDL.
-- **`generated/client.rs`** — the verbatim `based gen client` output. `--embedded` also
+- **`generated/client.rs`** — the verbatim `based gen client` output. The configured embedded mode also
   emits the in-process bridge, so the whole of the wiring is one line:
 
   ```rust

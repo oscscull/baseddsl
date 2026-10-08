@@ -3,8 +3,8 @@
 `ci/generated-consumers.py` creates a temporary standalone Cargo project outside
 the workspace, invokes the built `based gen client --embedded`, compiles with
 explicit consumer dependencies, then executes typed calls through the real engine.
-Every run starts with fresh client bytes. It also compares the four committed
-example clients with CLI output and rejects interchanged entity IDs via a negative
+Every run starts with fresh client bytes. It also checks the four committed
+example clients through `based gen client --check` and rejects interchanged entity IDs via a negative
 compile fixture. Compiler failures must specifically identify the Owner/Item type
 mismatch; unrelated compiler failures cannot pass that test.
 

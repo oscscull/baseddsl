@@ -73,10 +73,7 @@ def verify(dialect, binary):
 def verify_committed(binary):
     for example in ["sqlite-quickstart", "mariadb-quickstart", "postgres-quickstart", "axum-helpdesk"]:
         project = ROOT / "examples" / example
-        generated = project / "generated/client.rs"
-        result = subprocess.run([str(binary), "gen", "client", "--embedded"], cwd=project,
-                                check=True, capture_output=True)
-        assert result.stdout == generated.read_bytes(), f"stale client: {generated}"
+        run([str(binary), "gen", "client", "--check"], project)
 
 
 def main():

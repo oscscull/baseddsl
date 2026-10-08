@@ -67,7 +67,7 @@ Regenerate them whenever `schema/*.bsl` changes:
 
 ```sh
 based migrate gen                              # migrations/NNNN_*/{up.mig, schema.snap}
-based gen client -o generated/client.rs --embedded   # generated/client.rs (the typed client)
+based gen all   # configured generated/client.rs in embedded mode
 ```
 
 The only differences from the SQLite slice are the **driver** (a pooled `PgRouter`/`PostgresDb`
@@ -84,7 +84,7 @@ let api = client::embedded(&engine);   // typed, in-process, no socket, no bridg
 
 - **Schema setup is `based migrate apply`**, not a raw-DDL string — `main.rs` never
   issues DDL.
-- **`generated/client.rs`** is the verbatim `based gen client` output; `--embedded` also
+- **`generated/client.rs`** is the verbatim `based gen client` output; The configured embedded mode also
   emits the in-process bridge, so `client::embedded(&engine)` is the whole of the wiring.
 - **`$ctx`** (org, user) is a typed method argument the *app* supplies from its auth layer,
   never the caller.

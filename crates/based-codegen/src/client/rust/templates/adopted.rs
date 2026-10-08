@@ -18,7 +18,7 @@ pub(crate) fn adopt_constructor(dialect: crate::Dialect) -> String {
             "MariaDB/MySQL",
         ),
     };
-    format!(
+    let constructor = format!(
         r#"
 /// Adopt a **caller-owned** open {driver_name} transaction — the bring-your-own (`adopt`)
 /// rung of the transaction seam. Route this client's callables (including `for update`
@@ -44,6 +44,19 @@ pub fn adopt_{suffix}<'a>(
     }}
 }}
 "#
+    );
+    // cfg checking happens before item-level allowances. A scoped module preserves
+    // the optional constructor without leaking allowances into application code.
+    let scoped = constructor
+        .lines()
+        .map(|line| match line {
+            "" => String::new(),
+            _ => format!("    {line}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n#[allow(unexpected_cfgs, unused_imports)]\nmod __based_adopt_driver {{\n    use super::*;\n{scoped}\n}}\n#[allow(unused_imports)]\npub use __based_adopt_driver::*;\n"
     )
 }
 

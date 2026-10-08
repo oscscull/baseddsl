@@ -4,6 +4,7 @@ members = [
     "crates/based-ast",
     "crates/based-diagnostics",
     "crates/based-manifest",
+    "crates/based-artifacts",
     "crates/based-parser",
     "crates/based-fmt",
     "crates/based-sema",
