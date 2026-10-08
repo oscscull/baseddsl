@@ -6,6 +6,7 @@ import tempfile
 
 from archive import extract
 from metadata import binary_identity
+from sqlite_engine import verify as verify_sqlite_engine
 
 
 def invoke(binary, app, *args):
@@ -42,4 +43,5 @@ def verify(artifact):
         invoke(based, app, "migrate", "apply", "--database-url", database)
         status = invoke(based, app, "migrate", "status", "--database-url", database)
         assert "pending" not in status.stdout.lower() or "0 pending" in status.stdout.lower(), status.stdout
+        verify_sqlite_engine(based, root, app / "local.db")
     print(f"release smoke passed: {artifact.name}")

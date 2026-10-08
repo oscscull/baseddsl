@@ -108,3 +108,82 @@ checks diagnostics, hover, completion, and rename using the Linux x64 prebuilt
 LSP archive from the same run. Collection verifies the VSIX version, license,
 and required runtime files, then includes it in the combined checksums. This
 produces a locally installable extension; it does not publish to the Marketplace.
+
+## Final owner checklist
+
+The [readiness decision](v1-readiness.md) is NO-GO for publication until its owner
+conditions are met. The following is an executable owner checklist, not permission
+for an agent to merge, tag, publish or post. It requires the owner-reviewed version
+metadata and the final merged main commit; PR dry-run artifacts are not a substitute
+for verifying that commit.
+
+1. Review the dependency-ordered stack, #71 public-excerpt approval, supported
+   surfaces, candidate notes and [upgrade guide](upgrading.md). Merge only with
+   explicit authorization. Choose the release version and update workspace/VSIX
+   metadata together. Do not label the current `0.1.12` candidate as v1.
+2. Start from a clean checkout of that final main commit. Run the ordinary gates,
+   including both first-use paths, live/TLS recovery, generated consumers and cost
+   characterization. Use disposable databases as documented in the Makefile.
+3. Run the native dry run on the same commit, require all five native smokes, the
+   actual linked SQLite version floor, source-consumer, VSIX and collector checks,
+   then review/download its exact-commit artifacts and checksum inventory.
+4. Record the approved full SHA, version, platform boundaries, gate URLs and owner
+   decision. Tag only that commit, wait for the tag's complete release workflow,
+   review its draft assets, and publish only with a separate explicit instruction.
+5. Verify the final public release's source links/checksums and actual installation
+   commands from a clean environment before using them in the prepared reveal.
+   Posting the reveal is a separate owner instruction.
+
+Owner preparation commands (no tag or publication):
+
+```sh
+git switch main
+git pull --ff-only
+git status --short
+make ci-workspace-full
+make ci-onboarding
+make ci-database-tls
+make ci-consumer-build
+make ci-runtime-benchmark
+make ci-extension
+gh workflow run release.yml --ref main
+gh run list --workflow release.yml --branch main --limit 1
+```
+
+Also require every ordinary CI job on this exact main commit, including the existing
+server/generated-consumer/example tiers; the local list above does not replace CI.
+Inspect the chosen run rather than accepting an older green run by date. The manual
+native workflow defaults to non-publishing. The extracted smoke reads/imports its
+existing SQLite table and requires SQLite 3.51.3+ without changing that database.
+
+When the owner separately authorizes tagging, require their values explicitly and
+validate them with the existing metadata checker:
+
+```sh
+: "${TAG:?Set the owner-approved version tag}"
+: "${CANDIDATE:?Set the reviewed full Git commit}"
+test "$(git rev-parse HEAD)" = "$CANDIDATE"
+python3 - "$TAG" <<'PY'
+import sys
+sys.path.insert(0, "ci/release")
+from metadata import source
+print(source(expected_tag=sys.argv[1]))
+PY
+git tag -a "$TAG" "$CANDIDATE" -m "Based $TAG"
+git push origin "$TAG"
+```
+
+After the tag workflow succeeds and the owner approves the draft's exact assets:
+
+```sh
+gh release view "$TAG"
+gh release edit "$TAG" --draft=false
+```
+
+Do not execute the last block merely because the draft exists. For rollback, mark
+an affected release clearly, identify a known safe pinned tool/runtime version,
+publish corrected notes/advisory and a new version, and test schema compatibility
+before restarting writers. Do not move tags or replace published binaries. Restore
+or migrate database state through its separate reviewed recovery plan; tool rollback
+does not undo data changes. For SQLite WAL deployments, a known safe rollback must
+retain the upstream WAL-reset fix, including the engine linked into applications.

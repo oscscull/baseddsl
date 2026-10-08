@@ -34,7 +34,8 @@ an emitted SQL file as a separate application. Business logic stays in host code
 
 **Current status:** source version `0.1.12`, an evaluation candidate on the path to
 v1. The [release tracker](https://github.com/oscscull/baseddsl/issues/43) contains
-remaining gates. A successful dry run does not imply an owner-approved public
+remaining gates; the [readiness decision](docs/v1-readiness.md) records the owner
+publication conditions. A successful dry run does not imply an owner-approved public
 release. Use [versioned installation](docs/installation.md) for native CLI/LSP
 artifacts, a matching VS Code extension, or explicitly pinned Git source/library
 installation. Available assets and exact host prerequisites are described there.

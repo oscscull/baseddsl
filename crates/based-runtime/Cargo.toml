@@ -35,7 +35,7 @@ postgres = [
 # The SQLite driver + backend over sqlx's async SQLite driver (bundled engine, no
 # system dependency, no live server) — the infra-free `Db`/`Backend` behind real
 # end-to-end integration tests.
-sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:base64"]
+sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:base64", "dep:libsqlite3-sys"]
 # The HTTP listener (`based serve`) — the axum socket edge over `serve::dispatch` —
 # plus the production uuid id-gen. Off by default so the core stays a plain library.
 serve = ["dep:axum", "id-gen", "tokio/net"]
@@ -78,6 +78,8 @@ tokio = { version = "1", features = ["time", "sync"] }
 sqlx = { version = "0.9.0", optional = true, default-features = false, features = [
     "runtime-tokio",
 ] }
+# Require the WAL-reset fix for external consumers too, independently of the workspace lockfile.
+libsqlite3-sys = { workspace = true, optional = true }
 # Parsing the typed text-riding bind values (timestamp/date) into native driver types
 # inside the MariaDB/Postgres driver impls.
 chrono = { version = "0.4", optional = true, default-features = false, features = [

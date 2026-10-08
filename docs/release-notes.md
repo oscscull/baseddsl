@@ -66,6 +66,17 @@ storage, which preserves the decimal string; SQLite expressions that cast it
 to a numeric storage class have SQLite's usual floating-point limits and are
 outside that storage guarantee.
 
+## SQLite engine safety floor
+
+The workspace/native tools and runtime SQLite feature now require
+`libsqlite3-sys` 0.37.0 / bundled SQLite 3.51.3, containing the upstream WAL-reset
+corruption fix. This fits SQLx 0.9's supported binding range. Rebuild/update the
+embedded application's runtime and lockfile too; upgrading only the CLI does not
+replace the engine inside an old executable. The actual linked engine is checked
+in runtime tests and extracted native smokes. See the
+[upgrade guide](upgrading.md) and [readiness decision](v1-readiness.md). No schema
+migration or automatic repair of pre-existing corruption accompanies this update.
+
 ## Known limitations
 
 Embedded applications still load/supply runtime schema assets and configure a

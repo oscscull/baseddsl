@@ -3,8 +3,9 @@
 `based-catalog-sqlite` implements the [shared import contract](import-catalog-contract.md)
 behind its opt-in `sqlite` feature. It owns SQLite connection and catalog
 normalization; it has no compiler, runtime-engine, model writer, or migration
-dependency. The independently authored fixture currently records **SQLite 3.50.2**
-from the locked SQLx bundled engine. Metadata success does not establish that
+dependency. The independently authored fixture records **SQLite 3.51.3**
+from the locked SQLx bundled engine. The [readiness review](v1-readiness.md)
+requires its upstream WAL-reset fix in both the reader and runtime. Metadata success does not establish that
 existing application rows can decode into generated Rust types.
 
 ## File and read boundary
