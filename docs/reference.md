@@ -1,7 +1,11 @@
 # based — language reference
 
 Every feature of `.bsl`, with the syntax to use it. One page; skim the index, jump to a section.
-For *why* the language is shaped this way, see [`spec/`](../spec/); this page is *how*.
+This reference describes the current usable syntax surface. For detailed design
+semantics and priorities, see the [specification index](../spec/README.md); for a
+first executable run, choose an [embedded or standalone walkthrough](initializing.md).
+The support policy and its tests establish release support, rather than design
+intent alone.
 For supported deployment paths and versioning, see the [support policy](support-policy.md).
 For configured output paths, regeneration, ownership, and freshness checks, see [generated artifacts](generated-artifacts.md).
 For standalone guard configuration, see [the operator guide](standalone-guards.md) and the [external guard protocol v1](../spec/external-guards.md).
