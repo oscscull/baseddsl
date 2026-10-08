@@ -262,6 +262,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "based-catalog-bsl"
+version = "0.1.12"
+dependencies = [
+ "based-ast",
+ "based-catalog",
+ "based-fmt",
+ "based-manifest",
+ "based-project",
+ "based-sema",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "based-catalog-mariadb"
 version = "0.1.12"
 dependencies = [

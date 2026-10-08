@@ -71,8 +71,10 @@ It uses PascalCase model names and snake_case field names derived from physical
 names; punctuation splits words, non-ASCII code points get deterministic `uHEX`
 tokens, and empty/digit-leading identifiers receive `Imported`/`imported_`
 prefixes. Reserved BSL identifiers receive the same prefixes. Resolve normalized
-collisions by `_2`, `_3`, … in canonical physical identity order, never query
-arrival order. Field collision suffixes use catalog column order.
+collisions by numeric model suffixes (`Model2`, `Model3`, …) and `_2`, `_3`, …
+field suffixes in canonical physical identity order, never query arrival order.
+The current model lexer does not accept underscores. Model/file allocation also
+avoids case-insensitive filename collisions. Field suffixes use catalog column order.
 
 Always preserve the original identity through `@table`, `@schema`, and field
 `(column "…")` aliases as necessary. An alias the actual compiler cannot
@@ -136,7 +138,8 @@ Each adapter must create its fixture with hand-written SQL and prove read-only
 credentials, unchanged schema/data, no application-row reads, selection behavior,
 metadata visibility, and required loss findings. Readers do not import one another.
 
-The BSL emitter and CLI remain separate issues. Import does not take over an
+The [BSL emitter](catalog-bsl-emitter.md) and CLI own separate responsibilities.
+Import does not take over an
 existing database's migrations, apply generated SQL, continuously synchronize
 schemas, add policy, or create an alternative project setup system. See the
 [model/key/namespace semantics](../spec/syntax/models.md),
