@@ -150,6 +150,7 @@ dependencies = [
  "based-sema",
  "futures-core",
  "futures-util",
+ "libsqlite3-sys",
  "serde_json",
  "sqlx",
  "tokio",

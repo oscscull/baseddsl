@@ -65,3 +65,9 @@ Larger materialized reads and writes show meaningful overhead in this environmen
 Executed SQL and `EXPLAIN QUERY PLAN` details are included with bound values in the raw report. Flat reads use primary-key range scans; nested reads use the owner primary key and item owner index with correlated aggregation and a temporary sort tree; the page/count scan item. Bulk plans show VALUES-clause scans of 8, 300, and 212 rows, matching the chunk boundaries. CI checks artifact freshness, statement/result/data parity and compilation, with **no wall-clock performance threshold**.
 
 Reproduce with the commands and measurement boundaries in the [harness guide](../benchmarks/embedded-runtime/README.md). Publish repeated measurements and variance for any future performance claim.
+
+The archived measurements retain their recorded source/lock hashes. The current
+fixture lock records the runtime's explicit SQLite safety-floor dependency; both
+measured benchmark fixtures already selected bindings 0.37.0. CI rechecks parity
+and invalidation on the current fixture without rewriting historical timings or
+claiming a new performance measurement.

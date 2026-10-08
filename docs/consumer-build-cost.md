@@ -154,3 +154,9 @@ invalid inputs, output recovery and shared schema/application directory layouts.
 The initializer and tutorials should use the explicit workflow. Reconsidering a
 future helper default requires new repeated evidence and owner review; the
 current starter does not wait for that hypothetical optimization.
+
+The archived measurements retain their recorded source/lock hashes. The current
+fixture lock records the runtime's explicit SQLite safety-floor dependency; both
+measured benchmark fixtures already selected bindings 0.37.0. CI rechecks parity
+and invalidation on the current fixture without rewriting historical timings or
+claiming a new performance measurement.
