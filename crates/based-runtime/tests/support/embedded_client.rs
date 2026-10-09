@@ -1182,26 +1182,33 @@ impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> 
 
 impl<D: based_runtime::DbRead> TxBound for based_runtime::AdoptedTransport<D> {}
 
-/// Adopt a **caller-owned** open MariaDB/MySQL transaction — the bring-your-own (`adopt`)
-/// rung of the transaction seam. Route this client's callables (including `for update`
-/// locking reads — the adopted client is `TxBound`) through a transaction the caller already
-/// opened on its own `sqlx` pool, so the baseddsl work commits atomically with the caller's
-/// own raw writes on that transaction.
-///
-/// **`adopt` never begins, commits, or rolls back** — the caller owns the boundary; dropping
-/// the returned client leaves the transaction untouched, and the caller commits (or rolls
-/// back) it itself. There is no auto-retry (`transaction_retrying` needs an engine-owned
-/// boundary). Feature-gated so a build without the MariaDB/MySQL driver simply omits it;
-/// forward the feature to `based-runtime/mariadb`.
-#[cfg(feature = "mariadb")]
-pub fn adopt_mariadb<'a>(
-    engine: &based_runtime::Engine,
-    tx: &'a mut based_runtime::sqlx::Transaction<'_, based_runtime::sqlx::MySql>,
-) -> Client<based_runtime::AdoptedTransport<based_runtime::AdoptedMaria<'a>>> {
-    Client {
-        transport: based_runtime::AdoptedTransport::new(
-            engine.clone(),
-            based_runtime::AdoptedMaria::new(tx),
-        ),
+#[allow(unexpected_cfgs, unused_imports)]
+mod __based_adopt_driver {
+    use super::*;
+
+    /// Adopt a **caller-owned** open MariaDB/MySQL transaction — the bring-your-own (`adopt`)
+    /// rung of the transaction seam. Route this client's callables (including `for update`
+    /// locking reads — the adopted client is `TxBound`) through a transaction the caller already
+    /// opened on its own `sqlx` pool, so the baseddsl work commits atomically with the caller's
+    /// own raw writes on that transaction.
+    ///
+    /// **`adopt` never begins, commits, or rolls back** — the caller owns the boundary; dropping
+    /// the returned client leaves the transaction untouched, and the caller commits (or rolls
+    /// back) it itself. There is no auto-retry (`transaction_retrying` needs an engine-owned
+    /// boundary). Feature-gated so a build without the MariaDB/MySQL driver simply omits it;
+    /// forward the feature to `based-runtime/mariadb`.
+    #[cfg(feature = "mariadb")]
+    pub fn adopt_mariadb<'a>(
+        engine: &based_runtime::Engine,
+        tx: &'a mut based_runtime::sqlx::Transaction<'_, based_runtime::sqlx::MySql>,
+    ) -> Client<based_runtime::AdoptedTransport<based_runtime::AdoptedMaria<'a>>> {
+        Client {
+            transport: based_runtime::AdoptedTransport::new(
+                engine.clone(),
+                based_runtime::AdoptedMaria::new(tx),
+            ),
+        }
     }
 }
+#[allow(unused_imports)]
+pub use __based_adopt_driver::*;

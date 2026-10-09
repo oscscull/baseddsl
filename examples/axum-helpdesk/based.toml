@@ -3,3 +3,8 @@
 dialect = "postgres"
 client  = "rust"
 root    = "schema"
+
+# Explicit artifact generation remains the default until the measured build-cost gate.
+[generate]
+client = "generated/client.rs"
+client_mode = "embedded"
