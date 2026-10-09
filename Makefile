@@ -298,3 +298,9 @@ ci-cargo-generation:
 ci-initializer:
 	$(CARGO) build --locked -p based-cli
 	$(CI) initializer --based $(BASED)
+	python3 ci/check-embedded-tutorial.py --based $(BASED)
+
+.PHONY: ci-embedded-tutorial
+ci-embedded-tutorial:
+	$(CARGO) build --locked -p based-cli
+	$(CI) embedded-tutorial --based $(BASED)

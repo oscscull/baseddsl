@@ -1,7 +1,7 @@
 # Calling the HTTP service
 
 The standalone initializer includes a small Rust HTTP client. It runs a local
-Based process, creates and reads items, then stops the process:
+Based process, creates and reads related items, then stops the process:
 
 ```sh
 based init --mode standalone
