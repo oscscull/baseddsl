@@ -34,4 +34,4 @@ cargo install --git https://github.com/oscscull/baseddsl --rev FULL_COMMIT --loc
 
 Pin both tools and the runtime to the same source revision. Keep each native
 version in its own directory; selecting another directory on PATH rolls back the
-tools, but does not undo database changes. See [upgrading](reference.md).
+tools, but does not undo database changes. See [upgrading](upgrading.md).

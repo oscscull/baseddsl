@@ -78,3 +78,9 @@ pub fn fail(
         String::from_utf8_lossy(&result.stderr)
     ))
 }
+
+pub fn git(args: &[&str]) -> Result<String> {
+    Ok(run("git", args, &root(), &Environment::new())?
+        .trim()
+        .into())
+}
