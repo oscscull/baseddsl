@@ -1,6 +1,6 @@
 //! Validate physical column coverage and identity.
 use super::finding;
-use crate::{CatalogCode, CatalogDiagnostic, Table};
+use crate::{CatalogCode, CatalogDiagnostic, SqliteAffinity, Table, TypeFamily};
 use std::collections::BTreeSet;
 pub(super) fn validate(table: &Table) -> Vec<CatalogDiagnostic> {
     let mut names = BTreeSet::new();
@@ -23,7 +23,11 @@ pub(super) fn validate(table: &Table) -> Vec<CatalogDiagnostic> {
                 "Duplicate column name or ordinal",
             ));
         }
-        if column.name.is_empty() || column.native_type.declaration.is_empty() {
+        let sqlite_untyped = column.native_type.declaration.is_empty()
+            && column.native_type.sqlite_affinity == Some(SqliteAffinity::Blob)
+            && column.native_type.family == TypeFamily::Other;
+        if column.name.is_empty() || (column.native_type.declaration.is_empty() && !sqlite_untyped)
+        {
             findings.push(finding(
                 &table.id,
                 Some(&column.name),

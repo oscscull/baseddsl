@@ -301,6 +301,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "based-catalog-sqlite"
+version = "0.1.12"
+dependencies = [
+ "based-catalog",
+ "libsqlite3-sys",
+ "sqlx",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "based-ci"
 version = "0.1.12"
 dependencies = [

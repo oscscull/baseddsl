@@ -1,0 +1,23 @@
+[package]
+name = "based-catalog-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+sqlite = ["dep:sqlx", "dep:libsqlite3-sys"]
+
+[dependencies]
+based-catalog = { path = "../based-catalog" }
+sqlx = { version = "0.9.0", optional = true, default-features = false, features = ["runtime-tokio", "sqlite"] }
+libsqlite3-sys = { version = "0.35.0", optional = true }
+
+[dev-dependencies]
+based-catalog = { path = "../based-catalog", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+
+[lints]
+workspace = true
