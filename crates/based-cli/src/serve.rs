@@ -14,12 +14,17 @@ use std::path::Path;
 /// the runtime's HTTP listener. Blocks until the process is killed.
 pub async fn cmd_serve(
     root: &Path,
-    listen: &str,
-    database_url: Vec<String>,
-    pool_min: usize,
-    pool_max: usize,
-    idempotency: StoreOptions,
+    options: crate::serve_options::ServeOptions,
 ) -> Result<(), CliError> {
+    let crate::serve_options::ServeOptions {
+        listen,
+        database_url,
+        pool_min,
+        pool_max,
+        idempotency,
+        guards: guard_options,
+        ..
+    } = options;
     use based_runtime::http::{ServeConfig, TrustedHeaderContext};
     #[cfg(any(feature = "mariadb", feature = "postgres"))]
     use based_runtime::shard::PoolConfig;
@@ -39,6 +44,7 @@ pub async fn cmd_serve(
     let dialect = Dialect::parse(&project.manifest.dialect);
     let urls = shard_urls(root, dialect, database_url)?;
     let compiled = Compiled::from_checked(schema, decls, dialect);
+    let guards = crate::external_guards::build(root, &compiled, &guard_options)?;
 
     // Pool sizing from the flags; the hardening timeouts (checkout + statement) keep
     // their conservative defaults (a saturated pool → fast 503, a runaway query
@@ -52,9 +58,7 @@ pub async fn cmd_serve(
     };
     #[cfg(not(any(feature = "mariadb", feature = "postgres")))]
     let _ = (pool_min, pool_max);
-    let config = ServeConfig {
-        listen: listen.to_string(),
-    };
+    let config = ServeConfig { listen };
 
     // Build the backend for the manifest dialect and stand the listener up. The `@scope`
     // owner field routes to a shard schema-side, so no shard key is hand-set here —
@@ -67,14 +71,14 @@ pub async fn cmd_serve(
             let router = based_runtime::driver::ShardRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
             crate::idempotency_table::mariadb(&router, dialect, idempotency).await?;
-            run_listener(compiled, router, ctx, config, idempotency).await
+            run_listener(compiled, router, ctx, config, idempotency, guards).await
         }
         #[cfg(feature = "postgres")]
         Dialect::Postgres => {
             let router = based_runtime::PgRouter::new(&urls, pool)
                 .map_err(|e| CliError::db("connecting to database", e))?;
             crate::idempotency_table::postgres(&router, dialect, idempotency).await?;
-            run_listener(compiled, router, ctx, config, idempotency).await
+            run_listener(compiled, router, ctx, config, idempotency, guards).await
         }
         #[cfg(not(feature = "mariadb"))]
         Dialect::MariaDb | Dialect::MySql => Err(CliError::missing_driver("mariadb")),
@@ -90,7 +94,7 @@ pub async fn cmd_serve(
             let backend = based_runtime::SqliteBackend::open(&urls[0])
                 .map_err(|e| CliError::db(format!("opening {}", urls[0]), e))?;
             crate::idempotency_table::sqlite(&backend, dialect, idempotency).await?;
-            run_listener(compiled, backend, ctx, config, idempotency).await
+            run_listener(compiled, backend, ctx, config, idempotency, guards).await
         }
     }
 }
@@ -107,22 +111,31 @@ async fn run_listener(
     ctx: based_runtime::http::TrustedHeaderContext,
     config: based_runtime::http::ServeConfig,
     idempotency: StoreOptions,
+    guards: based_runtime::Guards,
 ) -> Result<(), CliError> {
     let dialect = compiled.dialect;
     let store = idempotency.build(dialect);
     let listen = config.listen.clone();
-    based_runtime::http::serve_with_store(compiled, backend, ctx, store, config, |handle| {
-        eprintln!("based serve: {dialect:?}, listening on {listen}");
-        eprintln!("liveness: GET /healthz  readiness: GET /readyz");
-        if let Err(e) = ctrlc::set_handler(move || {
-            eprintln!("based serve: shutdown signal received, draining…");
-            handle.shutdown();
-        }) {
-            // A missing signal handler is non-fatal — the server still runs, it just
-            // can't drain gracefully (a hard kill still stops it).
-            eprintln!("based serve: could not install shutdown handler: {e}");
-        }
-    })
+    based_runtime::http::serve_with_guards(
+        compiled,
+        backend,
+        ctx,
+        store,
+        guards,
+        config,
+        |handle| {
+            eprintln!("based serve: {dialect:?}, listening on {listen}");
+            eprintln!("liveness: GET /healthz  readiness: GET /readyz");
+            if let Err(e) = ctrlc::set_handler(move || {
+                eprintln!("based serve: shutdown signal received, draining…");
+                handle.shutdown();
+            }) {
+                // A missing signal handler is non-fatal — the server still runs, it just
+                // can't drain gracefully (a hard kill still stops it).
+                eprintln!("based serve: could not install shutdown handler: {e}");
+            }
+        },
+    )
     .await
     .map_err(|e| CliError::caused_by("serve failed", e))
 }

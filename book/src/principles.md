@@ -1,0 +1,26 @@
+# Design principles
+
+Tiebreakers, in priority order. Apply when a case isn't specified.
+
+1. **Safe by default; dangerous is explicit + visible.** Safe state is the silent default. Dangerous/guarantee-forfeiting state requires a visible token.
+
+2. **Nothing consequential is true by omission.** Elide a property only if: omission has one meaning, that meaning is safe, deviation is written visibly. Else make it explicit.
+
+3. **No positional/whitespace meaning.** Structure via delimiters (`{}`, `:`, `()`). Banned: significant indentation; two adjacent bare tokens where the gap is the syntax.
+
+4. **One source of truth; point at it.** A fact is declared once, referenced by name. Never declare the same fact from two places that can drift.
+
+5. **Push in a semantic only if the compiler can know it → warn/guarantee something.** In: schema/access semantics (deletion, cardinality, indexing, traversal). Out: app logic (validation, business rules, computation) → host-language seam. Nothing Turing-complete in the DSL.
+
+6. **Escape hatches: mandatory, minimal-scope, never silent.** Forfeit only guarantees needing comprehension (keep param-binding). Smallest scope. Greppable. Engine detects the gap and lints it even when it can't fill it.
+
+7. **Own the brutal lifecycle; lend the intent.** Engine owns dangerous scaffolding (tx boundaries, batching, capture). Caller supplies intent. Reuse hardened external tools, don't rebuild.
+
+8. **Show, don't write — only for cost-free, unambiguous derived facts.** A derived fact is shown in the editor (LSP), not written in source, only when deriving it is free of independent cost and has one meaning — e.g. an inverse name, fixed by the written forward edge. A derived fact a reviewer must weigh — an index (write + disk cost) or a primary key — is consequential (principle 2), so it is written in source; the engine errors when it's missing and offers a one-key autofix.
+
+9. **Consume any database; steer, don't forbid.** Every valid database state is expressible — via a first-class feature or a raw escape hatch; a valid state we can't represent at all is a bug. But representability is not endorsement: an undesirable-but-valid state stays reachable while carrying friction proportional to how much we discourage it — a mandatory `reason` (à la `unscoped`), or mild verbosity — and the engine warns when something is done wrong or inefficiently, as it does elsewhere. Never forbid a valid construct for being ugly; never silently bless it either.
+
+## Hard priorities
+1. Brevity (context windows).
+2. File separation — one model per file, self-contained for its owner.
+3. Readability — reviewer confirms design by reading.

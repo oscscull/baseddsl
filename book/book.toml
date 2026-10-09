@@ -1,0 +1,5 @@
+[book]
+title = "The Based Book"
+authors = ["Based contributors"]
+language = "en"
+src = "src"
