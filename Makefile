@@ -56,7 +56,7 @@ REDIS_URL    ?= redis://127.0.0.1:16379
 # The front-end crates that must stay async-runtime-free (parse → fmt → sema → codegen →
 # facts stay sync + pure; only the runtime and binaries may depend on tokio/sqlx).
 FRONTEND_CRATES := based-ast based-parser based-fmt based-sema based-codegen based-facts \
-                   based-diagnostics based-manifest
+                   based-diagnostics based-manifest based-project based-build
 
 ## Infra-free gate: everything that needs no DB. What `make ci` runs.
 ci: ci-workspace ci-extension
@@ -288,3 +288,8 @@ ci-runtime-benchmark:
 	$(CARGO) fmt --manifest-path benchmarks/embedded-runtime/Cargo.toml --check
 	$(CARGO) clippy --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- -D warnings
 	$(CARGO) run --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- 5
+
+.PHONY: ci-cargo-generation
+## Fresh optional build-helper consumer: lifecycle, formatter isolation and dependency boundary.
+ci-cargo-generation:
+	$(CI) cargo-generation
