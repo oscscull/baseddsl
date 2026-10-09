@@ -11,6 +11,7 @@ make check       # execution changes: full lint/tests, live databases, and examp
 
 Generator changes also run `make ci-generated-consumer-sqlite` and the two server
 consumer targets. Optional Cargo integration runs `make ci-cargo-generation`.
+Initializer/tutorial changes run `make ci-initializer ci-embedded-tutorial`.
 Database TLS verification runs `make ci-database-tls` and needs Docker/OpenSSL.
 
 Native packaging can be checked without publication:

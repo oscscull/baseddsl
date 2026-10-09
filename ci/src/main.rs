@@ -6,6 +6,7 @@ mod command;
 mod consumer;
 mod files;
 mod initializer;
+mod onboarding;
 mod release;
 mod source;
 mod source_consumer;
@@ -54,6 +55,10 @@ enum Task {
         #[arg(long)]
         based: PathBuf,
     },
+    EmbeddedTutorial {
+        #[arg(long)]
+        based: PathBuf,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -75,5 +80,6 @@ async fn main() -> Result<()> {
         } => release::collect(&directory, expected_count),
         Task::Extension { directory, output } => release::extension(&directory, &output),
         Task::Initializer { based } => initializer::verify(&based).await,
+        Task::EmbeddedTutorial { based } => onboarding::verify(&based).await,
     }
 }

@@ -26,6 +26,14 @@ pub fn identity(output: &str) -> Result<()> {
         rows.iter().any(|row| row["id"] == created["id"]),
         "created row absent"
     );
+    ensure!(
+        created["parent"]["name"] == "Parent",
+        "nested parent missing"
+    );
+    ensure!(
+        rows.iter().any(|row| row["id"] == created["parent"]["id"]),
+        "parent row absent"
+    );
     Ok(())
 }
 
@@ -102,7 +110,12 @@ pub async fn verify(based: &Path) -> Result<()> {
         command::run(command::cargo(), &["fmt", "--check"], &app, &env)?;
         let output = command::run(command::cargo(), &["run"], &app, &env)?;
         identity(&output)?;
-
+        if mode == "embedded" {
+            ensure!(
+                output.contains("lookup: not found in this owner's context"),
+                "owner lookup escaped scope"
+            );
+        }
         crate::files::replace(
             &app.join("schema/item.bsl"),
             "  name: text",
