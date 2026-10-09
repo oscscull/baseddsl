@@ -98,3 +98,40 @@ fn nonstandard_declared_fk_semantics_are_retained_and_blocking() {
         MatchMode::Full
     );
 }
+
+#[test]
+fn unavailable_foreign_key_timing_cannot_pass_as_immediate() {
+    let mut a = table("a");
+    let mut foreign = relation("a");
+    foreign.deferral = Deferral::Unknown;
+    a.foreign_keys.push(foreign);
+    let result = Discovery::checked(catalog(vec![a]), &selection(&["a"]), Vec::new());
+    assert!(result.has_errors());
+    assert_eq!(
+        result.catalog.tables[0].foreign_keys[0].deferral,
+        Deferral::Unknown
+    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|finding| finding.code == CatalogCode::UnsupportedAttribute));
+}
+
+#[test]
+fn sqlite_untyped_declaration_is_a_known_unsupported_fact() {
+    let mut a = table("a");
+    let mut native = NativeType::declared("", TypeFamily::Other);
+    native.sqlite_affinity = Some(SqliteAffinity::Blob);
+    a.columns[0].native_type = native;
+    let mut source = catalog(vec![a]);
+    source.source.dialect = CatalogDialect::Sqlite;
+    let result = Discovery::checked(source, &selection(&["a"]), Vec::new());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|finding| finding.code == CatalogCode::UnsupportedType));
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|finding| finding.code == CatalogCode::IncompleteMetadata));
+}
