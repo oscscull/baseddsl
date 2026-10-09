@@ -10,8 +10,8 @@ enum Priority { low = 1, normal = 2, high = 3, urgent = 4 }
 
 # Two stacked `@scope` lines are alternatives (OR): a callable confined by EITHER
 # the tenant (agents see the whole org) or the requester (people see their own
-# tickets) satisfies the contract. Cross-org access is inexpressible without a
-# greppable `unscoped(...)`.
+# tickets) satisfies the modeled-operation contract using trusted host context.
+# Explicit `unscoped(...)`, raw subqueries/bodies, and host SQL own their filters.
 @soft_delete(deleted_at)
 @created(created_at)
 @updated(updated_at)

@@ -343,7 +343,7 @@ query heavy(min: int) -> UserRow[] {                     # whole-query raw body
 Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate safely.
 Engine-built outer rows keep scope/soft-delete filters, but tables inside a raw
 subquery own theirs. A whole raw body on a scoped model requires explicit
-`unscoped("reason")` and owns all its predicates. See [raw boundaries](reference.md).
+`unscoped("reason")` and owns all its predicates. See [raw boundaries](recipes.md).
 
 ## Migrations
 
