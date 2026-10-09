@@ -8,6 +8,7 @@ The initializer teaches a first run. These examples show larger workloads:
 | [MariaDB quickstart](../../examples/mariadb-quickstart/) | The same client against a server database |
 | [PostgreSQL quickstart](../../examples/postgres-quickstart/) | PostgreSQL connections and migrations |
 | [Axum helpdesk](../../examples/axum-helpdesk/) | A multi-tenant host app with authentication, guards, streaming, and optional Redis |
+| [TypeScript guards](../../examples/standalone-typescript-guards/) | An authenticated HTTP edge and external permission callbacks |
 | [Commerce schema](../../spec/examples/commerce/) | A broader reference schema |
 
 For a quickstart, change to its directory, provide `DATABASE_URL` for a disposable
