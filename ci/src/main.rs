@@ -5,6 +5,7 @@ mod client;
 mod command;
 mod consumer;
 mod files;
+mod initializer;
 mod release;
 mod source;
 mod source_consumer;
@@ -49,6 +50,10 @@ enum Task {
         directory: PathBuf,
         output: PathBuf,
     },
+    Initializer {
+        #[arg(long)]
+        based: PathBuf,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,5 +74,6 @@ async fn main() -> Result<()> {
             expected_count,
         } => release::collect(&directory, expected_count),
         Task::Extension { directory, output } => release::extension(&directory, &output),
+        Task::Initializer { based } => initializer::verify(&based).await,
     }
 }
