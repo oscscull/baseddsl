@@ -172,6 +172,7 @@ ci-live-mariadb:
 
 ## Live Postgres: the integration suite against a PROVIDED server (`TEST_POSTGRES_URL`).
 ci-live-postgres:
+	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-catalog-postgres --features postgres --test live -- --include-ignored --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-cli --test migration_failure postgres_ -- --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test postgres_integration -- --test-threads=1 --nocapture
