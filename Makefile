@@ -273,3 +273,9 @@ ci-generated-consumer-mariadb: based-cli
 
 ci-generated-consumer-postgres: based-cli
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CI) generated-consumer postgres
+
+.PHONY: ci-typescript-guards
+# Standalone HTTP consumer with authenticated callbacks; no Rust consumer or DB server.
+ci-typescript-guards:
+	$(CARGO) build -p based-cli --no-default-features
+	cd examples/standalone-typescript-guards && $(NPM) ci && BASED_BIN="$(BASED)" $(NPM) test

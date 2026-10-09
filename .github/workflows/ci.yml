@@ -164,3 +164,13 @@ jobs:
           make ci-generated-consumer-sqlite ci-generated-consumer-mariadb ci-generated-consumer-postgres
           MARIADB_URL=mysql://root:based_test_pw@127.0.0.1:3306/based_test
           POSTGRES_URL=postgres://postgres:based_test_pw@127.0.0.1:5432/based_test
+
+  typescript-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: make ci-typescript-guards
