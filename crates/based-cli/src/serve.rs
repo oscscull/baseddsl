@@ -48,8 +48,8 @@ pub async fn cmd_serve(
 
     // Pool sizing from the flags; the hardening timeouts (checkout + statement) keep
     // their conservative defaults (a saturated pool → fast 503, a runaway query
-    // aborted). The pool is also the concurrency ceiling — requests past it wait at
-    // most the checkout timeout, then fail fast.
+    // aborted). The pool bounds database connections; the trusted edge owns HTTP
+    // concurrency and callback limits.
     #[cfg(any(feature = "mariadb", feature = "postgres"))]
     let pool = PoolConfig {
         min: pool_min,
@@ -63,7 +63,7 @@ pub async fn cmd_serve(
     // Build the backend for the manifest dialect and stand the listener up. The `@scope`
     // owner field routes to a shard schema-side, so no shard key is hand-set here —
     // the driver reads it off the compiled schema. SQLite is a single local file (one url,
-    // one shared database), so it neither shards nor pools.
+    // one shared database) with its own fixed pool defaults; these flags size server pools.
     let ctx = TrustedHeaderContext;
     match dialect {
         #[cfg(feature = "mariadb")]

@@ -2,8 +2,8 @@
 //!
 //! This module only decodes the socket into `dispatch`'s arguments and writes its
 //! [`WireResponse`] back; the logic lives in the pure dispatch core. It is an async tokio
-//! service whose concurrency is bounded by the backend's connection pool (a request past
-//! the pool's capacity waits at most the checkout timeout, then fails fast as a `503`).
+//! service whose database work is bounded by the backend's connection pool. The trusted
+//! edge owns limits on accepted HTTP requests, queued work, and concurrent callbacks.
 //!
 //! ## Per-request flow
 //! 1. Decode the request line (`POST /q|m/<name>`), headers, and the (size-capped) JSON
