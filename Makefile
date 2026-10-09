@@ -163,6 +163,7 @@ ci-live: ci-live-mariadb ci-live-postgres ci-live-sqlx ci-standalone-store
 ## server. `TEST_MARIADB_URL` makes the harness connect there instead of spinning a container
 ## (support/docker_mariadb.rs); `--test-threads=1` keeps the shared DB's per-test resets serial.
 ci-live-mariadb:
+	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-cli --test import_servers mariadb_ -- --include-ignored --nocapture
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-catalog-mariadb --features mariadb --test live -- --include-ignored --nocapture
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-cli --test migration_failure mariadb_ -- --nocapture
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-runtime --features docker-tests \
@@ -172,6 +173,7 @@ ci-live-mariadb:
 
 ## Live Postgres: the integration suite against a PROVIDED server (`TEST_POSTGRES_URL`).
 ci-live-postgres:
+	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-cli --test import_servers postgres_ -- --include-ignored --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-catalog-postgres --features postgres --test live -- --include-ignored --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-cli --test migration_failure postgres_ -- --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-runtime --features docker-tests \

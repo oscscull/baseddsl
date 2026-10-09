@@ -6,7 +6,7 @@ mod load;
 mod redaction;
 
 pub use backend::backend;
-pub use discover::discover_project;
+pub use discover::{discover_allow_empty_project, discover_project};
 pub use facts::cmd_facts;
 pub use load::{load_checked, Loaded};
 pub use redaction::redact;

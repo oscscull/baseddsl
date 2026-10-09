@@ -5,6 +5,7 @@ mod client;
 mod command;
 mod consumer;
 mod files;
+mod import;
 mod initializer;
 mod onboarding;
 mod release;
@@ -59,6 +60,18 @@ enum Task {
         #[arg(long)]
         based: PathBuf,
     },
+    ImportConsumer {
+        #[arg(long)]
+        based: PathBuf,
+    },
+    ImportServerConsumer {
+        #[arg(long)]
+        based: PathBuf,
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        dialect: String,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -81,5 +94,11 @@ async fn main() -> Result<()> {
         Task::Extension { directory, output } => release::extension(&directory, &output),
         Task::Initializer { based } => initializer::verify(&based).await,
         Task::EmbeddedTutorial { based } => onboarding::verify(&based).await,
+        Task::ImportConsumer { based } => import::sqlite(&based).await,
+        Task::ImportServerConsumer {
+            based,
+            project,
+            dialect,
+        } => import::server(&based, &project, &dialect),
     }
 }
