@@ -141,40 +141,7 @@ enum MigrateAction {
     },
 }
 
-#[derive(Subcommand)]
-enum GenTarget {
-    /// Emit SQL DDL (`CREATE TABLE …`) for the manifest dialect.
-    Sql {
-        /// Explicit project root; otherwise find the nearest ancestor based.toml.
-        root: Option<PathBuf>,
-        /// Write to this file instead of stdout.
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-    },
-    /// Emit a typed client module for the manifest client target.
-    Client {
-        /// Explicit project root; otherwise find the nearest ancestor based.toml.
-        root: Option<PathBuf>,
-        /// Write to this file instead of stdout.
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-        /// Also emit the in-process **embedded bridge**: an `Embedded` `Transport`
-        /// over `based_runtime::Engine` plus `client::embedded(&engine)`, so an embedding
-        /// build gets a working client with no hand-written bridge. The consuming crate
-        /// must depend on based-runtime; a pure-wire client leaves this off.
-        #[arg(long)]
-        embedded: bool,
-    },
-    /// Emit an OpenAPI 3.1 spec for the wire — feed it to `openapi-generator` for a
-    /// client in any language (polyglot via one contract, not N emitters).
-    Openapi {
-        /// Explicit project root; otherwise find the nearest ancestor based.toml.
-        root: Option<PathBuf>,
-        /// Write to this file instead of stdout.
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-    },
-}
+use gen::options::GenTarget;
 
 // The binary owns the async runtime; front-end commands are sync and just run on it,
 // execution commands (serve, migrate apply/status) await the runtime's futures.
@@ -194,23 +161,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Fmt { root, check } => {
             check::cmd_fmt(&project_root::resolve(root.as_deref())?, check)
         }
-        Command::Gen { target } => match target {
-            GenTarget::Sql { root, out } => {
-                gen::cmd_gen_sql(&project_root::resolve(root.as_deref())?, out.as_deref())
-            }
-            GenTarget::Client {
-                root,
-                out,
-                embedded,
-            } => gen::cmd_gen_client(
-                &project_root::resolve(root.as_deref())?,
-                out.as_deref(),
-                embedded,
-            ),
-            GenTarget::Openapi { root, out } => {
-                gen::cmd_gen_openapi(&project_root::resolve(root.as_deref())?, out.as_deref())
-            }
-        },
+        Command::Gen { target } => gen::execute(target),
         Command::Migrate { action } => match action {
             MigrateAction::Gen { root, name } => {
                 migrate::cmd_migrate_gen(&project_root::resolve(root.as_deref())?, name.as_deref())

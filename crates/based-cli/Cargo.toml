@@ -20,6 +20,7 @@ postgres = ["based-runtime/postgres", "based-runtime/tls-rustls"]
 based-ast = { workspace = true }
 based-diagnostics = { workspace = true }
 based-manifest = { workspace = true }
+based-artifacts = { path = "../based-artifacts" }
 based-parser = { workspace = true }
 based-fmt = { workspace = true }
 based-sema = { workspace = true }
@@ -51,3 +52,4 @@ workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"

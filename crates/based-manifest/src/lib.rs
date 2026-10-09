@@ -9,7 +9,9 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+mod generation;
 mod validate;
+pub use generation::{ClientMode, GenerationConfig};
 
 /// Parsed `based.toml`.
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +27,9 @@ pub struct Manifest {
     /// `[schema]` block — schema-wide conventions.
     #[serde(default)]
     pub schema: SchemaConfig,
+    /// `[generate]` destinations and mode; paths are relative to the manifest directory.
+    #[serde(default)]
+    pub generate: GenerationConfig,
 }
 
 /// The `[schema]` manifest block: project-wide schema conventions.
