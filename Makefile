@@ -294,3 +294,7 @@ ci-runtime-benchmark:
 ci-cargo-generation:
 	$(CI) cargo-generation
 
+.PHONY: ci-initializer
+ci-initializer:
+	$(CARGO) build --locked -p based-cli
+	$(CI) initializer --based $(BASED)
