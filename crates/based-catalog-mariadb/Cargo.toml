@@ -1,0 +1,21 @@
+[package]
+name = "based-catalog-mariadb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+mariadb = ["dep:sqlx"]
+
+[dependencies]
+based-catalog = { path = "../based-catalog" }
+sqlx = { version = "0.9.0", optional = true, default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring"] }
+
+[dev-dependencies]
+based-catalog = { path = "../based-catalog", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
