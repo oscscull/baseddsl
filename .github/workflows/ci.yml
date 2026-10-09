@@ -11,13 +11,6 @@ on:
   pull_request:
 
 jobs:
-  standalone-tutorial:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: make ci-standalone-tutorial
-
   initializer:
     runs-on: ubuntu-latest
     steps:

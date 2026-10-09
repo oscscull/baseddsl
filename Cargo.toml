@@ -7,6 +7,7 @@ members = [
     "crates/based-manifest",
     "crates/based-artifacts",
     "crates/based-project",
+    "crates/based-catalog",
     "crates/based-build",
     "crates/based-parser",
     "crates/based-fmt",
