@@ -7,6 +7,7 @@
 - [Deploying the service](deployment.md)
 - [Retrying mutations](idempotency.md)
 - [Permission guards](guards.md)
+- [Performance](performance.md)
 - [Compatibility and reports](support.md)
 - [Design principles](principles.md)
 - [Language reference](reference.md)
