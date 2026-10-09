@@ -11,6 +11,7 @@
 //! The derivation itself lives in `based-facts`; this crate maps those facts onto
 //! the LSP wire.
 
+mod cli;
 mod compile;
 mod sqltok;
 
@@ -663,7 +664,10 @@ fn to_lsp_diagnostic(d: &based_diagnostics::Diagnostic, idx: &compile::LineIndex
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
+    if let Some(status) = cli::handle() {
+        return status;
+    }
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(|client| Backend {
@@ -671,4 +675,5 @@ async fn main() {
         state: Mutex::new(State::default()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
+    std::process::ExitCode::SUCCESS
 }
