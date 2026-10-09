@@ -3,6 +3,7 @@
 - [Based](introduction.md)
 - [Installation](installation.md)
 - [Generated clients and artifacts](generation.md)
+- [Generating during a Cargo build](cargo-generation.md)
 - [Project and connection configuration](configuration.md)
 - [Migrations and recovery](migrations.md)
 - [Deploying the service](deployment.md)

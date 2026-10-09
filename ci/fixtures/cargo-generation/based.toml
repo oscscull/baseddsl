@@ -1,0 +1,4 @@
+dialect = "sqlite"
+root = "schema"
+[generate]
+client_mode = "embedded"

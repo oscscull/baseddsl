@@ -1,10 +1,7 @@
 //! Generate one complete artifact from a checked compiler result; no filesystem writes.
 use crate::{error::CliError, project::Loaded};
 use based_artifacts::Format;
-use based_codegen::{
-    client::{ClientOptions, ClientTarget},
-    Dialect,
-};
+use based_codegen::Dialect;
 use based_manifest::ClientMode;
 
 #[derive(Clone, Copy)]
@@ -36,20 +33,7 @@ pub(super) fn render(kind: Kind, loaded: &Loaded, mode: ClientMode) -> Result<St
     let (project, schema, decls, _, _) = loaded;
     let dialect = Dialect::parse(&project.manifest.dialect);
     match kind {
-        Kind::Client => {
-            let target = ClientTarget::try_parse(&project.manifest.client)
-                .ok_or_else(|| CliError::usage("invalid client target; expected rust"))?;
-            let embedded = mode == ClientMode::Embedded;
-            Ok(based_codegen::client::client_with(
-                schema,
-                decls,
-                target,
-                ClientOptions {
-                    embedded,
-                    dialect: embedded.then_some(dialect),
-                },
-            ))
-        }
+        Kind::Client => Ok(based_project::render_client(project, schema, decls, mode)),
         Kind::Sql => Ok(super::sql::render(
             schema,
             decls,

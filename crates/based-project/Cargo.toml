@@ -1,0 +1,17 @@
+[package]
+name = "based-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+based-ast.workspace = true
+based-diagnostics.workspace = true
+based-manifest.workspace = true
+based-parser.workspace = true
+based-sema.workspace = true
+based-codegen = { path = "../based-codegen", default-features = false, features = ["client"] }
+
+[lints]
+workspace = true
