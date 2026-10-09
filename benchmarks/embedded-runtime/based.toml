@@ -1,3 +1,7 @@
 dialect = "sqlite"
 client = "rust"
 root = "schema"
+
+[generate]
+client = "generated/client.rs"
+client_mode = "embedded"
