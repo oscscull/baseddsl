@@ -1,3 +1,4 @@
+mod benchmark;
 mod client;
 mod command;
 mod consumer;
@@ -12,10 +13,12 @@ struct Options {
 #[derive(Subcommand)]
 enum Task {
     GeneratedConsumer { dialect: String },
+    RuntimeBenchmark,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
     match Options::parse().task {
         Task::GeneratedConsumer { dialect } => consumer::verify(&dialect),
+        Task::RuntimeBenchmark => benchmark::verify(),
     }
 }
