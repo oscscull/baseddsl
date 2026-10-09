@@ -1,5 +1,6 @@
 mod archive;
 mod checksums;
+mod extension;
 mod metadata;
 mod smoke;
 
@@ -31,6 +32,15 @@ pub async fn package(
     smoke::verify(&artifact).await?;
     checksums::write(output)?;
     println!("{}", artifact.display());
+    Ok(())
+}
+
+pub fn extension(directory: &Path, output: &Path) -> Result<()> {
+    let source = metadata::source(None, false)?;
+    let name = format!("based-vscode-{}.vsix", source["version"].as_str().unwrap());
+    extension::verify(&directory.join(&name), source["version"].as_str().unwrap())?;
+    fs::create_dir_all(output)?;
+    fs::copy(directory.join(&name), output.join(&name))?;
     Ok(())
 }
 
@@ -72,6 +82,14 @@ pub fn collect(directory: &Path, expected_count: usize) -> Result<()> {
             "duplicate target"
         );
     }
+    let extensions = fs::read_dir(directory)?
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "vsix"))
+        .collect::<Vec<_>>();
+    ensure!(extensions.len() == 1, "expected one matching VSIX");
+    extension::verify(&extensions[0], version)?;
     checksums::write(directory)?;
     Ok(())
 }

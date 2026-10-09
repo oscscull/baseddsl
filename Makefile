@@ -134,7 +134,7 @@ ci-coloring:
 
 ## Build + package the VS Code extension (.vsix). `npm ci` is the reproducible install.
 ci-extension:
-	cd editors/vscode && $(NPM) ci && $(NPM) run compile && $(NPM) run package
+	cd editors/vscode && $(NPM) ci && $(NPM) run compile && $(NPM) test && $(NPM) run package
 
 ## Build the `based serve` container image, then smoke-boot it against
 ## bundled SQLite (no external DB) to prove the packaged image actually serves — the deploy

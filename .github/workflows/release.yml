@@ -67,8 +67,33 @@ jobs:
           mkdir "$RUNNER_TEMP/installed"
           tar -xzf "$RUNNER_TEMP/native/"*.tar.gz -C "$RUNNER_TEMP/installed"
           cargo run --locked -p based-ci -- source-consumer --based "$RUNNER_TEMP/installed/based"
+  vsix:
+    needs: native
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: based-native-x86_64-unknown-linux-gnu
+          path: native
+      - run: make ci-extension
+      - run: |
+          mkdir native/installed
+          tar -xzf native/*.tar.gz -C native/installed
+          cd editors/vscode
+          BASED_LSP="$GITHUB_WORKSPACE/native/installed/based-lsp" xvfb-run -a npm run test:installed
+      - run: cargo run --locked -p based-ci -- extension editors/vscode "$RUNNER_TEMP/vsix-assets"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: based-vsix
+          path: ${{ runner.temp }}/vsix-assets/*
+          if-no-files-found: error
   collect:
-    needs: [native, source-consumer]
+    needs: [native, source-consumer, vsix]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +102,10 @@ jobs:
         with:
           pattern: based-native-*
           merge-multiple: true
+          path: ${{ runner.temp }}/release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: based-vsix
           path: ${{ runner.temp }}/release-assets
       - run: cargo run --locked -p based-ci -- collect "$RUNNER_TEMP/release-assets"
       - uses: actions/upload-artifact@v4
