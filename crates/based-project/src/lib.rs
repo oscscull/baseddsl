@@ -39,6 +39,11 @@ pub fn load(root: &Path) -> Result<CheckedProject, Error> {
 /// Check an already discovered project without changing the discovery contract.
 pub fn check_project(project: Project) -> Result<CheckedProject, Error> {
     let sources = sources::read(&project)?;
+    check_sources(project, sources)
+}
+
+/// Check supplied sources through the same compiler pipeline, without filesystem I/O.
+pub fn check_sources(project: Project, sources: Sources) -> Result<CheckedProject, Error> {
     let (mut declarations, diagnostics) = parse::declarations(&sources);
     let mut report = Report {
         sources,
