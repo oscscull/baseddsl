@@ -13,6 +13,7 @@
 - [Upgrading](upgrading.md)
 - [Compatibility and reports](support.md)
 - [Changing Based](contributing.md)
+- [VS Code](editor.md)
 - [Design principles](principles.md)
 - [Language reference](reference.md)
 - [Verified database connections](tls.md)

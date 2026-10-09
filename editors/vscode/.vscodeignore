@@ -10,3 +10,6 @@ tsconfig.json
 **/*.map
 **/*.ts
 !out/**/*.js
+
+test/**
+.vscode-test/**

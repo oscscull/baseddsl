@@ -45,6 +45,10 @@ enum Task {
         #[arg(long, default_value_t = 5)]
         expected_count: usize,
     },
+    Extension {
+        directory: PathBuf,
+        output: PathBuf,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -64,5 +68,6 @@ async fn main() -> Result<()> {
             directory,
             expected_count,
         } => release::collect(&directory, expected_count),
+        Task::Extension { directory, output } => release::extension(&directory, &output),
     }
 }
