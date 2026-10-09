@@ -12,6 +12,11 @@ pub struct MariaDbCatalogReader {
 }
 
 impl MariaDbCatalogReader {
+    /// Parse the host's SQLx URL options, preserving verified TLS and redacting failures.
+    pub async fn connect_url(url: &str) -> Result<Self, CatalogReadError> {
+        Self::connect(url.parse().map_err(|_| CatalogReadError::Connection)?).await
+    }
+
     pub async fn connect(options: MySqlConnectOptions) -> Result<Self, CatalogReadError> {
         let mut connection = MySqlConnection::connect_with(&options.disable_statement_logging())
             .await

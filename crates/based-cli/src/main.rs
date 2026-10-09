@@ -14,6 +14,7 @@ mod external_guards;
 mod gen;
 mod idempotency_store;
 mod idempotency_table;
+mod import;
 mod init;
 mod local_config;
 mod migrate;
@@ -39,6 +40,8 @@ struct Cli {
 enum Command {
     /// Initialize an empty directory as an embedded app or local HTTP service.
     Init(init::options::Options),
+    /// Import explicitly selected database metadata as checked, hand-editable models.
+    Import(import::options::Options),
     /// Parse + typecheck the project, print diagnostics.
     Check {
         /// Explicit project root; otherwise find the nearest ancestor based.toml.
@@ -161,6 +164,7 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Init(options) => init::execute(options),
+        Command::Import(options) => import::execute(options).await,
         Command::Check { root } => check::cmd_check(&project_root::resolve(root.as_deref())?),
         Command::Fmt { root, check } => {
             check::cmd_fmt(&project_root::resolve(root.as_deref())?, check)
