@@ -11,6 +11,7 @@
 - [Deploying the service](deployment.md)
 - [Retrying mutations](idempotency.md)
 - [Permission guards](guards.md)
+- [Importing an existing database](import.md)
 - [Performance](performance.md)
 - [Upgrading](upgrading.md)
 - [Compatibility and reports](support.md)

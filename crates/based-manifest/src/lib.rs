@@ -93,6 +93,23 @@ pub const MANIFEST_NAME: &str = "based.toml";
 /// root into the closed file set. Directory layout is not constrained ; files
 /// are returned in a stable, path-sorted order so diagnostics are deterministic.
 pub fn discover(root: &Path) -> Result<Project, Vec<Diagnostic>> {
+    let project = discover_allow_empty(root)?;
+    if project.files.is_empty() {
+        let schema_root = project
+            .manifest
+            .root
+            .as_ref()
+            .map_or_else(|| root.to_path_buf(), |schema| root.join(schema));
+        return Err(vec![Diagnostic::error(
+            "E0012",
+            format!("no `.bsl` files found under {}", schema_root.display()),
+        )]);
+    }
+    Ok(project)
+}
+
+/// Validate/discover inputs for callers staging the first models. Filesystem errors remain errors.
+pub fn discover_allow_empty(root: &Path) -> Result<Project, Vec<Diagnostic>> {
     let manifest_path = root.join(MANIFEST_NAME);
     let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
         vec![Diagnostic::error(
@@ -135,13 +152,6 @@ pub fn discover(root: &Path) -> Result<Project, Vec<Diagnostic>> {
         })
         .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
-
-    if files.is_empty() {
-        return Err(vec![Diagnostic::error(
-            "E0012",
-            format!("no `.bsl` files found under {}", schema_root.display()),
-        )]);
-    }
 
     Ok(Project { manifest, files })
 }
