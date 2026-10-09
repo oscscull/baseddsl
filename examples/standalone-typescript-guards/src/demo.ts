@@ -10,9 +10,12 @@ import { edge } from "./edge.js";
 import { listen, close } from "./listener.js";
 import { run, startBased, stop } from "./based-process.js";
 import { post } from "./request.js";
+import { verifyRequiredContext } from "./verify-context.js";
+import { verifyEdgeHeaders } from "./verify-edge.js";
 import { verifyPermissions, verifyUnavailable } from "./verify-guards.js";
 
 async function demo() {
+  await verifyEdgeHeaders();
   const source = fileURLToPath(new URL("../", import.meta.url));
   const binary = process.env.BASED_BIN ? resolve(process.env.BASED_BIN) : "based";
   const directory = await mkdtemp(join(tmpdir(), "based-ts-guards-"));
@@ -29,6 +32,7 @@ async function demo() {
     await run(binary, ["migrate", "gen"], directory, env);
     await run(binary, ["migrate", "apply"], directory, env);
     based = await startBased(binary, directory, env);
+    await verifyRequiredContext(based.url);
     // Local fixture setup; create_org is deliberately unavailable through the gateway.
     const org = await post(`${based.url}/m/create_org`, { name: "Demo" });
     assert.equal(org.status, 200);

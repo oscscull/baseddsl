@@ -4,6 +4,7 @@
 - [Installation](installation.md)
 - [Project and connection configuration](configuration.md)
 - [Migrations and recovery](migrations.md)
+- [Deploying the service](deployment.md)
 - [Retrying mutations](idempotency.md)
 - [Permission guards](guards.md)
 - [Compatibility and reports](support.md)

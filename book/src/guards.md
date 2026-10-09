@@ -53,4 +53,4 @@ BASED_BIN=../../target/debug/based npm test
 Read its authentication edge, callback, and BSL before adapting it. The edge uses
 local example tokens, constructs fresh forwarding headers, and keeps the backend
 and callback on loopback. Production deployment needs your own identity system
-and [network boundary](reference.md).
+and [network boundary](deployment.md).
