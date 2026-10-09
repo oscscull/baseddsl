@@ -17,7 +17,7 @@ pub fn assess(table: &Table) -> Vec<CatalogDiagnostic> {
                 &table.id,
                 foreign.name.as_deref(),
                 CatalogCode::UnsupportedAttribute,
-                "FK match/deferral/SET DEFAULT semantics are retained but need manual review",
+                "Unknown or nonstandard FK match/deferral/SET DEFAULT semantics need manual review",
             )
         })
         .collect()

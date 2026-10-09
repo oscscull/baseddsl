@@ -31,7 +31,7 @@ pub fn assess(table: &Table) -> Vec<CatalogDiagnostic> {
                     &table.id,
                     key.name.as_deref(),
                     CatalogCode::UnsupportedAttribute,
-                    "Deferrable key semantics are not automatically represented",
+                    "Unknown or deferred key timing is not automatically represented",
                 )
             }),
     );
