@@ -77,6 +77,10 @@ fn one(
 }
 
 fn all(root: &Path, options: OutputOptions) -> Result<(), CliError> {
+    output::publish(&prepared_all(root)?, options.policy())
+}
+
+pub(crate) fn prepared_all(root: &Path) -> Result<Vec<based_artifacts::Artifact>, CliError> {
     let loaded = load_checked(root)?;
     let mode = loaded.0.manifest.generate.client_mode;
     let artifacts = [Kind::Client, Kind::Sql, Kind::OpenApi]
@@ -89,5 +93,5 @@ fn all(root: &Path, options: OutputOptions) -> Result<(), CliError> {
             "no [generate] destinations configured in based.toml",
         ));
     }
-    output::publish(&artifacts, options.policy())
+    Ok(artifacts)
 }

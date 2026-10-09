@@ -2,6 +2,7 @@
 
 - [Based](introduction.md)
 - [Installation](installation.md)
+- [Calling the HTTP service](standalone.md)
 - [Generated clients and artifacts](generation.md)
 - [Generating during a Cargo build](cargo-generation.md)
 - [Project and connection configuration](configuration.md)
