@@ -50,5 +50,48 @@ pub async fn verify(artifact: &Path) -> Result<()> {
         !status.to_lowercase().contains("pending") || status.to_lowercase().contains("0 pending"),
         "pending native migration: {status}"
     );
+    sqlite_engine(&based, scratch.path(), &app.join("local.db"))?;
+    Ok(())
+}
+
+fn sqlite_engine(based: &Path, root: &Path, database: &Path) -> Result<()> {
+    let probe = root.join("import-probe");
+    fs::create_dir_all(probe.join("models"))?;
+    fs::write(
+        probe.join("based.toml"),
+        "dialect='sqlite'\nroot='models'\n",
+    )?;
+    let before = fs::read(database)?;
+    let output = command::run(
+        based,
+        &[
+            "import",
+            "--database-url",
+            database.to_str().unwrap(),
+            "--table",
+            "main.item",
+            "--json",
+        ],
+        &probe,
+        &Environment::new(),
+    )?;
+    let report: Value = serde_json::from_str(&output)?;
+    let version = report["catalog"]["source"]["server_version"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing SQLite version"))?;
+    let version = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(
+        version.as_slice() >= [3, 51, 3].as_slice(),
+        "extracted CLI uses an older SQLite engine"
+    );
+    ensure!(
+        report["status"] == "imported"
+            && fs::read(database)? == before
+            && !probe.join("migrations").exists(),
+        "native import changed database"
+    );
     Ok(())
 }
