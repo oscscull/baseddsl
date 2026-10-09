@@ -18,7 +18,12 @@ fn offline_commands_and_outputs_resolve_from_child_directories() {
             success(project.run("src/nested", &["gen", target])).stdout
         );
         success(project.run("src/nested", &["gen", target, "-o", "artifact.txt"]));
-        assert_eq!(root, std::fs::read(project.0.join("artifact.txt")).unwrap());
+        let saved = std::fs::read(project.0.join("artifact.txt")).unwrap();
+        assert_eq!(
+            artifact_payload(target, &root),
+            artifact_payload(target, &saved)
+        );
+        assert!(String::from_utf8_lossy(&saved).contains("--out=artifact.txt"));
     }
     success(project.run("src/nested", &["migrate", "gen"]));
     assert!(project.0.join("migrations/0001_init/up.mig").exists());
@@ -27,6 +32,29 @@ fn offline_commands_and_outputs_resolve_from_child_directories() {
         success(project.run("", &["migrate", "render"])).stdout,
         success(project.run("src/nested", &["migrate", "render"])).stdout
     );
+}
+
+/// File destinations change regeneration metadata, while the generated payload
+/// remains independent of the invoking directory and output transport.
+fn artifact_payload(target: &str, bytes: &[u8]) -> serde_json::Value {
+    if target == "openapi" {
+        let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("x-based-generated");
+        return document;
+    }
+    serde_json::Value::String(
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                !line.starts_with("// Regenerate ") && !line.starts_with("-- Regenerate ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 #[test]
