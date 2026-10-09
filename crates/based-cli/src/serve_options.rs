@@ -17,7 +17,7 @@ pub struct ServeOptions {
     /// Warm connections kept per shard pool.
     #[arg(long, default_value_t = 4)]
     pub pool_min: usize,
-    /// Max connections per shard pool (the per-box concurrency cap).
+    /// Max database connections per shard. Bound HTTP concurrency at the trusted edge.
     #[arg(long, default_value_t = 32)]
     pub pool_max: usize,
     #[command(flatten)]
