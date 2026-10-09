@@ -1,5 +1,8 @@
-//! Create and read an item through the generated in-process client.
+//! Wire the database and checked schema into the embedded engine.
 mod database;
+mod demo;
+mod lookup;
+mod session;
 
 #[allow(dead_code)]
 mod client {
@@ -15,18 +18,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         database::connect(root)?,
         based_runtime::id::UuidGen,
     );
-    let api = client::embedded(&engine);
-    let created = api
-        .create_item(
-            client::CreateItemInput {
-                name: "Hello Based".into(),
-            },
-            (),
-        )
-        .await?;
-    let rows = api.items(client::ItemsInput {}, ()).await?;
-    assert!(rows.iter().any(|row| row.id == created.id));
-    println!("created: {}", serde_json::to_string(&created)?);
-    println!("read: {}", serde_json::to_string(&rows)?);
+    demo::run(&engine, session::Session::local_demo()).await?;
     Ok(())
 }

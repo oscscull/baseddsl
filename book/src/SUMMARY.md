@@ -2,6 +2,7 @@
 
 - [Based](introduction.md)
 - [Installation](installation.md)
+- [A small Rust application](embedded.md)
 - [Calling the HTTP service](standalone.md)
 - [Generated clients and artifacts](generation.md)
 - [Generating during a Cargo build](cargo-generation.md)

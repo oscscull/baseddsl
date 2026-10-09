@@ -66,7 +66,7 @@ jobs:
       - run: |
           mkdir "$RUNNER_TEMP/installed"
           tar -xzf "$RUNNER_TEMP/native/"*.tar.gz -C "$RUNNER_TEMP/installed"
-          cargo run --locked -p based-ci -- source-consumer --based "$RUNNER_TEMP/installed/based"
+          cargo run --locked -p based-ci -- embedded-tutorial --based "$RUNNER_TEMP/installed/based"
   vsix:
     needs: native
     runs-on: ubuntu-22.04

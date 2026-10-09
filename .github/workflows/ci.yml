@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: make ci-initializer
+      - run: make ci-initializer ci-embedded-tutorial
 
   cargo-generation:
     runs-on: ubuntu-latest
