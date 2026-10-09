@@ -1,0 +1,3 @@
+dialect = "sqlite"
+client = "rust"
+root = "schema"

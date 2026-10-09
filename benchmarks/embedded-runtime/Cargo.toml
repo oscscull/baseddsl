@@ -1,0 +1,25 @@
+[package]
+name = "embedded-runtime-benchmark"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = []
+
+[dependencies]
+based-runtime = { path = "../../crates/based-runtime", features = ["sqlite"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1.92"
+
+[profile.release]
+lto = "thin"
+
+[lints.clippy]
+too_many_lines = "deny"
+redundant_clone = "deny"
+manual_let_else = "deny"

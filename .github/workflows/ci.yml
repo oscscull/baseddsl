@@ -11,6 +11,15 @@ on:
   pull_request:
 
 jobs:
+  runtime-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: make ci-runtime-benchmark
+
   # Infra-free gate: fmt + clippy + the full test suite.
   workspace:
     runs-on: ubuntu-latest
