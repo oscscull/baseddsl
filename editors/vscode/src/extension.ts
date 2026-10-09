@@ -1,56 +1,26 @@
-// VS Code client for the Based DSL. Launches the `based-lsp` binary over stdio and
-// wires it up as the language server for `.bsl` files, surfacing the diagnostics,
-// inlay hints, and hover the server already emits (M5).
+// Own the extension's language-client lifecycle.
 import * as vscode from "vscode";
-import {
-  LanguageClient,
-  LanguageClientOptions,
-  ServerOptions,
-  TransportKind,
-} from "vscode-languageclient/node";
+import { LanguageClient } from "vscode-languageclient/node";
+import { createClient } from "./language-client";
+import { checkServer } from "./server-preflight";
 
 let client: LanguageClient | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
-  const config = vscode.workspace.getConfiguration("basedls");
-  const serverPath = config.get<string>("serverPath", "based-lsp");
-
-  // The server communicates over stdio (tower-lsp). It takes no args; the client
-  // sends the workspace root at `initialize`, and the server globs `**/*.bsl`.
-  const serverOptions: ServerOptions = {
-    run: { command: serverPath, transport: TransportKind.stdio },
-    debug: { command: serverPath, transport: TransportKind.stdio },
-  };
-
-  const clientOptions: LanguageClientOptions = {
-    // Attach to every `.bsl` document.
-    documentSelector: [{ scheme: "file", language: "bsl" }],
-    synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.bsl"),
-    },
-    // The server publishes diagnostics unprompted; inlay hints, hover, and the
-    // per-dialect SQL semantic tokens over `raw`…`` blocks are pulled via the
-    // capabilities it advertises at initialize. Nothing extra to enable client-side
-    // beyond registering for the language — vscode-languageclient negotiates the
-    // inlay-hint and semantic-tokens capabilities automatically when the server
-    // offers them (semantic highlighting layers over the TextMate grammar).
-  };
-
-  client = new LanguageClient(
-    "basedls",
-    "Based DSL Language Server",
-    serverOptions,
-    clientOptions,
-  );
-
-  // start() also registers the client so it is disposed on deactivate.
-  context.subscriptions.push(client);
-  client.start().catch((err: unknown) => {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const serverPath = vscode.workspace
+    .getConfiguration("basedls")
+    .get<string>("serverPath", "based-lsp");
+  try {
+    await checkServer(serverPath, context.extension.packageJSON.version as string);
+    client = createClient(serverPath);
+    context.subscriptions.push(client);
+    await client.start();
+  } catch (error: unknown) {
     void vscode.window.showErrorMessage(
-      `Based DSL: failed to start language server "${serverPath}". ` +
-        `Build it with \`cargo build -p based-lsp\` and set \`basedls.serverPath\` if it is not on PATH. (${String(err)})`,
+      `Based DSL: ${error instanceof Error ? error.message : String(error)}`,
     );
-  });
+    throw error;
+  }
 }
 
 export function deactivate(): Thenable<void> | undefined {
