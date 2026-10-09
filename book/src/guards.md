@@ -39,3 +39,18 @@ Keep callbacks to permission decisions. Put race-sensitive invariants in atomic
 write conditions or transactions; callback side effects are not part of a database
 commit. The host or trusted edge must derive the context.
 
+## Example
+
+From the repository root, run the TypeScript orders example:
+
+```sh
+cargo build -p based-cli --no-default-features
+cd examples/standalone-typescript-guards
+npm ci
+BASED_BIN=../../target/debug/based npm test
+```
+
+Read its authentication edge, callback, and BSL before adapting it. The edge uses
+local example tokens, constructs fresh forwarding headers, and keeps the backend
+and callback on loopback. Production deployment needs your own identity system
+and [network boundary](reference.md).
