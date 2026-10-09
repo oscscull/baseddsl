@@ -19,8 +19,8 @@ impl std::fmt::Display for MigrationFailure {
             self.id, self.direction, self.stage, self.source.message
         )?;
         if matches!(self.dialect, Dialect::MariaDb | Dialect::MySql) {
-            return f.write_str("DDL may already be committed even without a completion ledger row; inspect the live schema and _based_migrations, restore a known state before retry (docs/migration-recovery.md)");
+            return f.write_str("DDL may already be committed even without a completion ledger row; inspect the live schema and _based_migrations, restore a known state before retry (book/src/migrations.md)");
         }
-        f.write_str("transaction rollback is expected for transactional SQL, but commit failures can be ambiguous; inspect the live schema and _based_migrations before retry (docs/migration-recovery.md)")
+        f.write_str("transaction rollback is expected for transactional SQL, but commit failures can be ambiguous; inspect the live schema and _based_migrations before retry (book/src/migrations.md)")
     }
 }

@@ -29,6 +29,7 @@
 
 CARGO ?= cargo
 NPM   ?= npm
+CI := $(CARGO) run --locked -p based-ci --
 # Test runner. nextest isolates each test in its own process; that avoids the in-process
 # contention (shared sockets/temp files) that makes `cargo test` serialize the sqlite/serve
 # suite from ~4s to ~17min here. It does not run doctests — those run as a separate `--doc` step
@@ -265,10 +266,10 @@ ci-standalone-store:
 ## Fresh external consumers are expensive; run separately from the workspace loop.
 .PHONY: ci-generated-consumer-sqlite ci-generated-consumer-mariadb ci-generated-consumer-postgres
 ci-generated-consumer-sqlite: based-cli
-	$(ROOT)ci/generated-consumers.py sqlite
+	$(CI) generated-consumer sqlite
 
 ci-generated-consumer-mariadb: based-cli
-	TEST_MARIADB_URL="$(MARIADB_URL)" $(ROOT)ci/generated-consumers.py mariadb
+	TEST_MARIADB_URL="$(MARIADB_URL)" $(CI) generated-consumer mariadb
 
 ci-generated-consumer-postgres: based-cli
-	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(ROOT)ci/generated-consumers.py postgres
+	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CI) generated-consumer postgres

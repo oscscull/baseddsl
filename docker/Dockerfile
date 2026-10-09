@@ -3,13 +3,13 @@
 # Container image for `based serve`. Multi-stage: a Rust builder
 # compiles the release `based` binary; a slim runtime carries just the binary + its
 # entrypoint. The served project (based.toml + **/*.bsl [+ migrations/]) is mounted at
-# /app, and everything else is env-configured — see docker/README.md for the run recipe.
+# /app, and everything else is env-configured — see book/src/deployment.md for the run recipe.
 #
 # Build from the repo root:  docker build -f docker/Dockerfile -t based-serve .
 
 # --- build stage --------------------------------------------------------------------
 # Tracks stable 1.x (matches CI's `dtolnay/rust-toolchain@stable`); the workspace floor is
-# 1.85 but the resolved lockfile pulls deps needing a newer stable, so we don't pin below it.
+# 1.94 (the SQLx floor); use stable rather than pinning below resolved dependency requirements.
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY . .

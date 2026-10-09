@@ -604,9 +604,7 @@ fn graceful_shutdown_drains_and_returns() {
         .expect("serve thread should return after drain");
 }
 
-/// A guard is a host function this standalone listener cannot register, so a guarded
-/// schema is refused at startup — the loud build-time failure, never a request-time
-/// silent pass. (A guarded schema embeds the engine via `Engine::with_guards`.)
+/// Missing guard mappings refuse listener startup before binding.
 #[tokio::test]
 async fn listener_refuses_a_guarded_schema_at_startup() {
     const GUARDED: &str = r#"
@@ -631,5 +629,9 @@ async fn listener_refuses_a_guarded_schema_at_startup() {
     .await
     .expect_err("a guarded schema must not come up on the listener");
     assert!(err.to_string().contains("caller_can_close"), "{err}");
-    assert!(err.to_string().contains("Engine::with_guards"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("no guard with that name is registered"),
+        "{err}"
+    );
 }

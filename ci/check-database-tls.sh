@@ -53,12 +53,8 @@ for kind in postgres mariadb; do
     cp -R "examples/$kind-quickstart/$entry" "$example/"
   done
   # Preserve the standalone consumer's path dependencies while isolating all data/artifacts.
-  python3 - "$example/Cargo.toml" "$root" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-p.write_text(p.read_text().replace('../../crates/', sys.argv[2] + '/crates/'))
-PY
+  sed "s|../../crates/|$root/crates/|g" "$example/Cargo.toml" > "$example/Cargo.toml.tmp"
+  mv "$example/Cargo.toml.tmp" "$example/Cargo.toml"
   url="$TEST_TLS_POSTGRES_URL"
   if [[ "$kind" == mariadb ]]; then url="$TEST_TLS_MARIADB_URL"; fi
   "$root/target/debug/based" migrate apply "$example" --database-url "$url"
@@ -68,7 +64,7 @@ PY
     if "$root/target/debug/based" migrate status "$example" --database-url "$bad_url" >"$fixture_dir/out" 2>"$fixture_dir/err"; then
       echo 'CLI accepted an invalid TLS certificate/hostname' >&2; exit 1
     fi
-    if rg -q 'based_tls_test_pw' "$fixture_dir/out" "$fixture_dir/err"; then
+    if grep -q 'based_tls_test_pw' "$fixture_dir/out" "$fixture_dir/err"; then
       echo 'CLI exposed a database credential' >&2; exit 1
     fi
   done

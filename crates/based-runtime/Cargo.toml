@@ -41,6 +41,8 @@ sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:base64"]
 serve = ["dep:axum", "id-gen", "tokio/net"]
 # Production UUID/ULID generation for embedded apps, without the HTTP listener.
 id-gen = ["dep:uuid", "dep:ulid"]
+# Authenticated, certificate-verified HTTP callbacks; opt-in for embedded consumers.
+external-guards = ["dep:reqwest", "dep:serde"]
 # The Docker-backed real-DB integration harness + live suites. Brings up ephemeral
 # MariaDB/Postgres containers (via the `docker` CLI) — or connects to provided servers
 # via `TEST_MARIADB_URL`/`TEST_POSTGRES_URL` — to run the *verbatim* codegen-lowered
@@ -91,7 +93,11 @@ ulid = { version = "1", optional = true }
 # driver binds/reads (in the concrete driver impls only).
 base64 = { version = "0.22", optional = true }
 
+serde = { workspace = true, optional = true }
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["rustls", "stream"] }
+
 [dev-dependencies]
+tokio-rustls = "0.26"
 # The embedded-client drift test regenerates its fixture; consumers do not.
 based-codegen.workspace = true
 based-parser.workspace = true

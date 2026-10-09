@@ -57,6 +57,8 @@
 
 pub mod cursor;
 pub mod embed;
+#[cfg(feature = "external-guards")]
+pub mod external_guard;
 pub mod guard;
 pub mod id;
 pub mod idempotency;
@@ -116,8 +118,8 @@ pub use sqlx;
 
 #[cfg(feature = "serve")]
 pub use http::{
-    serve, serve_with_handle, serve_with_store, Context, ContextSource, Handle, HeaderView,
-    ServeConfig, ServeError, TrustedHeaderContext,
+    serve, serve_with_guards, serve_with_handle, serve_with_store, Context, ContextSource, Handle,
+    HeaderView, ServeConfig, ServeError, TrustedHeaderContext,
 };
 
 #[cfg(feature = "sqlite")]

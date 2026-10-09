@@ -32,6 +32,7 @@ based-version = { workspace = true }
 # commands — check/gen/facts/migrate gen|render — don't touch any of them.
 based-runtime = { path = "../based-runtime", features = [
     "serve",
+    "external-guards",
     "sqlite",
 ] }
 # The binary owns the async runtime: execution (serve, migrate apply/status) is native
@@ -39,6 +40,8 @@ based-runtime = { path = "../based-runtime", features = [
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 clap = { workspace = true }
 dotenvy = "0.15"
+serde.workspace = true
+toml.workspace = true
 # Graceful shutdown of `based serve`: catch SIGTERM/SIGINT and drain (principle 7 —
 # reuse a hardened signal crate rather than hand-roll platform signal handling).
 ctrlc = { workspace = true }
