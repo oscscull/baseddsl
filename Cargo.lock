@@ -264,6 +264,17 @@ name = "based-ast"
 version = "0.1.12"
 
 [[package]]
+name = "based-build"
+version = "0.1.12"
+dependencies = [
+ "based-artifacts",
+ "based-manifest",
+ "based-project",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "based-ci"
 version = "0.1.12"
 dependencies = [
@@ -295,6 +306,7 @@ dependencies = [
  "based-fmt",
  "based-manifest",
  "based-parser",
+ "based-project",
  "based-runtime",
  "based-sema",
  "based-version",
@@ -381,6 +393,18 @@ dependencies = [
  "based-ast",
  "based-diagnostics",
  "logos",
+]
+
+[[package]]
+name = "based-project"
+version = "0.1.12"
+dependencies = [
+ "based-ast",
+ "based-codegen",
+ "based-diagnostics",
+ "based-manifest",
+ "based-parser",
+ "based-sema",
 ]
 
 [[package]]

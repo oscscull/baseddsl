@@ -1,0 +1,16 @@
+[package]
+name = "based-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+based-manifest.workspace = true
+based-project.workspace = true
+based-artifacts = { path = "../based-artifacts" }
+sha2 = "0.10"
+tempfile = "3"
+
+[lints]
+workspace = true
