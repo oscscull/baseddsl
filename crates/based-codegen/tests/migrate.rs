@@ -862,6 +862,13 @@ fn composite_key_snapshot_round_trips_with_multi_column_pk_and_fk() {
         "\n{text}"
     );
 
+    // The FK's own columns are real snapshot columns, not one phantom `<field>_id`.
+    assert!(
+        text.contains("column enrollment_course_id uuid not_null fk=Enrollment"),
+        "\n{text}"
+    );
+    assert!(!text.contains("enrollment_id "), "\n{text}");
+
     // Round-trips through parse, and a re-diff is empty (stable).
     let parsed = Snapshot::parse(&text).expect("round-trip parse");
     assert_eq!(Snapshot::from_schema(&schema), parsed);
@@ -959,4 +966,65 @@ fn signed_defaults_from_scratch_and_round_trip() {
     let parsed = Snapshot::parse(&snap.render()).expect("round-trip parse");
     assert_eq!(snap, parsed);
     assert!(migrate::diff(&parsed, &schema).is_empty());
+}
+
+#[test]
+fn aliased_composite_fk_snapshot_round_trips_and_builds_real_columns() {
+    let schema = checked(
+        r#"
+        @key(tenant_id, id)
+        Order { tenant_id: int  id: text  total: int }
+        Line { id: Id  order: Order (column id = "ord_no", tenant_id = "ord_tenant") @fk }
+        "#,
+    );
+    let text = migrate::snapshot(&schema);
+    assert!(
+        text.contains("column ord_no text not_null fk=Order"),
+        "\n{text}"
+    );
+    assert!(
+        text.contains("column ord_tenant int not_null fk=Order"),
+        "\n{text}"
+    );
+    assert!(
+        text.contains("fk (ord_tenant, ord_no) -> order.(tenant_id, id)"),
+        "\n{text}"
+    );
+    assert!(!text.contains("order_id"), "\n{text}");
+    let parsed = Snapshot::parse(&text).expect("round-trip parse");
+    assert_eq!(Snapshot::from_schema(&schema), parsed);
+    assert!(migrate::diff(&parsed, &schema).is_empty());
+
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    for dialect in [Dialect::MariaDb, Dialect::Sqlite, Dialect::Postgres] {
+        let sql = migrate::render_sql(&steps, dialect);
+        let q = if dialect == Dialect::Postgres {
+            '"'
+        } else {
+            '`'
+        };
+        assert!(
+            sql.contains(&format!("{q}ord_tenant{q} BIGINT NOT NULL"))
+                || sql.contains(&format!("{q}ord_tenant{q} INTEGER NOT NULL")),
+            "\n{sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "FOREIGN KEY ({q}ord_tenant{q}, {q}ord_no{q}) REFERENCES {q}order{q} ({q}tenant_id{q}, {q}id{q})"
+            )),
+            "\n{sql}"
+        );
+    }
+
+    // Re-aliasing one part is a column change the diff sees.
+    let renamed = checked(
+        r#"
+        @key(tenant_id, id)
+        Order { tenant_id: int  id: text  total: int }
+        Line { id: Id  order: Order (column id = "order_no", tenant_id = "ord_tenant") @fk }
+        "#,
+    );
+    let sql = migrate::render_sql(&migrate::diff(&parsed, &renamed), Dialect::Postgres);
+    assert!(sql.contains("\"order_no\""), "\n{sql}");
+    assert!(sql.contains("\"ord_no\""), "\n{sql}");
 }

@@ -39,6 +39,8 @@ mod aggregates;
 mod atomic_updates;
 #[path = "check/callables.rs"]
 mod callables;
+#[path = "check/column_aliases.rs"]
+mod column_aliases;
 #[path = "check/computed_fields.rs"]
 mod computed_fields;
 #[path = "check/context.rs"]

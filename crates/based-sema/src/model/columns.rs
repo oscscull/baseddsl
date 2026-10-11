@@ -189,6 +189,10 @@ pub(crate) fn classify(f: &Field, enums: &HashMap<String, EnumKind>) -> MemberKi
                     optional: f.ty.optional,
                     fk_col,
                     custom_on: f.relation_on.clone(),
+                    fk_aliases: column_map(f)
+                        .iter()
+                        .map(|a| (a.part.node.clone(), a.column.clone()))
+                        .collect(),
                     fk: fk_decl(f),
                 }
             }
@@ -233,4 +237,15 @@ pub(crate) fn column_override(f: &Field) -> Option<String> {
         Modifier::Column(c) => Some(c.clone()),
         _ => None,
     })
+}
+
+/// The field's `(column part = "…", …)` composite-key column map, if declared.
+pub(crate) fn column_map(f: &Field) -> &[ColumnAlias] {
+    f.modifiers
+        .iter()
+        .find_map(|m| match m {
+            Modifier::ColumnMap(aliases) => Some(aliases.as_slice()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::ir::*;
 use crate::resolve;
 
+mod column_aliases;
 mod columns;
 mod decimal_fit;
 mod decorators;
@@ -18,6 +19,7 @@ mod resolve_exprs;
 mod skeleton;
 mod validate;
 
+pub(crate) use column_aliases::*;
 pub(crate) use columns::*;
 use decimal_fit::decimal_fits;
 pub(crate) use decorators::*;

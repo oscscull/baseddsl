@@ -366,6 +366,19 @@ pub enum Modifier {
     Default(DefaultVal),
     /// `(column "legacy_name")` — alias onto a legacy / reserved-word column.
     Column(String),
+    /// `(column tenant_id = "ord_tenant", id = "ord_no")` — the local column for each
+    /// primary-key part of a composite-key relation target.
+    ColumnMap(Vec<ColumnAlias>),
+}
+
+/// One `part = "column"` entry of a composite relation's column map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnAlias {
+    /// A primary-key field of the relation's target model.
+    pub part: Ident,
+    /// The local physical column holding that key part.
+    pub column: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

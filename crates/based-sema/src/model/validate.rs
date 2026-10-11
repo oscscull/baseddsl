@@ -16,6 +16,7 @@ pub fn validate(
     validate_indexes(ast, mi, models, sink);
     validate_decorators(ast, mi, models, sink);
     validate_fk(ast, mi, models, sink);
+    validate_column_aliases(ast, mi, models, index, sink);
     validate_was(ast, mi, models, sink);
     validate_decimals(ast, sink);
     validate_time_bytes(ast, sink);

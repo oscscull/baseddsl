@@ -3,7 +3,7 @@
 
 use super::*;
 use based_ast::{DefaultVal, Literal, Primitive, SortDir, SortTerm};
-use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RModel, SoftDelete, SoftMode};
+use based_sema::{CheckedSchema, ForeignKeys, MemberKind, RMember, RModel, SoftDelete, SoftMode};
 
 impl Snapshot {
     /// Build the neutral snapshot from a resolved schema, under the default `foreign_keys`
@@ -94,18 +94,29 @@ fn column_snaps(schema: &CheckedSchema, model: &RModel) -> Vec<ColumnSnap> {
                 optional,
                 fk_col,
                 ..
-            } => columns.push(ColumnSnap {
-                // A relation is its FK column: its physical type is the target's
-                // key type (default uuid), and it carries the related model so a
-                // retyped/dropped relation reads as an add/drop/alter of `<field>_id`.
-                name: fk_col.clone(),
-                ty: fk_type(schema, target),
-                nullable: *optional,
-                default: None,
-                unique: false,
-                fk: Some(target.clone()),
-                generated: None,
-            }),
+            } => {
+                // A relation is its FK column(s): each typed as the target key part it
+                // references (default uuid), carrying the related model so a
+                // retyped/dropped relation reads as an add/drop/alter of its columns.
+                let pairs = schema.fk_columns(mem);
+                let typed: Vec<(String, String)> = if pairs.len() > 1 {
+                    pairs
+                        .into_iter()
+                        .map(|(column, part)| (column, key_part_type(schema, part)))
+                        .collect()
+                } else {
+                    vec![(fk_col.clone(), fk_type(schema, target))]
+                };
+                columns.extend(typed.into_iter().map(|(name, ty)| ColumnSnap {
+                    name,
+                    ty,
+                    nullable: *optional,
+                    default: None,
+                    unique: false,
+                    fk: Some(target.clone()),
+                    generated: None,
+                }));
+            }
             MemberKind::Inverse { .. } => {}
         }
     }
@@ -445,6 +456,24 @@ fn fk_type(schema: &CheckedSchema, target: &str) -> String {
         }) => "int".to_string(),
         Some(MemberKind::Scalar { ty, .. }) => neutral_type(*ty, false),
         _ => "uuid".to_string(),
+    }
+}
+
+/// The neutral storage type of one composite-key part an FK column references (a
+/// `serial` part stores as a plain `int`).
+fn key_part_type(schema: &CheckedSchema, part: &RMember) -> String {
+    match &part.kind {
+        MemberKind::Scalar {
+            raw_type: Some(spec),
+            ..
+        } => spec.canonical(),
+        MemberKind::Scalar {
+            ty: Primitive::Serial,
+            ..
+        } => "int".to_string(),
+        MemberKind::Scalar { ty, .. } => neutral_type(*ty, false),
+        MemberKind::Forward { target, .. } => fk_type(schema, target),
+        MemberKind::Inverse { .. } => "uuid".to_string(),
     }
 }
 

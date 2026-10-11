@@ -148,6 +148,34 @@ impl<'a> Parser<'a> {
         Ok((pred, end))
     }
 
+    /// `part = "column", …` — a composite relation's per-key-part columns. A comma
+    /// continues the map only when a `part =` entry follows; otherwise it separates the
+    /// next modifier.
+    fn column_map(&mut self) -> PResult<Vec<ColumnAlias>> {
+        let mut aliases = Vec::new();
+        loop {
+            let part = self.lower_ident("key part")?;
+            self.expect(Tok::Eq, "`=`")?;
+            let s = self.expect(Tok::Str, "a quoted column name")?;
+            aliases.push(ColumnAlias {
+                span: Span {
+                    file: self.file,
+                    start: part.span.start,
+                    end: s.end,
+                },
+                part,
+                column: unquote(self.text(s)),
+            });
+            let next_entry = self.at(Tok::Comma)
+                && self.tok_at(1) == Some(Tok::LowerIdent)
+                && self.tok_at(2) == Some(Tok::Eq);
+            if !next_entry {
+                return Ok(aliases);
+            }
+            self.bump();
+        }
+    }
+
     fn modifiers(&mut self) -> PResult<(Vec<Modifier>, u32)> {
         self.expect(Tok::LParen, "`(`")?;
         let mut mods = Vec::new();
@@ -157,8 +185,12 @@ impl<'a> Parser<'a> {
             } else if self.eat_kw("default") {
                 Modifier::Default(self.default_val()?)
             } else if self.eat_kw("column") {
-                let s = self.expect(Tok::Str, "a quoted column name")?;
-                Modifier::Column(unquote(self.text(s)))
+                if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::Eq) {
+                    Modifier::ColumnMap(self.column_map()?)
+                } else {
+                    let s = self.expect(Tok::Str, "a quoted column name")?;
+                    Modifier::Column(unquote(self.text(s)))
+                }
             } else {
                 self.err("expected `unique`, `default`, or `column`");
                 return Err(());

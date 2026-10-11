@@ -4,7 +4,7 @@ use super::{
 };
 use based_catalog::{Catalog, CatalogDialect, Table};
 use based_manifest::Manifest;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn render(
     catalog: &Catalog,
@@ -44,7 +44,14 @@ pub(crate) fn render(
         report.loss(&table.id, None, "SQLite STRICT/WITHOUT ROWID storage semantics are retained in the catalog but not reproduced by generated BSL DDL");
     }
     source.push_str(&format!("{} {{\n", naming.model));
+    let consumed: BTreeSet<&String> = relations
+        .iter()
+        .flat_map(|(first, foreign)| foreign.columns.iter().filter(move |c| *c != first))
+        .collect();
     for column in &table.columns {
+        if consumed.contains(&column.name) {
+            continue;
+        }
         let field = &naming.fields[&column.name];
         let serial = generation::serial(column, table, dialect, report);
         let ty = types::scalar(column, &table.id, dialect, report);
@@ -69,7 +76,7 @@ pub(crate) fn render(
             source.push_str(&format!(
                 "{field}: {}{optional} (column {}) @fk({reason}on_delete: {}, on_update: {})\n",
                 names[&foreign.target].model,
-                quote(&column.name),
+                relations::columns(foreign, &names[&foreign.target]),
                 relations::action(foreign.on_delete),
                 relations::action(foreign.on_update)
             ));
