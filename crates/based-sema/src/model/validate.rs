@@ -19,6 +19,7 @@ pub fn validate(
     validate_was(ast, mi, models, sink);
     validate_decimals(ast, sink);
     validate_time_bytes(ast, sink);
+    validate_int_defaults(ast, sink);
     compute_unique(ast, &mut models[mi]);
 }
 
@@ -27,7 +28,8 @@ const DECIMAL_MAX_PRECISION: u32 = 38;
 
 /// Check every `decimal(p, s)` field's precision/scale is in range (`1 ≤ s ≤ p ≤ 38`)
 /// and that a decimal column's `default` is a decimal literal (an integer or a fractional
-/// literal), not a string/bool — both. Purely local (one model's own fields).
+/// literal, optionally signed) that fits the column's precision and scale. Purely local
+/// (one model's own fields).
 pub(crate) fn validate_decimals(ast: &Model, sink: &mut Sink) {
     for mem in &ast.members {
         let Member::Field(f) = mem else { continue };
@@ -54,6 +56,39 @@ pub(crate) fn validate_decimals(ast: &Model, sink: &mut Sink) {
                     f.span,
                     format!(
                         "default for decimal column `{}` must be a decimal literal",
+                        f.name.node
+                    ),
+                );
+            } else if !decimal_fits(lit, precision, scale) {
+                sink.error(
+                    code::DECIMAL_INVALID,
+                    f.span,
+                    format!(
+                        "default for decimal column `{}` does not fit `decimal({precision}, \
+                         {scale})` without rounding",
+                        f.name.node
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// An `int` column's literal default must be an integer (a fractional one would be
+/// rounded by the database). Purely local.
+pub(crate) fn validate_int_defaults(ast: &Model, sink: &mut Sink) {
+    for mem in &ast.members {
+        let Member::Field(f) = mem else { continue };
+        if f.ty.base != BaseType::Primitive(Primitive::Int) {
+            continue;
+        }
+        for m in &f.modifiers {
+            if let Modifier::Default(DefaultVal::Lit(Literal::Decimal(_))) = m {
+                sink.error(
+                    code::INT_DEFAULT,
+                    f.span,
+                    format!(
+                        "default for int column `{}` must be an integer literal",
                         f.name.node
                     ),
                 );

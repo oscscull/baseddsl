@@ -323,6 +323,19 @@ fn time_default_renders_as_sql() {
 }
 
 #[test]
+fn signed_defaults_render_on_every_dialect() {
+    let src = "Ledger { id: Id, a: int (default -5), b: decimal(6, 2) (default -1.50) }";
+    for (ddl, q) in [(gen(src), '`'), (gen_sqlite(src), '`'), (gen_pg(src), '"')] {
+        assert!(
+            ddl.contains(&format!("{q}a{q} BIGINT NOT NULL DEFAULT -5"))
+                || ddl.contains(&format!("{q}a{q} INTEGER NOT NULL DEFAULT -5")),
+            "\n{ddl}"
+        );
+        assert!(ddl.contains("NOT NULL DEFAULT -1.50"), "\n{ddl}");
+    }
+}
+
+#[test]
 fn decimal_default_is_byte_exact() {
     // The trailing zero survives (a float round-trip would drop it).
     let ddl = gen("Order { id: Id, total: decimal(12, 2) (default 0.10) }");

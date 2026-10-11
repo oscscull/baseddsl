@@ -99,6 +99,27 @@ fn update_injects_soft_delete_scope_and_bumps_updated() {
 }
 
 #[test]
+fn signed_literals_never_render_as_a_sql_comment() {
+    let src = r#"
+        Product { id: Id, qty: int, name: text }
+        shape P from Product { qty }
+        mutation adjust(id: Id) -> P {
+          update Product where (id = $id and qty > -10) { qty = qty - -5 };
+        }
+        "#;
+    let maria = gen(src);
+    assert!(
+        maria.contains("SET `product`.`qty` = (`product`.`qty` - -5)"),
+        "\n{maria}"
+    );
+    assert!(maria.contains("`product`.`qty` > -10"), "\n{maria}");
+    assert!(
+        !maria.contains("--5") && !maria.contains("--10"),
+        "\n{maria}"
+    );
+}
+
+#[test]
 fn atomic_update_lowers_to_real_sql_expression() {
     // `qty = qty + $delta` becomes a computed SET — a real SQL expression over the
     // row's own column, not a read-modify-write. MariaDB qualifies the SET target.

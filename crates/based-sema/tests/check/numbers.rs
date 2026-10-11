@@ -72,3 +72,20 @@ fn decimal_default_must_be_a_decimal_literal() {
         "Ledger { id: Id, a: decimal(12, 2) (default 5), b: decimal(12, 2) (default 9.99) }",
     );
 }
+
+#[test]
+fn signed_defaults_check_against_the_column_type() {
+    assert_clean(
+        "Ledger { id: Id, a: int (default -5), b: decimal(6, 2) (default -1.25), c: float (default -1.5), d: decimal(4, 2) (default -99.99) }",
+    );
+    // A decimal default must fit the precision/scale without rounding.
+    for bad in ["-100.00", "-1.234", "100"] {
+        let (_, d) = analyze(&format!(
+            "Ledger {{ id: Id, a: decimal(4, 2) (default {bad}) }}"
+        ));
+        assert!(errors(&d).contains(&"E0159"), "{bad}: {:?}", codes(&d));
+    }
+    // An int default must be an integer literal.
+    let (_, d) = analyze("Ledger { id: Id, a: int (default -1.5) }");
+    assert!(errors(&d).contains(&"E0319"), "{:?}", codes(&d));
+}

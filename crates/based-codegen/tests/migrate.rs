@@ -944,3 +944,19 @@ fn generated_column_expression_change_is_drop_readd_without_was_hint() {
         "a same-name generated-column replace must not emit a @was rename hint"
     );
 }
+
+#[test]
+fn signed_defaults_from_scratch_and_round_trip() {
+    let schema =
+        checked("Ledger { id: Id, a: int (default -5), b: decimal(6, 2) (default -1.50) }");
+    let steps = migrate::diff(&Snapshot::default(), &schema);
+    for dialect in [Dialect::MariaDb, Dialect::Sqlite, Dialect::Postgres] {
+        let sql = migrate::render_sql(&steps, dialect);
+        assert!(sql.contains("NOT NULL DEFAULT -5"), "\n{sql}");
+        assert!(sql.contains("NOT NULL DEFAULT -1.50"), "\n{sql}");
+    }
+    let snap = Snapshot::from_schema(&schema);
+    let parsed = Snapshot::parse(&snap.render()).expect("round-trip parse");
+    assert_eq!(snap, parsed);
+    assert!(migrate::diff(&parsed, &schema).is_empty());
+}

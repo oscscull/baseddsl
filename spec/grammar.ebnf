@@ -426,7 +426,7 @@ path        = lower_ident { '.' lower_ident } ;       (* dotted traversal       
 func_call   = func_name '(' [ value { ',' value } ] ')' ;
 func_name   = 'now' | ident ;           (* closed set enforced in sema, not here*)
 
-literal     = STRING | INT | FLOAT | 'true' | 'false' | 'null' ;
+literal     = STRING | [ '-' ] ( INT | FLOAT ) | 'true' | 'false' | 'null' ;
 (* A FLOAT literal is carried as its exact source text (AST `Literal::Decimal`), so a  *)
 (* `decimal` default / value is byte-exact — never rounded through an f64.             *)
 
