@@ -12,7 +12,7 @@
 use std::future::IntoFuture;
 
 use axum_helpdesk::{routes, App};
-use futures_util::StreamExt;
+use based_runtime::futures_util::StreamExt;
 use serde_json::{json, Value};
 
 #[tokio::main]

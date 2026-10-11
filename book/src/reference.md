@@ -214,6 +214,14 @@ page (50) with count   # also return `total`
 query export(org) -> stream OrderCard scoped Tenant;   # no []; NDJSON wire; page forbidden
 ```
 
+The Rust client returns a `RowStream` (a `futures_core::Stream`). The embedded client needs no extra
+dependency; consume it with `based_runtime::futures_util::StreamExt`. A wire-only client depends on
+`futures-core` directly.
+
+A stream can't be opened inside `client::transaction` (error: "streaming within a transaction is not
+supported"). Stream outside, collect the rows to write, then open a short transaction for the writes —
+this also keeps the write-lock window small.
+
 ## Locking & distinct
 
 ```

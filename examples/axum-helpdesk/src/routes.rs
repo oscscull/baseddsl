@@ -9,7 +9,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use futures_util::StreamExt;
+use based_runtime::futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 

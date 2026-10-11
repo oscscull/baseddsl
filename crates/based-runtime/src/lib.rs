@@ -116,6 +116,12 @@ pub use value::SqlValue;
 #[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
 pub use sqlx;
 
+// Re-export the stream crates so a generated client's `-> stream` surface names
+// `based_runtime::futures_core::Stream`, and a consumer can reach `StreamExt`, without
+// declaring either dependency themselves.
+pub use futures_core;
+pub use futures_util;
+
 #[cfg(feature = "serve")]
 pub use http::{
     serve, serve_with_guards, serve_with_handle, serve_with_store, Context, ContextSource, Handle,

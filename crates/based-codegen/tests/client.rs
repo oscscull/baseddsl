@@ -798,6 +798,8 @@ fn embedded_bridge_streams_the_engine_rows() {
         out.contains("inner: based_runtime::ShapedStream,"),
         "\n{out}"
     );
+    // The stream trait resolves through based-runtime: no direct futures-core dependency.
+    assert!(out.contains("use based_runtime::futures_core;"), "\n{out}");
 }
 
 // ---------- enums ----------------------------------------------------------
