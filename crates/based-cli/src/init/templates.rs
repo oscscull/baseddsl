@@ -46,6 +46,10 @@ fn embedded(dialect: Dialect) -> Vec<(&'static str, String)> {
     vec![
         ("Cargo.toml", super::cargo::manifest(dialect)),
         (
+            "build.rs",
+            include_str!("../../starter/embedded/build.rs").into(),
+        ),
+        (
             "src/main.rs",
             include_str!("../../starter/embedded/main.rs").into(),
         ),

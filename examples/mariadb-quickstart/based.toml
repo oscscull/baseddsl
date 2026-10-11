@@ -5,7 +5,6 @@ dialect = "mariadb"
 client  = "rust"
 root    = "schema"
 
-# Explicit artifact generation remains the default until the measured build-cost gate.
+# `build.rs` generates the embedded client into `OUT_DIR`.
 [generate]
-client = "generated/client.rs"
 client_mode = "embedded"

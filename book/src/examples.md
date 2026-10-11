@@ -11,6 +11,10 @@ The initializer teaches a first run. These examples show larger workloads:
 | [TypeScript guards](../../examples/standalone-typescript-guards/) | An authenticated HTTP edge and external permission callbacks |
 | [Commerce schema](../../spec/examples/commerce/) | A broader reference schema |
 
+The quickstarts generate their client from `build.rs`, like the initializer. The
+helpdesk commits its client with `based gen all` to show
+[checked-in artifacts](generation.md#checked-in-artifacts).
+
 For a quickstart, change to its directory, provide `DATABASE_URL` for a disposable
 server database (or a SQLite file), apply its migration, then run Cargo:
 

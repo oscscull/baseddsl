@@ -10,6 +10,8 @@ cargo run
 
 The application creates a parent and child, then prints both through the generated
 typed client. SQLite uses a local file; no database server is required.
+`build.rs` generates the client from the schema on every `cargo build`; see
+[generated clients](generation.md).
 
 Read `schema/item.bsl` first. `Item` has an optional parent, an owner scope,
 and an `ItemView` projection containing its parent's ID and name. The generated
@@ -37,18 +39,17 @@ Change assignments from `name = $name` to `title = $name`.
 
 ```sh
 based check
-based gen all
 based migrate gen . rename_item_title
 based migrate verify
 based migrate render . --number 2
 based migrate apply --database-url local.db
-based gen all --check
 cargo run
 ```
 
-Review the rendered migration before applying it. Generation does not alter the
-database. `@was` produces a rename rather than a drop/add, preserving existing
-values and relation IDs. Commit the generated client, migration files, and Cargo.lock.
+Review the rendered migration before applying it; `cargo run` picks up the
+schema change without a separate generation step. `@was` produces a rename
+rather than a drop/add, preserving existing values and relation IDs. Commit the
+migration files and Cargo.lock.
 
 Use a new database file for a fresh run. For MariaDB or PostgreSQL, select
 `--dialect mariadb` or `--dialect postgres` at initialization and export

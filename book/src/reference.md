@@ -373,7 +373,7 @@ migrations gap-free with tamper + drift checks.
 
 ## Client
 
-Use the [generator-owned include! wrapper](generation.md) to isolate generated Rust from application formatting.
+Rust applications [generate the client from `build.rs`](generation.md) into `OUT_DIR`.
 
 Each query/mutation generates a typed client method + one wire endpoint (`POST /q/<name>`, JSON body);
 clients call fixed signatures — the DSL never ships. Ids are phantom-typed newtypes (`Id<Order>`),

@@ -6,7 +6,7 @@ mod session;
 
 #[allow(dead_code)]
 mod client {
-    include!("../generated/client.rs");
+    include!(concat!(env!("OUT_DIR"), "/client.rs"));
 }
 
 #[tokio::main]

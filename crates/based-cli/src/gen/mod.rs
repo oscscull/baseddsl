@@ -80,18 +80,23 @@ fn all(root: &Path, options: OutputOptions) -> Result<(), CliError> {
     output::publish(&prepared_all(root)?, options.policy())
 }
 
-pub(crate) fn prepared_all(root: &Path) -> Result<Vec<based_artifacts::Artifact>, CliError> {
-    let loaded = load_checked(root)?;
-    let mode = loaded.0.manifest.generate.client_mode;
-    let artifacts = [Kind::Client, Kind::Sql, Kind::OpenApi]
-        .into_iter()
-        .filter_map(|kind| kind.configured(&loaded).map(|out| (kind, Path::new(out))))
-        .map(|(kind, destination)| prepare::file(kind, root, destination, &loaded, mode))
-        .collect::<Result<Vec<_>, CliError>>()?;
+fn prepared_all(root: &Path) -> Result<Vec<based_artifacts::Artifact>, CliError> {
+    let artifacts = prepared_configured(root)?;
     if artifacts.is_empty() {
         return Err(CliError::usage(
             "no [generate] destinations configured in based.toml",
         ));
     }
     Ok(artifacts)
+}
+
+/// Every configured artifact; empty when generation happens elsewhere (e.g. `build.rs`).
+pub(crate) fn prepared_configured(root: &Path) -> Result<Vec<based_artifacts::Artifact>, CliError> {
+    let loaded = load_checked(root)?;
+    let mode = loaded.0.manifest.generate.client_mode;
+    [Kind::Client, Kind::Sql, Kind::OpenApi]
+        .into_iter()
+        .filter_map(|kind| kind.configured(&loaded).map(|out| (kind, Path::new(out))))
+        .map(|(kind, destination)| prepare::file(kind, root, destination, &loaded, mode))
+        .collect()
 }
