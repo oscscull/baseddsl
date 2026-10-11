@@ -54,7 +54,8 @@ Order {
 - `bytes` rides the wire as a base64 string. `ulid` / `serial` are id-generation strategies (valid as `id`; `serial` = DB-generated sequential int).
 
 **Field modifiers** (parentheses): `(unique)`, `(default <value>)`, `(default now())`,
-`(default <enum-variant>)`, `(column "legacy_name")`.
+`(default <enum-variant>)`, `(column "legacy_name")`. Numeric defaults may be signed:
+`(default -5)`, `(default -1.25)`; a `decimal` default must fit its precision and scale.
 
 **Table naming:** `snake_case(ModelName)`, never pluralized (`OrderItem` → `order_item`). A relation FK
 column is `<field>_id`. Override with `@table("…")` (table) or `(column "…")` (column).

@@ -5,6 +5,9 @@ impl<'a> Parser<'a> {
         match self.peek().map(|l| l.tok) {
             Some(Tok::Dollar) => Ok(Value::Param(self.param_ref()?)),
             Some(Tok::Int | Tok::Float | Tok::Str) => Ok(Value::Lit(self.literal()?)),
+            Some(Tok::Minus) if matches!(self.tok_at(1), Some(Tok::Int | Tok::Float)) => {
+                Ok(Value::Lit(self.literal()?))
+            }
             Some(Tok::LowerIdent) => match self.ident_at(0) {
                 Some("true" | "false" | "null") => Ok(Value::Lit(self.literal()?)),
                 _ if self.tok_at(1) == Some(Tok::LParen) => Ok(Value::Func(self.func_call()?)),
@@ -66,17 +69,25 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn literal(&mut self) -> PResult<Literal> {
+        // A leading `-` signs a numeric literal (`default -5`, `default -1.25`).
+        let negative = self.at(Tok::Minus) && matches!(self.tok_at(1), Some(Tok::Int | Tok::Float));
+        if negative {
+            self.bump();
+        }
+        let sign = if negative { "-" } else { "" };
         let l = self.peek().ok_or_else(|| self.err_unit("a literal"))?;
         let lit = match l.tok {
             Tok::Int => {
-                let n = self.text(l).parse::<i64>().map_err(|_| {
-                    self.err("integer literal out of range");
-                })?;
+                let n = format!("{sign}{}", self.text(l))
+                    .parse::<i64>()
+                    .map_err(|_| {
+                        self.err("integer literal out of range");
+                    })?;
                 Literal::Int(n)
             }
             // A fractional literal is kept as its exact source text (see `Literal::Decimal`)
             // so a `decimal` default / value keeps full precision.
-            Tok::Float => Literal::Decimal(self.text(l).to_string()),
+            Tok::Float => Literal::Decimal(format!("{sign}{}", self.text(l))),
             Tok::Str => Literal::Str(unquote(self.text(l))),
             Tok::LowerIdent => match self.text(l) {
                 "true" => Literal::Bool(true),

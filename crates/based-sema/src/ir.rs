@@ -218,6 +218,7 @@ pub mod code {
     // `time` and `bytes` scalar types (D117): a time-of-day and a binary blob.
     pub const TIME_DEFAULT: &str = "E0313"; // a `time` column's `default` must be a time string literal (e.g. "14:30:00")
     pub const BYTES_DEFAULT: &str = "E0314"; // a `bytes` column cannot carry a literal default — set it from a raw migration or a DB default
+    pub const INT_DEFAULT: &str = "E0319"; // an `int` column's `default` is a fractional literal — the database would round it
 
     // Computed shape fields (E032x): a per-row derived scalar `out = <expr>`
     // (arithmetic / concat / case) projected in an ordinary (non-group) shape.

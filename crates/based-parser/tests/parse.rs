@@ -106,6 +106,35 @@ fn model_decorators_fields_index_inverse() {
 }
 
 #[test]
+fn signed_numeric_defaults() {
+    let m = only_model(
+        "Ledger { a: int (default -5)\n b: decimal(6, 2) (default -1.50)\n c: int (default -9223372036854775808) }",
+    );
+    let defaults: Vec<&Literal> = m
+        .members
+        .iter()
+        .filter_map(|mem| match mem {
+            Member::Field(f) => match &f.modifiers[0] {
+                Modifier::Default(DefaultVal::Lit(l)) => Some(l),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        defaults,
+        [
+            &Literal::Int(-5),
+            &Literal::Decimal("-1.50".into()),
+            &Literal::Int(i64::MIN)
+        ]
+    );
+    parse_err("Ledger { a: int (default -9223372036854775809) }");
+    parse_ok("query q() -> R[] { list Ledger where (a > -5 and b = -1.5) order (a); }");
+    parse_err("Ledger { a: text (default -\"x\") }");
+}
+
+#[test]
 fn field_inverse_ref_and_unique() {
     let m = only_model(
         r#"
