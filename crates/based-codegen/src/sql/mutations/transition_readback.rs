@@ -59,27 +59,6 @@ pub(crate) fn transition_readback(
     Some(TransitionReadback { key, write_index })
 }
 
-/// Only equalities required by conjunction can uniquely identify the written row.
-/// A key inside OR/NOT, or a value read from a changing column, is not a stable key.
-fn bound_key<'a>(pred: &'a Predicate, field: &str) -> Option<&'a Predicate> {
-    match pred {
-        Predicate::And(a, b) => bound_key(a, field).or_else(|| bound_key(b, field)),
-        Predicate::Cmp {
-            path,
-            op: Op::Eq,
-            value: Value::Param(_) | Value::Lit(_),
-        } if local_field(path) == Some(field) => Some(pred),
-        _ => None,
-    }
-}
-
-fn local_field(path: &Path) -> Option<&str> {
-    match path.segments.as_slice() {
-        [field] => Some(field.node.as_str()),
-        _ => None,
-    }
-}
-
 fn reads_assigned_field(pred: &Predicate, assigns: &[Assign]) -> bool {
     let assigned = |path: &Path| {
         local_field(path).is_some_and(|field| assigns.iter().any(|a| a.col.node == field))

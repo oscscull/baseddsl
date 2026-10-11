@@ -126,6 +126,8 @@ mod nested_to_many;
 mod nested_to_one;
 #[path = "sqlite_integration/nullable_pagination.rs"]
 mod nullable_pagination;
+#[path = "sqlite_integration/ok_zero_rows.rs"]
+mod ok_zero_rows;
 #[path = "sqlite_integration/pagination.rs"]
 mod pagination;
 #[path = "sqlite_integration/relations_and_locks.rs"]

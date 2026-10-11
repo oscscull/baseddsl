@@ -76,6 +76,15 @@ pub(crate) fn ret_select(
             RetKey::CreatedId
         } else {
             let (pred, live) = surviving_ret_write(&m.body, &rm.ret_model, schema)?;
+            // An `-> ok` filtered bulk write matching nothing is a no-op success; only a
+            // keyed write re-selects, so its absent row still answers `not_found`.
+            if rm.ack
+                && !schema
+                    .model(&rm.ret_model)
+                    .is_some_and(|rt| where_is_keyed(pred, rt))
+            {
+                return None;
+            }
             RetKey::Where {
                 pred: transition_key.unwrap_or(pred),
                 live,
