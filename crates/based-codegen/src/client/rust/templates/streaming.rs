@@ -2,8 +2,8 @@
 /// `RowStream` return type and the NDJSON decoder any HTTP transport feeds its
 /// response body through. The decoder owns the framing contract (terminal line
 /// mandatory, truncation = transport error), so every transport inherits it.
-/// `futures_core` is referenced by full path — like `bigdecimal`, the consumer
-/// needs the dependency only when the schema uses the feature.
+/// `futures_core` is referenced by full path: an embedded client binds it to
+/// `based_runtime::futures_core`, while a wire-only consumer depends on it directly.
 pub(crate) const STREAMING: &str = r#"
 // ---------- streaming ----------
 

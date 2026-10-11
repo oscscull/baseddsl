@@ -1416,6 +1416,10 @@ pub fn embedded(engine: &based_runtime::Engine) -> Client<Embedded<'_>> {
     }
 }
 
+// The streaming surface's `futures_core` paths resolve through based-runtime, so the
+// consumer needs no direct futures-core dependency.
+use based_runtime::futures_core;
+
 /// The embedded transport's row stream: `based_runtime::ShapedStream` items decoded
 /// into the typed shape. After an `Err` item the stream is finished (the engine's
 /// stream already ends after its error; a decode failure ends this one).

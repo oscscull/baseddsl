@@ -159,8 +159,6 @@ dependencies = [
  "based-runtime",
  "bigdecimal",
  "dotenvy",
- "futures-core",
- "futures-util",
  "redis",
  "reqwest",
  "serde",
