@@ -1064,3 +1064,23 @@ fn model_level_no_fk_parses_as_a_decorator() {
     let m = only_model(r#"@no_fk("legacy table") Order { org: Org }"#);
     assert!(m.decorators.iter().any(|d| d.name.node == "no_fk"));
 }
+
+#[test]
+fn composite_column_map_then_more_modifiers() {
+    let m = only_model(
+        r#"Line { order: Order (column tenant_id = "ord_tenant", id = "ord no", unique) }"#,
+    );
+    let Member::Field(f) = &m.members[0] else {
+        panic!()
+    };
+    let Modifier::ColumnMap(aliases) = &f.modifiers[0] else {
+        panic!("{:?}", f.modifiers)
+    };
+    let pairs: Vec<(&str, &str)> = aliases
+        .iter()
+        .map(|a| (a.part.node.as_str(), a.column.as_str()))
+        .collect();
+    assert_eq!(pairs, [("tenant_id", "ord_tenant"), ("id", "ord no")]);
+    assert_eq!(f.modifiers[1], Modifier::Unique);
+    parse_err(r#"Line { order: Order (column tenant_id = ord_tenant) }"#);
+}

@@ -77,10 +77,13 @@ pub(crate) fn render(table: &Table, names: &ModelNames, report: &mut ImportRepor
     indexes
 }
 
+/// The fields over ordered columns; a composite relation's adjacent columns collapse to
+/// its one field (the compiler's expansion is verified against the catalog afterwards).
 pub(crate) fn fields(columns: &[String], names: &ModelNames) -> String {
-    columns
+    let mut fields: Vec<&str> = columns
         .iter()
         .map(|column| names.fields[column].as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect();
+    fields.dedup();
+    fields.join(", ")
 }

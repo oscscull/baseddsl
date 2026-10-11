@@ -101,7 +101,11 @@ inverse_ref = '(' model_ref '.' field_name ')' ;
 modifiers   = '(' modifier { ',' modifier } ')' ;
 modifier    = 'unique'
             | 'default' default_val
-            | 'column' STRING ;        (* legacy/reserved column-name override  *)
+            | 'column' STRING          (* legacy/reserved column-name override  *)
+            | 'column' column_alias { ',' column_alias } ;
+(* A composite-key relation's local column per target key part. A `,` continues the *)
+(* map only when `field_name '='` follows; otherwise it starts the next modifier.    *)
+column_alias = field_name '=' STRING ;
 default_val = literal | func_call
             | variant ;                (* a bare identifier: an enum default (enums.md) *)
 

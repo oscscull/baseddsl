@@ -7,7 +7,8 @@
 //! the runtime's lowered DML against a live in-memory SQLite database, so a passing run
 //! means the whole composite-key path — composite `PRIMARY KEY`, composite create +
 //! read-back, get-by-composite-key, an inbound multi-column FK write, and a to-many nest
-//! correlated on the parent's composite key — actually executes.
+//! correlated on the parent's composite key — actually executes. The same flow runs with
+//! the FK on arbitrary per-part `(column part = "…")` aliases.
 
 #![cfg(feature = "sqlite")]
 
@@ -62,8 +63,10 @@ query enrollment_sessions(course, student) -> EnrollmentWithSessions;
 query sessions() -> SessionCard[];
 "#;
 
-async fn backend() -> (Compiled, SqliteBackend) {
-    let sf = parse_file(SCHEMA, FileId(0)).expect("parse");
+const SESSION: &str = "Session { id: Id, enrollment: Enrollment, note: text, @index enrollment }";
+
+async fn backend(schema: &str) -> (Compiled, SqliteBackend) {
+    let sf = parse_file(schema, FileId(0)).expect("parse");
     let (schema, diags) = check(&sf.decls);
     assert!(
         !diags
@@ -107,7 +110,34 @@ async fn call(
 
 #[tokio::test]
 async fn composite_key_create_get_fk_and_nest() {
-    let (c, backend) = backend().await;
+    composite_flow(SCHEMA).await;
+}
+
+#[tokio::test]
+async fn aliased_composite_fk_columns_create_get_and_nest() {
+    // Listed out of key order, with names that need quoting.
+    let aliased = SCHEMA.replace(
+        SESSION,
+        r#"Session {
+  id: Id
+  enrollment: Enrollment (column student = "ses student", course = "ses\"course")
+  note: text
+  @index enrollment
+}"#,
+    );
+    assert_ne!(aliased, SCHEMA);
+    let sf = parse_file(&aliased, FileId(0)).expect("parse");
+    let ddl = sql::ddl(&check(&sf.decls).0, Dialect::Sqlite);
+    assert!(
+        ddl.contains("ON `session` (`ses\"course`, `ses student`)"),
+        "\n{ddl}"
+    );
+    assert!(!ddl.contains("enrollment_course_id"), "\n{ddl}");
+    composite_flow(&aliased).await;
+}
+
+async fn composite_flow(schema: &str) {
+    let (c, backend) = backend(schema).await;
 
     // Parents with natural single-column keys, so the composite key parts are known ids.
     call(

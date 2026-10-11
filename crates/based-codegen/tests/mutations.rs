@@ -1446,3 +1446,29 @@ fn serial_bulk_read_back_learns_keys_from_the_insert() {
     let br = lm[0].bulk_readback.as_ref().expect("read-back");
     assert!(br.serial);
 }
+
+#[test]
+fn aliased_composite_fk_joins_and_writes_on_its_own_columns() {
+    let src = r#"
+        @key(tenant_id, id)
+        Order { tenant_id: int  id: text  total: int }
+        Line { id: Id  order: Order (column id = "ord_no", tenant_id = "ord_tenant")  qty: int }
+        shape OrderCard from Order { tenant_id, id, total }
+        shape LineCard from Line { qty, order { total } }
+        mutation add_line(order -> order, qty) -> LineCard {
+          create Line { order = $order, qty = $qty };
+        }
+        "#;
+    let maria = gen(src);
+    assert!(
+        maria.contains("INSERT INTO `line` (`id`, `ord_tenant`, `ord_no`, `qty`)\nVALUES (:id, :order__tenant_id, :order__id, :qty);"),
+        "\n{maria}"
+    );
+    assert!(
+        maria.contains(
+            "ON `j_order`.`tenant_id` = `line`.`ord_tenant` AND `j_order`.`id` = `line`.`ord_no`"
+        ),
+        "\n{maria}"
+    );
+    assert!(!maria.contains("order_tenant_id"), "\n{maria}");
+}

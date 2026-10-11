@@ -119,7 +119,9 @@ User {
 ```
 
 - Custom join: `placed_by: User (on: orders.user_ref = users.legacy_id)`
-- A composite-key target expands to a multi-column FK automatically.
+- A composite-key target expands to a multi-column FK automatically (`<field>_<part>` columns).
+  Name the columns per key part with `order: Order (column tenant_id = "ord_tenant", id = "ord_no")`;
+  every key part must be named once, and `(column "…")` stays the single-column form.
 - **Many-to-many** = an explicit junction model (two forward edges + two inverses); flatten it away in a
   shape (see [Shapes](#shapes)). There is no implicit-junction sugar.
 

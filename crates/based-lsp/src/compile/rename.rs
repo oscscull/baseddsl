@@ -105,7 +105,7 @@ impl Snapshot {
                 if f.was.is_some()
                     || f.modifiers
                         .iter()
-                        .any(|md| matches!(md, Modifier::Column(_)))
+                        .any(|md| matches!(md, Modifier::Column(_) | Modifier::ColumnMap(_)))
                 {
                     return None;
                 }

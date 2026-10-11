@@ -28,14 +28,20 @@ pub(crate) fn physical(
         let actual: BTreeMap<_, _> = model
             .members
             .iter()
-            .map(|member| {
+            .flat_map(|member| {
                 let nullable = match &member.kind {
                     MemberKind::Scalar { optional, .. } | MemberKind::Forward { optional, .. } => {
                         *optional
                     }
                     MemberKind::Inverse { .. } => false,
                 };
-                (member.physical_col().to_owned(), nullable)
+                let columns = schema.fk_columns(member);
+                let columns = if columns.len() > 1 {
+                    columns.into_iter().map(|(column, _)| column).collect()
+                } else {
+                    vec![member.physical_col().to_owned()]
+                };
+                columns.into_iter().map(move |column| (column, nullable))
             })
             .collect();
         let expected: BTreeMap<_, _> = table

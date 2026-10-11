@@ -38,7 +38,9 @@ pub mod code {
     pub const JOIN_TABLE: &str = "E0125"; // custom `on:` join names a table not in scope
     pub const JOIN_FORM: &str = "E0126"; // custom `on:` join malformed (not `<table>.<col>`, or not a to-one relation)
     pub const JOIN_SELF_REF: &str = "E0127"; // custom `on:` join whose near and far are the same model — the two sides can't be named apart
-                                             // shapes
+    pub const COLUMN_ALIAS: &str = "E0128"; // a `(column …)` form doesn't fit the field: a map on a scalar/single-key relation, a single name on a composite-key relation, or an unknown/missing/duplicate key part
+    pub const COLUMN_COLLISION: &str = "E0129"; // a `(column part = "…")` alias names a column another field (or another part) already occupies
+                                                // shapes
     pub const SHAPE_BARE_RELATION: &str = "E0130"; // bare relation must nest or `=`
     pub const SHAPE_NEST_SCALAR: &str = "E0131"; // nested a non-relation
     pub const SHAPE_REF_UNKNOWN: &str = "E0132"; // `field -> Name` names no shape
@@ -464,37 +466,13 @@ impl CheckedSchema {
     }
 
     /// The physical FK column(s) a forward relation occupies, each paired with the target
-    /// primary-key part it references (its type + physical column). A single-column-key
-    /// target yields one entry on the relation's own `fk_col` (its `(column "…")` override
-    /// honored). A composite-key target yields one `<field>_<part_col>` column per key
-    /// part, in key order — the auto-expanded multi-column FK. Empty for an inverse edge,
-    /// a missing target, a keyless target (no key to reference), or a custom-join edge
-    /// (its join rides declared legacy columns, so it owns no conventional FK column).
+    /// primary-key part it references (see [`RMember::fk_columns_into`]).
     pub fn fk_columns<'s>(&'s self, mem: &RMember) -> Vec<(String, &'s RMember)> {
-        let MemberKind::Forward {
-            target,
-            fk_col,
-            custom_on,
-            ..
-        } = &mem.kind
-        else {
+        let MemberKind::Forward { target, .. } = &mem.kind else {
             return Vec::new();
         };
-        if custom_on.is_some() {
-            return Vec::new();
-        }
-        let Some(t) = self.model(target) else {
-            return Vec::new();
-        };
-        let parts = t.pk_members();
-        if parts.len() <= 1 {
-            parts.into_iter().map(|p| (fk_col.clone(), p)).collect()
-        } else {
-            parts
-                .into_iter()
-                .map(|p| (format!("{}_{}", mem.name, p.physical_col()), p))
-                .collect()
-        }
+        self.model(target)
+            .map_or_else(Vec::new, |t| mem.fk_columns_into(t))
     }
 }
 
@@ -879,6 +857,9 @@ pub enum MemberKind {
         /// custom-join edge (it owns no conventional FK column); codegen renders this
         /// predicate as the join `ON` in place of the `fk_col = pk` correlation.
         custom_on: Option<Predicate>,
+        /// `(column part = "col", …)`: the local column per target key part, for a
+        /// composite-key target. Empty means the `<field>_<part>` convention.
+        fk_aliases: Vec<(String, String)>,
         /// The `@fk`/`@no_fk` intent on this edge (presence resolved via
         /// [`RModel::resolved_fk`] against the `foreign_keys` convention).
         fk: FkDecl,
@@ -889,6 +870,41 @@ pub enum MemberKind {
 }
 
 impl RMember {
+    /// The physical FK column(s) this forward relation occupies in `target`, each paired
+    /// with the target primary-key part it references, in key order. A single-column-key
+    /// target yields one entry on `fk_col` (its `(column "…")` override honored). A
+    /// composite-key target yields one column per key part: its `(column part = "…")`
+    /// alias, else `<field>_<part_col>`. Empty for an inverse edge, a keyless target, or a
+    /// custom-join edge (its join rides declared legacy columns).
+    pub fn fk_columns_into<'t>(&self, target: &'t RModel) -> Vec<(String, &'t Self)> {
+        let MemberKind::Forward {
+            fk_col,
+            fk_aliases,
+            custom_on: None,
+            ..
+        } = &self.kind
+        else {
+            return Vec::new();
+        };
+        let parts = target.pk_members();
+        if parts.len() <= 1 {
+            return parts.into_iter().map(|p| (fk_col.clone(), p)).collect();
+        }
+        parts
+            .into_iter()
+            .map(|p| {
+                let column = fk_aliases
+                    .iter()
+                    .find(|(part, _)| *part == p.name)
+                    .map_or_else(
+                        || format!("{}_{}", self.name, p.physical_col()),
+                        |(_, column)| column.clone(),
+                    );
+                (column, p)
+            })
+            .collect()
+    }
+
     /// The member's physical column name: a scalar's `column`, a forward relation's
     /// `fk_col`, else the field name (an inverse owns no column). The rename target a
     /// `@was` maps its old name to.

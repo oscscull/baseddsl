@@ -102,6 +102,14 @@ fn modifier(m: &Modifier) -> String {
         Modifier::Unique => "unique".to_string(),
         Modifier::Default(v) => format!("default {}", default_val(v)),
         Modifier::Column(c) => format!("column \"{}\"", esc(c)),
+        Modifier::ColumnMap(aliases) => format!(
+            "column {}",
+            aliases
+                .iter()
+                .map(|a| format!("{} = \"{}\"", a.part.node, esc(&a.column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

@@ -470,3 +470,14 @@ fn computed_shape_field_reprints_with_minimal_parens() {
         "shape S from P {\n  tier = case when price > 100 then \"hi\" else \"lo\" end\n}\n"
     );
 }
+
+#[test]
+fn composite_column_map_round_trips() {
+    let src =
+        "Line {\n  order: Order (column tenant_id = \"ord_tenant\", id = \"ord \\\"no\\\"\")\n}\n";
+    assert_eq!(
+        fmt("Line {\n order: Order (column tenant_id=\"ord_tenant\",id = \"ord \\\"no\\\"\")\n}"),
+        src
+    );
+    assert_eq!(fmt(src), src);
+}

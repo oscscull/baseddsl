@@ -1176,3 +1176,61 @@ fn ulid_pk_is_a_fixed_char_string() {
     let p = gen_pg(src);
     assert!(p.contains(r#""id" TEXT NOT NULL"#), "\n{p}");
 }
+
+const ALIASED_FK: &str = r#"
+    @key(tenant_id, id)
+    Order { tenant_id: int  id: text  total: int }
+    Line {
+      id: Id
+      order: Order? (column id = "ord no", tenant_id = "ord_tenant") @fk
+      @index order
+    }
+"#;
+
+#[test]
+fn aliased_composite_fk_pairs_follow_key_order_on_every_dialect() {
+    for (ddl, q) in [
+        (gen(ALIASED_FK), '`'),
+        (gen_sqlite(ALIASED_FK), '`'),
+        (gen_pg(ALIASED_FK), '"'),
+    ] {
+        let fk = format!(
+            "FOREIGN KEY ({q}ord_tenant{q}, {q}ord no{q}) REFERENCES {q}order{q} ({q}tenant_id{q}, {q}id{q})"
+        );
+        assert!(ddl.contains(&fk), "\n{ddl}");
+        // An optional relation leaves every aliased column nullable.
+        for col in ["ord_tenant", "ord no"] {
+            let line = ddl
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("{q}{col}{q} ")))
+                .unwrap_or_else(|| panic!("no column {col}\n{ddl}"));
+            assert!(!line.contains("NOT NULL"), "{line}\n{ddl}");
+        }
+        assert!(
+            ddl.contains(&format!("({q}ord_tenant{q}, {q}ord no{q})")),
+            "index covers the aliased pair\n{ddl}"
+        );
+        assert!(!ddl.contains("order_tenant_id"), "\n{ddl}");
+    }
+}
+
+#[test]
+fn aliased_composite_fks_form_a_cycle() {
+    let src = r#"
+        @key(region, code)
+        Depot { region: text  code: text  hub: Hub? (column region = "hub_region", code = "hub_code") @fk }
+        @key(region, code)
+        Hub { region: text  code: text  depot: Depot? (column region = "dep_region", code = "dep_code") @fk }
+    "#;
+    let p = gen_pg(src);
+    assert!(
+        p.contains(r#"FOREIGN KEY ("hub_region", "hub_code") REFERENCES "hub" ("region", "code")"#),
+        "\n{p}"
+    );
+    assert!(
+        p.contains(
+            r#"FOREIGN KEY ("dep_region", "dep_code") REFERENCES "depot" ("region", "code")"#
+        ),
+        "\n{p}"
+    );
+}

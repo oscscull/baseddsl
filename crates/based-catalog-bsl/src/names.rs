@@ -1,5 +1,5 @@
 //! A closed registry owns model/file collisions and per-table column-name collisions.
-use based_catalog::{Catalog, TableId, ValueGeneration};
+use based_catalog::{Catalog, Table, TableId, ValueGeneration};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -31,7 +31,7 @@ pub(crate) fn registry(catalog: &Catalog) -> BTreeMap<TableId, ModelNames> {
                 .filter(|column| column.generation != ValueGeneration::None)
                 .map(|column| &column.name);
             let mut used_fields = BTreeSet::from(["id".into()]);
-            let fields = table
+            let mut fields: BTreeMap<String, String> = table
                 .columns
                 .iter()
                 .map(|column| {
@@ -47,6 +47,7 @@ pub(crate) fn registry(catalog: &Catalog) -> BTreeMap<TableId, ModelNames> {
                     (column.name.clone(), name)
                 })
                 .collect();
+            composite_relations(table, &mut fields, &mut used_fields);
             let names = ModelNames {
                 physical: table.id.clone(),
                 file: format!("{}.bsl", model.to_ascii_lowercase()),
@@ -56,6 +57,43 @@ pub(crate) fn registry(catalog: &Catalog) -> BTreeMap<TableId, ModelNames> {
             (table.id.clone(), names)
         })
         .collect()
+}
+
+/// A composite FK's local columns all map to one relation field named after its target;
+/// a column shared by several composite FKs keeps its own name (the overlap is reported).
+fn composite_relations(
+    table: &Table,
+    fields: &mut BTreeMap<String, String>,
+    used: &mut BTreeSet<String>,
+) {
+    let composite: Vec<_> = table
+        .foreign_keys
+        .iter()
+        .filter(|foreign| foreign.columns.len() > 1)
+        .collect();
+    for foreign in &composite {
+        let shared = foreign.columns.iter().any(|column| {
+            composite
+                .iter()
+                .filter(|other| other.columns.contains(column))
+                .count()
+                > 1
+        });
+        if shared {
+            continue;
+        }
+        let name = allocate(
+            &super::identifier::field(&foreign.target.name),
+            "_",
+            used,
+            false,
+        );
+        for column in &foreign.columns {
+            if let Some(field) = fields.get_mut(column) {
+                field.clone_from(&name);
+            }
+        }
+    }
 }
 
 fn allocate(base: &str, separator: &str, used: &mut BTreeSet<String>, folded: bool) -> String {
