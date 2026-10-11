@@ -11,6 +11,7 @@ mod onboarding;
 mod release;
 mod source;
 mod source_consumer;
+mod standalone;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -60,6 +61,10 @@ enum Task {
         #[arg(long)]
         based: PathBuf,
     },
+    StandaloneTutorial {
+        #[arg(long)]
+        based: PathBuf,
+    },
     ImportConsumer {
         #[arg(long)]
         based: PathBuf,
@@ -94,6 +99,7 @@ async fn main() -> Result<()> {
         Task::Extension { directory, output } => release::extension(&directory, &output),
         Task::Initializer { based } => initializer::verify(&based).await,
         Task::EmbeddedTutorial { based } => onboarding::verify(&based).await,
+        Task::StandaloneTutorial { based } => standalone::verify(&based),
         Task::ImportConsumer { based } => import::sqlite(&based).await,
         Task::ImportServerConsumer {
             based,

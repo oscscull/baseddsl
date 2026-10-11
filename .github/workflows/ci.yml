@@ -20,7 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: make ci-initializer ci-embedded-tutorial
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: make ci-initializer ci-embedded-tutorial ci-standalone-tutorial
 
   cargo-generation:
     runs-on: ubuntu-latest

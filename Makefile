@@ -308,3 +308,9 @@ ci-initializer:
 ci-embedded-tutorial:
 	$(CARGO) build --locked -p based-cli
 	$(CI) embedded-tutorial --based $(BASED)
+
+.PHONY: ci-standalone-tutorial
+## The book's standalone path in a clean project: edge, curl, durable replay. Needs node and curl.
+ci-standalone-tutorial:
+	$(CARGO) build --locked -p based-cli
+	$(CI) standalone-tutorial --based $(BASED)
