@@ -80,13 +80,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: based-native-x86_64-unknown-linux-gnu
-          path: native
+          path: ${{ runner.temp }}/native
       - run: make ci-extension
       - run: |
-          mkdir native/installed
-          tar -xzf native/*.tar.gz -C native/installed
+          mkdir "$RUNNER_TEMP/native/installed"
+          tar -xzf "$RUNNER_TEMP"/native/*.tar.gz -C "$RUNNER_TEMP/native/installed"
           cd editors/vscode
-          BASED_LSP="$GITHUB_WORKSPACE/native/installed/based-lsp" xvfb-run -a npm run test:installed
+          BASED_LSP="$RUNNER_TEMP/native/installed/based-lsp" xvfb-run -a npm run test:installed
       - run: cargo run --locked -p based-ci -- extension editors/vscode "$RUNNER_TEMP/vsix-assets"
       - uses: actions/upload-artifact@v4
         with:
