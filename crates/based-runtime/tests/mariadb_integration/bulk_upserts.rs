@@ -147,3 +147,37 @@ async fn bulk_upsert_and_serial_read_back_live_mariadb() {
         "contiguous DB-generated id range in input order"
     );
 }
+
+/// `rel = incoming.rel` into a composite-key model sets every FK part via `VALUES(<part>)`.
+#[tokio::test]
+async fn bulk_upsert_moves_a_composite_relation_from_incoming_live_mariadb() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @key(code, term)
+        RelCourse { code: text, term: text, title: text }
+        RelSeat { id: Id, tag: text (unique), course: RelCourse }
+        shape SeatIn from RelSeat { tag course { code term } }
+        shape SeatRow from RelSeat { tag, title = course.title }
+        query seats() -> SeatRow[] { list RelSeat order (tag); }
+        mutation import(rows: SeatIn[]) -> ok {
+          create RelSeat[] from $rows on conflict (tag) update { course = incoming.course };
+        }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    container
+        .exec_batch(
+            "INSERT INTO `rel_course` (`code`, `term`, `title`) VALUES ('CS1', 'F', 'Fall'), ('CS1', 'S', 'Spring');",
+        )
+        .await;
+    for term in ["F", "S"] {
+        let rows = json!({ "rows": [{ "tag": "a", "course": { "code": "CS1", "term": term } }] });
+        let r = call(&c, &router, "POST", "/m/import", rows, json!({})).await;
+        assert_eq!(r.status, 200, "{:?}", r.body);
+    }
+    let got = call(&c, &router, "POST", "/q/seats", json!({}), json!({})).await;
+    assert_eq!(got.body, json!([{ "tag": "a", "title": "Spring" }]));
+}

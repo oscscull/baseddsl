@@ -4,6 +4,7 @@ use super::*;
 
 mod bulk_upsert;
 mod incoming;
+mod incoming_relation;
 mod input_body;
 mod input_coverage;
 mod input_nest;
@@ -13,6 +14,7 @@ mod input_shape;
 use bulk_upsert::*;
 pub(in crate::check::mutation) use incoming::rhs_incoming_span;
 use incoming::*;
+use incoming_relation::*;
 use input_body::*;
 use input_coverage::*;
 use input_nest::*;

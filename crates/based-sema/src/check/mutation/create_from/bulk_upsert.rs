@@ -56,6 +56,7 @@ pub(super) fn check_bulk_upsert(
         }
         // Validate every `incoming.<col>` operand names a settable column.
         check_incoming_refs(&a.value, m_model, cx, mi, sink);
+        check_incoming_relation(a, m_model, cx, sink);
         // Non-incoming operands get the ordinary assign check; an assign that mentions
         // `incoming` is validated by the walk above (its type agreement is the column's).
         if rhs_incoming_span(&a.value).is_none() {

@@ -138,5 +138,7 @@ mod scopes;
 mod tx_bindings;
 #[path = "sqlite_integration/upserts_and_ddl.rs"]
 mod upserts_and_ddl;
+#[path = "sqlite_integration/upsert_incoming_relation.rs"]
+mod upsert_incoming_relation;
 #[path = "sqlite_integration/write_recovery.rs"]
 mod write_recovery;

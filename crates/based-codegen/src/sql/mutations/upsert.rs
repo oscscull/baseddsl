@@ -49,26 +49,32 @@ pub(crate) fn conflict_update_sets(
     let mut sel = Select::new(schema, decls, model, dialect)
         .with_bare_cols(true)
         .with_incoming(incoming);
-    let mut render = |a: &Assign| -> (String, String) {
-        (
+    let mut render = |a: &Assign| -> Vec<(String, String)> {
+        if let Some(parts) = incoming
+            .then(|| incoming_composite_fk(schema, model, a, dialect))
+            .flatten()
+        {
+            return parts;
+        }
+        vec![(
             physical_col(model, &a.col.node),
             sel.assign_rhs(&a.value, model, &a.col.node),
-        )
+        )]
     };
     // Build the (col, rhs) list in lexical order: a `...incoming` spread expands, at its own
     // position, to every eligible payload column set from the proposed row.
     let mut items: Vec<(String, String)> = Vec::new();
     match oc.spread.as_ref().map(|s| s.preceding.min(oc.update.len())) {
         Some(preceding) => {
-            items.extend(oc.update[..preceding].iter().map(&mut render));
+            items.extend(oc.update[..preceding].iter().flat_map(&mut render));
             items.extend(
                 spread_cols
                     .iter()
                     .map(|c| (c.clone(), incoming_col_ref(dialect, c))),
             );
-            items.extend(oc.update[preceding..].iter().map(&mut render));
+            items.extend(oc.update[preceding..].iter().flat_map(&mut render));
         }
-        None => items.extend(oc.update.iter().map(&mut render)),
+        None => items.extend(oc.update.iter().flat_map(&mut render)),
     }
     // Last-write-wins (JS object-spread): a column set twice keeps its last RHS. SQL's SET
     // list rejects a duplicate column, so collapse to one assignment per column.
@@ -84,6 +90,36 @@ pub(crate) fn conflict_update_sets(
         .into_iter()
         .map(|col| format!("{} = {}", dialect.quote(&col), vals[&col]))
         .collect()
+}
+
+/// `rel = incoming.other` into a composite-key model: one SET per key part, each read from
+/// the matching part column of the proposed row. `None` for every other assign.
+fn incoming_composite_fk(
+    schema: &CheckedSchema,
+    model: &RModel,
+    a: &Assign,
+    dialect: Dialect,
+) -> Option<Vec<(String, String)>> {
+    let AssignRhs::Value(Value::Path(p)) = &a.value else {
+        return None;
+    };
+    let [head, field] = p.segments.as_slice() else {
+        return None;
+    };
+    if head.node != "incoming" {
+        return None;
+    }
+    let lhs = schema.fk_columns(model.member(&a.col.node)?);
+    let rhs = schema.fk_columns(model.member(&field.node)?);
+    if lhs.len() < 2 || lhs.len() != rhs.len() {
+        return None;
+    }
+    Some(
+        lhs.into_iter()
+            .zip(rhs)
+            .map(|((col, _), (src, _))| (col, incoming_col_ref(dialect, &src)))
+            .collect(),
+    )
 }
 
 /// A bare physical column read from the proposed/incoming row of a bulk upsert — the spread

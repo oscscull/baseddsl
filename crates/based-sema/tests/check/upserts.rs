@@ -150,3 +150,78 @@ fn spread_of_non_incoming_source_is_e0334() {
     ));
     assert!(errors(&d).contains(&"E0334"), "{:?}", codes(&d));
 }
+
+// ---------- `incoming.<relation>` in a bulk upsert ---------------------------
+
+const INCOMING_REL_SCHEMA: &str = r#"
+    Token { id: Id, name: text }
+    Artist { id: Id, name: text }
+    TokenPrinting {
+      id: serial
+      scryfall_id: text (unique)
+      token: Token
+      artist: Artist
+      data: json
+      hits: int
+    }
+    shape TokenPrintingIn from TokenPrinting { scryfall_id token { id } artist { id } data hits }
+"#;
+
+fn incoming_rel(update: &str) -> Vec<String> {
+    let (_, d) = analyze(&format!(
+        "{INCOMING_REL_SCHEMA}
+        mutation import(rows: TokenPrintingIn[]) -> ok {{
+          create TokenPrinting[] from $rows on conflict (scryfall_id) update {{ {update} }};
+        }}"
+    ));
+    errors(&d).into_iter().map(str::to_string).collect()
+}
+
+#[test]
+fn bulk_upsert_sets_relation_from_incoming() {
+    let errs = incoming_rel("token = incoming.token, data = incoming.data");
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn incoming_relation_into_a_scalar_is_e0333() {
+    assert_eq!(incoming_rel("data = incoming.token"), ["E0333"]);
+}
+
+#[test]
+fn incoming_relation_into_another_model_is_e0333() {
+    assert_eq!(incoming_rel("artist = incoming.token"), ["E0333"]);
+}
+
+#[test]
+fn incoming_relation_in_arithmetic_is_e0333() {
+    assert_eq!(incoming_rel("hits = hits + incoming.token"), ["E0333"]);
+}
+
+const INCOMING_COMPOSITE_SCHEMA: &str = r#"
+    @key(code, term)
+    Course { code: text, term: text, title: text }
+    Seat { id: Id, tag: text (unique), label: text, course: Course }
+    shape SeatIn from Seat { tag label course { code term } }
+"#;
+
+fn incoming_composite(update: &str) -> Vec<String> {
+    let (_, d) = analyze(&format!(
+        "{INCOMING_COMPOSITE_SCHEMA}
+        mutation import(rows: SeatIn[]) -> ok {{
+          create Seat[] from $rows on conflict (tag) update {{ {update} }};
+        }}"
+    ));
+    errors(&d).into_iter().map(str::to_string).collect()
+}
+
+#[test]
+fn bulk_upsert_sets_composite_relation_from_incoming() {
+    let errs = incoming_composite("course = incoming.course");
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+#[test]
+fn incoming_scalar_into_a_composite_relation_is_e0333() {
+    assert_eq!(incoming_composite("course = incoming.label"), ["E0333"]);
+}
