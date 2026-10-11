@@ -9,6 +9,10 @@ make check-fast  # iteration: formatting and infra-free workspace tests
 make check       # execution changes: full lint/tests, live databases, and examples
 ```
 
+Compiler changes run the changed crate's tests, such as `cargo test -p based-parser`,
+`-p based-sema`, or `-p based-codegen`. SQL, migration, and driver changes run
+`make ci-live` against disposable databases from `make dev-db-up`.
+
 Generator changes also run `make ci-generated-consumer-sqlite` and the two server
 consumer targets. Optional Cargo integration runs `make ci-cargo-generation`.
 Initializer/tutorial changes run `make ci-initializer ci-embedded-tutorial
