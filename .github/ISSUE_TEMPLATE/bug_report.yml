@@ -1,0 +1,32 @@
+name: Bug report
+description: Something behaves differently from the book.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, tokens, connection URLs, and private data. Report vulnerabilities [privately](https://github.com/oscscull/baseddsl/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: based --version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal BSL, commands or calls, with made-up data.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Mode, database, OS
+      placeholder: standalone, PostgreSQL 16, Ubuntu 24.04
