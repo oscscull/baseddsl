@@ -98,8 +98,11 @@ async fn rows(app: &Path, column: &str) -> Result<Vec<(String, String, String, O
 fn formatting(app: &Path, env: &Environment) -> Result<()> {
     let target = Path::new(&env["CARGO_TARGET_DIR"]);
     let clients = crate::artifacts::find(target, "based-starter", "client.rs")?;
-    ensure!(clients.len() == 1, "expected one OUT_DIR client");
-    let before = fs::read(&clients[0])?;
+    ensure!(!clients.is_empty(), "missing OUT_DIR client");
+    let before = clients
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()?;
     fs::write(
         app.join("rustfmt.toml"),
         "max_width = 60\nuse_small_heuristics = \"Off\"\n",
@@ -107,7 +110,11 @@ fn formatting(app: &Path, env: &Environment) -> Result<()> {
     command::run(command::cargo(), &["fmt"], app, env)?;
     command::run(command::cargo(), &["fmt", "--check"], app, env)?;
     ensure!(
-        fs::read(&clients[0])? == before,
+        clients
+            .iter()
+            .map(fs::read)
+            .collect::<Result<Vec<_>, _>>()?
+            == before,
         "formatting changed generated client"
     );
     ensure!(
