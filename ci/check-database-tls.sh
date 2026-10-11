@@ -49,7 +49,7 @@ cargo build -p based-cli
 for kind in postgres mariadb; do
   example="$fixture_dir/$kind"
   mkdir -p "$example"
-  for entry in Cargo.toml Cargo.lock based.toml schema migrations src generated; do
+  for entry in Cargo.toml Cargo.lock build.rs based.toml schema migrations src; do
     cp -R "examples/$kind-quickstart/$entry" "$example/"
   done
   # Preserve the standalone consumer's path dependencies while isolating all data/artifacts.
