@@ -81,6 +81,6 @@ pub(crate) fn lower_bulk_create(
         capture: None,
         wipe: false,
         bulk: Some(bulk),
-        real_delete: false,
+        keyed_delete: false,
     })
 }

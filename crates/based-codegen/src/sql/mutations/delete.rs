@@ -55,7 +55,7 @@ fn soft_delete_write(
         capture: None,
         wipe,
         bulk: None,
-        real_delete: false,
+        keyed_delete: false,
     }
 }
 
@@ -102,7 +102,8 @@ fn real_delete_write(
         capture: None,
         wipe,
         bulk: None,
-        // A filtered real DELETE ack-checks its zero-rows-affected as a 404; a wipe does not.
-        real_delete: !wipe,
+        // A keyed real DELETE ack-checks its zero-rows-affected as a 404; a wipe or a
+        // filtered bulk delete does not.
+        keyed_delete: where_.is_some_and(|p| where_is_keyed(p, model)),
     }
 }

@@ -82,7 +82,7 @@ pub(crate) fn lower_create<'a>(
         capture,
         wipe: false,
         bulk: None,
-        real_delete: false,
+        keyed_delete: false,
     }
 }
 

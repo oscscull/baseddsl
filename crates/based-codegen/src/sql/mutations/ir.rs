@@ -18,8 +18,9 @@ pub struct LoweredMutation {
     /// or the write's own `where` for a surviving update / soft delete / restore.
     /// Conditional transitions with an unchanged, explicitly bound primary key read
     /// back by that key after the `match_check` succeeds. `None`
-    /// only when the row does not survive the write — a real DELETE (plain-model `delete` /
-    /// `hard delete`) — where the response falls back to `{}`.
+    /// when the row does not survive the write — a real DELETE (plain-model `delete` /
+    /// `hard delete`) — where the response falls back to `{}`, and for an `-> ok` filtered
+    /// (non-keyed) bulk write, which succeeds on zero rows.
     pub ret_select: Option<String>,
     /// The declared-shape read-back for a structured `create … from`: an
     /// IN-keyed re-select over the written rows' keys, projecting the return shape (single
@@ -115,11 +116,12 @@ pub struct LoweredWrite {
     /// review template). The runtime reads the param, expands it to a chunked, atomic
     /// multi-row `INSERT`. `None` for every ordinary inline write.
     pub bulk: Option<BulkInsert>,
-    /// A filtered **real** DELETE (`hard delete M where …`, or a plain-model `delete M
-    /// where …`) — the only write whose zero-rows-affected is an absent-row 404 under an
-    /// `-> ok` acknowledgement. A wipe, a soft tombstone, a create, and an update all leave
-    /// it `false`, so a surviving-write `-> ok` still acks.
-    pub real_delete: bool,
+    /// A keyed **real** DELETE (`hard delete M where …`, or a plain-model `delete M
+    /// where …`, whose `where` binds a unique column or the full primary key) — the only
+    /// write whose zero-rows-affected is an absent-row 404 under an `-> ok`
+    /// acknowledgement. A wipe, a filtered bulk delete, a soft tombstone, a create, and an
+    /// update all leave it `false`.
+    pub keyed_delete: bool,
 }
 
 /// A structured shape-input `create`. The runtime materializes the actual SQL — the
