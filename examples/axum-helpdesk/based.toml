@@ -4,7 +4,7 @@ dialect = "postgres"
 client  = "rust"
 root    = "schema"
 
-# Explicit artifact generation remains the default until the measured build-cost gate.
+# Checked-in generation (`based gen all`); the quickstarts use `build.rs` instead.
 [generate]
 client = "generated/client.rs"
 client_mode = "embedded"

@@ -1,4 +1,4 @@
-//! Render reproducible Rust dependencies for the embedded consumer.
+//! Render reproducible Rust dependencies for the starter consumers.
 use super::options::Dialect;
 
 pub fn manifest(dialect: Dialect) -> String {
@@ -20,10 +20,14 @@ based-runtime = {{ git = "https://github.com/oscscull/baseddsl.git", rev = "{}",
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
+
+[build-dependencies]
+based-build = {{ git = "https://github.com/oscscull/baseddsl.git", rev = "{}" }}
 "#,
         env!("CARGO_PKG_RUST_VERSION"),
         based_version::COMMIT,
         dialect.name(),
-        tls
+        tls,
+        based_version::COMMIT,
     )
 }

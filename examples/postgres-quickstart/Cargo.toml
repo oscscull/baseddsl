@@ -26,3 +26,7 @@ serde_json = "1"
 bigdecimal = "0.4"
 # Load `DATABASE_URL` from `.env` (the conventional 12-factor crate) — no hard-coded URL.
 dotenvy = "0.15"
+
+[build-dependencies]
+# Generates the typed client from `based.toml` + `schema/` during `cargo build`.
+based-build = { path = "../../crates/based-build" }

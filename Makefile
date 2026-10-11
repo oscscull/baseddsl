@@ -294,7 +294,7 @@ ci-runtime-benchmark:
 	$(CARGO) run --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- 5
 
 .PHONY: ci-cargo-generation
-## Fresh optional build-helper consumer: lifecycle, formatter isolation and dependency boundary.
+## Fresh build.rs consumer: lifecycle, formatter isolation and dependency boundary.
 ci-cargo-generation:
 	$(CI) cargo-generation
 

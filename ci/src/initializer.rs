@@ -60,10 +60,17 @@ pub fn fresh(based: &Path, app: &Path, mode: &str, dialect: &str, env: &Environm
         "wrong next steps: {instructions}"
     );
     ensure!(
-        !app.join("local.db").exists() && !app.join("build.rs").exists(),
+        !app.join("local.db").exists(),
         "initializer performed runtime work"
     );
-    command::run(based, &["gen", "all", "--check"], app, env)?;
+    let embedded = mode == "embedded";
+    ensure!(
+        app.join("build.rs").exists() == embedded && app.join("generated").exists() != embedded,
+        "embedded starters generate from build.rs; standalone commits artifacts"
+    );
+    if !embedded {
+        command::run(based, &["gen", "all", "--check"], app, env)?;
+    }
     command::run(based, &["migrate", "verify"], app, env)?;
     let before = fingerprint(app)?;
     let error = command::fail(
@@ -126,11 +133,10 @@ pub async fn verify(based: &Path) -> Result<()> {
             "  name: text",
             "  name: text\n  description: text?",
         )?;
-        for args in [
-            &["gen", "all"][..],
-            &["migrate", "gen"],
-            &["migrate", "verify"],
-        ] {
+        if mode == "standalone" {
+            command::run(&based, &["gen", "all"], &app, &env)?;
+        }
+        for args in [&["migrate", "gen"][..], &["migrate", "verify"]] {
             command::run(&based, args, &app, &env)?;
         }
         ensure!(

@@ -26,7 +26,7 @@ pub fn execute(options: Options) -> Result<(), CliError> {
         std::fs::write(&path, content).map_err(|e| io_at("preparing", &path, e))?;
     }
     based_artifacts::publish(
-        &crate::gen::prepared_all(stage.path())?,
+        &crate::gen::prepared_configured(stage.path())?,
         based_artifacts::Policy::Write {
             overwrite_user_owned: false,
         },

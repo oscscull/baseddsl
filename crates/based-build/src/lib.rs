@@ -1,10 +1,10 @@
-//! Optional compiler-only `build.rs` integration. Never connects to a database.
-//! Kept out of starters until the consumer build-cost gate accepts the overhead.
+//! Compiler-only `build.rs` client generation. Never connects to a database.
 mod cache;
 mod environment;
 mod error;
 mod inputs;
 mod output;
+mod report;
 
 pub use error::Error;
 use std::path::PathBuf;
@@ -15,6 +15,12 @@ pub struct Generation {
     pub checked: bool,
     /// Whether the generated client bytes changed and were published.
     pub changed: bool,
+}
+
+/// Generate the client from `build.rs`; failures become Cargo build errors with
+/// source-located diagnostics. Returns `None` after reporting a failure.
+pub fn run() -> Option<Generation> {
+    report::report(generate())
 }
 
 /// Generate `OUT_DIR/client.rs` using the Cargo package's `based.toml`.

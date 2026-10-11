@@ -4,7 +4,8 @@ Keep CLI, language server, extension, runtime, and generated clients at matching
 versions. Before v1, `0.x` releases can change public interfaces.
 
 1. Back up database and migration history. Keep the previous tool installation.
-2. Pin the new source/version and regenerate clients and other owned artifacts.
+2. Pin the new source/version for the runtime and `based-build`, then regenerate
+   any checked-in artifacts with `based gen all`.
 3. Compile the application, review API changes and rendered migration SQL, and test
    against a copy of the database.
 4. Apply reviewed migrations separately and verify schema, data, and application calls.

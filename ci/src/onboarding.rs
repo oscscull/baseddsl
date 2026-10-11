@@ -33,14 +33,8 @@ pub async fn verify(based: &Path) -> Result<()> {
     let before = rows(&app, "name").await?;
     ensure!(before.len() == 2, "wrong lesson rows");
     rename(&app)?;
-    let error = command::fail(&based, &["gen", "all", "--check"], &app, &env)?;
-    ensure!(
-        error.to_lowercase().contains("stale"),
-        "stale artifacts accepted"
-    );
     for args in [
         &["check"][..],
-        &["gen", "all"],
         &["migrate", "gen", ".", "rename_item_title"],
         &["migrate", "verify"],
         &["migrate", "render", ".", "--number", "2"],
@@ -69,7 +63,7 @@ pub async fn verify(based: &Path) -> Result<()> {
         &app,
         &env,
     )?;
-    formatting(&based, &app, &env)?;
+    formatting(&app, &env)?;
     failures(&based, &app, &env)?;
     Ok(())
 }
@@ -101,22 +95,28 @@ async fn rows(app: &Path, column: &str) -> Result<Vec<(String, String, String, O
         .collect())
 }
 
-fn formatting(based: &Path, app: &Path, env: &Environment) -> Result<()> {
-    let artifact = app.join("generated/client.rs");
-    let before = fs::read(&artifact)?;
+fn formatting(app: &Path, env: &Environment) -> Result<()> {
+    let target = Path::new(&env["CARGO_TARGET_DIR"]);
+    let clients = crate::artifacts::find(target, "based-starter", "client.rs")?;
+    ensure!(clients.len() == 1, "expected one OUT_DIR client");
+    let before = fs::read(&clients[0])?;
     fs::write(
         app.join("rustfmt.toml"),
         "max_width = 60\nuse_small_heuristics = \"Off\"\n",
     )?;
     command::run(command::cargo(), &["fmt"], app, env)?;
     command::run(command::cargo(), &["fmt", "--check"], app, env)?;
-    let child = app.join("src/nested");
-    fs::create_dir(&child)?;
-    command::run(based, &["gen", "all", "--check"], &child, env)?;
-    command::run(based, &["gen", "all"], &child, env)?;
     ensure!(
-        fs::read(artifact)? == before,
-        "formatting/subdirectory generation changed artifact"
+        fs::read(&clients[0])? == before,
+        "formatting changed generated client"
+    );
+    ensure!(
+        !walkdir::WalkDir::new(app)
+            .into_iter()
+            .filter_entry(|entry| entry.file_name() != "target")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name() == "client.rs"),
+        "generated client escaped OUT_DIR"
     );
     Ok(())
 }
@@ -131,15 +131,16 @@ fn failures(based: &Path, app: &Path, env: &Environment) -> Result<()> {
         "invalid configuration error missing"
     );
     fs::write(manifest, before)?;
-    let artifact = app.join("generated/client.rs");
-    let before = fs::read(&artifact)?;
-    fs::write(&artifact, "// User-owned output\n")?;
-    let error = command::fail(based, &["gen", "all"], app, env)?;
+    let schema = app.join("schema/item.bsl");
+    let before = fs::read(&schema)?;
+    fs::write(&schema, "Item { id: serial, name:\n")?;
+    let error = command::fail(command::cargo(), &["build"], app, env)?;
     ensure!(
-        error.contains("--force") && fs::read_to_string(&artifact)? == "// User-owned output\n",
-        "output collision lost user source"
+        error.contains("item.bsl:") && error.contains("check failed:"),
+        "build did not surface the schema diagnostic: {error}"
     );
-    fs::write(artifact, before)?;
+    fs::write(&schema, before)?;
+    command::run(command::cargo(), &["build"], app, env)?;
     let missing = app.join("absent-directory/database.db");
     command::fail(
         based,
