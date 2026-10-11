@@ -83,7 +83,7 @@ fn generation_and_temporal_numeric_variants_are_rejected_without_approximation()
 
 #[test]
 fn unknown_defaults_and_unrepresentable_aliases_are_blocking_reports() {
-    for source in ["-5", "+5", "-1.25"] {
+    for source in ["+5", "-1.25", "'-5'::text", "-"] {
         let mut catalog = fixture::catalog(CatalogDialect::Postgres);
         catalog.tables[0].columns[1].native_type =
             NativeType::declared("bigint", TypeFamily::Integer);

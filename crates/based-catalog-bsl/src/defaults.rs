@@ -20,6 +20,10 @@ pub(crate) fn render(
             .strip_suffix("::text")
             .or_else(|| source.strip_suffix("::character varying"))
             .unwrap_or(source),
+        (CatalogDialect::Postgres, "int" | "float") => numeric_cast_body(source).unwrap_or(source),
+        (CatalogDialect::Postgres, ty) if ty.starts_with("decimal(") => {
+            numeric_cast_body(source).unwrap_or(source)
+        }
         _ => source,
     };
     let value = literal(source, ty, dialect);
@@ -27,6 +31,18 @@ pub(crate) fn render(
         report.error(table, Some(&column.name), CatalogCode::UnsupportedAttribute, "Default SQL is not a verified literal for this BSL type; expressions/casts/functions require manual representation");
     }
     value
+}
+
+/// PostgreSQL deparses a signed numeric constant as a quoted cast (`'-5'::integer`).
+fn numeric_cast_body(source: &str) -> Option<&str> {
+    let (quoted, cast) = source.rsplit_once("::")?;
+    if !matches!(
+        cast,
+        "smallint" | "integer" | "bigint" | "numeric" | "real" | "double precision"
+    ) {
+        return None;
+    }
+    quoted.strip_prefix('\'')?.strip_suffix('\'')
 }
 
 fn strip_parentheses(mut source: &str) -> &str {
@@ -43,11 +59,7 @@ fn literal(source: &str, ty: &str, dialect: CatalogDialect) -> Option<String> {
     if ty == "bool" && matches!(source.to_ascii_lowercase().as_str(), "true" | "false") {
         return Some(source.to_ascii_lowercase());
     }
-    if ty == "int"
-        && !source.is_empty()
-        && source.bytes().all(|byte| byte.is_ascii_digit())
-        && source.parse::<i64>().is_ok()
-    {
+    if ty == "int" && digits(unsigned(source)) && source.parse::<i64>().is_ok() {
         return Some(source.to_owned());
     }
     if (ty == "float" || ty.starts_with("decimal(")) && decimal(source) {
@@ -73,11 +85,17 @@ fn literal(source: &str, ty: &str, dialect: CatalogDialect) -> Option<String> {
 }
 
 fn decimal(source: &str) -> bool {
-    let Some((whole, fraction)) = source.split_once('.') else {
+    let Some((whole, fraction)) = unsigned(source).split_once('.') else {
         return false;
     };
-    !whole.is_empty()
-        && !fraction.is_empty()
-        && whole.bytes().all(|byte| byte.is_ascii_digit())
-        && fraction.bytes().all(|byte| byte.is_ascii_digit())
+    digits(whole) && digits(fraction)
+}
+
+/// The magnitude of a numeric literal; BSL spells only a leading `-` sign.
+fn unsigned(source: &str) -> &str {
+    source.strip_prefix('-').unwrap_or(source)
+}
+
+fn digits(source: &str) -> bool {
+    !source.is_empty() && source.bytes().all(|byte| byte.is_ascii_digit())
 }

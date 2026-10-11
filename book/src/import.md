@@ -37,8 +37,8 @@ keys and keyless tables remain distinct. Naming collisions are resolved determin
 
 Unsupported or unrepresentable facts block publication rather than disappearing.
 Review findings for views, expression/partial indexes, generated expressions,
-native types/defaults, and FK semantics. Signed native defaults and arbitrary
-composite-FK column aliases currently have representation limits. Selected objects
+native types/defaults, and FK semantics. Arbitrary composite-FK column aliases
+currently have representation limits. Selected objects
 with missing visibility or unresolved references cannot become successful imports.
 
 Import is a one-shot starting point, not continuous schema synchronization. To

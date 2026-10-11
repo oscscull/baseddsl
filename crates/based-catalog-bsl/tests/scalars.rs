@@ -57,6 +57,85 @@ fn native_scalars_literal_defaults_and_bound_losses_are_independent_compiler_fac
     assert!(!output.report.has_errors());
 }
 
+#[test]
+fn signed_native_defaults_emit_as_signed_literals() {
+    let int = |source: &str| (source.to_owned(), Literal::Int(-5));
+    let fraction = |source: &str, text: &str| (source.to_owned(), Literal::Decimal(text.into()));
+    for (dialect, declarations, cases) in [
+        (
+            CatalogDialect::Postgres,
+            ["bigint", "numeric(6,2)", "double precision"],
+            [
+                int("'-5'::integer"),
+                fraction("'-1.25'::numeric", "-1.25"),
+                fraction("'-1.5'::double precision", "-1.5"),
+            ],
+        ),
+        (
+            CatalogDialect::MariaDb,
+            ["bigint", "decimal(6,2)", "double"],
+            [
+                int("-5"),
+                fraction("-1.25", "-1.25"),
+                fraction("-1.5", "-1.5"),
+            ],
+        ),
+        (
+            CatalogDialect::Sqlite,
+            ["integer", "real", "real"],
+            [
+                int("(-5)"),
+                fraction("-1.25", "-1.25"),
+                fraction("(-1.5)", "-1.5"),
+            ],
+        ),
+    ] {
+        let families = [TypeFamily::Integer, TypeFamily::Decimal, TypeFamily::Real];
+        let columns = cases
+            .iter()
+            .enumerate()
+            .map(|(position, (source, _))| {
+                let mut family = families[position];
+                if dialect == CatalogDialect::Sqlite && family == TypeFamily::Decimal {
+                    family = TypeFamily::Real;
+                }
+                let mut column = fixture::column(
+                    &format!("value_{position}"),
+                    u32::try_from(position).unwrap(),
+                    declarations[position],
+                    family,
+                    true,
+                );
+                if family == TypeFamily::Decimal {
+                    column.native_type.precision = Some(6);
+                    column.native_type.scale = Some(2);
+                }
+                column.default = Some(source.clone());
+                column
+            })
+            .collect();
+        let mut catalog = fixture::catalog(dialect);
+        let namespace = catalog.tables[0].id.namespace.clone();
+        catalog.tables = vec![fixture::table(&namespace, "signed", columns, &[])];
+        let (discovery, selection) = fixture::discovery(catalog);
+        let output = emit(&discovery, &selection, &fixture::manifest(dialect, "none")).unwrap();
+        assert!(!output.report.has_errors(), "{:?}", output.report);
+        let model = output.checked.schema.model("Signed").unwrap();
+        for (position, (_, expected)) in cases.iter().enumerate() {
+            let MemberKind::Scalar { default, .. } =
+                &model.member(&format!("value_{position}")).unwrap().kind
+            else {
+                panic!()
+            };
+            assert_eq!(
+                default.as_ref(),
+                Some(&DefaultVal::Lit(expected.clone())),
+                "{dialect:?} {position}"
+            );
+        }
+    }
+}
+
 type ScalarCase = (
     NativeType,
     Primitive,

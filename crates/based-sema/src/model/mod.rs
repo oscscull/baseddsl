@@ -9,6 +9,7 @@ use crate::ir::*;
 use crate::resolve;
 
 mod columns;
+mod decimal_fit;
 mod decorators;
 mod generated;
 mod keys;
@@ -18,6 +19,7 @@ mod skeleton;
 mod validate;
 
 pub(crate) use columns::*;
+use decimal_fit::decimal_fits;
 pub(crate) use decorators::*;
 pub(crate) use generated::*;
 pub(crate) use keys::*;

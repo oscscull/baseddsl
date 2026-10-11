@@ -88,6 +88,16 @@ fn time_and_bytes_primitives_round_trip() {
 }
 
 #[test]
+fn signed_numeric_defaults_round_trip() {
+    let src = "Ledger {\n  a: int (default -5)\n  b: decimal(6, 2) (default -1.50)\n}\n";
+    assert_eq!(
+        fmt("Ledger {\n a: int (default - 5)\n b: decimal(6, 2) (default -1.50)\n}"),
+        src
+    );
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
 fn field_type_column_aligns() {
     let got = fmt("Order {\n deleted_at: timestamp?\n fulfilled_by: User?\n total: int\n}");
     assert_eq!(
