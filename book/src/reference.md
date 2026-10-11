@@ -301,6 +301,8 @@ create Inventory[] from $rows
 ```
 
 - A bare column (`qty`) is the **stored** row; `incoming.<col>` is the **proposed** row.
+- `incoming.<relation>` re-points a relation as a whole (`token = incoming.token`, every key column for a
+  composite key); it can only be assigned to a relation into the same model.
 - `...incoming` (bulk only, at most once) sets **every** payload column except the conflict target from
   the proposed row — the last-write-wins overwrite. Explicit assigns compose in lexical order:
 

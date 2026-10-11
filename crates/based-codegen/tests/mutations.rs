@@ -1330,6 +1330,62 @@ fn bulk_upsert_spread_mysql_uses_values() {
     );
 }
 
+fn conflict_tail(src: &str, dialect: Dialect) -> String {
+    lower(src, dialect)[0].stmts[0]
+        .bulk
+        .as_ref()
+        .and_then(|b| b.conflict_tail.clone())
+        .expect("conflict tail")
+}
+
+const BULK_UPSERT_RELATION: &str = r#"
+    Token { id: Id, name: text }
+    TokenPrinting { id: serial, scryfall_id: text (unique), token: Token, data: json }
+    shape TokenPrintingIn from TokenPrinting { scryfall_id token { id } data }
+    mutation import(rows: TokenPrintingIn[]) -> ok {
+      create TokenPrinting[] from $rows
+        on conflict (scryfall_id) update { token = incoming.token, data = incoming.data };
+    }
+"#;
+
+#[test]
+fn bulk_upsert_sets_relation_fk_from_incoming() {
+    assert_eq!(
+        conflict_tail(BULK_UPSERT_RELATION, Dialect::Postgres),
+        "\nON CONFLICT (\"scryfall_id\") DO UPDATE SET \"token_id\" = excluded.\"token_id\", \"data\" = excluded.\"data\""
+    );
+    assert_eq!(
+        conflict_tail(BULK_UPSERT_RELATION, Dialect::Sqlite),
+        "\nON CONFLICT (`scryfall_id`) DO UPDATE SET `token_id` = excluded.`token_id`, `data` = excluded.`data`"
+    );
+    assert_eq!(
+        conflict_tail(BULK_UPSERT_RELATION, Dialect::MariaDb),
+        "\nON DUPLICATE KEY UPDATE `token_id` = VALUES(`token_id`), `data` = VALUES(`data`)"
+    );
+}
+
+const BULK_UPSERT_COMPOSITE_RELATION: &str = r#"
+    @key(code, term)
+    Course { code: text, term: text, title: text }
+    Seat { id: Id, tag: text (unique), course: Course }
+    shape SeatIn from Seat { tag course { code term } }
+    mutation import(rows: SeatIn[]) -> ok {
+      create Seat[] from $rows on conflict (tag) update { course = incoming.course };
+    }
+"#;
+
+#[test]
+fn bulk_upsert_sets_every_composite_fk_part_from_incoming() {
+    assert_eq!(
+        conflict_tail(BULK_UPSERT_COMPOSITE_RELATION, Dialect::Postgres),
+        "\nON CONFLICT (\"tag\") DO UPDATE SET \"course_code\" = excluded.\"course_code\", \"course_term\" = excluded.\"course_term\""
+    );
+    assert_eq!(
+        conflict_tail(BULK_UPSERT_COMPOSITE_RELATION, Dialect::MySql),
+        "\nON DUPLICATE KEY UPDATE `course_code` = VALUES(`course_code`), `course_term` = VALUES(`course_term`)"
+    );
+}
+
 #[test]
 fn bulk_read_back_is_an_in_keyed_reselect_of_the_shape() {
     let lm = lower(BULK_UPSERT_SCHEMA, Dialect::Sqlite);
