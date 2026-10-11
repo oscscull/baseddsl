@@ -28,8 +28,9 @@ Callbacks receive a POST with `Authorization: Bearer <secret>` and this v1 body:
 {"version":1,"guard":"caller_can_refund","callable":"refund","args":{"id":"..."},"ctx":{"org":"..."}}
 ```
 
-An allowed response is `{"version":1,"verdict":"allow"}`. Denial uses
-`"verdict":"deny"` and can include `"message"`. Invalid, unavailable,
+An allowed response is `{"version":1,"verdict":"allow"}`. A denial is
+`{"version":1,"verdict":"deny","message":"..."}` with a non-empty message of at
+most 1024 bytes. Invalid, unavailable,
 oversized, or timed-out callbacks deny the mutation with `403 guard_denied`.
 The adapter does not follow redirects or retry callbacks. Guards run before database
 checkout and idempotency claims, including on replay. Internal transaction retries
@@ -53,4 +54,4 @@ BASED_BIN=../../target/debug/based npm test
 Read its authentication edge, callback, and BSL before adapting it. The edge uses
 local example tokens, constructs fresh forwarding headers, and keeps the backend
 and callback on loopback. Production deployment needs your own identity system
-and [network boundary](deployment.md).
+and [network boundary](deployment.md#network-boundary).

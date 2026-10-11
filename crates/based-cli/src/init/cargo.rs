@@ -1,22 +1,6 @@
 //! Render reproducible Rust dependencies for the embedded consumer.
 use super::options::Dialect;
 
-pub fn standalone_manifest() -> String {
-    format!(
-        r#"[package]
-name = "based-http-starter"
-version = "0.1.0"
-edition = "2021"
-rust-version = "{}"
-[workspace]
-[dependencies]
-reqwest = {{ version = "0.13", default-features = false, features = ["blocking", "json"] }}
-serde_json = "1"
-"#,
-        env!("CARGO_PKG_RUST_VERSION")
-    )
-}
-
 pub fn manifest(dialect: Dialect) -> String {
     let tls = match dialect {
         Dialect::Sqlite => "",
