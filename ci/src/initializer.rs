@@ -51,8 +51,12 @@ pub fn fresh(based: &Path, app: &Path, mode: &str, dialect: &str, env: &Environm
         &command::root(),
         env,
     )?;
+    let run = match mode {
+        "standalone" => "3. node edge/edge.mjs",
+        _ => "2. cargo run",
+    };
     ensure!(
-        instructions.contains("1. based migrate apply") && instructions.contains("2. cargo run"),
+        instructions.contains("1. based migrate apply") && instructions.contains(run),
         "wrong next steps: {instructions}"
     );
     ensure!(
@@ -107,10 +111,11 @@ pub async fn verify(based: &Path) -> Result<()> {
             &app,
             &env,
         )?;
-        command::run(command::cargo(), &["fmt", "--check"], &app, &env)?;
-        let output = command::run(command::cargo(), &["run"], &app, &env)?;
-        identity(&output)?;
-        if mode == "embedded" {
+        let rust = mode == "embedded";
+        if rust {
+            command::run(command::cargo(), &["fmt", "--check"], &app, &env)?;
+            let output = command::run(command::cargo(), &["run"], &app, &env)?;
+            identity(&output)?;
             ensure!(
                 output.contains("lookup: not found in this owner's context"),
                 "owner lookup escaped scope"
@@ -148,23 +153,27 @@ pub async fn verify(based: &Path) -> Result<()> {
                 .any(|name| name == "description"),
             "migration not applied"
         );
-        identity(&command::run(command::cargo(), &["run"], &app, &env)?)?;
-        command::run(
-            command::cargo(),
-            &["clippy", "--", "-D", "warnings"],
-            &app,
-            &env,
-        )?;
-        for dialect in ["mariadb", "postgres"] {
-            let app = scratch.path().join(format!("{mode}-{dialect}"));
-            fresh(&based, &app, mode, dialect, &env)?;
-            command::run(command::cargo(), &["fmt", "--check"], &app, &env)?;
+        if rust {
+            identity(&command::run(command::cargo(), &["run"], &app, &env)?)?;
             command::run(
                 command::cargo(),
                 &["clippy", "--", "-D", "warnings"],
                 &app,
                 &env,
             )?;
+        }
+        for dialect in ["mariadb", "postgres"] {
+            let app = scratch.path().join(format!("{mode}-{dialect}"));
+            fresh(&based, &app, mode, dialect, &env)?;
+            if rust {
+                command::run(command::cargo(), &["fmt", "--check"], &app, &env)?;
+                command::run(
+                    command::cargo(),
+                    &["clippy", "--", "-D", "warnings"],
+                    &app,
+                    &env,
+                )?;
+            }
         }
     }
     collisions(&based, scratch.path(), &env)?;

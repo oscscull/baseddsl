@@ -15,24 +15,22 @@ pub fn files(options: &Options) -> Vec<(&'static str, String)> {
             ".env.example",
             super::config::example(options.dialect).into(),
         ),
-        ("README.md", super::instructions::readme(options)),
         ("based.toml", super::manifest::render(options)),
     ];
     match options.mode {
-        Mode::Embedded => files.extend(embedded(options.dialect)),
+        Mode::Embedded => {
+            files.push(("README.md", super::instructions::readme(options)));
+            files.extend(embedded(options.dialect));
+        }
         Mode::Standalone => files.extend([
-            ("Cargo.toml", super::cargo::standalone_manifest()),
+            ("README.md", super::instructions::standalone_readme(options)),
             (
-                "src/main.rs",
-                include_str!("../../starter/standalone/main.rs").into(),
+                "edge/edge.mjs",
+                include_str!("../../starter/standalone/edge/edge.mjs").into(),
             ),
             (
-                "src/service.rs",
-                include_str!("../../starter/standalone/service.rs").into(),
-            ),
-            (
-                "src/http.rs",
-                include_str!("../../starter/standalone/http.rs").into(),
+                "edge/identity.mjs",
+                include_str!("../../starter/standalone/edge/identity.mjs").into(),
             ),
         ]),
     }
