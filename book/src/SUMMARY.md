@@ -20,5 +20,5 @@
 - [Design principles](principles.md)
 - [Language reference](reference.md)
 - [Verified database connections](tls.md)
-- [Working with scopes and transactions](recipes.md)
+- [Recipes](recipes.md)
 - [Larger applications](examples.md)

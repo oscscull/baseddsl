@@ -1,4 +1,67 @@
-# Working with scopes and transactions
+# Recipes
+
+## Read related rows in one response
+
+```bsl
+scope Author (owner: uuid = $ctx.owner)
+
+@scope Author
+Item {
+  id: Id
+  name: text
+  owner: uuid
+  parent: Item?
+  children: Item[] (Item.parent)
+  @index owner
+  @index parent
+}
+
+shape ItemTree from Item {
+  id
+  name
+  parent { id, name }
+  children { id, name }
+}
+
+query item_tree(id) -> ItemTree scoped Author;
+```
+
+A shape picks fields and nests relations; the query compiles to one statement.
+Scope predicates apply to joined and nested rows too. `based check` rejects a join
+with no covering index, so `@index parent` is required for `children`. See
+[relations](reference.md#relations) and [shapes](reference.md#shapes).
+
+## Serve anonymous and signed-in callers
+
+```bsl
+Post {
+  id: Id
+  author: uuid?
+  public: bool
+  body: text
+}
+
+query feed() -> Post[] {
+  list Post where (author = $ctx.user? or public = true) order (id);
+}
+```
+
+`$ctx.user?` is optional context. A signed-in caller sees their posts and public
+ones. Without `user`, the leaf becomes `author IS NULL`: the caller sees public
+posts **and unowned ones**, not everything. Optional context is allowed only in
+query `where` clauses; scopes always require their context.
+
+## See the SQL a callable runs
+
+```sh
+based gen sql
+```
+
+This writes `generated/schema.sql` (`[generate] sql` in `based.toml`): the DDL,
+then each callable under `-- query <name>` or `-- mutation <name>`. Parameters
+and context appear as `:name` placeholders. To see a plan, substitute values and
+prefix the statement with `EXPLAIN QUERY PLAN` (SQLite) or `EXPLAIN` (MariaDB,
+PostgreSQL). `based facts` lists the indexes Based infers.
 
 ## Select one ownership alternative or require both axes
 
@@ -72,7 +135,8 @@ reads use another connection, including for adopted transactions; they cannot se
 uncommitted caller state or hold its row locks. The conditional predicate makes
 the expected state part of the write. A stale/absent/out-of-scope row returns
 `404 not_found` with no transition. A preflight denial returns `403 guard_denied`.
-Guard registration is required before an engine/service can start.
+Guard registration is required before an engine/service can start. Standalone
+services configure guards as [HTTP callbacks](guards.md).
 
 Use [host transactions](reference.md) for locking
 read-decide-write. `for update` requires a transaction-bound client and gives row
