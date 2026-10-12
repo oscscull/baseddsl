@@ -1,13 +1,6 @@
 use super::*;
 
-/// Render the client module; `fixtures` also emits the test-fixture builders, which need
-/// the embedded bridge.
-pub(crate) fn render(
-    schema: &CheckedSchema,
-    decls: &[Decl],
-    opts: ClientOptions,
-    fixtures: bool,
-) -> String {
+pub(crate) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions) -> String {
     let callables = collect(schema, decls);
     // The streaming surface (`RowStream`, `decode_ndjson`, `Transport::call_stream`)
     // is emitted only when a `-> stream` query exists, and the idempotency-key
@@ -33,10 +26,8 @@ pub(crate) fn render(
     // the wire client stays free of a based-runtime dependency.
     if opts.embedded {
         emit_embedded_bridge(&mut out, &callables, opts, has_stream, has_mutation);
-        if fixtures {
-            out.push_str(&render_fixtures(schema));
-        }
     }
+    out.push_str(&render_fixtures(schema, opts.embedded));
     if out.contains(": Decimal") || out.contains("<Decimal>") {
         out.push_str(DECIMAL);
     }

@@ -7,8 +7,14 @@ impl Engine {
     /// Insert one test-fixture row of `model` in its own transaction and return the whole
     /// row as stored. `row` maps field names to values (a relation to its target's key
     /// object); unset columns take NULL or their database default. Scopes and guards do
-    /// not apply. Not reachable through any route.
-    pub async fn insert_fixture(&self, model: &str, row: serde_json::Value) -> WireResponse {
+    /// not apply. `shard` is the routing key of the shard to insert on (`""` for a
+    /// single-shard deployment). Not reachable through any route.
+    pub async fn insert_fixture(
+        &self,
+        model: &str,
+        row: serde_json::Value,
+        shard: &str,
+    ) -> WireResponse {
         let prepared = match super::prepare(self.compiled(), model, row) {
             Ok(prepared) => prepared,
             Err(response) => return response,
@@ -16,7 +22,7 @@ impl Engine {
         let result = run_mutation(
             &prepared.compiled,
             self.backend(),
-            "",
+            shard,
             self.id_gen(),
             &NoStore,
             &prepared.request,

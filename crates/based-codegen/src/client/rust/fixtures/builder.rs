@@ -7,7 +7,7 @@ pub(super) fn render_builder(schema: &CheckedSchema, fixture: &FixtureModel<'_>)
     let mut out = format!(
         "\n/// One `{model}` fixture row being built; [`{ctor}`] starts one.\n\
          #[derive(Debug, Clone)]\n#[must_use]\npub struct {builder} {{\n    \
-         row: serde_json::Map<String, serde_json::Value>,\n}}\n",
+         row: serde_json::Map<String, serde_json::Value>,\n    shard: String,\n}}\n",
         ctor = constructor_name(model),
     );
     out.push_str(&render_constructor(schema, fixture, &builder));
@@ -19,9 +19,12 @@ pub(super) fn render_builder(schema: &CheckedSchema, fixture: &FixtureModel<'_>)
         out.push_str(&render_setter(schema, fixture.model, field));
     }
     out.push_str(&format!(
-        "    /// Insert the row and return it as stored.\n    \
-         pub async fn insert<T: FixtureTransport>(self, client: &Client<T>) -> Result<{model}Row, ClientError> {{\n        \
-         support::insert(client, \"{model}\", self.row).await\n    }}\n}}\n"
+        "    /// Insert on the shard this key routes to (default: the empty key).\n    \
+         pub fn on_shard(mut self, key: impl Into<String>) -> Self {{\n        \
+         self.shard = key.into();\n        self\n    }}\n\n    \
+         /// Insert the row and return it as stored.\n    \
+         pub async fn insert(self, to: &impl FixtureTransport) -> Result<{model}Row, ClientError> {{\n        \
+         support::insert(to, \"{model}\", self.row, &self.shard).await\n    }}\n}}\n"
     ));
     out
 }
@@ -50,7 +53,7 @@ fn render_constructor(schema: &CheckedSchema, fixture: &FixtureModel<'_>, builde
     let uses_n = fixture
         .fields
         .iter()
-        .any(|f| matches!(f.role, Role::Placeholder(_)));
+        .any(|f| matches!(&f.role, Role::Placeholder(p) if p.uses_n()));
     let mut body = String::new();
     if uses_n {
         body.push_str("    let n = support::next_n();\n");
@@ -62,7 +65,7 @@ fn render_constructor(schema: &CheckedSchema, fixture: &FixtureModel<'_>, builde
         body.extend(fills);
     }
     format!(
-        "\n/// A new `{model}` fixture.\n#[allow(clippy::too_many_arguments)]\npub fn {ctor}({params}) -> {builder} {{\n{body}    {builder} {{ row }}\n}}\n",
+        "\n/// A new `{model}` fixture.\n#[allow(clippy::too_many_arguments)]\npub fn {ctor}({params}) -> {builder} {{\n{body}    {builder} {{\n        row,\n        shard: String::new(),\n    }}\n}}\n",
         ctor = constructor_name(model),
         params = params.join(", "),
     )

@@ -37,14 +37,19 @@ async fn answer(engine: &Engine, line: &str) -> Value {
     let Some(model) = request["model"].as_str() else {
         return error("each request needs a \"model\" string");
     };
-    let response = engine.insert_fixture(model, request["row"].clone()).await;
+    let shard = request["shard"].as_str().unwrap_or("");
+    let response = engine
+        .insert_fixture(model, request["row"].clone(), shard)
+        .await;
     if response.status == 200 {
         json!({ "row": response.body })
     } else {
-        response.body
+        let mut reply = response.body;
+        reply["status"] = json!(response.status);
+        reply
     }
 }
 
 fn error(message: &str) -> Value {
-    json!({ "error": { "code": "bad_request", "message": message } })
+    json!({ "status": 400, "error": { "code": "bad_request", "message": message } })
 }

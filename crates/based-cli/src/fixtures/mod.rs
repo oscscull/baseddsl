@@ -1,7 +1,8 @@
 //! `based fixtures`: a test-fixture process. It reads one JSON request per stdin line,
-//! `{"model": "...", "row": {...}}`, inserts the row through the engine and answers on
-//! stdout with `{"row": {...}}` or `{"error": {"code", "message"}}`, in order. Generated
-//! TypeScript fixtures drive it; it opens no socket.
+//! `{"model": "...", "row": {...}, "shard": "..."}` (shard optional), inserts the row
+//! through the engine and answers on stdout with `{"row": {...}}` or
+//! `{"status": 4xx, "error": {"code", "message"}}`, in order. Generated TypeScript and
+//! wire-client Rust fixtures drive it; it opens no socket.
 
 mod lines;
 

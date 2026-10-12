@@ -385,6 +385,6 @@ transparent over the wire. `page` returns `{ rows, cursor }` (+ `total` with cou
 `-> stream` returns an async `Stream` of rows over NDJSON. An embedded in-process client is available via
 `client::embedded(&engine)`.
 
-An embedded `build.rs` client also carries `client::fixtures`, typed test-row builders
+Every Rust client also carries `client::fixtures`, typed test-row builders
 (`fixtures::order(&org, &buyer).insert(&api)`); TypeScript gets the same builders from
 `based gen fixtures --lang ts -o <path>`. See [test fixtures](fixtures.md).

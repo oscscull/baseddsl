@@ -2,9 +2,7 @@
 //! generated from that one reading.
 
 use based_ast::FileId;
-use based_codegen::client::{
-    client_with, client_with_fixtures, typescript_fixtures, ClientOptions, ClientTarget,
-};
+use based_codegen::client::{client_with, typescript_fixtures, ClientOptions, ClientTarget};
 use based_codegen::fixture::{fixture_model, Placeholder, Role};
 use based_parser::parse_file;
 use based_sema::{check, CheckedSchema};
@@ -111,13 +109,13 @@ fn a_required_opaque_column_cannot_be_a_fixture() {
 }
 
 #[test]
-fn embedded_build_clients_carry_rust_fixtures() {
+fn every_rust_client_carries_fixtures() {
     let (schema, decls) = schema();
     let embedded = ClientOptions {
         embedded: true,
         dialect: None,
     };
-    let out = client_with_fixtures(&schema, &decls, ClientTarget::Rust, embedded);
+    let out = client_with(&schema, &decls, ClientTarget::Rust, embedded);
     assert!(out.contains("pub mod fixtures {"), "{out}");
     assert!(
         out.contains("pub fn note(org: impl RowRef<Id<entity::Org>>) -> NoteFixture"),
@@ -126,25 +124,27 @@ fn embedded_build_clients_carry_rust_fixtures() {
     assert!(out.contains("pub struct NoteRow"), "{out}");
     assert!(out.contains("pub fn reviewer(mut self, value: impl RowRef<Id<entity::Org>>)"));
     assert!(out.contains("format!(\"title-{n}\")"), "{out}");
+    assert!(out.contains("pub fn on_shard(mut self"), "{out}");
+    assert!(
+        out.contains("impl FixtureTransport for Embedded<'_>"),
+        "{out}"
+    );
     assert!(
         !out.contains("pub struct MeshRow"),
         "ineligible models get no builder"
     );
 
-    let plain = client_with(&schema, &decls, ClientTarget::Rust, embedded);
-    assert!(
-        !plain.contains("pub mod fixtures"),
-        "`based gen client` output is unchanged"
-    );
-    let wire = client_with_fixtures(
+    let wire = client_with(
         &schema,
         &decls,
         ClientTarget::Rust,
         ClientOptions::default(),
     );
+    assert!(wire.contains("pub mod fixtures {"), "{wire}");
+    assert!(wire.contains("pub fn connect(options: Connect)"), "{wire}");
     assert!(
-        !wire.contains("pub mod fixtures"),
-        "fixtures need the embedded engine"
+        !wire.contains("based_runtime"),
+        "a wire client never names the engine"
     );
 }
 
@@ -173,4 +173,6 @@ fn typescript_fixtures_mirror_the_rust_builders() {
         "unused helpers are left out"
     );
     assert!(out.contains("export function connect("), "{out}");
+    assert!(out.contains("export class Counter"), "{out}");
+    assert!(out.contains("on_shard(key: string): this"), "{out}");
 }

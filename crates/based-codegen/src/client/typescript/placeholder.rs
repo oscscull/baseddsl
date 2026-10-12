@@ -6,7 +6,9 @@ pub(super) fn placeholder_expr(field: &str, placeholder: &Placeholder) -> String
     match placeholder {
         Placeholder::Text => format!("`{field}-${{n}}`"),
         Placeholder::Int | Placeholder::Float => "n".to_string(),
-        Placeholder::Decimal => "String(n)".to_string(),
+        Placeholder::Decimal { whole_digits } => {
+            format!("String(n % {})", 10u64.pow(*whole_digits))
+        }
         Placeholder::Bool => "false".to_string(),
         Placeholder::Enum(EnumValue::Str(wire)) => format!("{wire:?}"),
         Placeholder::Enum(EnumValue::Int(value)) => value.to_string(),

@@ -58,6 +58,19 @@ test("required relations are arguments; rows and ids both name a parent", async 
 test("the engine rejects what it cannot insert", async () => {
   await assert.rejects(
     connection.insert("Nope", {}, []),
-    (error: unknown) => error instanceof fixtures.FixtureError && error.code === "unknown_fixture",
+    (error: unknown) =>
+      error instanceof fixtures.FixtureError && error.status === 404 && error.code === "unknown_fixture",
   );
+});
+
+test("separate counters never collide", () => {
+  const first = new fixtures.Counter();
+  const second = new fixtures.Counter();
+  const taken = new Set(Array.from({ length: 10000 }, () => first.take()));
+  for (let i = 0; i < 10000; i++) assert.ok(!taken.has(second.take()));
+});
+
+test("a shard key rides along to the process", async () => {
+  const org = await fixtures.org().on_shard("").insert(connection);
+  assert.match(org.slug, /^slug-\d+$/);
 });
