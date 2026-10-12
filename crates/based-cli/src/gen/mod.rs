@@ -46,6 +46,16 @@ pub fn execute(target: GenTarget) -> Result<(), CliError> {
                 mode,
             )
         }
+        GenTarget::Fixtures {
+            root,
+            lang: options::Lang::Ts,
+            output,
+        } => one(
+            Kind::Fixtures,
+            &project_root::resolve(root.as_deref())?,
+            output,
+            None,
+        ),
         GenTarget::All { root, check, force } => all(
             &project_root::resolve(root.as_deref())?,
             OutputOptions {

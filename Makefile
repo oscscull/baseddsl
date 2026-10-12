@@ -197,7 +197,8 @@ ci-examples: ci-example-sqlite ci-example-mariadb ci-example-postgres ci-example
 ci-example-sqlite: based-cli
 	cd examples/sqlite-quickstart && rm -f "$(SQLITE_DB)" && \
 	  DATABASE_URL="$(SQLITE_DB)" $(BASED) migrate apply --database-url "$(SQLITE_DB)" && \
-	  DATABASE_URL="$(SQLITE_DB)" $(CARGO) run
+	  DATABASE_URL="$(SQLITE_DB)" $(CARGO) run && \
+	  $(CARGO) test --test fixtures
 
 ci-example-mariadb: based-cli
 	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"
@@ -283,6 +284,12 @@ ci-generated-consumer-postgres: based-cli
 ci-typescript-guards:
 	$(CARGO) build -p based-cli --no-default-features
 	cd examples/standalone-typescript-guards && $(NPM) ci && BASED_BIN="$(BASED)" $(NPM) test
+
+.PHONY: ci-typescript-fixtures
+# Generated TypeScript fixtures driving a `based fixtures` process over SQLite.
+ci-typescript-fixtures:
+	$(CARGO) build -p based-cli --no-default-features
+	cd examples/typescript-fixtures && $(NPM) ci && BASED_BIN="$(BASED)" $(NPM) test
 
 .PHONY: ci-runtime-benchmark
 # Parity and generated-artifact gate, never a latency threshold.

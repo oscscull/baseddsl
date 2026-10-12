@@ -145,13 +145,28 @@ impl TxTransport {
         let mut guard = self.slot.lock().await;
         match guard.as_mut() {
             Some(tx) => self.engine.dispatch_on(&mut **tx, route, args, ctx).await,
-            None => WireResponse::error(
-                500,
-                "internal",
-                "the transaction is already committed or rolled back".to_string(),
-            ),
+            None => closed(),
         }
     }
+
+    /// Insert one test-fixture row on the held transaction (see
+    /// [`Engine::insert_fixture`](crate::Engine::insert_fixture)).
+    pub async fn insert_fixture(&self, model: &str, row: Value) -> WireResponse {
+        let mut guard = self.slot.lock().await;
+        match guard.as_mut() {
+            Some(tx) => self.engine.insert_fixture_on(&mut **tx, model, row).await,
+            None => closed(),
+        }
+    }
+}
+
+/// The response for a call on a transaction that already ended.
+fn closed() -> WireResponse {
+    WireResponse::error(
+        500,
+        "internal",
+        "the transaction is already committed or rolled back".to_string(),
+    )
 }
 
 /// A `Transport` bound to a **caller-owned** open transaction the caller adopted from its
@@ -195,5 +210,12 @@ impl<D: DbRead> AdoptedTransport<D> {
     pub async fn dispatch(&self, route: &str, args: Value, ctx: Value) -> WireResponse {
         let mut guard = self.db.lock().await;
         self.engine.dispatch_on(&mut *guard, route, args, ctx).await
+    }
+
+    /// Insert one test-fixture row on the adopted transaction (see
+    /// [`Engine::insert_fixture`](crate::Engine::insert_fixture)).
+    pub async fn insert_fixture(&self, model: &str, row: Value) -> WireResponse {
+        let mut guard = self.db.lock().await;
+        self.engine.insert_fixture_on(&mut *guard, model, row).await
     }
 }

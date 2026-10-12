@@ -44,7 +44,7 @@ based-runtime = { path = "../based-runtime", features = [
 ] }
 # The binary owns the async runtime: execution (serve, migrate apply/status) is native
 # async; the front-end commands just run on it.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
 clap = { workspace = true }
 dotenvy = "0.15"
 tempfile = "3"

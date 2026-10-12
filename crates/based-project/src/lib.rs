@@ -11,7 +11,7 @@ mod sources;
 use based_ast::Decl;
 use based_manifest::Project;
 use based_sema::CheckedSchema;
-pub use client::render_client;
+pub use client::{render_build_client, render_client};
 pub use error::Error;
 pub use report::Report;
 use std::path::{Path, PathBuf};

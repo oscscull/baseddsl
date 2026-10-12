@@ -7,8 +7,9 @@
 //! (`openapi`, enabled by the default `openapi` feature): `CheckedSchema` -> one OpenAPI document over the same wire, so
 //! `openapi-generator` yields clients in any language (polyglot via one emitter, not
 //! N). The **migration** engine ([`migrate`]): `CheckedSchema` -> a canonical
-//! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list. Each
-//! is a module reading the same resolved IR.
+//! `schema.snap` + a `diff` producing the dialect-neutral `up.mig` step list. Test
+//! [`fixture`]s: which columns a fixture row sets, shared by the engine and the Rust and
+//! TypeScript builders. Each is a module reading the same resolved IR.
 //!
 //! The compiler seed is `based_sema::CheckedSchema`. Codegen never re-derives
 //! resolution facts (table names, FK columns, soft-delete mode) — those live on the
@@ -18,6 +19,7 @@ mod any_write_check;
 #[cfg(feature = "client")]
 pub mod client;
 mod dialect_check;
+pub mod fixture;
 pub mod migrate;
 #[cfg(feature = "openapi")]
 pub mod openapi;

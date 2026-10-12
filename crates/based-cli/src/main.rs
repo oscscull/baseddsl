@@ -11,6 +11,7 @@
 mod check;
 mod error;
 mod external_guards;
+mod fixtures;
 mod gen;
 mod idempotency_store;
 mod idempotency_table;
@@ -78,6 +79,9 @@ enum Command {
     /// Strip caller-supplied X-Based-* headers and prevent direct listener access.
     /// Deployment guide: https://github.com/oscscull/baseddsl/blob/main/book/src/deployment.md
     Serve(serve_options::ServeOptions),
+    /// Insert test-fixture rows read as JSON lines on stdin; generated TypeScript
+    /// fixtures drive this process. Never serves HTTP.
+    Fixtures(fixtures::FixturesOptions),
 }
 
 #[derive(Subcommand)]
@@ -213,6 +217,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Serve(options) => {
             let root = project_root::resolve(options.root.as_deref())?;
             serve::cmd_serve(&root, options).await
+        }
+        Command::Fixtures(options) => {
+            let root = project_root::resolve(options.root.as_deref())?;
+            fixtures::cmd_fixtures(&root, options).await
         }
     }
 }

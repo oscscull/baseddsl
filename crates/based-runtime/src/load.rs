@@ -29,6 +29,8 @@ pub struct Compiled {
     pub queries: HashMap<String, LoweredQuery>,
     /// Lowered mutation write statements, keyed by callable name (write dispatch).
     pub mutations: HashMap<String, LoweredMutation>,
+    /// Test-fixture insert ops, compiled on first use; never part of dispatch.
+    pub(crate) fixtures: crate::fixture::Fixtures,
 }
 
 /// How loading failed: either the front end reported errors (the schema is not
@@ -96,6 +98,7 @@ impl Compiled {
             dialect,
             queries,
             mutations,
+            fixtures: crate::fixture::Fixtures::default(),
         }
     }
 

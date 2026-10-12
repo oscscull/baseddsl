@@ -218,3 +218,4 @@ jobs:
         with:
           node-version: 20
       - run: make ci-typescript-guards
+      - run: make ci-typescript-fixtures

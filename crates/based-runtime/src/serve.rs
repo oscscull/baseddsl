@@ -150,7 +150,7 @@ pub async fn dispatch_on<D: crate::run::DbRead + ?Sized>(
 /// Map a run result to the wire response — the shared tail of [`dispatch`] and
 /// [`dispatch_on`], so the auto-commit edge and the host-transaction edge answer a success
 /// or failure identically.
-fn run_result_to_response(result: Result<serde_json::Value, RunError>) -> WireResponse {
+pub(crate) fn run_result_to_response(result: Result<serde_json::Value, RunError>) -> WireResponse {
     match result {
         Ok(body) => WireResponse::ok(body),
         Err(RunError::Plan(e)) => plan_error_response(e),

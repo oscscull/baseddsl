@@ -22,6 +22,12 @@ pub enum Mode {
     Embedded,
 }
 
+/// A host language for generated test fixtures. Rust fixtures come from `build.rs`.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Lang {
+    Ts,
+}
+
 #[derive(Subcommand)]
 pub enum GenTarget {
     /// Generate SQL DDL and parameterized query/mutation templates.
@@ -44,6 +50,15 @@ pub enum GenTarget {
     /// Generate an OpenAPI 3.1 contract.
     Openapi {
         root: Option<PathBuf>,
+        #[command(flatten)]
+        output: OutputOptions,
+    },
+    /// Generate typed test-fixture builders for a TypeScript test suite.
+    Fixtures {
+        root: Option<PathBuf>,
+        /// The host language.
+        #[arg(long, value_enum)]
+        lang: Lang,
         #[command(flatten)]
         output: OutputOptions,
     },

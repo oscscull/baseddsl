@@ -16,6 +16,10 @@ name = "client"
 required-features = ["client"]
 
 [[test]]
+name = "fixtures"
+required-features = ["client"]
+
+[[test]]
 name = "openapi"
 required-features = ["openapi"]
 
