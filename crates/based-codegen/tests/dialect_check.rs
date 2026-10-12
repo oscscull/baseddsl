@@ -3,7 +3,7 @@
 //! `ORDER BY`), so `check` must error for that target and stay quiet for the others.
 
 use based_ast::FileId;
-use based_codegen::{ordered_nest_diagnostics, Dialect};
+use based_codegen::{any_write_diagnostics, ordered_nest_diagnostics, Dialect};
 use based_parser::parse_file;
 use based_sema::{check, expand_spreads};
 
@@ -100,4 +100,55 @@ fn ordered_m2m_flatten_errors_on_mysql() {
         query get_post(id) -> PostDetail;
     "#;
     assert_eq!(codes_for(src, Dialect::MySql), vec!["E0350"]);
+}
+
+// ---------- a write's self-referential `.any` through a custom `on:` edge ----------
+
+fn any_write_codes(src: &str, dialect: Dialect) -> Vec<&'static str> {
+    let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
+    let (schema, diags) = check(&sf.decls);
+    let errs: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == based_diagnostics::Severity::Error && d.code != "E0260")
+        .map(|d| d.code)
+        .collect();
+    assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
+    any_write_diagnostics(&schema, &sf.decls, dialect)
+        .iter()
+        .map(|d| d.code)
+        .collect()
+}
+
+const CUSTOM_ON_TREE: &str = r#"
+    Node {
+      id: Id
+      code: text
+      parent_code: text?
+      parent: Node? (on: node.parent_code = node.code)
+      children: Node[] (Node.parent)
+    }
+    mutation prune() -> ok { delete Node where (not children.any()); }
+"#;
+
+#[test]
+fn custom_on_self_any_in_a_write_errors_on_the_mysql_family() {
+    assert_eq!(
+        any_write_codes(CUSTOM_ON_TREE, Dialect::MySql),
+        vec!["E0352"]
+    );
+    assert_eq!(
+        any_write_codes(CUSTOM_ON_TREE, Dialect::MariaDb),
+        vec!["E0352"]
+    );
+    assert!(any_write_codes(CUSTOM_ON_TREE, Dialect::Postgres).is_empty());
+    assert!(any_write_codes(CUSTOM_ON_TREE, Dialect::Sqlite).is_empty());
+}
+
+#[test]
+fn key_linked_self_any_in_a_write_is_clean_on_mariadb() {
+    let src = r#"
+        User { id: Id, name: text, invited_by: User?, invited_users: User[] (User.invited_by) }
+        mutation prune() -> ok { delete User where (not invited_users.any()); }
+    "#;
+    assert!(any_write_codes(src, Dialect::MariaDb).is_empty());
 }

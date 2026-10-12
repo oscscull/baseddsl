@@ -130,6 +130,7 @@ fn compile_paths(
             diagnostics.extend(based_codegen::ordered_nest_diagnostics(
                 &schema, &expanded, d,
             ));
+            diagnostics.extend(based_codegen::any_write_diagnostics(&schema, &expanded, d));
         }
         // FK-convention divergence checks (resolved project `foreign_keys`; a loose file
         // with no project uses the safe `None` default).
