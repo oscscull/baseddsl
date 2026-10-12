@@ -122,6 +122,7 @@ impl<'a> Select<'a> {
             bare_cols: false,
             incoming: false,
             optional_params: self.optional_params.clone(),
+            write_table: self.write_table.clone(),
         }
     }
 

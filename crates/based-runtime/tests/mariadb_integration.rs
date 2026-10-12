@@ -178,6 +178,8 @@ mod mutations_and_scopes;
 mod nested_writes_and_filters;
 #[path = "mariadb_integration/queries.rs"]
 mod queries;
+#[path = "mariadb_integration/relation_any.rs"]
+mod relation_any;
 #[path = "mariadb_integration/streaming.rs"]
 mod streaming;
 #[path = "mariadb_integration/types_and_tx.rs"]

@@ -34,25 +34,89 @@ impl<'a> Select<'a> {
         self.sub_counter += 1;
         let child_alias = format!("s{}_{}", self.sub_counter, child.table);
         let mut sub = self.spawn_child(child_alias.clone());
-        let mut wheres = vec![self.to_many_correlation(child, &via, cur, &child_alias, &alias)];
+        let mut filters = Vec::new();
         if let Some(sd) = &child.soft_delete {
-            wheres.push(soft_pred(self.dialect, &child_alias, child, sd));
+            filters.push(soft_pred(self.dialect, &child_alias, child, sd));
         }
         if let Some(scope) = sub.scope_join_pred(&child_alias, child) {
-            wheres.push(scope);
+            filters.push(scope);
         }
         if let Some(p) = pred {
-            wheres.push(sub.predicate(p, child));
+            filters.push(sub.predicate(p, child));
         }
         self.sub_counter = sub.sub_counter;
+        let from = format!("{} AS {}", self.qt(child), self.q(&child_alias));
+        let mut joins = String::new();
+        push_joins(&mut joins, self.dialect, &sub.joins);
 
-        let mut sql = format!(
-            "EXISTS (SELECT 1 FROM {} AS {}",
-            self.qt(child),
-            self.q(&child_alias)
+        // MySQL/MariaDB can't read the table a statement writes in a subquery; a derived
+        // table is materialized first, so the rows it returns are read before the write.
+        let custom_on = matches!(
+            child.member(&via).map(|m| &m.kind),
+            Some(MemberKind::Forward {
+                custom_on: Some(_),
+                ..
+            })
         );
-        push_joins(&mut sql, self.dialect, &sub.joins);
-        sql.push_str(&format!(" WHERE {})", wheres.join(" AND ")));
-        sql
+        if self.dialect.is_mysql_family()
+            && self.write_table.as_deref() == Some(&child.table)
+            && !custom_on
+        {
+            let pairs = self.to_many_pairs(child, &via, cur);
+            let source = format!("{from}{joins}");
+            return self.materialized_any(&pairs, &alias, &child_alias, &source, &filters);
+        }
+        let mut wheres = vec![self.to_many_correlation(child, &via, cur, &child_alias, &alias)];
+        wheres.extend(filters);
+        format!(
+            "EXISTS (SELECT 1 FROM {from}{joins} WHERE {})",
+            wheres.join(" AND ")
+        )
+    }
+
+    /// `(<parent key>) IN (SELECT * FROM (SELECT <child fk> FROM … WHERE …) AS d<n>)` — the
+    /// uncorrelated form of `EXISTS` for a self-referential write, over the edge's
+    /// `(child_fk, parent_pk)` pairs.
+    fn materialized_any(
+        &mut self,
+        pairs: &[(String, String)],
+        parent_alias: &str,
+        child_alias: &str,
+        source: &str,
+        filters: &[String],
+    ) -> String {
+        let mut wheres: Vec<String> = pairs
+            .iter()
+            .map(|(fk, _)| format!("{} IS NOT NULL", self.qcol(child_alias, fk)))
+            .collect();
+        wheres.extend(filters.iter().cloned());
+        let keys: Vec<String> = pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (fk, _))| {
+                format!(
+                    "{} AS {}",
+                    self.qcol(child_alias, fk),
+                    self.q(&format!("k{i}"))
+                )
+            })
+            .collect();
+        let parents: Vec<String> = pairs
+            .iter()
+            .map(|(_, pk)| self.qcol(parent_alias, pk))
+            .collect();
+        self.sub_counter += 1;
+        let derived = format!("d{}", self.sub_counter);
+        let lhs = if let [one] = parents.as_slice() {
+            one.clone()
+        } else {
+            format!("({})", parents.join(", "))
+        };
+        format!(
+            "{lhs} IN (SELECT * FROM (SELECT {} FROM {source} WHERE {}) AS {})",
+            keys.join(", "),
+            wheres.join(" AND "),
+            self.q(&derived)
+        )
     }
 }
