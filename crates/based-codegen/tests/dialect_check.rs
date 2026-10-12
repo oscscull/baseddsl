@@ -120,14 +120,14 @@ fn any_write_codes(src: &str, dialect: Dialect) -> Vec<&'static str> {
 }
 
 const CUSTOM_ON_TREE: &str = r#"
+    Group { id: Id, code: text, members: Node[] (Node.group), coded: Node[] (Node.coded_group) }
     Node {
       id: Id
-      code: text
-      parent_code: text?
-      parent: Node? (on: node.parent_code = node.code)
-      children: Node[] (Node.parent)
+      group: Group
+      group_code: text?
+      coded_group: Group? (on: node.group_code = group.code)
     }
-    mutation prune() -> ok { delete Node where (not children.any()); }
+    mutation prune() -> ok { delete Node where (not group.coded.any()); }
 "#;
 
 #[test]
