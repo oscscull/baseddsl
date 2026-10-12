@@ -75,19 +75,22 @@ pub(crate) fn ret_select(
         } else if creates_ret {
             RetKey::CreatedId
         } else {
-            let (pred, live) = surviving_ret_write(&m.body, &rm.ret_model, schema)?;
+            let w = surviving_ret_write(&m.body, &rm.ret_model, schema)?;
             // An `-> ok` filtered bulk write matching nothing is a no-op success; only a
-            // keyed write re-selects, so its absent row still answers `not_found`.
+            // keyed write re-selects, so its absent row still answers `not_found`. An
+            // `-> ok` update never re-selects: it may assign the key it matched on, so its
+            // own affected rows decide the miss (`keyed_ack`).
             if rm.ack
-                && !schema
-                    .model(&rm.ret_model)
-                    .is_some_and(|rt| where_is_keyed(pred, rt))
+                && (w.update
+                    || !schema
+                        .model(&rm.ret_model)
+                        .is_some_and(|rt| where_is_keyed(w.pred, rt)))
             {
                 return None;
             }
             RetKey::Where {
-                pred: transition_key.unwrap_or(pred),
-                live,
+                pred: transition_key.unwrap_or(w.pred),
+                live: w.live,
             }
         };
         Some(lower_ret_select(
@@ -272,23 +275,31 @@ fn lower_bulk_readback(
     }
 }
 
-/// The write whose surviving row a where-keyed re-select reads back: the first
-/// `update` / soft `delete` / `restore` on the return model, with its `where` predicate and
-/// whether the row is *live* afterwards (so the re-select injects the soft-delete live
-/// predicate). A plain-model / `hard delete` removes the row, and a `create` is the
-/// create-keyed path — both yield `None` here.
+/// The write whose surviving row a where-keyed re-select reads back.
+struct SurvivingWrite<'a> {
+    pred: &'a Predicate,
+    /// The row is live afterwards, so the re-select injects the soft-delete live predicate.
+    live: bool,
+    /// An `update`, which may assign the columns its `where` matched on.
+    update: bool,
+}
+
+/// The first `update` / soft `delete` / `restore` on the return model. A plain-model /
+/// `hard delete` removes the row, and a `create` is the create-keyed path — both yield
+/// `None` here.
 fn surviving_ret_write<'a>(
     body: &'a [WriteStmt],
     ret_model: &str,
     schema: &CheckedSchema,
-) -> Option<(&'a Predicate, bool)> {
+) -> Option<SurvivingWrite<'a>> {
+    let found = |pred, live, update| Some(SurvivingWrite { pred, live, update });
     for w in flat_writes(body) {
         match w {
             WriteStmt::Update { model, where_, .. } if model.node == ret_model => {
-                return Some((where_, true)); // the updated row stays live
+                return found(where_, true, true); // the updated row stays live
             }
             WriteStmt::Restore { model, where_ } if model.node == ret_model => {
-                return Some((where_, true)); // the row is live again after a restore
+                return found(where_, true, false); // the row is live again after a restore
             }
             // A soft `delete` tombstones (the row survives — read it back *without* the live
             // predicate); a plain-model `delete` removes it (skip — no row). A soft `delete
@@ -302,7 +313,7 @@ fn surviving_ret_write<'a>(
                     .model(&model.node)
                     .is_some_and(|m| m.soft_delete.is_some()) =>
             {
-                return Some((where_, false));
+                return found(where_, false, false);
             }
             _ => {}
         }

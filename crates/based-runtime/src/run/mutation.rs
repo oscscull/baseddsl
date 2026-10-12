@@ -170,9 +170,9 @@ pub(crate) async fn apply(
 /// not-found. Only a mutation whose row does not survive the write (a real DELETE) has no
 /// re-select and falls back to `{ id }` / `{}`.
 ///
-/// An `-> ok` mutation (a real DELETE, no re-select) decides the miss on rows
-/// affected instead: its primary DELETE (`plan.ack_check`) touching zero rows means
-/// the row was absent or out of scope — same rollback, same `Ok(None)` not-found.
+/// A keyed `-> ok` DELETE or UPDATE (no re-select) decides the miss on rows affected
+/// instead: that write (`plan.ack_check`) touching zero rows means the row was absent or
+/// out of scope — same rollback, same `Ok(None)` not-found.
 pub(crate) async fn apply_once(
     db: Box<dyn Db>,
     plan: &MutationPlan,

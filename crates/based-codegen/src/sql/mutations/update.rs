@@ -40,6 +40,6 @@ pub(crate) fn lower_update<'a>(
         capture: None,
         wipe: false,
         bulk: None,
-        keyed_delete: false,
+        keyed_ack: where_is_keyed(where_, model),
     }
 }
