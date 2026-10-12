@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 /// `based migrate gen [name]`: diff the current `.bsl` against the latest captured
 /// snapshot and, if there are changes, write the next `migrations/NNNN_slug/{up.mig,
 /// schema.snap}`. Offline + deterministic: the baseline is a stored snapshot, never
-/// a database. No changes ⇒ writes nothing and says so (a clean exit).
-pub fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> {
+/// a database. No changes ⇒ writes nothing and says so (a clean exit), unless `data` asks for
+/// a migration to hold hand-written data steps.
+pub fn cmd_migrate_gen(root: &Path, name: Option<&str>, data: bool) -> Result<(), CliError> {
     use based_codegen::migrate;
 
     let (project, schema, decls, sources, _warnings) = load_checked(root)?;
@@ -29,7 +30,7 @@ pub fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> 
     let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
     let now = migrate::Snapshot::from_schema_with(&schema, fks);
     let steps = migrate::diff_snapshots(&prev, &now);
-    if steps.is_empty() {
+    if steps.is_empty() && !data {
         println!("no schema changes since the latest migration — nothing to generate");
         return Ok(());
     }
@@ -47,13 +48,17 @@ pub fn cmd_migrate_gen(root: &Path, name: Option<&str>) -> Result<(), CliError> 
     // mechanically reversible, a loud irreversible comment otherwise, so a reverse exists to
     // complete instead of being silently never written.
     let dialect = Dialect::parse(&project.manifest.dialect);
-    let down = migrate::render_down(&steps, dialect);
     let up_path = dir.join("up.mig");
     let snap_path = dir.join("schema.snap");
-    let down_path = dir.join("down.mig");
     std::fs::write(&up_path, &up).map_err(|e| io_at("writing", &up_path, e))?;
     std::fs::write(&snap_path, &snap).map_err(|e| io_at("writing", &snap_path, e))?;
-    std::fs::write(&down_path, &down).map_err(|e| io_at("writing", &down_path, e))?;
+    // A data-only migration gets no prefilled down: literal-row creates reverse on their
+    // own, anything else needs a hand-written one.
+    if !steps.is_empty() {
+        let down = migrate::render_down(&steps, dialect);
+        let down_path = dir.join("down.mig");
+        std::fs::write(&down_path, &down).map_err(|e| io_at("writing", &down_path, e))?;
+    }
 
     let destructive = steps.iter().filter(|s| s.destructive()).count();
     println!(
@@ -169,26 +174,33 @@ pub fn cmd_migrate_render(
             read_snapshot(&existing[idx - 1].1)?
         };
         let now = read_snapshot(dir)?;
-        let mut steps = migrate::diff_snapshots(&prev, &now);
+        let steps = migrate::diff_snapshots(&prev, &now);
         let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
+        let name = name.as_deref().unwrap_or("?");
         // Structural steps are snapshot-authoritative; refuse to render SQL for a migration
         // whose structural `up.mig` lines were hand-edited away from `schema.snap` (else the
-        // rendered SQL would silently ignore the edit). `raw(<dialect>)` escapes are authored
-        // into `up.mig`, not derivable from the snapshots — append them so the rendered SQL
-        // matches what `apply` runs.
-        if let Ok(up_text) = std::fs::read_to_string(dir.join("up.mig")) {
-            if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
-                return Err(CliError::failure(format!(
-                    "migration {} has a structural up.mig line edited away from schema.snap; \
-                     edit the schema and re-run `based migrate gen`, or use a raw(<dialect>) line",
-                    name.as_deref().unwrap_or("?")
-                )));
-            }
-            steps.extend(migrate::parse_raw_steps(&up_text));
+        // rendered SQL would silently ignore the edit). `raw(<dialect>)` escapes and data
+        // steps are authored into `up.mig` — the plan places them as `apply` runs them.
+        let up_text = std::fs::read_to_string(dir.join("up.mig")).unwrap_or_default();
+        if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
+            return Err(CliError::failure(format!(
+                "migration {name} has a structural up.mig line edited away from schema.snap; \
+                 edit the schema and re-run `based migrate gen`, or use a raw(<dialect>) line"
+            )));
         }
+        let plan = migrate::plan_up(&prev, &now, &up_text, dialect).map_err(|problems| {
+            CliError::failure(format!(
+                "migration {name}: {}",
+                problems
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        })?;
 
-        println!("-- migrations/{}/up.mig", name.as_deref().unwrap_or("?"));
-        print!("{}", migrate::render_migration(&steps, dialect, &now));
+        println!("-- migrations/{name}/up.mig");
+        print!("{}", plan.review);
         println!();
     }
     Ok(())
@@ -228,6 +240,7 @@ pub async fn cmd_migrate_apply(
     let opts = migrate::ApplyOpts {
         allow_destructive,
         direction,
+        progress: Some(report_chunk),
     };
 
     let urls = shard_urls(root, dialect, database_url)?;
@@ -328,6 +341,7 @@ pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
 
     let (project, schema, _decls, _sources, _warnings) = load_checked(root)?;
     let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
+    let dialect = Dialect::parse(&project.manifest.dialect);
     let existing = existing_migrations(&root.join("migrations"))?;
 
     let mut problems = 0usize;
@@ -355,6 +369,7 @@ pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
         let stored =
             std::fs::read_to_string(&up_path).map_err(|e| io_at("reading", &up_path, e))?;
         problems += verify_up_mig(name, &stored, &steps, &snap);
+        problems += verify_data_steps(name, &stored, &prev, &snap, dialect);
         prev = snap;
     }
 
@@ -424,12 +439,47 @@ fn verify_up_mig(
     problems
 }
 
+/// Check one migration's data steps (and the placement of its `raw` lines) against the
+/// schema state at their lines, for the manifest dialect. Returns the number of problems.
+fn verify_data_steps(
+    name: &str,
+    stored: &str,
+    prev: &based_codegen::migrate::Snapshot,
+    snap: &based_codegen::migrate::Snapshot,
+    dialect: Dialect,
+) -> usize {
+    use based_codegen::migrate;
+
+    match migrate::plan_up(prev, snap, stored, dialect) {
+        Ok(plan) => {
+            if plan.has_data {
+                println!("  {name}: data steps checked");
+            }
+            0
+        }
+        Err(problems) => {
+            for p in &problems {
+                eprintln!("  {name}: {p}");
+            }
+            problems.len()
+        }
+    }
+}
+
 /// Read + parse a migration directory's `schema.snap`.
 fn read_snapshot(dir: &Path) -> Result<based_codegen::migrate::Snapshot, CliError> {
     let path = dir.join("schema.snap");
     let text = std::fs::read_to_string(&path).map_err(|e| io_at("reading", &path, e))?;
     based_codegen::migrate::Snapshot::parse(&text)
         .map_err(|e| CliError::failure(format!("parsing {}: {e}", path.display())))
+}
+
+/// Print one committed batch of a chunked data step.
+fn report_chunk(p: &based_runtime::migrate::ChunkProgress) {
+    println!(
+        "  {}: {}: {} rows (chunk {})",
+        p.migration, p.table, p.rows, p.chunk
+    );
 }
 
 /// Print an apply/rollback report line.

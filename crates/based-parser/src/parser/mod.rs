@@ -13,6 +13,7 @@ mod aggregate;
 mod arith;
 mod conflict;
 mod cursor;
+mod data_step;
 mod decl;
 mod decorator;
 mod enums;
@@ -120,4 +121,33 @@ struct Parser<'a> {
     toks: Vec<Lexed>,
     pos: usize,
     diags: Vec<Diagnostic>,
+}
+
+/// Parse one migration data step (an `up.mig` `create` / `update` / `delete` line, possibly
+/// spanning several lines). `Err` iff the input is not exactly one step.
+pub fn parse_data_step(src: &str, file: FileId) -> Result<DataStep, Vec<Diagnostic>> {
+    let lexing = lex(src);
+    let mut p = Parser {
+        src,
+        file,
+        toks: lexing.tokens,
+        pos: 0,
+        diags: Vec::new(),
+    };
+    for (start, end) in lexing.errors {
+        p.diags
+            .push(Diagnostic::error("E0001", "unexpected character").at(Span { file, start, end }));
+    }
+    match p.data_step() {
+        Ok(step) if p.diags.is_empty() && p.peek().is_none() => Ok(step),
+        Ok(_) => {
+            if p.peek().is_some() {
+                p.diags.push(
+                    Diagnostic::error("E0002", "trailing tokens after the data step").at(p.here()),
+                );
+            }
+            Err(p.diags)
+        }
+        Err(()) => Err(p.diags),
+    }
 }

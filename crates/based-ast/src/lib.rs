@@ -4,6 +4,9 @@
 //! builds these, sema/codegen read them. Spans ride the nodes that produce
 //! diagnostics.
 
+mod data_step;
+pub use data_step::*;
+
 // ---------- Source positions ----------------------------------------------
 
 /// Index into the compilation's file table.

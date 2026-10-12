@@ -46,12 +46,16 @@
 //! is the default (`uuid`, not-null, not-unique) — a universally implicit invariant;
 //! a model that declares a non-default `id` records it explicitly.
 
+mod data;
 mod diff;
+mod evolve;
 mod lifecycle;
 mod model;
+mod script;
 mod sql;
 mod up_mig;
 
+pub use data::{ChunkPlan, DataError};
 pub use diff::{
     diff, diff_snapshots, drift, has_raw_step, parse_raw_steps, raw_modeled_tables,
     strip_raw_steps, ColumnChange, ScopeChange, Step,
@@ -61,6 +65,7 @@ pub use model::{
     fk_spec_text, foreign_key_snaps, snapshot, target_pk_column, ColumnSnap, ForeignKeySnap,
     IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot, TableSnap,
 };
+pub use script::{has_data_step, plan_up, UpPlan, UpProblem, UpUnit, FORMAT_MARKER};
 pub use sql::{
     content_hash, migration_sql, render_down, render_migration, render_sql, sql_statements,
     up_mig_matches_snapshot,

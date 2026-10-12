@@ -14,6 +14,42 @@ Review the rendered SQL before applying it. Use `@was("old_name")` for renames;
 drop/add can lose values. Applied migration files are immutable. Add another
 migration to change an applied schema.
 
+## Data steps
+
+Write backfills and reference rows as typed lines in `up.mig`, between the
+structural steps. They name the snapshot's tables and columns as of their line:
+
+```
+format 2
+add column card_printing.set_code text null
+update all card_printing { set_code = data.set }
+update card where (card_printing.any(digital = false)) { paper = true } chunk 5000
+create format[] from [
+  { key = "commander", name = "Commander" },
+] on conflict (key) update { ...incoming }
+delete event where (created_at < "2024-01-01")
+```
+
+`format 2` runs every line in written order, `raw(<dialect>)` lines included.
+Without it, a migration keeps the old order: all `raw` lines after the
+structure. `based migrate gen --data` writes a migration with no schema change
+to hold data steps.
+
+`verify`, `render`, and `apply` check each step: unknown names, type mismatches,
+generated columns, missing required columns, and a non-unique conflict target
+are errors, as is anything the target dialect can't run. `data.set` reads a key
+of a `json` column. `child.any(…)` tests for a row in the table whose foreign
+key points here.
+
+`chunk N [by col] [pause 200ms]` on an `update` or `delete` walks the primary
+key (or `col`, which must be unique or indexed) `N` rows at a time, one
+transaction per batch. Progress is recorded, so an interrupted apply resumes.
+
+`--down` reverses a migration of literal-row `create`s by itself. Any other
+data step needs a `down.mig`.
+
+## Recovery
+
 A failed MariaDB DDL statement can leave earlier changes committed with no
 completion ledger row. Pending status does not prove that nothing ran. PostgreSQL
 and SQLite ordinary DDL rolls back on statement failure; raw SQL that changes

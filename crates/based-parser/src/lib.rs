@@ -18,4 +18,4 @@ pub fn parse_file(src: &str, file: FileId) -> Result<SchemaFile, Vec<Diagnostic>
     parser::parse(src, file)
 }
 
-pub use parser::parse_expr;
+pub use parser::{parse_data_step, parse_expr};
