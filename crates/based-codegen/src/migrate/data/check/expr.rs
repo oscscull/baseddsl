@@ -79,61 +79,60 @@ impl Ck<'_> {
     }
 
     fn path_value(&mut self, p: &Path, t: &TableView, scope: Scope) -> Ty {
-        let first = &p.segments[0];
-        if first.node == "incoming" && p.segments.len() == 2 {
-            if !scope.incoming {
+        match p.segments.as_slice() {
+            [first, _] if first.node == "incoming" && !scope.incoming => {
                 self.err(
                     first.span,
                     "`incoming.<col>` is only available in an `on conflict … update` branch",
                 );
-                return Ty::Unknown;
+                Ty::Unknown
             }
-            return self.column_ty(&p.segments[1].node, p.segments[1].span, t);
+            [first, col] if first.node == "incoming" => self.column_ty(&col.node, col.span, t),
+            [only] if t.col(&only.node).is_none() => Ty::Label(only.node.clone()),
+            [first, ..] if !scope.columns => {
+                self.err(
+                    first.span,
+                    format!(
+                        "`{}` reads a column — a created row's values are literals",
+                        first.node
+                    ),
+                );
+                Ty::Unknown
+            }
+            _ => self.column_path(p, t),
         }
-        if p.segments.len() == 1 && t.col(&first.node).is_none() {
-            return Ty::Label(first.node.clone());
-        }
-        if !scope.columns {
-            self.err(
-                first.span,
-                format!(
-                    "`{}` reads a column — a created row's values are literals",
-                    first.node
-                ),
-            );
-            return Ty::Unknown;
-        }
-        self.column_path(p, t)
     }
 
     /// A column, or a dot path into a `json` column.
     pub(crate) fn column_path(&mut self, p: &Path, t: &TableView) -> Ty {
         let first = &p.segments[0];
-        let ty = self.column_ty(&first.node, first.span, t);
-        if p.segments.len() == 1 || ty == Ty::Unknown {
-            return ty;
-        }
-        if ty == Ty::Col(Fam::Json) {
-            Ty::JsonPath
-        } else {
-            self.err(
-                p.segments[1].span,
-                format!(
-                    "`{}` is not a json column — a dot path reaches into json only",
-                    first.node
-                ),
-            );
-            Ty::Unknown
+        match (
+            self.column_ty(&first.node, first.span, t),
+            p.segments.get(1),
+        ) {
+            (ty, None) | (ty @ Ty::Unknown, Some(_)) => ty,
+            (Ty::Col(Fam::Json), Some(_)) => Ty::JsonPath,
+            (_, Some(dot)) => {
+                self.err(
+                    dot.span,
+                    format!(
+                        "`{}` is not a json column — a dot path reaches into json only",
+                        first.node
+                    ),
+                );
+                Ty::Unknown
+            }
         }
     }
 
     fn column_ty(&mut self, name: &str, span: Span, t: &TableView) -> Ty {
-        if let Some(c) = t.col(name) {
-            Ty::Col(c.fam.clone())
-        } else {
-            self.err(span, format!("table `{}` has no column `{name}`", t.name()));
-            Ty::Unknown
-        }
+        t.col(name).map_or_else(
+            || {
+                self.err(span, format!("table `{}` has no column `{name}`", t.name()));
+                Ty::Unknown
+            },
+            |c| Ty::Col(c.fam.clone()),
+        )
     }
 
     /// Report `ty` not fitting `col`.
@@ -154,38 +153,41 @@ fn numeric_operand(ty: &Ty) -> bool {
 
 /// Can a value of type `ty` be written to `col`?
 pub(crate) fn fits(col: &Col, ty: &Ty) -> Result<(), String> {
-    let f = &col.fam;
-    let ok = match ty {
+    match (ty, &col.fam) {
+        (Ty::Null, _) if col.nullable => Ok(()),
+        (Ty::Null, _) => Err(format!("`{}` is not nullable", col.name)),
+        (Ty::Label(l), Fam::StrEnum(vs) | Fam::IntEnum(vs)) if vs.contains(l) => Ok(()),
+        (Ty::Label(l), Fam::StrEnum(vs) | Fam::IntEnum(vs)) => Err(format!(
+            "`{l}` is not a value of `{}` ({})",
+            col.name,
+            vs.join(", ")
+        )),
+        (Ty::Label(l), _) => Err(format!("unknown column `{l}`")),
+        (Ty::Str(Some(v)), Fam::StrEnum(vs)) if !vs.contains(v) => Err(format!(
+            "\"{v}\" is not a value of `{}` ({})",
+            col.name,
+            vs.join(", ")
+        )),
+        (Ty::Str(Some(_)), Fam::StrEnum(_)) => Ok(()),
+        (_, Fam::Opaque) => Err(format!(
+            "`{}` has an opaque type — use a raw(<dialect>) line",
+            col.name
+        )),
+        (_, f) if accepts(f, ty) => Ok(()),
+        _ => Err(format!(
+            "cannot write {} to `{}` ({})",
+            ty_name(ty),
+            col.name,
+            col.ty
+        )),
+    }
+}
+
+/// Does family `f` take a value of type `ty`, nulls and labels aside?
+fn accepts(f: &Fam, ty: &Ty) -> bool {
+    match ty {
         Ty::Unknown => true,
-        Ty::Null => {
-            return if col.nullable {
-                Ok(())
-            } else {
-                Err(format!("`{}` is not nullable", col.name))
-            }
-        }
         Ty::JsonPath => !matches!(f, Fam::Bytes | Fam::Opaque),
-        Ty::Label(l) => {
-            return match f {
-                Fam::StrEnum(vs) | Fam::IntEnum(vs) if vs.contains(l) => Ok(()),
-                Fam::StrEnum(vs) | Fam::IntEnum(vs) => Err(format!(
-                    "`{l}` is not a value of `{}` ({})",
-                    col.name,
-                    vs.join(", ")
-                )),
-                _ => Err(format!("unknown column `{l}`")),
-            }
-        }
-        Ty::Str(Some(v)) if matches!(f, Fam::StrEnum(_)) => {
-            return match f {
-                Fam::StrEnum(vs) if !vs.contains(v) => Err(format!(
-                    "\"{v}\" is not a value of `{}` ({})",
-                    col.name,
-                    vs.join(", ")
-                )),
-                _ => Ok(()),
-            }
-        }
         Ty::Str(_) => matches!(
             f,
             Fam::Text
@@ -209,22 +211,7 @@ pub(crate) fn fits(col: &Col, ty: &Ty) -> Result<(), String> {
                 || (matches!(src, Fam::StrEnum(_)) && *f == Fam::Text)
                 || (*src == Fam::Text && matches!(f, Fam::StrEnum(_)))
         }
-    };
-    if *f == Fam::Opaque {
-        return Err(format!(
-            "`{}` has an opaque type — use a raw(<dialect>) line",
-            col.name
-        ));
-    }
-    if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "cannot write {} to `{}` ({})",
-            ty_name(ty),
-            col.name,
-            col.ty
-        ))
+        Ty::Null | Ty::Label(_) => false,
     }
 }
 

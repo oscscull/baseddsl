@@ -47,21 +47,21 @@ pub fn plan_up(
     let mut steps = diff_snapshots(prev, target);
     let scanned = scan(up_text);
     if !scanned.in_order {
-        if let Some(item) = scanned
+        let first_data = scanned
             .items
             .iter()
-            .find(|i| matches!(i.kind, ItemKind::Data(_)))
-        {
-            return Err(vec![problem(
+            .find(|i| matches!(i.kind, ItemKind::Data(_)));
+        return match first_data {
+            Some(item) => Err(vec![problem(
                 UP,
                 item.line,
                 format!(
                     "data steps run in written order — add `{FORMAT_MARKER}` as the first line \
                      (raw lines then run where they are written too)"
                 ),
-            )]);
-        }
-        return legacy_plan(&steps, up_text, dialect, target);
+            )]),
+            None => legacy_plan(&steps, up_text, dialect, target),
+        };
     }
     constraint_safe(&mut steps);
     plan_in_order(UP, prev, target, &steps, &scanned, dialect)
@@ -136,19 +136,13 @@ fn legacy_plan(
 ) -> Result<UpPlan, Vec<ScriptProblem>> {
     let whole = |message: String| vec![problem(UP, 0, message)];
     let raws = super::super::diff::parse_raw_steps(up_text);
-    let mut units: Vec<PlanUnit> = migration_sql(steps, dialect, target)
+    let units = migration_sql(steps, dialect, target)
         .map_err(whole)?
         .into_iter()
+        .chain(sql_statements(&raws, dialect).map_err(whole)?)
         .map(PlanUnit::Sql)
         .collect();
-    units.extend(
-        sql_statements(&raws, dialect)
-            .map_err(whole)?
-            .into_iter()
-            .map(PlanUnit::Sql),
-    );
-    let mut all = steps.to_vec();
-    all.extend(raws);
+    let all: Vec<Step> = steps.iter().cloned().chain(raws).collect();
     Ok(UpPlan {
         units,
         review: render_migration(&all, dialect, target),
@@ -200,9 +194,9 @@ impl Walk {
     }
 
     fn raw(&mut self, step: &Step) {
-        if let Ok(stmts) = sql_statements(std::slice::from_ref(step), self.dialect) {
-            self.units.extend(stmts.into_iter().map(PlanUnit::Sql));
-        }
+        let stmts = sql_statements(std::slice::from_ref(step), self.dialect);
+        self.units
+            .extend(stmts.into_iter().flatten().map(PlanUnit::Sql));
         self.review
             .push_str(body(&render_sql(std::slice::from_ref(step), self.dialect)));
     }

@@ -366,9 +366,14 @@ pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
         // Regenerated in the order the file's format runs them.
         let steps = migrate::up_steps(&prev, &snap, &stored);
         problems += verify_up_mig(name, &stored, &steps, &snap);
-        problems += verify_data_steps(name, &stored, &prev, &snap, dialect);
+        // Data steps (and `raw` placement) checked against the schema state at their lines.
+        let up = migrate::plan_up(&prev, &snap, &stored, dialect);
+        if up.as_ref().is_ok_and(|plan| plan.has_data) {
+            println!("  {name}: data steps checked");
+        }
+        problems += report_problems(name, up);
         if let Ok(down) = std::fs::read_to_string(dir.join("down.mig")) {
-            problems += verify_down_mig(name, &down, &prev, &snap, dialect);
+            problems += report_problems(name, migrate::plan_down(&prev, &snap, &down, dialect));
         }
         prev = snap;
     }
@@ -439,52 +444,17 @@ fn verify_up_mig(
     problems
 }
 
-/// Check one migration's data steps (and the placement of its `raw` lines) against the
-/// schema state at their lines, for the manifest dialect. Returns the number of problems.
-fn verify_data_steps(
-    name: &str,
-    stored: &str,
-    prev: &based_codegen::migrate::Snapshot,
-    snap: &based_codegen::migrate::Snapshot,
-    dialect: Dialect,
-) -> usize {
-    use based_codegen::migrate;
-
-    match migrate::plan_up(prev, snap, stored, dialect) {
-        Ok(plan) => {
-            if plan.has_data {
-                println!("  {name}: data steps checked");
-            }
-            0
-        }
-        Err(problems) => {
+/// Print a migration script's planning problems; returns how many there were.
+fn report_problems<T, P: std::fmt::Display>(name: &str, planned: Result<T, Vec<P>>) -> usize {
+    planned.map_or_else(
+        |problems| {
             for p in &problems {
                 eprintln!("  {name}: {p}");
             }
             problems.len()
-        }
-    }
-}
-
-/// Check a `down.mig`: its structural lines against the reverse the snapshots imply, and
-/// each data step against the state at its line, for the manifest dialect. Returns the
-/// number of problems.
-fn verify_down_mig(
-    name: &str,
-    down: &str,
-    prev: &based_codegen::migrate::Snapshot,
-    snap: &based_codegen::migrate::Snapshot,
-    dialect: Dialect,
-) -> usize {
-    match based_codegen::migrate::plan_down(prev, snap, down, dialect) {
-        Ok(_) => 0,
-        Err(problems) => {
-            for p in &problems {
-                eprintln!("  {name}: {p}");
-            }
-            problems.len()
-        }
-    }
+        },
+        |_| 0,
+    )
 }
 
 /// Read + parse a migration directory's `schema.snap`.

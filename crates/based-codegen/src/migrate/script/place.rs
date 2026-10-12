@@ -3,7 +3,7 @@
 
 use super::super::diff::Step;
 use super::super::up_mig::render_step;
-use super::scan::{ItemKind, Scanned};
+use super::scan::{is_canonical, ItemKind, Scanned};
 use super::ScriptProblem;
 
 /// One entry of an in-order migration, in execution order.
@@ -18,14 +18,13 @@ pub(crate) fn place<'a>(
     steps: &'a [Step],
     scanned: &'a Scanned<'_>,
 ) -> Result<Vec<Placed<'a>>, ScriptProblem> {
-    let counts: Vec<usize> = steps.iter().map(canonical_lines).collect();
+    let mut pending = steps.iter().map(|s| (s, canonical_lines(s))).peekable();
+    let mut seen = 0usize;
     let mut out = Vec::with_capacity(steps.len() + scanned.items.len());
-    let (mut next, mut seen) = (0usize, 0usize);
     for item in &scanned.items {
-        while next < steps.len() && seen + counts[next] <= item.after {
-            out.push(Placed::Step(&steps[next]));
-            seen += counts[next];
-            next += 1;
+        while let Some((step, n)) = pending.next_if(|&(_, n)| seen + n <= item.after) {
+            seen += n;
+            out.push(Placed::Step(step));
         }
         if seen != item.after {
             return Err(ScriptProblem {
@@ -43,16 +42,13 @@ pub(crate) fn place<'a>(
             },
         });
     }
-    out.extend(steps[next..].iter().map(Placed::Step));
+    out.extend(pending.map(|(s, _)| Placed::Step(s)));
     Ok(out)
 }
 
-/// How many non-blank, non-comment `up.mig` lines a step renders to.
+/// How many canonical `up.mig` lines a step renders to.
 fn canonical_lines(step: &Step) -> usize {
     let mut text = String::new();
     render_step(&mut text, step);
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .count()
+    text.lines().filter(|l| is_canonical(l)).count()
 }

@@ -11,18 +11,18 @@ use crate::Dialect;
 /// `DELETE FROM t WHERE key IN (…)` undoing `step`, or `None` when it isn't a plain literal
 /// `create` keyed by literals (an upsert, an update, or a delete can't be undone).
 pub(crate) fn invert(step: &DataStep, snap: &Snapshot, dialect: Dialect) -> Option<String> {
-    let DataOp::Create {
-        table,
-        rows,
-        conflict: None,
-        ..
-    } = &step.op
+    let (
+        DataOp::Create {
+            table,
+            rows,
+            conflict: None,
+            ..
+        },
+        None,
+    ) = (&step.op, &step.chunk)
     else {
         return None;
     };
-    if step.chunk.is_some() {
-        return None;
-    }
     let t = TableView::find(snap, &table.node)?;
     t.unique_keys().into_iter().find_map(|key| {
         let tuples = rows
@@ -38,21 +38,21 @@ pub(crate) fn invert(step: &DataStep, snap: &Snapshot, dialect: Dialect) -> Opti
             .collect::<Option<Vec<_>>>()?;
         let qt = dialect.quote_table(t.snap.schema.as_deref(), t.name());
         let cols: Vec<String> = key.iter().map(|k| dialect.quote(k)).collect();
-        Some(if let [col] = cols.as_slice() {
-            let vals: Vec<String> = tuples.into_iter().map(|mut v| v.remove(0)).collect();
-            format!("DELETE FROM {qt} WHERE {col} IN ({})", vals.join(", "))
-        } else {
-            let vals: Vec<String> = tuples
-                .iter()
-                .map(|v| format!("({})", v.join(", ")))
-                .collect();
-            format!(
-                "DELETE FROM {qt} WHERE ({}) IN ({})",
-                cols.join(", "),
-                vals.join(", ")
-            )
-        })
+        let vals: Vec<String> = tuples.iter().map(|v| tuple(v)).collect();
+        Some(format!(
+            "DELETE FROM {qt} WHERE {} IN ({})",
+            tuple(&cols),
+            vals.join(", ")
+        ))
     })
+}
+
+/// One item bare, several as a parenthesized SQL row value.
+fn tuple(items: &[String]) -> String {
+    match items {
+        [one] => one.clone(),
+        _ => format!("({})", items.join(", ")),
+    }
 }
 
 /// A non-null literal (or a bare enum value) as SQL.

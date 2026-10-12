@@ -8,7 +8,7 @@ use based_ast::{DataOp, DataStep, Span};
 use super::super::model::Snapshot;
 use super::super::unit::PlanUnit;
 use super::check::DataError;
-use super::table::TableView;
+use super::table::{Col, Fam, TableView};
 use crate::Dialect;
 
 mod chunk;
@@ -41,11 +41,9 @@ pub(crate) fn lower_step(
         writes_root: !matches!(step.op, DataOp::Create { .. }),
         sub: Cell::new(0),
     };
-    if let Some(chunk) = &step.chunk {
-        return Ok(PlanUnit::Chunked(lw.chunk_plan(step, chunk, &t)?));
-    }
-    Ok(match &step.op {
-        DataOp::Create { rows, conflict, .. } => {
+    Ok(match (&step.chunk, &step.op) {
+        (Some(chunk), _) => PlanUnit::Chunked(lw.chunk_plan(step, chunk, &t)?),
+        (None, DataOp::Create { rows, conflict, .. }) => {
             let (sql, ids) = lw.create(rows, conflict.as_ref(), &t)?;
             if ids.is_empty() {
                 PlanUnit::Sql(sql)
@@ -53,10 +51,13 @@ pub(crate) fn lower_step(
                 PlanUnit::Minted { sql, ids }
             }
         }
-        DataOp::Update {
-            where_, assigns, ..
-        } => PlanUnit::Sql(lw.update(where_.as_ref(), assigns, &t, None)?),
-        DataOp::Delete { where_, .. } => PlanUnit::Sql(lw.delete(where_.as_ref(), &t, None)?),
+        (
+            None,
+            DataOp::Update {
+                where_, assigns, ..
+            },
+        ) => PlanUnit::Sql(lw.update(where_.as_ref(), assigns, &t)?),
+        (None, DataOp::Delete { where_, .. }) => PlanUnit::Sql(lw.delete(where_.as_ref(), &t)?),
     })
 }
 
@@ -111,5 +112,18 @@ impl Lw<'_> {
             span,
             message: message.into(),
         }
+    }
+}
+
+/// A stand-in column of `fam`, for an operand with no column of its own.
+pub(super) fn col_of(fam: Fam, ty: &str) -> Col {
+    Col {
+        name: String::new(),
+        ty: ty.to_string(),
+        fam,
+        nullable: true,
+        has_default: false,
+        generated: false,
+        auto: false,
     }
 }

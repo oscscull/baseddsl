@@ -12,9 +12,7 @@ pub(crate) fn child_link<'a>(
     child: &str,
     by: Option<&str>,
 ) -> Result<(TableView<'a>, Vec<(String, String)>), String> {
-    let Some(view) = TableView::find(snap, child) else {
-        return Err(format!("unknown table `{child}`"));
-    };
+    let view = TableView::find(snap, child).ok_or_else(|| format!("unknown table `{child}`"))?;
     let mut links: Vec<Vec<(String, String)>> = view
         .snap
         .foreign_keys
@@ -28,19 +26,21 @@ pub(crate) fn child_link<'a>(
                 .collect()
         })
         .collect();
+    // A single-column parent key also links through `fk=<Model>` markers no `fk` line covers.
     if let [pk] = parent.pk().as_slice() {
-        for c in &view.snap.columns {
-            let names_parent = c
-                .fk
-                .as_deref()
-                .is_some_and(|m| m == parent.name() || based_sema::snake_case(m) == parent.name());
-            let covered = links
-                .iter()
-                .any(|l| l.iter().any(|(col, _)| col == &c.name));
-            if names_parent && !covered {
-                links.push(vec![(c.name.clone(), pk.clone())]);
-            }
-        }
+        let marked: Vec<_> = view
+            .snap
+            .columns
+            .iter()
+            .filter(|c| {
+                c.fk.as_deref().is_some_and(|m| {
+                    m == parent.name() || based_sema::snake_case(m) == parent.name()
+                })
+            })
+            .filter(|c| !links.iter().flatten().any(|(col, _)| col == &c.name))
+            .map(|c| vec![(c.name.clone(), pk.clone())])
+            .collect();
+        links.extend(marked);
     }
     let names = |links: &[Vec<(String, String)>]| {
         links
@@ -64,9 +64,9 @@ pub(crate) fn child_link<'a>(
             ));
         }
     }
-    match links.len() {
-        1 => Ok((view, links.remove(0))),
-        0 => Err(format!(
+    match links.as_slice() {
+        [link] => Ok((view, link.clone())),
+        [] => Err(format!(
             "table `{child}` has no foreign key to `{}`",
             parent.name()
         )),

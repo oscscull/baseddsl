@@ -16,22 +16,24 @@ impl Ck<'_> {
             );
             return;
         }
-        let walk = if let Some(by) = &chunk.by {
-            self.walk_by(by, t);
-            vec![by.node.clone()]
-        } else {
-            self.walk_pk(chunk, t)
-        };
-        if let DataOp::Update { assigns, .. } = &step.op {
-            for a in assigns.iter().filter(|a| walk.contains(&a.col.node)) {
-                self.err(
-                    a.col.span,
-                    format!(
-                        "a chunked update can't assign `{}`, the column it walks by",
-                        a.col.node
-                    ),
-                );
+        let walk = match &chunk.by {
+            Some(by) => {
+                self.walk_by(by, t);
+                vec![by.node.clone()]
             }
+            None => self.walk_pk(chunk, t),
+        };
+        let DataOp::Update { assigns, .. } = &step.op else {
+            return;
+        };
+        for a in assigns.iter().filter(|a| walk.contains(&a.col.node)) {
+            self.err(
+                a.col.span,
+                format!(
+                    "a chunked update can't assign `{}`, the column it walks by",
+                    a.col.node
+                ),
+            );
         }
     }
 

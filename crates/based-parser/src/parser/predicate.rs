@@ -94,17 +94,16 @@ impl<'a> Parser<'a> {
         self.bump();
         // `by <fk column>` leads only when followed by `,` or `)` (a column named `by`
         // compared to something stays a predicate).
-        let by = if self.at_kw("by")
+        let by = (self.at_kw("by")
             && self.tok_at(1) == Some(Tok::LowerIdent)
-            && matches!(self.tok_at(2), Some(Tok::Comma | Tok::RParen))
-        {
+            && matches!(self.tok_at(2), Some(Tok::Comma | Tok::RParen)))
+        .then(|| {
             self.bump();
-            let col = self.lower_ident("a foreign-key column")?;
+            let col = self.lower_ident("a foreign-key column");
             self.eat(Tok::Comma);
-            Some(col)
-        } else {
-            None
-        };
+            col
+        })
+        .transpose()?;
         let pred = if self.at(Tok::RParen) {
             None
         } else {
