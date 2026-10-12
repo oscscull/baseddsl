@@ -27,10 +27,15 @@ pub(crate) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions
     if opts.embedded {
         emit_embedded_bridge(&mut out, &callables, opts, has_stream, has_mutation);
     }
-    out.push_str(&render_fixtures(schema, opts.embedded));
-    if out.contains(": Decimal") || out.contains("<Decimal>") {
+    // Fixtures come last, so the module reads as the client first.
+    let fixtures = render_fixtures(schema, opts.embedded);
+    if [&out, &fixtures]
+        .iter()
+        .any(|s| s.contains(": Decimal") || s.contains("<Decimal>"))
+    {
         out.push_str(DECIMAL);
     }
+    out.push_str(&fixtures);
     out
 }
 
