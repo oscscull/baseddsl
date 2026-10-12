@@ -970,8 +970,9 @@ fn render_up_header_states_the_honest_contract() {
     assert!(up.contains("raw(<dialect>)"), "\n{up}");
     assert!(up.contains("down.mig"), "\n{up}");
     assert!(!up.contains("edit if needed"), "\n{up}");
-    // Every header line is a `#` comment, so it never affects the tamper hash.
-    let bare = "add column product.barcode text null\n";
+    // Every header line but the format marker is a `#` comment, so only the marker and the
+    // steps reach the tamper hash.
+    let bare = "format 2\nadd column product.barcode text null\n";
     assert_eq!(content_hash(&up), content_hash(bare));
 }
 

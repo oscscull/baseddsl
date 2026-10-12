@@ -29,6 +29,8 @@ mod key_composite_integration;
 mod key_integration;
 #[path = "sqlite/migrate_apply.rs"]
 mod migrate_apply;
+#[path = "sqlite/migrate_data.rs"]
+mod migrate_data;
 #[path = "sqlite/optional_ctx_integration.rs"]
 mod optional_ctx_integration;
 #[path = "sqlite/optional_filter_integration.rs"]

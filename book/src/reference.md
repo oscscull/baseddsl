@@ -375,6 +375,11 @@ Steps are dialect-neutral (`add column`, `alter column`, `rename table`, `add in
 `raw(<dialect>)`…). Renames come from `@was("old")`. A ledger table (`_based_migrations`) tracks applied
 migrations gap-free with tamper + drift checks.
 
+Data steps sit between them in `up.mig` (`format 2` runs every line in order): `update all t { col = data.key }`,
+`update t where (child.any(…)) { … }`, `create t[] from [ { … } ] on conflict (k) update { ...incoming }`,
+`delete t where (…)`; `… chunk 5000 [by col] [pause 200ms]` batches an update/delete. See
+[migrations](migrations.md#data-steps).
+
 ## Client
 
 Rust applications [generate the client from `build.rs`](generation.md) into `OUT_DIR`.

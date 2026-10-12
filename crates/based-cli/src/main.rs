@@ -95,6 +95,9 @@ enum MigrateAction {
         /// A short label for the migration slug (snake-cased). When omitted, the slug
         /// is derived from the change (`init` for the first, else `schema_update`).
         name: Option<String>,
+        /// Write the migration even with no schema changes, to hold hand-written data steps.
+        #[arg(long)]
+        data: bool,
     },
     /// Render migrations' neutral `up.mig` steps to per-dialect SQL and print it — the
     /// review-the-SQL step. Offline: reads the stored `schema.snap`s, never a DB.
@@ -175,9 +178,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         }
         Command::Gen { target } => gen::execute(target),
         Command::Migrate { action } => match action {
-            MigrateAction::Gen { root, name } => {
-                migrate::cmd_migrate_gen(&project_root::resolve(root.as_deref())?, name.as_deref())
-            }
+            MigrateAction::Gen { root, name, data } => migrate::cmd_migrate_gen(
+                &project_root::resolve(root.as_deref())?,
+                name.as_deref(),
+                data,
+            ),
             MigrateAction::Render {
                 root,
                 number,

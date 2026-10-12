@@ -2,7 +2,7 @@
 //! guard that every commerce example file parses clean.
 
 use based_ast::*;
-use based_parser::parse_file;
+use based_parser::{parse_data_step, parse_file};
 
 fn parse_ok(src: &str) -> SchemaFile {
     match parse_file(src, FileId(0)) {
@@ -1109,4 +1109,50 @@ fn composite_column_map_then_more_modifiers() {
     assert_eq!(pairs, [("tenant_id", "ord_tenant"), ("id", "ord no")]);
     assert_eq!(f.modifiers[1], Modifier::Unique);
     parse_err(r#"Line { order: Order (column tenant_id = ord_tenant) }"#);
+}
+
+#[test]
+fn data_step_forms_parse() {
+    let step = parse_data_step(
+        "create format[] from [\n  { key = \"edh\", name = \"Commander\" },\n] on conflict (key) update { ...incoming }",
+        FileId(0),
+    )
+    .unwrap();
+    match &step.op {
+        DataOp::Create {
+            table,
+            rows,
+            bulk,
+            conflict: Some(c),
+        } => {
+            assert_eq!(table.node, "format");
+            assert!(*bulk);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].assigns.len(), 2);
+            assert!(c.spread.is_some());
+        }
+        other => panic!("{other:?}"),
+    }
+    let step = parse_data_step(
+        "update all token_printing { set_code = data.set }",
+        FileId(0),
+    )
+    .unwrap();
+    assert!(matches!(&step.op, DataOp::Update { where_: None, .. }));
+    let step = parse_data_step(
+        "delete event where (created_at < \"2024-01-01\") chunk 10000 by created_at pause 2s",
+        FileId(0),
+    )
+    .unwrap();
+    let chunk = step.chunk.expect("chunk");
+    assert_eq!(chunk.size, 10000);
+    assert_eq!(chunk.by.map(|b| b.node).as_deref(), Some("created_at"));
+    assert_eq!(chunk.pause_ms, Some(2000));
+}
+
+#[test]
+fn data_step_rejects_a_bare_delete_and_trailing_tokens() {
+    assert!(parse_data_step("delete event", FileId(0)).is_err());
+    assert!(parse_data_step("update all card { a = 1 } extra", FileId(0)).is_err());
+    assert!(parse_data_step("update all card { a = 1 } chunk 0", FileId(0)).is_err());
 }

@@ -181,6 +181,7 @@ async fn down_rolls_back_the_latest_and_can_re_apply() {
         &ApplyOpts {
             allow_destructive: false,
             direction: Direction::Down,
+            ..ApplyOpts::default()
         },
     )
     .await
@@ -301,6 +302,7 @@ async fn a_destructive_migration_needs_the_allow_flag() {
         &ApplyOpts {
             allow_destructive: true,
             direction: Direction::Up,
+            ..ApplyOpts::default()
         },
     )
     .await

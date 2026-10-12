@@ -33,7 +33,8 @@ pub fn content_hash(up_text: &str) -> String {
 /// `render`, and `verify`: structural steps derive from `schema.snap`, so a hand-edit that
 /// changes a structural line's canonical form is drift and must be refused rather than
 /// silently ignored. Canonicalized like [`content_hash`] (cosmetic whitespace/comment edits
-/// are tolerated; `raw(dialect)` escapes ride separately and are stripped before compare).
+/// are tolerated; the format marker, `raw(dialect)` escapes, and data steps ride separately
+/// and are stripped before compare).
 pub fn up_mig_matches_snapshot(up_text: &str, steps: &[Step]) -> bool {
-    content_hash(&strip_raw_steps(up_text)) == content_hash(&render_up(steps))
+    content_hash(&strip_raw_steps(up_text)) == content_hash(&strip_raw_steps(&render_up(steps)))
 }

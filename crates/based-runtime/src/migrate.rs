@@ -28,12 +28,15 @@
 
 #[path = "migration_failure.rs"]
 mod failure;
+#[path = "migrate_resume.rs"]
+mod resume;
 pub use failure::MigrationFailure;
+pub use resume::ChunkProgress;
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use based_codegen::migrate::{self, Snapshot};
+use based_codegen::migrate::{self, Snapshot, UpUnit};
 use based_codegen::Dialect;
 
 use crate::run::{fetch_all, Backend, DbError, DbRead, Row};
@@ -50,8 +53,9 @@ pub struct PlannedMigration {
     pub number: u32,
     /// The directory name (`0002_add_barcode`) — the ledger's primary key.
     pub id: String,
-    /// The executable up statements for the target dialect (snapshot-authoritative).
-    pub up_sql: Vec<String>,
+    /// The executable up units for the target dialect, in order: statements (structural
+    /// steps derive from the snapshots) and chunked data steps.
+    pub up: Vec<UpUnit>,
     /// The `up.mig` content hash — the ledger tamper guard.
     pub up_hash: String,
     /// Any up step is destructive (a drop / narrowing / new not-null-without-default /
@@ -60,7 +64,8 @@ pub struct PlannedMigration {
     /// Teach-at-checkpoint messages: a drop-one-column/add-one-same-family-column pair on a
     /// table is ambiguous with a rename, so the destructive gate points at `@was` (D105).
     pub rename_hints: Vec<String>,
-    /// The author-written `down.mig` (raw per-dialect SQL, split into statements), if present.
+    /// The down statements: the author-written `down.mig` (raw per-dialect SQL, split into
+    /// statements), else the automatic reverse of a migration of literal-row creates.
     pub down_sql: Option<Vec<String>>,
 }
 
@@ -90,6 +95,8 @@ pub struct ApplyOpts {
     /// Vouch for destructive steps at apply time (`--allow-destructive`).
     pub allow_destructive: bool,
     pub direction: Direction,
+    /// Called after each committed batch of a chunked data step.
+    pub progress: Option<fn(&ChunkProgress)>,
 }
 
 impl Default for ApplyOpts {
@@ -97,6 +104,7 @@ impl Default for ApplyOpts {
         Self {
             allow_destructive: false,
             direction: Direction::Up,
+            progress: None,
         }
     }
 }
@@ -198,7 +206,8 @@ impl std::error::Error for MigrateError {}
 /// Read `<root>/migrations/NNNN_slug/` into an ordered [`PlannedMigration`] list for the
 /// given dialect. Each migration's steps are re-derived as `diff(prev snapshot, this
 /// snapshot)` and rendered to executable SQL; the `up.mig` bytes are hashed for the ledger;
-/// a `down.mig` (raw SQL) is split into statements if present. The numbers must be a
+/// a `down.mig` (raw SQL) is split into statements if present, else a migration of
+/// literal-row creates reverses automatically. The numbers must be a
 /// gap-free `1..N` sequence (zero-padded, sequential).
 pub fn load_migrations(
     root: &Path,
@@ -222,23 +231,24 @@ pub fn load_migrations(
         let snap = Snapshot::parse(&snap_text)
             .map_err(|e| MigrateError::Artifact(format!("{name}/schema.snap: {e}")))?;
         let steps = migrate::diff_snapshots(&prev, &snap);
-        let mut up_sql = migrate::migration_sql(&steps, dialect, &snap)
-            .map_err(|e| MigrateError::Artifact(format!("{name}/up.mig: {e}")))?;
-
         let up_text = read_file(&path.join("up.mig"))?;
         // Structural steps are authoritative from `schema.snap`; a hand-edit to a structural
         // `up.mig` line would otherwise be silently ignored at apply. Refuse it instead.
         if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
             return Err(MigrateError::UpMigDrift { id: name.clone() });
         }
-        // `raw(<dialect>)` escape steps can't be re-derived from the snapshots (opaque
-        // SQL) — recover them from the authored `up.mig` and layer them after the
-        // structural steps for the matching target.
-        let raw_steps = migrate::parse_raw_steps(&up_text);
-        up_sql.extend(
-            migrate::sql_statements(&raw_steps, dialect)
-                .map_err(|e| MigrateError::Artifact(format!("{name}/up.mig: {e}")))?,
-        );
+        // The structural steps interleaved with the authored `raw` escapes and data steps
+        // (in written order for a `format 2` migration; raw last otherwise).
+        let plan = migrate::plan_up(&prev, &snap, &up_text, dialect).map_err(|problems| {
+            MigrateError::Artifact(format!(
+                "{name}/up.mig: {}",
+                problems
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        })?;
         let up_hash = migrate::content_hash(&up_text);
         let destructive = steps.iter().any(based_codegen::migrate::Step::destructive);
         // The rename teach hint keys off this migration's own diff (prev → this snapshot),
@@ -254,17 +264,18 @@ pub fn load_migrations(
         // migration stays roll-forward only (a `--down` on it is a loud `NoDown`, not a
         // silent no-op) until the author completes it.
         let down_path = path.join("down.mig");
-        let down_sql = if down_path.is_file() {
+        let authored = if down_path.is_file() {
             let stmts = split_sql(&read_file(&down_path)?);
             (!stmts.is_empty()).then_some(stmts)
         } else {
             None
         };
+        let down_sql = authored.or(plan.auto_down);
 
         out.push(PlannedMigration {
             number: *number,
             id: name.clone(),
-            up_sql,
+            up: plan.units,
             up_hash,
             destructive,
             rename_hints,
@@ -531,20 +542,42 @@ pub async fn apply(
                 applied: report.applied.clone(),
             });
         }
-        run_in_tx(
-            backend,
-            &m.up_sql,
-            LedgerOp::Insert {
-                id: &m.id,
-                hash: &m.up_hash,
-            },
-            dialect,
-        )
-        .await?;
+        apply_one(backend, dialect, m, opts).await?;
         report.applied.push(m.id.clone());
     }
 
     Ok(report)
+}
+
+/// Apply one pending migration forward. A chunked data step commits batch by batch, so its
+/// migration applies resumably; any other migration runs in one transaction with its
+/// ledger row.
+async fn apply_one(
+    backend: &dyn Backend,
+    dialect: Dialect,
+    m: &PlannedMigration,
+    opts: &ApplyOpts,
+) -> Result<(), MigrateError> {
+    if m.up.iter().any(|u| matches!(u, UpUnit::Chunked(_))) {
+        return resume::apply_resumable(backend, dialect, m, opts.progress).await;
+    }
+    let stmts: Vec<String> =
+        m.up.iter()
+            .filter_map(|u| match u {
+                UpUnit::Sql(s) => Some(s.clone()),
+                UpUnit::Chunked(_) => None,
+            })
+            .collect();
+    run_in_tx(
+        backend,
+        &stmts,
+        LedgerOp::Insert {
+            id: &m.id,
+            hash: &m.up_hash,
+        },
+        dialect,
+    )
+    .await
 }
 
 /// The ledger write a migration's transaction ends with.
@@ -668,7 +701,7 @@ mod tests {
         PlannedMigration {
             number,
             id: id.to_string(),
-            up_sql: vec![],
+            up: vec![],
             up_hash: hash.to_string(),
             destructive: false,
             rename_hints: vec![],

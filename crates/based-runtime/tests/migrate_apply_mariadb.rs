@@ -200,6 +200,7 @@ async fn incremental_alter_on_a_namespaced_table_preserves_data_live() {
         &ApplyOpts {
             allow_destructive: false,
             direction: Direction::To(1),
+            ..ApplyOpts::default()
         },
     )
     .await
