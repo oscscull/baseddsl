@@ -310,10 +310,13 @@ async fn typed_down_round_trips_up_down_up() {
     round_trip_tree(&s.0);
     let backend = SqliteBackend::in_memory().unwrap();
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    // 0003 drops a column, so the forward runs vouch for it.
+    let up = ApplyOpts {
+        allow_destructive: true,
+        ..opts()
+    };
     // Up drops the indexed `size` column (index first, so SQLite accepts it).
-    apply(&backend, Dialect::Sqlite, &migs, &opts())
-        .await
-        .unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &up).await.unwrap();
     assert_eq!(columns(&backend).await, ["id", "name"]);
     {
         let mut db = backend.checkout("").await.unwrap();
@@ -345,9 +348,7 @@ async fn typed_down_round_trips_up_down_up() {
         "the rename kept the data"
     );
 
-    let report = apply(&backend, Dialect::Sqlite, &migs, &opts())
-        .await
-        .unwrap();
+    let report = apply(&backend, Dialect::Sqlite, &migs, &up).await.unwrap();
     assert_eq!(report.applied, vec!["0002_rename", "0003_drop_size"]);
     assert_eq!(columns(&backend).await, ["id", "name"]);
 }

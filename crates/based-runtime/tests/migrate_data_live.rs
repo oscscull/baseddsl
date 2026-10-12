@@ -363,9 +363,12 @@ async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
     let s = Scratch::new(&format!("round-{}", dialect.name()));
     round_trip_tree(&s.0);
     let migs = load_migrations(&s.0, dialect).unwrap();
-    apply(backend, dialect, &migs, &ApplyOpts::default())
-        .await
-        .unwrap();
+    // 0003 drops a column, so the forward runs vouch for it.
+    let up = ApplyOpts {
+        allow_destructive: true,
+        ..ApplyOpts::default()
+    };
+    apply(backend, dialect, &migs, &up).await.unwrap();
     exec(
         backend,
         &format!(
@@ -399,9 +402,7 @@ async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
     )
     .await;
     assert_eq!(titles, ["Gizmo"]);
-    let report = apply(backend, dialect, &migs, &ApplyOpts::default())
-        .await
-        .unwrap();
+    let report = apply(backend, dialect, &migs, &up).await.unwrap();
     assert_eq!(report.applied, vec!["0002_rename", "0003_drop_size"]);
     let names = strings(
         backend,
