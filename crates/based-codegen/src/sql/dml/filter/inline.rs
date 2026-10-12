@@ -31,6 +31,10 @@ fn subst_pred(p: &Predicate, binds: &HashMap<&str, &Value>) -> Predicate {
             name: name.clone(),
             args: args.iter().map(|a| subst_value(a, binds)).collect(),
         },
+        Predicate::Any { path, pred } => Predicate::Any {
+            path: path.clone(),
+            pred: pred.as_deref().map(|p| Box::new(subst_pred(p, binds))),
+        },
         Predicate::Raw(raw) => Predicate::Raw(raw.clone()),
     }
 }

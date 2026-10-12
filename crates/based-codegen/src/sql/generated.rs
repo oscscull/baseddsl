@@ -191,8 +191,8 @@ fn gen_predicate(
             ),
             Emit::Neutral => gen_col(model, &path.segments[0].node, emit),
         },
-        // Named filters / raw are rejected in a generated column's condition during sema.
-        Predicate::FilterCall { .. } | Predicate::Raw(_) => match emit {
+        // Named filters / `.any` / raw are rejected in a generated column's condition during sema.
+        Predicate::FilterCall { .. } | Predicate::Any { .. } | Predicate::Raw(_) => match emit {
             Emit::Sql(d) => d.bool_lit(true).to_string(),
             Emit::Neutral => "true".to_string(),
         },

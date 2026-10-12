@@ -32,6 +32,11 @@ pub fn check_relation_on(pred: &Predicate, near: usize, far: usize, cx: &Cx, sin
             name.span,
             "named filters aren't allowed in a custom `on:` join condition",
         ),
+        Predicate::Any { path, .. } => sink.error(
+            code::JOIN_FORM,
+            path.segments[0].span,
+            "`.any` isn't allowed in a custom `on:` join condition",
+        ),
         // A raw join fragment is an escape hatch the engine can't resolve — leave it.
         Predicate::Raw(_) => {}
     }

@@ -57,6 +57,11 @@ pub(crate) fn pred_filter_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a Ident>) {
         }
         Predicate::Not(inner) => pred_filter_refs(inner, out),
         Predicate::FilterCall { name, .. } => out.push(name),
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                pred_filter_refs(inner, out);
+            }
+        }
         Predicate::Cmp { .. }
         | Predicate::InList { .. }
         | Predicate::Bare(_)

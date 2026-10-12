@@ -33,6 +33,11 @@ pub(crate) fn walk_pred_values(pred: &Predicate, f: &mut impl FnMut(&Value)) {
         Predicate::Cmp { value, .. } => f(value),
         Predicate::InList { values, .. } => values.iter().for_each(f),
         Predicate::FilterCall { args, .. } => args.iter().for_each(f),
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                walk_pred_values(inner, f);
+            }
+        }
         Predicate::Bare(_) | Predicate::Raw(_) => {}
     }
 }
@@ -342,6 +347,16 @@ pub(crate) fn check_predicate_in(
         }
         Predicate::FilterCall { name, args } => {
             check_filter_call(name, args, model, cx, params, in_filters, sink);
+        }
+        Predicate::Any { path, pred } => {
+            // The inner predicate ranges over the related model's rows.
+            let target = model.map(|mi| resolve_any_target(path, mi, cx, sink));
+            if matches!(target, Some(None)) {
+                return; // the relation itself failed to resolve — already reported
+            }
+            if let Some(inner) = pred {
+                check_predicate_in(inner, target.flatten(), cx, params, in_filters, sink);
+            }
         }
         Predicate::Raw(raw) => {
             check_raw_params(raw, params, sink);

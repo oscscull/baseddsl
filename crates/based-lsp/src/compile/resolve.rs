@@ -49,6 +49,7 @@ impl Snapshot {
     /// omitted: their root is the polymorphic call site.)
     pub(super) fn field_paths(&self) -> Vec<(&str, &[Ident])> {
         let mut out = Vec::new();
+        let rel = |model: &str, field: &str| self.relation_target(model, field);
         for d in &self.decls {
             match d {
                 Decl::Shape(s) => self.shape_paths(s.from.node.as_str(), &s.body, &mut out),
@@ -72,19 +73,19 @@ impl Snapshot {
                     match &q.body {
                         QueryBody::Block(stmt) => {
                             for c in &stmt.clauses {
-                                clause_paths(c, root, &mut out);
+                                clause_paths(c, root, &rel, &mut out);
                             }
                         }
                         QueryBody::Inline(clauses) => {
                             for c in clauses {
-                                clause_paths(c, root, &mut out);
+                                clause_paths(c, root, &rel, &mut out);
                             }
                         }
                         // A raw body is opaque SQL — no field paths inside.
                         QueryBody::Bare | QueryBody::Raw(_) => {}
                     }
                 }
-                Decl::Mutation(m) => write_paths(&m.body, &mut out),
+                Decl::Mutation(m) => write_paths(&m.body, &rel, &mut out),
                 Decl::Model(m) => column_map_paths(m, &mut out),
                 _ => {}
             }

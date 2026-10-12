@@ -46,6 +46,7 @@ impl<'a> Select<'a> {
                 Some(f) => self.filter_call(f, args, model),
                 None => format!("TRUE /* filter {} unresolved */", name.node),
             },
+            Predicate::Any { path, pred } => self.relation_any(path, pred.as_deref(), model),
             Predicate::Raw(raw) => format!(
                 "({})",
                 render_raw(self.dialect, raw, &self.root_alias, &model.table)

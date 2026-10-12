@@ -104,7 +104,7 @@ impl<'a> Select<'a> {
     /// this select's schema/dialect/filters/scope injection and the current subquery
     /// counter (so nested aliases stay globally distinct). For a to-many / flatten
     /// correlated subquery's own reaches.
-    fn spawn_child(&self, root_alias: String) -> Self {
+    pub(crate) fn spawn_child(&self, root_alias: String) -> Self {
         Select {
             schema: self.schema,
             dialect: self.dialect,

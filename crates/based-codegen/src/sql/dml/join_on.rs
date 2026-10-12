@@ -63,7 +63,7 @@ pub(crate) fn render_join_on(
         }
         Predicate::Bare(path) => format!("{} = {}", col(path), dialect.bool_lit(true)),
         Predicate::Raw(raw) => format!("({})", render_raw(dialect, raw, near_alias, near_table)),
-        // Sema rejects a named-filter call in a join; lower to a harmless truth.
-        Predicate::FilterCall { .. } => "TRUE".to_string(),
+        // Sema rejects a named-filter call / `.any` in a join; lower to a harmless truth.
+        Predicate::FilterCall { .. } | Predicate::Any { .. } => "TRUE".to_string(),
     }
 }

@@ -694,6 +694,32 @@ fn walk_pred_join(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<usize>)
             }
         }
         Predicate::Bare(path) => walk_path_join(path, model, cx, out),
+        // Every hop of a `.any` relation is joined or subqueried with its scope injected.
+        Predicate::Any { path, pred } => {
+            let Some(target) =
+                crate::resolve::resolve_any_target(path, model, cx, &mut Sink::default())
+            else {
+                return;
+            };
+            let mut cur = model;
+            for seg in &path.segments {
+                let Some(next) = cx
+                    .model(cur)
+                    .member(&seg.node)
+                    .and_then(|m| m.kind.target())
+                    .and_then(|t| cx.find(t))
+                else {
+                    return;
+                };
+                if is_scoped(cx, next) {
+                    push(out, next);
+                }
+                cur = next;
+            }
+            if let Some(inner) = pred {
+                walk_pred_join(inner, target, cx, out);
+            }
+        }
         // Filter bodies join at the call site too, but codegen does not walk them for
         // scope , so we mirror codegen and don't walk them here.
         Predicate::FilterCall { .. } | Predicate::Raw(_) => {}

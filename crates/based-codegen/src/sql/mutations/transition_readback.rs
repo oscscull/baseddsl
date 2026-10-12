@@ -72,6 +72,7 @@ fn reads_assigned_field(pred: &Predicate, assigns: &[Assign]) -> bool {
             assigned(path) || matches!(value, Value::Path(path) if assigned(path))
         }
         Predicate::InList { path, .. } | Predicate::Bare(path) => assigned(path),
-        Predicate::FilterCall { .. } | Predicate::Raw(_) => false,
+        // `.any` reads the related rows, never this statement's assigned columns.
+        Predicate::FilterCall { .. } | Predicate::Any { .. } | Predicate::Raw(_) => false,
     }
 }

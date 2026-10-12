@@ -33,6 +33,11 @@ pub(super) fn check_having(
         Predicate::Bare(path) => check_having_path(path, out_names, qspan, sink),
         // A raw predicate term / named-filter call is a leaf escape — left unchecked.
         Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
+        Predicate::Any { path, .. } => sink.error(
+            code::RELATION_ANY,
+            path.segments[0].span,
+            "`.any` isn't available in `having` — a grouped row has no relations; filter in `where`",
+        ),
     }
 }
 

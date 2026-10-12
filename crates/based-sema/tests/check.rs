@@ -87,6 +87,8 @@ mod optional_context;
 mod optional_filters;
 #[path = "check/raw_queries.rs"]
 mod raw_queries;
+#[path = "check/relation_any.rs"]
+mod relation_any;
 #[path = "check/renames.rs"]
 mod renames;
 #[path = "check/resolution_errors.rs"]

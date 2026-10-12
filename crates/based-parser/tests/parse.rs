@@ -338,6 +338,32 @@ fn in_value_list_and_single_bind_forms() {
 }
 
 #[test]
+fn relation_any_with_and_without_a_predicate() {
+    let sf = parse_ok("filter f = printings.any(digital = false) or not decks.any();");
+    let Decl::Filter(nf) = &sf.decls[0] else {
+        panic!("expected filter");
+    };
+    let Predicate::Or(l, r) = &nf.pred else {
+        panic!("expected or, got {:?}", nf.pred);
+    };
+    match &**l {
+        Predicate::Any {
+            path,
+            pred: Some(inner),
+        } => {
+            assert_eq!(path.segments.len(), 1);
+            assert_eq!(path.segments[0].node, "printings");
+            assert!(matches!(&**inner, Predicate::Cmp { op: Op::Eq, .. }));
+        }
+        other => panic!("expected any, got {other:?}"),
+    }
+    let Predicate::Not(inner) = &**r else {
+        panic!("expected not, got {r:?}");
+    };
+    assert!(matches!(&**inner, Predicate::Any { pred: None, .. }));
+}
+
+#[test]
 fn in_empty_list_is_a_parse_error() {
     assert!(parse_file("filter f = status in ();", FileId(0)).is_err());
 }

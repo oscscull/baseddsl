@@ -58,6 +58,9 @@ impl<'a> Parser<'a> {
             return Ok(Predicate::FilterCall { name: first, args });
         }
         let path = self.path_from(first);
+        if let Some(any) = self.relation_any(&path)? {
+            return Ok(any);
+        }
         if self.at_op() {
             let op = self.op()?;
             // `in (` opens a value list; `in` with a bare value stays a plain Cmp.
@@ -78,6 +81,26 @@ impl<'a> Parser<'a> {
             // bare filter reference or a bool column, both `Bare(path)`
             Ok(Predicate::Bare(path))
         }
+    }
+
+    /// `rel.any(pred)` / `rel.any()`: a path whose last segment is `any` followed by `(`.
+    fn relation_any(&mut self, path: &Path) -> PResult<Option<Predicate>> {
+        let is_any = path.segments.len() > 1
+            && path.segments.last().is_some_and(|s| s.node == "any")
+            && self.at(Tok::LParen);
+        if !is_any {
+            return Ok(None);
+        }
+        self.bump();
+        let pred = if self.at(Tok::RParen) {
+            None
+        } else {
+            Some(Box::new(self.predicate()?))
+        };
+        self.expect(Tok::RParen, "`)`")?;
+        let mut rel = path.clone();
+        rel.segments.pop();
+        Ok(Some(Predicate::Any { path: rel, pred }))
     }
 
     fn at_op(&self) -> bool {

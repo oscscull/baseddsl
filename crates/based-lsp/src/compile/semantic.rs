@@ -99,6 +99,11 @@ fn pred_raw<'a>(p: &'a Predicate, out: &mut Vec<&'a RawSql>) {
         }
         Predicate::Not(inner) => pred_raw(inner, out),
         Predicate::Raw(r) => out.push(r),
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                pred_raw(inner, out);
+            }
+        }
         Predicate::Cmp { .. }
         | Predicate::InList { .. }
         | Predicate::FilterCall { .. }

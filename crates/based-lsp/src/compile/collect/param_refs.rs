@@ -126,6 +126,11 @@ pub(crate) fn pred_param_refs<'a>(p: &'a Predicate, out: &mut Vec<&'a ParamRef>)
         Predicate::InList { values, .. } => values.iter().for_each(|v| value_param_refs(v, out)),
         Predicate::FilterCall { args, .. } => args.iter().for_each(|v| value_param_refs(v, out)),
         Predicate::Raw(r) => raw_param_refs(r, out),
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                pred_param_refs(inner, out);
+            }
+        }
         Predicate::Bare(_) => {}
     }
 }

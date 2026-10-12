@@ -159,6 +159,11 @@ fn collect_pred_refs(
         Predicate::Cmp { value, .. } => record(out, value),
         Predicate::InList { values, .. } => values.iter().for_each(|v| record(out, v)),
         Predicate::FilterCall { args, .. } => args.iter().for_each(|v| record(out, v)),
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                collect_pred_refs(inner, models, out);
+            }
+        }
         Predicate::Bare(_) | Predicate::Raw(_) => {}
     }
 }
