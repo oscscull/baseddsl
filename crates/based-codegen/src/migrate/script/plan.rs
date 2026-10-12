@@ -1,5 +1,5 @@
-//! Turn one migration's `up.mig` + snapshot pair into its executable units and review text
-//! for a dialect: structural SQL, `raw` escapes, and checked data steps, in execution order.
+//! Turn a migration script + snapshot pair into its executable units and review text for a
+//! dialect: structural SQL, `raw` escapes, and checked data steps, in execution order.
 
 use super::super::data::invert;
 use super::super::diff::{diff_snapshots, Step};
@@ -13,7 +13,7 @@ use super::scan::{scan, ItemKind, FORMAT_MARKER};
 use super::ScriptProblem;
 use crate::Dialect;
 
-const FILE: &str = "up.mig";
+const UP: &str = "up.mig";
 
 /// A migration's up path for one dialect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,9 +27,9 @@ pub struct UpPlan {
     pub has_data: bool,
 }
 
-fn problem(line: usize, message: String) -> ScriptProblem {
+fn problem(file: &'static str, line: usize, message: String) -> ScriptProblem {
     ScriptProblem {
-        file: FILE,
+        file,
         line,
         message,
     }
@@ -52,6 +52,7 @@ pub fn plan_up(
             .find(|i| matches!(i.kind, ItemKind::Data(_)))
         {
             return Err(vec![problem(
+                UP,
                 item.line,
                 format!(
                     "data steps run in written order — add `{FORMAT_MARKER}` as the first line \
@@ -61,10 +62,24 @@ pub fn plan_up(
         }
         return legacy_plan(&steps, up_text, dialect, target);
     }
-    let placed = place(&steps, &scanned).map_err(|p| vec![p])?;
+    plan_in_order(UP, prev, target, &steps, &scanned, dialect)
+}
+
+/// Plan an in-order script running `steps` from `from` to `to`, its `raw` lines and data
+/// steps placed among them; each data step is checked against the state at its line.
+pub(crate) fn plan_in_order(
+    file: &'static str,
+    from: &Snapshot,
+    to: &Snapshot,
+    steps: &[Step],
+    scanned: &super::scan::Scanned<'_>,
+    dialect: Dialect,
+) -> Result<UpPlan, Vec<ScriptProblem>> {
+    let placed = place(file, steps, scanned).map_err(|p| vec![p])?;
     let mut walk = Walk {
+        file,
         dialect,
-        snap: prev.clone(),
+        snap: from.clone(),
         pending: Vec::new(),
         units: Vec::new(),
         review: header(dialect),
@@ -93,7 +108,7 @@ pub fn plan_up(
         }
     }
     // Every step has applied: the remaining segment targets the recorded snapshot itself.
-    walk.snap = target.clone();
+    walk.snap = to.clone();
     walk.flush();
     if !walk.problems.is_empty() {
         return Err(walk.problems);
@@ -117,7 +132,7 @@ fn legacy_plan(
     dialect: Dialect,
     target: &Snapshot,
 ) -> Result<UpPlan, Vec<ScriptProblem>> {
-    let whole = |message: String| vec![problem(0, message)];
+    let whole = |message: String| vec![problem(UP, 0, message)];
     let raws = super::super::diff::parse_raw_steps(up_text);
     let mut units: Vec<PlanUnit> = migration_sql(steps, dialect, target)
         .map_err(whole)?
@@ -153,6 +168,7 @@ pub(crate) fn body(rendered: &str) -> &str {
 }
 
 struct Walk {
+    file: &'static str,
     dialect: Dialect,
     /// The schema state at the current line.
     snap: Snapshot,
@@ -175,7 +191,7 @@ impl Walk {
         let steps = std::mem::take(&mut self.pending);
         match migration_sql(&steps, self.dialect, &self.snap) {
             Ok(stmts) => self.units.extend(stmts.into_iter().map(PlanUnit::Sql)),
-            Err(message) => self.problems.push(problem(0, message)),
+            Err(message) => self.problems.push(problem(self.file, 0, message)),
         }
         self.review
             .push_str(body(&render_migration(&steps, self.dialect, &self.snap)));
@@ -191,9 +207,9 @@ impl Walk {
 
     fn data(&mut self, line: usize, text: &str) {
         self.has_data = true;
-        match data_unit(FILE, line, text, &self.snap, self.dialect) {
+        match data_unit(self.file, line, text, &self.snap, self.dialect) {
             Ok((step, unit)) => {
-                self.review.push_str(&review(FILE, line, &unit));
+                self.review.push_str(&review(self.file, line, &unit));
                 self.units.push(unit);
                 let inverse = invert(&step, &self.snap, self.dialect);
                 match (&mut self.downs, inverse) {

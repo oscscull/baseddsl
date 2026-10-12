@@ -13,13 +13,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 mod column;
-mod down;
 mod hash;
 mod snap_parse;
 mod sqlite_rebuild;
 mod statements;
 
-pub use down::render_down;
 pub use hash::{content_hash, up_mig_matches_snapshot};
 
 pub(crate) use column::*;

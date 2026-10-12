@@ -48,10 +48,13 @@ project's id strategy (uuid or ulid).
 key (or `col`, which must be unique or indexed) `N` rows at a time, one
 transaction per batch. Progress is recorded, so an interrupted apply resumes.
 
-`--down` reverses a migration of literal-row `create`s by itself. Any other
-data step needs a `down.mig`. `migrate gen` writes it as a `format 2` script of
-`raw(<dialect>)` reverse lines, and data steps can sit between them; they are
-checked against the state the up migration leaves.
+`migrate gen` also writes `down.mig`: the reverse structural steps in the same
+vocabulary (`drop column`, `rename column … -> …`, `add index`, …), run by
+`apply --down`. A reverse restores a dropped column's shape, not its data. Add
+data steps and `raw(<dialect>)` lines between its lines just as in `up.mig`;
+each is checked against the schema at its line, and `verify` refuses edited
+structural lines. A data-only migration of literal-row `create`s reverses by
+itself; any other data step needs its reverse written in `down.mig`.
 
 ## Recovery
 

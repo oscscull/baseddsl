@@ -287,7 +287,7 @@ pub fn load_migrations(
         // silent no-op) until the author completes it.
         let down_path = path.join("down.mig");
         let authored = if down_path.is_file() {
-            migrate::plan_down(&snap, &read_file(&down_path)?, dialect)
+            migrate::plan_down(&prev, &snap, &read_file(&down_path)?, dialect)
                 .map_err(|problems| {
                     MigrateError::Artifact(format!(
                         "{name}/down.mig: {}",

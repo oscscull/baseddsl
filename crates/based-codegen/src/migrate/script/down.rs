@@ -1,12 +1,14 @@
-//! Plan a `down.mig`: a `format 2` script of `raw(<dialect>)` lines and data steps run in
-//! written order, or a legacy raw-SQL file split on `;`.
+//! Plan a `down.mig`: a `format 2` script — the reverse structural steps (derived from the
+//! two snapshots), with `raw(<dialect>)` lines and data steps placed among them — or a legacy
+//! raw-SQL file split on `;`.
 
+use super::super::diff::strip_raw_steps;
+use super::super::down_mig::{down_steps, render_down_steps, rollback_target};
 use super::super::model::Snapshot;
-use super::super::sql::{render_sql, sql_statements};
+use super::super::sql::content_hash;
 use super::super::unit::PlanUnit;
-use super::data_item::{data_unit, review};
-use super::plan::{body, header};
-use super::scan::{scan, ItemKind};
+use super::plan::{header, plan_in_order};
+use super::scan::scan;
 use super::split::split_sql;
 use super::ScriptProblem;
 use crate::Dialect;
@@ -20,11 +22,12 @@ pub struct DownPlan {
     pub review: String,
 }
 
-/// Plan `down_text` reversing the migration whose post-up state is `target`. Data steps are
-/// checked against that state. `Ok(None)` when the file holds nothing executable (the
-/// migration stays roll-forward only).
+/// Plan `down_text`, the reverse of the migration from `prev` to `now`. Each data step is
+/// checked against the schema state at its line, walking back from `now`. `Ok(None)` when
+/// the file holds nothing executable (the migration stays roll-forward only).
 pub fn plan_down(
-    target: &Snapshot,
+    prev: &Snapshot,
+    now: &Snapshot,
     down_text: &str,
     dialect: Dialect,
 ) -> Result<Option<DownPlan>, Vec<ScriptProblem>> {
@@ -37,45 +40,22 @@ pub fn plan_down(
         let review = format!("{}{down_text}", header(dialect));
         return Ok((!units.is_empty()).then_some(DownPlan { units, review }));
     }
-    let mut problems: Vec<ScriptProblem> = down_text
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| scanned.structural.contains(l))
-        .filter(|(_, l)| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .map(|(i, _)| ScriptProblem {
+    let back = rollback_target(prev, now);
+    let steps = down_steps(prev, now);
+    let expected = strip_raw_steps(&render_down_steps(&steps));
+    if content_hash(&strip_raw_steps(down_text)) != content_hash(&expected) {
+        return Err(vec![ScriptProblem {
             file: FILE,
-            line: i + 1,
-            message: "a `format 2` down.mig holds data steps and raw(<dialect>) lines only"
+            line: 0,
+            message: "its structural lines diverge from the reverse of up.mig (derived from \
+                      schema.snap) — restore them from `based migrate gen`, or use a \
+                      raw(<dialect>) line"
                 .to_string(),
-        })
-        .collect();
-    let mut units = Vec::new();
-    let mut text = header(dialect);
-    for item in &scanned.items {
-        match &item.kind {
-            ItemKind::Raw(step) => {
-                if let Ok(stmts) = sql_statements(std::slice::from_ref(&**step), dialect) {
-                    units.extend(stmts.into_iter().map(PlanUnit::Sql));
-                }
-                text.push_str(body(&render_sql(std::slice::from_ref(&**step), dialect)));
-            }
-            ItemKind::Data(src) => match data_unit(FILE, item.line, src, target, dialect) {
-                Ok((_, unit)) => {
-                    text.push_str(&review(FILE, item.line, &unit));
-                    units.push(unit);
-                }
-                Err(ps) => problems.extend(ps),
-            },
-        }
+        }]);
     }
-    if !problems.is_empty() {
-        return Err(problems);
-    }
-    Ok((!units.is_empty()).then_some(DownPlan {
-        units,
-        review: text,
+    let plan = plan_in_order(FILE, now, &back, &steps, &scanned, dialect)?;
+    Ok((!plan.units.is_empty()).then_some(DownPlan {
+        units: plan.units,
+        review: plan.review,
     }))
 }
