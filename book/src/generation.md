@@ -46,8 +46,8 @@ Runtime schemas, connection setup, and migrations stay explicit. Deploy
 `based.toml` and BSL alongside applications using `Compiled::load`.
 
 The application needs `serde` with `derive`, `serde_json`, and its
-runtime/transport dependencies. A schema with a `decimal` column also needs
-`bigdecimal = "0.4"`.
+runtime/transport dependencies. A wire client with decimal fields also needs
+`bigdecimal = "0.4"`; an embedded client reaches it through `based_runtime`.
 Entity IDs are distinct Rust types; an owner ID cannot stand in for an item ID.
 
 ## Checked-in artifacts

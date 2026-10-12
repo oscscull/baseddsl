@@ -94,6 +94,8 @@ ulid = { version = "1", optional = true }
 # Encoding/decoding a `bytes` value between its base64 wire string and the raw bytes a
 # driver binds/reads (in the concrete driver impls only).
 base64 = { version = "0.22", optional = true }
+# Re-exported so an embedded client's `Decimal` needs no consumer dependency.
+bigdecimal = "0.4"
 
 serde = { workspace = true, optional = true }
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["rustls", "stream"] }
@@ -108,7 +110,6 @@ async-trait = "0.1.92"
 # The embed example (`tests/embed.rs`) hosts a committed generated client, which
 # derives serde — the same dependency any consumer of `based gen client` pulls in.
 serde.workspace = true
-bigdecimal = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # The streaming-client gate (`tests/streaming_client.rs`) drives the generated client
 # through a real HTTP client whose response body streams — the `stream` feature exposes

@@ -123,6 +123,10 @@ pub use sqlx;
 pub use futures_core;
 pub use futures_util;
 
+// Re-export bigdecimal so an embedded client's `Decimal` names
+// `based_runtime::bigdecimal` and the consumer declares no decimal dependency.
+pub use bigdecimal;
+
 #[cfg(feature = "serve")]
 pub use http::{
     serve, serve_with_guards, serve_with_handle, serve_with_store, Context, ContextSource, Handle,

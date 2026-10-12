@@ -1785,13 +1785,13 @@ mod __based_adopt_driver {
 #[allow(unused_imports)]
 pub use __based_adopt_driver::*;
 
-/// An exact decimal backed by `bigdecimal::BigDecimal`. JSON always carries a
+/// An exact decimal backed by `based_runtime::bigdecimal::BigDecimal`. JSON always carries a
 /// plain decimal string; no float conversion or scientific notation enters SQL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Decimal(bigdecimal::BigDecimal);
+pub struct Decimal(based_runtime::bigdecimal::BigDecimal);
 
 impl std::str::FromStr for Decimal {
-    type Err = bigdecimal::ParseBigDecimalError;
+    type Err = based_runtime::bigdecimal::ParseBigDecimalError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.parse().map(Self)
