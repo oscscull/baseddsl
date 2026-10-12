@@ -26,36 +26,46 @@ impl Desk {
             return None;
         };
         let pool = PgPool::connect(&url).await.unwrap();
-        let org = uuid::Uuid::new_v4();
-        let user = uuid::Uuid::new_v4();
-        let ticket = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO org (id, name, slug) VALUES ($1, 'Transition test', $2)")
-            .bind(org)
-            .bind(org.to_string())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO \"user\" (id, org_id, name, email, role) VALUES ($1, $2, 'Agent', $3, 'agent')")
-            .bind(user).bind(org).bind(format!("{user}@transition.test")).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO ticket (id, org_id, requester_id, created_at, updated_at, subject, status) VALUES ($1, $2, $3, now(), now(), 'Transition', 'resolved')")
-            .bind(ticket).bind(org).bind(user).execute(&pool).await.unwrap();
+        let engine = engine(&pool, policy());
+        let unique = uuid::Uuid::new_v4();
+        let org = fixture(
+            &engine,
+            "Org",
+            json!({ "name": "Transition test", "slug": unique.to_string() }),
+        )
+        .await;
+        let user = fixture(
+            &engine,
+            "User",
+            json!({
+                "org": { "id": org },
+                "name": "Agent",
+                "email": format!("{unique}@transition.test"),
+                "role": "agent",
+            }),
+        )
+        .await;
+        let ticket = fixture(
+            &engine,
+            "Ticket",
+            json!({
+                "org": { "id": org },
+                "requester": { "id": user },
+                "subject": "Transition",
+                "status": "resolved",
+            }),
+        )
+        .await;
         Some(Self {
             pool,
-            org: org.to_string(),
-            user: user.to_string(),
-            ticket: ticket.to_string(),
+            org,
+            user,
+            ticket,
         })
     }
 
     fn engine(&self, guards: Guards) -> Engine {
-        let compiled = Compiled::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        Engine::with_guards(
-            compiled,
-            PgRouter::from_pool(self.pool.clone()),
-            UuidGen,
-            guards,
-        )
-        .unwrap()
+        engine(&self.pool, guards)
     }
 
     fn ctx(&self) -> Value {
@@ -95,6 +105,18 @@ impl Desk {
                 .unwrap();
         }
     }
+}
+
+fn engine(pool: &PgPool, guards: Guards) -> Engine {
+    let compiled = Compiled::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    Engine::with_guards(compiled, PgRouter::from_pool(pool.clone()), UuidGen, guards).unwrap()
+}
+
+/// Insert one fixture row and return its id.
+async fn fixture(engine: &Engine, model: &str, row: Value) -> String {
+    let inserted = engine.insert_fixture(model, row).await;
+    assert_eq!(inserted.status, 200, "{model} fixture: {:?}", inserted.body);
+    inserted.body["id"].as_str().unwrap().to_string()
 }
 
 fn policy() -> Guards {

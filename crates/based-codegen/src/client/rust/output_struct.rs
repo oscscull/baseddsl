@@ -273,7 +273,7 @@ pub(super) fn emit_struct(out: &mut String, s: &OutStruct, seen: &mut Vec<String
 /// column as this model's typed id), forward FKs as the target's typed id under the
 /// relation field name (matching the SELECT alias). Inverse edges store nothing, so
 /// they are omitted.
-fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, String)> {
+pub(super) fn model_fields(schema: &CheckedSchema, model: &RModel) -> Vec<(String, String)> {
     let mut fields = Vec::new();
     for mem in &model.members {
         match &mem.kind {

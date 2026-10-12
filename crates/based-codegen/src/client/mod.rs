@@ -25,9 +25,11 @@ use based_sema::CheckedSchema;
 mod format_rust;
 mod rust;
 mod target;
+mod typescript;
 
 pub use format_rust::format_rust;
 pub use target::{ClientOptions, ClientTarget};
+pub use typescript::typescript_fixtures;
 
 /// Render the whole schema as a typed *wire* client module for `target` (no embedded
 /// bridge). The socket-free embed path uses [`client_with`] with
@@ -45,5 +47,17 @@ pub fn client_with(
     opts: ClientOptions,
 ) -> String {
     let ClientTarget::Rust = target;
-    rust::render(schema, decls, opts)
+    rust::render(schema, decls, opts, false)
+}
+
+/// Like [`client_with`], also emitting the `fixtures` module of typed test-fixture
+/// builders when the client is embedded (they insert through the in-process engine).
+pub fn client_with_fixtures(
+    schema: &CheckedSchema,
+    decls: &[Decl],
+    target: ClientTarget,
+    opts: ClientOptions,
+) -> String {
+    let ClientTarget::Rust = target;
+    rust::render(schema, decls, opts, opts.embedded)
 }

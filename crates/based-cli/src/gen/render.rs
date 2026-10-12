@@ -9,6 +9,7 @@ pub(super) enum Kind {
     Client,
     Sql,
     OpenApi,
+    Fixtures,
 }
 
 impl Kind {
@@ -17,6 +18,7 @@ impl Kind {
             Self::Client => Format::Rust,
             Self::Sql => Format::Sql,
             Self::OpenApi => Format::OpenApi,
+            Self::Fixtures => Format::TypeScript,
         }
     }
     pub(super) fn configured(self, loaded: &Loaded) -> Option<&str> {
@@ -25,6 +27,7 @@ impl Kind {
             Self::Client => config.client.as_deref(),
             Self::Sql => config.sql.as_deref(),
             Self::OpenApi => config.openapi.as_deref(),
+            Self::Fixtures => None,
         }
     }
 }
@@ -41,5 +44,6 @@ pub(super) fn render(kind: Kind, loaded: &Loaded, mode: ClientMode) -> Result<St
             based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys),
         )),
         Kind::OpenApi => Ok(based_codegen::openapi::openapi(schema, decls)),
+        Kind::Fixtures => Ok(based_codegen::client::typescript_fixtures(schema)),
     }
 }

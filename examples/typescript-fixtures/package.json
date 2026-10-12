@@ -1,0 +1,17 @@
+{
+  "name": "based-typescript-fixtures",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fixtures": "${BASED_BIN:-based} gen fixtures --lang ts -o src/generated/fixtures.ts",
+    "build": "tsc",
+    "test": "npm run fixtures && npm run build && node --test dist/fixtures.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

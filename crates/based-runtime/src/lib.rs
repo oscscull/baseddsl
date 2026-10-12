@@ -59,6 +59,7 @@ pub mod cursor;
 pub mod embed;
 #[cfg(feature = "external-guards")]
 pub mod external_guard;
+mod fixture;
 pub mod guard;
 pub mod id;
 pub mod idempotency;

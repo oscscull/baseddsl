@@ -7,6 +7,7 @@ pub(super) fn regeneration(kind: Kind, path: Option<&Path>, embedded: bool) -> S
         Kind::Client => "client",
         Kind::Sql => "sql",
         Kind::OpenApi => "openapi",
+        Kind::Fixtures => "fixtures --lang ts",
     };
     let mut command = format!("based gen {target}");
     if let Some(path) = path {

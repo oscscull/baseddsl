@@ -5,6 +5,7 @@
 - [A small Rust application](embedded.md)
 - [A standalone HTTP service](standalone.md)
 - [Generated clients and artifacts](generation.md)
+- [Test fixtures](fixtures.md)
 - [Project and connection configuration](configuration.md)
 - [Migrations and recovery](migrations.md)
 - [Deploying the service](deployment.md)

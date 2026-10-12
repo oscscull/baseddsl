@@ -382,3 +382,7 @@ clients call fixed signatures — the DSL never ships. Ids are phantom-typed new
 transparent over the wire. `page` returns `{ rows, cursor }` (+ `total` with count); `-> ok` returns unit;
 `-> stream` returns an async `Stream` of rows over NDJSON. An embedded in-process client is available via
 `client::embedded(&engine)`.
+
+An embedded `build.rs` client also carries `client::fixtures`, typed test-row builders
+(`fixtures::order(&org, &buyer).insert(&api)`); TypeScript gets the same builders from
+`based gen fixtures --lang ts -o <path>`. See [test fixtures](fixtures.md).

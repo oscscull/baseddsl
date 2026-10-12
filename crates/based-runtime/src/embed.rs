@@ -264,6 +264,16 @@ impl Engine {
         .await
     }
 
+    /// The connection source every auto-committed call checks out from.
+    pub(crate) fn backend(&self) -> &dyn Backend {
+        &*self.inner.backend
+    }
+
+    /// The id generator every `create` mints from.
+    pub(crate) fn id_gen(&self) -> &dyn IdGen {
+        self.inner.id_gen.as_ref()
+    }
+
     /// The compiled schema this engine serves (its lowered queries/mutations + resolved
     /// schema), for callers that want to introspect what routes exist.
     pub fn compiled(&self) -> &Compiled {

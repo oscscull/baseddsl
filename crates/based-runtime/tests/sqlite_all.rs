@@ -15,6 +15,8 @@ mod computed_integration;
 mod conditional_transition;
 #[path = "sqlite/distinct_integration.rs"]
 mod distinct_integration;
+#[path = "sqlite/fixtures.rs"]
+mod fixtures;
 #[path = "sqlite/idempotency_db.rs"]
 mod idempotency_db;
 #[path = "sqlite/in_list_integration.rs"]
