@@ -349,6 +349,7 @@ fn relation_any_with_and_without_a_predicate() {
     match &**l {
         Predicate::Any {
             path,
+            by: None,
             pred: Some(inner),
         } => {
             assert_eq!(path.segments.len(), 1);
@@ -1155,4 +1156,35 @@ fn data_step_rejects_a_bare_delete_and_trailing_tokens() {
     assert!(parse_data_step("delete event", FileId(0)).is_err());
     assert!(parse_data_step("update all card { a = 1 } extra", FileId(0)).is_err());
     assert!(parse_data_step("update all card { a = 1 } chunk 0", FileId(0)).is_err());
+}
+
+#[test]
+fn relation_any_takes_a_leading_by_column() {
+    let step = parse_data_step(
+        "update card where (card_printing.any(by card_id, digital = false)) { paper = true }",
+        FileId(0),
+    )
+    .unwrap();
+    let DataOp::Update {
+        where_: Some(Predicate::Any { by, pred, .. }),
+        ..
+    } = &step.op
+    else {
+        panic!("{:?}", step.op);
+    };
+    assert_eq!(by.as_ref().map(|b| b.node.as_str()), Some("card_id"));
+    assert!(pred.is_some());
+    // A column named `by` compared to something stays an ordinary predicate.
+    let sf = parse_ok("filter f = rows.any(by = 1);");
+    let Decl::Filter(nf) = &sf.decls[0] else {
+        panic!("expected filter");
+    };
+    assert!(matches!(
+        &nf.pred,
+        Predicate::Any {
+            by: None,
+            pred: Some(_),
+            ..
+        }
+    ));
 }

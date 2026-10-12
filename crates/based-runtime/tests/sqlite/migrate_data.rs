@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use based_codegen::migrate::{diff_snapshots, render_up, Snapshot};
+use based_codegen::migrate::{diff_snapshots, render_up, IdKind, Snapshot};
 use based_codegen::Dialect;
 use based_runtime::fetch_all;
 use based_runtime::migrate::{apply, load_migrations, ApplyOpts, Direction};
@@ -26,6 +26,19 @@ table tag
   column name text not_null unique
 ";
 
+/// Apply options with a deterministic id mint (uuid-shaped, so the length checks hold).
+fn opts() -> ApplyOpts {
+    fn mint(_: IdKind) -> String {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("00000000-0000-4000-8000-{n:012}")
+    }
+    ApplyOpts {
+        mint: Some(mint),
+        ..ApplyOpts::default()
+    }
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -46,6 +59,10 @@ impl Scratch {
         std::fs::write(dir.join("up.mig"), up).unwrap();
         std::fs::write(dir.join("schema.snap"), SNAP).unwrap();
     }
+
+    fn down(&self, name: &str, down: &str) {
+        std::fs::write(self.0.join("migrations").join(name).join("down.mig"), down).unwrap();
+    }
 }
 
 impl Drop for Scratch {
@@ -62,7 +79,7 @@ async fn seeded(s: &Scratch) -> SqliteBackend {
     );
     let backend = SqliteBackend::in_memory().unwrap();
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
-    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+    apply(&backend, Dialect::Sqlite, &migs, &opts())
         .await
         .unwrap();
     let mut db = backend.checkout("").await.unwrap();
@@ -106,7 +123,7 @@ async fn chunked_backfill_commits_in_batches_and_completes() {
         "format 2\nupdate card where (card_printing.any(digital = false)) { paper = true } chunk 1\n",
     );
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
-    let report = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+    let report = apply(&backend, Dialect::Sqlite, &migs, &opts())
         .await
         .unwrap();
     assert_eq!(report.applied, vec!["0002_paper"]);
@@ -137,12 +154,12 @@ async fn literal_rows_roll_back_without_a_down_mig() {
         "format 2\ncreate tag[] from [ { name = \"staple\" }, { name = \"combo\" } ]\n",
     );
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
-    apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+    apply(&backend, Dialect::Sqlite, &migs, &opts())
         .await
         .unwrap();
     let rows = query(&backend, "SELECT name FROM tag ORDER BY name").await;
     assert_eq!(rows.len(), 2);
-    // Each created row got a fresh uuid id.
+    // Each created row got a freshly minted id.
     let ids = query(&backend, "SELECT id FROM tag").await;
     assert!(ids
         .iter()
@@ -154,11 +171,82 @@ async fn literal_rows_roll_back_without_a_down_mig() {
         &migs,
         &ApplyOpts {
             direction: Direction::Down,
-            ..ApplyOpts::default()
+            ..opts()
         },
     )
     .await
     .unwrap();
     assert_eq!(report.rolled_back, vec!["0002_tags"]);
     assert!(query(&backend, "SELECT name FROM tag").await.is_empty());
+}
+
+#[tokio::test]
+async fn an_interrupted_chunked_step_resumes_from_its_cursor() {
+    let s = Scratch::new("resume");
+    let backend = seeded(&s).await;
+    s.migration(
+        "0002_paper",
+        "format 2\nupdate all card { paper = true } chunk 1\n",
+    );
+    let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    // A run that committed the batch ending at `c1`, then stopped.
+    {
+        let mut db = backend.checkout("").await.unwrap();
+        db.execute(
+            "CREATE TABLE _based_migration_progress (id TEXT NOT NULL PRIMARY KEY, \
+             content_hash TEXT NOT NULL, segment INTEGER NOT NULL, cursor TEXT NULL, \
+             rows_done INTEGER NOT NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO _based_migration_progress VALUES (?, ?, 0, ?, 1)",
+            &[
+                SqlValue::Text("0002_paper".into()),
+                SqlValue::Text(migs[1].up_hash.clone()),
+                SqlValue::Text(r#"["'c1'"]"#.into()),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    let report = apply(&backend, Dialect::Sqlite, &migs, &opts())
+        .await
+        .unwrap();
+    assert_eq!(report.applied, vec!["0002_paper"]);
+    // Only the rows after the cursor were written by the resumed run.
+    let rows = query(&backend, "SELECT id FROM card WHERE paper = 1 ORDER BY id").await;
+    let paper: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(paper, vec!["c2", "c3"]);
+}
+
+#[tokio::test]
+async fn a_typed_down_mig_runs_its_data_steps() {
+    let s = Scratch::new("typed-down");
+    let backend = seeded(&s).await;
+    s.migration("0002_paper", "format 2\nupdate all card { paper = true }\n");
+    s.down(
+        "0002_paper",
+        "format 2\nupdate card where (name = \"Bolt\") { paper = false }\n",
+    );
+    let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &opts())
+        .await
+        .unwrap();
+    let report = apply(
+        &backend,
+        Dialect::Sqlite,
+        &migs,
+        &ApplyOpts {
+            direction: Direction::Down,
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.rolled_back, vec!["0002_paper"]);
+    let rows = query(&backend, "SELECT id FROM card WHERE paper = 1 ORDER BY id").await;
+    let paper: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(paper, vec!["c2", "c3"]);
 }

@@ -169,6 +169,8 @@ ci-live-mariadb:
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test mariadb_integration --test migrate_apply_mariadb -- --test-threads=1 --nocapture
 	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-runtime --features docker-tests \
+	  --test migrate_data_live live_mariadb -- --nocapture
+	TEST_MARIADB_URL="$(MARIADB_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test decimal_client generated_client_round_trips_decimal_domain_through_mariadb -- --exact --nocapture
 
 ## Live Postgres: the integration suite against a PROVIDED server (`TEST_POSTGRES_URL`).
@@ -178,6 +180,8 @@ ci-live-postgres:
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-cli --test migration_failure postgres_ -- --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test postgres_integration -- --test-threads=1 --nocapture
+	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-runtime --features docker-tests \
+	  --test migrate_data_live live_postgres -- --nocapture
 	TEST_POSTGRES_URL="$(POSTGRES_URL)" $(CARGO) test -p based-runtime --features docker-tests \
 	  --test decimal_client generated_client_round_trips_decimal_domain_through_postgres -- --exact --nocapture
 

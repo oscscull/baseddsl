@@ -2,7 +2,9 @@
 //! against the schema state at each line, and per-dialect lowering. The scenarios are the
 //! edhbuilder backfills (a JSON field copy, reference rows, the paper backfill).
 
-use based_codegen::migrate::{plan_up, up_mig_matches_snapshot, Snapshot, UpPlan, UpUnit};
+use based_codegen::migrate::{
+    plan_down, plan_up, up_mig_matches_snapshot, IdKind, PlanUnit, Snapshot, UpPlan,
+};
 use based_codegen::Dialect;
 
 const BEFORE: &str = "snapshot v1 dialect=neutral
@@ -55,8 +57,8 @@ fn sql(p: &UpPlan) -> Vec<&str> {
     p.units
         .iter()
         .map(|u| match u {
-            UpUnit::Sql(s) => s.as_str(),
-            UpUnit::Chunked(_) => "<chunked>",
+            PlanUnit::Sql(s) | PlanUnit::Minted { sql: s, .. } => s.as_str(),
+            PlanUnit::Chunked(_) => "<chunked>",
         })
         .collect()
 }
@@ -127,7 +129,13 @@ fn reference_rows_upsert_per_dialect() {
     let pg = plan(BEFORE, BEFORE, REFERENCE_ROWS, Dialect::Postgres);
     assert_eq!(
         sql(&pg)[0],
-        r#"INSERT INTO "format" ("key", "name", "id") VALUES ('commander', 'Commander', gen_random_uuid()), ('brawl', 'Brawl', gen_random_uuid()) ON CONFLICT ("key") DO UPDATE SET "name" = excluded."name""#
+        r#"INSERT INTO "format" ("key", "name", "id") VALUES ('commander', 'Commander', $1), ('brawl', 'Brawl', $2) ON CONFLICT ("key") DO UPDATE SET "name" = excluded."name""#
+    );
+    // The omitted primary key is minted at apply time with the project's id strategy.
+    assert!(
+        matches!(&pg.units[0], PlanUnit::Minted { ids, .. } if ids == &[IdKind::Uuid, IdKind::Uuid]),
+        "{:?}",
+        pg.units
     );
     let maria = plan(BEFORE, BEFORE, REFERENCE_ROWS, Dialect::MariaDb);
     assert!(
@@ -147,9 +155,9 @@ fn literal_rows_reverse_automatically() {
     let p = plan(BEFORE, BEFORE, up, Dialect::Sqlite);
     assert_eq!(
         p.auto_down,
-        Some(vec![
+        Some(vec![PlanUnit::Sql(
             "DELETE FROM `format` WHERE `key` IN ('pauper')".to_string()
-        ])
+        )])
     );
     let upd = "format 2\nupdate format where (key = \"pauper\") { name = \"P\" }\n";
     assert_eq!(plan(BEFORE, BEFORE, upd, Dialect::Sqlite).auto_down, None);
@@ -188,7 +196,7 @@ fn raw_lines_run_where_they_are_written() {
 fn chunked_update_walks_the_primary_key() {
     let up = "format 2\nupdate all card { paper = true } chunk 5000 pause 200ms\n";
     let p = plan(BEFORE, BEFORE, up, Dialect::Sqlite);
-    let UpUnit::Chunked(c) = &p.units[0] else {
+    let PlanUnit::Chunked(c) = &p.units[0] else {
         panic!("{:?}", p.units)
     };
     assert_eq!(c.key_columns, vec!["id"]);
@@ -207,7 +215,7 @@ fn chunked_update_walks_the_primary_key() {
 fn chunked_delete_by_an_indexed_column_keeps_its_filter() {
     let up = "format 2\ndelete card_printing where (digital = true) chunk 100 by card_id\n";
     let p = plan(BEFORE, BEFORE, up, Dialect::Postgres);
-    let UpUnit::Chunked(c) = &p.units[0] else {
+    let PlanUnit::Chunked(c) = &p.units[0] else {
         panic!("{:?}", p.units)
     };
     assert_eq!(
@@ -260,7 +268,7 @@ fn data_steps_need_the_in_order_format() {
 }
 
 #[test]
-fn mysql_rejects_a_subquery_on_the_table_being_written() {
+fn mysql_reads_the_written_table_through_a_derived_table() {
     let tree = "snapshot v1 dialect=neutral
 
 table node
@@ -268,7 +276,138 @@ table node
   column parent_id uuid null fk=Node
 ";
     let up = "format 2\ndelete node where (not node.any())\n";
-    assert!(plan_up(&snap(tree), &snap(tree), up, Dialect::Sqlite).is_ok());
-    let err = plan_up(&snap(tree), &snap(tree), up, Dialect::MariaDb).unwrap_err();
-    assert!(err[0].message.contains("can't read `node`"), "{err:?}");
+    let lite = plan(tree, tree, up, Dialect::Sqlite);
+    assert_eq!(
+        sql(&lite)[0],
+        "DELETE FROM `node` WHERE NOT (EXISTS (SELECT 1 FROM `node` AS `s1_node` WHERE `s1_node`.`parent_id` = `node`.`id`))"
+    );
+    let maria = plan(tree, tree, up, Dialect::MariaDb);
+    assert_eq!(
+        sql(&maria)[0],
+        "DELETE FROM `node` WHERE NOT (`node`.`id` IN (SELECT * FROM (SELECT `s1_node`.`parent_id` AS `k0` FROM `node` AS `s1_node` WHERE `s1_node`.`parent_id` IS NOT NULL) AS `d2`))"
+    );
+}
+
+#[test]
+fn enum_values_need_no_quotes_in_any_case() {
+    let tree = "snapshot v1 dialect=neutral
+
+table ticket
+  column status enum(OPEN,in_progress,DONE) not_null
+";
+    let up = "format 2\nupdate ticket where (status = OPEN) { status = IN_PROGRESS }\n";
+    let p = plan_up(&snap(tree), &snap(tree), up, Dialect::Postgres);
+    // `IN_PROGRESS` is not a value (the stored one is `in_progress`): a loud error.
+    let err = p.unwrap_err();
+    assert!(
+        err[0]
+            .message
+            .contains("`IN_PROGRESS` is not a value of `status`"),
+        "{err:?}"
+    );
+    let up = "format 2\nupdate ticket where (status = OPEN) { status = DONE }\n";
+    let p = plan(tree, tree, up, Dialect::Postgres);
+    assert_eq!(
+        sql(&p)[0],
+        r#"UPDATE "ticket" SET "status" = 'DONE' WHERE "ticket"."status" = 'OPEN'"#
+    );
+    let quoted = "format 2\nupdate all ticket { status = \"closed\" }\n";
+    assert!(problems(tree, tree, quoted).contains("is not a value of `status`"));
+}
+
+#[test]
+fn ulid_keys_mint_ulids() {
+    let tree = "snapshot v1 dialect=neutral
+
+table tag
+  column id ulid not_null
+  column name text not_null
+";
+    let up = "format 2\ncreate tag { name = \"x\" }\n";
+    let p = plan(tree, tree, up, Dialect::Sqlite);
+    assert!(
+        matches!(&p.units[0], PlanUnit::Minted { sql, ids } if ids == &[IdKind::Ulid] && sql.ends_with("VALUES ('x', ?)")),
+        "{:?}",
+        p.units
+    );
+}
+
+#[test]
+fn down_mig_runs_data_steps_checked_against_the_post_up_state() {
+    let now = after();
+    let down = "format 2
+update all card_printing { set_code = null }
+raw(sqlite) `ALTER TABLE card_printing DROP COLUMN set_code`
+";
+    let p = plan_down(&snap(&now), down, Dialect::Sqlite)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        p.units,
+        vec![
+            PlanUnit::Sql("UPDATE `card_printing` SET `set_code` = NULL".into()),
+            PlanUnit::Sql("ALTER TABLE card_printing DROP COLUMN set_code".into()),
+        ]
+    );
+    // Checked like up.mig: a name the post-up state lacks is an error.
+    let bad = "format 2\nupdate all card_printing { nope = 1 }\n";
+    let err = plan_down(&snap(&now), bad, Dialect::Sqlite).unwrap_err();
+    assert!(err[0].to_string().contains("down.mig line 2"), "{err:?}");
+    // A structural line has no place in a down script.
+    let structural = "format 2\ndrop column card_printing.set_code\n";
+    assert!(plan_down(&snap(&now), structural, Dialect::Sqlite).is_err());
+    // A legacy raw-SQL down.mig still splits on `;`; an all-comment one is no down at all.
+    let legacy = plan_down(&snap(&now), "-- x\nDROP TABLE a;\n", Dialect::Sqlite).unwrap();
+    assert_eq!(
+        legacy.unwrap().units,
+        vec![PlanUnit::Sql("DROP TABLE a".into())]
+    );
+    assert!(plan_down(&snap(&now), "-- nothing\n", Dialect::Sqlite)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn gen_down_mig_is_a_script_of_raw_lines() {
+    let now = after();
+    let steps = based_codegen::migrate::diff_snapshots(&snap(BEFORE), &snap(&now));
+    let down = based_codegen::migrate::render_down(&steps, Dialect::Postgres);
+    assert!(down.contains("format 2"), "{down}");
+    let p = plan_down(&snap(&now), &down, Dialect::Postgres)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        p.units,
+        vec![PlanUnit::Sql(
+            r#"ALTER TABLE "card_printing" DROP COLUMN "set_code""#.into()
+        )]
+    );
+}
+
+#[test]
+fn any_by_picks_among_several_foreign_keys() {
+    let tree = "snapshot v1 dialect=neutral
+
+table card
+  column name text not_null
+  column paper bool not_null default=false
+
+table deck
+  column commander_id uuid not_null fk=Card
+  column partner_id uuid null fk=Card
+";
+    let bare = "format 2\nupdate card where (deck.any()) { paper = true }\n";
+    let got = problems(tree, tree, bare);
+    assert!(got.contains("more than one foreign key"), "{got}");
+    assert!(got.contains("deck.any(by <col>, …)"), "{got}");
+
+    let by = "format 2\nupdate card where (deck.any(by partner_id)) { paper = true }\n";
+    let p = plan(tree, tree, by, Dialect::Sqlite);
+    assert_eq!(
+        sql(&p)[0],
+        "UPDATE `card` SET `paper` = 1 WHERE EXISTS (SELECT 1 FROM `deck` AS `s1_deck` WHERE `s1_deck`.`partner_id` = `card`.`id`)"
+    );
+
+    let wrong = "format 2\nupdate card where (deck.any(by name)) { paper = true }\n";
+    assert!(problems(tree, tree, wrong).contains("`by name` must name a foreign key of `deck`"));
 }

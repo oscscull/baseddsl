@@ -53,6 +53,7 @@ mod lifecycle;
 mod model;
 mod script;
 mod sql;
+mod unit;
 mod up_mig;
 
 pub use data::{ChunkPlan, DataError};
@@ -65,11 +66,14 @@ pub use model::{
     fk_spec_text, foreign_key_snaps, snapshot, target_pk_column, ColumnSnap, ForeignKeySnap,
     IndexSnap, ParseError, Rename, ScopeDeclSnap, ScopeTermSnap, Snapshot, TableSnap,
 };
-pub use script::{has_data_step, plan_up, UpPlan, UpProblem, UpUnit, FORMAT_MARKER};
+pub use script::{
+    has_data_step, plan_down, plan_up, DownPlan, ScriptProblem, UpPlan, FORMAT_MARKER,
+};
 pub use sql::{
     content_hash, migration_sql, render_down, render_migration, render_sql, sql_statements,
     up_mig_matches_snapshot,
 };
+pub use unit::{IdKind, PlanUnit};
 pub use up_mig::render_up;
 
 #[cfg(test)]

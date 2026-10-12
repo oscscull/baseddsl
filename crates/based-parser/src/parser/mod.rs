@@ -52,6 +52,7 @@ pub fn parse(src: &str, file: FileId) -> Result<SchemaFile, Vec<Diagnostic>> {
         toks: lexing.tokens,
         pos: 0,
         diags: Vec::new(),
+        any_case_labels: false,
     };
     for (start, end) in lexing.errors {
         // `^` was the tx back-reference marker (`^.id`), removed in favour of named step
@@ -96,6 +97,7 @@ pub fn parse_expr(src: &str, file: FileId) -> Result<ShapeExpr, Vec<Diagnostic>>
         toks: lexing.tokens,
         pos: 0,
         diags: Vec::new(),
+        any_case_labels: false,
     };
     for (start, end) in lexing.errors {
         p.diags
@@ -121,6 +123,9 @@ struct Parser<'a> {
     toks: Vec<Lexed>,
     pos: usize,
     diags: Vec<Diagnostic>,
+    /// A bare capitalized word in value position is an enum value (data steps name enum
+    /// values by their stored spelling).
+    any_case_labels: bool,
 }
 
 /// Parse one migration data step (an `up.mig` `create` / `update` / `delete` line, possibly
@@ -133,6 +138,7 @@ pub fn parse_data_step(src: &str, file: FileId) -> Result<DataStep, Vec<Diagnost
         toks: lexing.tokens,
         pos: 0,
         diags: Vec::new(),
+        any_case_labels: true,
     };
     for (start, end) in lexing.errors {
         p.diags

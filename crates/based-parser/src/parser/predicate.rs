@@ -92,6 +92,19 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         self.bump();
+        // `by <fk column>` leads only when followed by `,` or `)` (a column named `by`
+        // compared to something stays a predicate).
+        let by = if self.at_kw("by")
+            && self.tok_at(1) == Some(Tok::LowerIdent)
+            && matches!(self.tok_at(2), Some(Tok::Comma | Tok::RParen))
+        {
+            self.bump();
+            let col = self.lower_ident("a foreign-key column")?;
+            self.eat(Tok::Comma);
+            Some(col)
+        } else {
+            None
+        };
         let pred = if self.at(Tok::RParen) {
             None
         } else {
@@ -100,7 +113,11 @@ impl<'a> Parser<'a> {
         self.expect(Tok::RParen, "`)`")?;
         let mut rel = path.clone();
         rel.segments.pop();
-        Ok(Some(Predicate::Any { path: rel, pred }))
+        Ok(Some(Predicate::Any {
+            path: rel,
+            by,
+            pred,
+        }))
     }
 
     fn at_op(&self) -> bool {

@@ -13,7 +13,8 @@ pub(crate) enum Ty {
     JsonPath,
     /// A bare name that is not a column — an enum value, if the target is an enum.
     Label(String),
-    Str,
+    /// A string; the literal's value when it is one.
+    Str(Option<String>),
     Int,
     Dec,
     Bool,
@@ -40,7 +41,7 @@ impl Ck<'_> {
             ShapeExpr::Concat { lhs, rhs, .. } => {
                 self.expr(lhs, t, scope);
                 self.expr(rhs, t, scope);
-                Ty::Str
+                Ty::Str(None)
             }
             ShapeExpr::Case { arms, else_, .. } => {
                 for arm in arms {
@@ -55,7 +56,7 @@ impl Ck<'_> {
     pub(crate) fn value(&mut self, v: &Value, t: &TableView, scope: Scope) -> Ty {
         match v {
             Value::Lit(l) => match l {
-                Literal::Str(_) => Ty::Str,
+                Literal::Str(v) => Ty::Str(Some(v.clone())),
                 Literal::Int(_) => Ty::Int,
                 Literal::Decimal(_) => Ty::Dec,
                 Literal::Bool(_) => Ty::Bool,
@@ -175,7 +176,17 @@ pub(crate) fn fits(col: &Col, ty: &Ty) -> Result<(), String> {
                 _ => Err(format!("unknown column `{l}`")),
             }
         }
-        Ty::Str => matches!(
+        Ty::Str(Some(v)) if matches!(f, Fam::StrEnum(_)) => {
+            return match f {
+                Fam::StrEnum(vs) if !vs.contains(v) => Err(format!(
+                    "\"{v}\" is not a value of `{}` ({})",
+                    col.name,
+                    vs.join(", ")
+                )),
+                _ => Ok(()),
+            }
+        }
+        Ty::Str(_) => matches!(
             f,
             Fam::Text
                 | Fam::Uuid
@@ -222,7 +233,7 @@ pub(crate) fn ty_name(ty: &Ty) -> String {
         Ty::Col(f) => format!("a {} column", f.name()),
         Ty::JsonPath => "a json path".into(),
         Ty::Label(l) => format!("`{l}`"),
-        Ty::Str => "a string".into(),
+        Ty::Str(_) => "a string".into(),
         Ty::Int => "an integer".into(),
         Ty::Dec => "a decimal".into(),
         Ty::Bool => "a bool".into(),

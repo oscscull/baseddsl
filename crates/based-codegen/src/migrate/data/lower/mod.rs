@@ -1,11 +1,12 @@
-//! Lower a checked data step to SQL for one dialect: plain statements, or a [`ChunkPlan`]
-//! the runtime drives batch by batch.
+//! Lower a checked data step to one executable unit for a dialect: a statement (binding ids
+//! minted at apply time), or a [`ChunkPlan`] the runtime drives batch by batch.
 
 use std::cell::Cell;
 
 use based_ast::{DataOp, DataStep, Span};
 
 use super::super::model::Snapshot;
+use super::super::unit::PlanUnit;
 use super::check::DataError;
 use super::table::TableView;
 use crate::Dialect;
@@ -19,19 +20,13 @@ mod write;
 
 pub use chunk::ChunkPlan;
 
-/// A lowered data step.
-pub(crate) enum Lowered {
-    Sql(Vec<String>),
-    Chunked(ChunkPlan),
-}
-
 /// Lower `step` (already checked against `snap`) for `dialect`. `Err` for a construct the
 /// dialect can't express.
 pub(crate) fn lower_step(
     step: &DataStep,
     snap: &Snapshot,
     dialect: Dialect,
-) -> Result<Lowered, DataError> {
+) -> Result<PlanUnit, DataError> {
     let table = step.op.table();
     let t = TableView::find(snap, &table.node).ok_or_else(|| DataError {
         span: table.span,
@@ -47,16 +42,22 @@ pub(crate) fn lower_step(
         sub: Cell::new(0),
     };
     if let Some(chunk) = &step.chunk {
-        return Ok(Lowered::Chunked(lw.chunk_plan(step, chunk, &t)?));
+        return Ok(PlanUnit::Chunked(lw.chunk_plan(step, chunk, &t)?));
     }
-    let sql = match &step.op {
-        DataOp::Create { rows, conflict, .. } => lw.create(rows, conflict.as_ref(), &t)?,
+    Ok(match &step.op {
+        DataOp::Create { rows, conflict, .. } => {
+            let (sql, ids) = lw.create(rows, conflict.as_ref(), &t)?;
+            if ids.is_empty() {
+                PlanUnit::Sql(sql)
+            } else {
+                PlanUnit::Minted { sql, ids }
+            }
+        }
         DataOp::Update {
             where_, assigns, ..
-        } => lw.update(where_.as_ref(), assigns, &t, None)?,
-        DataOp::Delete { where_, .. } => lw.delete(where_.as_ref(), &t, None)?,
-    };
-    Ok(Lowered::Sql(vec![sql]))
+        } => PlanUnit::Sql(lw.update(where_.as_ref(), assigns, &t, None)?),
+        DataOp::Delete { where_, .. } => PlanUnit::Sql(lw.delete(where_.as_ref(), &t, None)?),
+    })
 }
 
 /// Lowering state for one step.

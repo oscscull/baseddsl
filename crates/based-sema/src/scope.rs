@@ -695,7 +695,7 @@ fn walk_pred_join(pred: &Predicate, model: usize, cx: &Cx, out: &mut Vec<usize>)
         }
         Predicate::Bare(path) => walk_path_join(path, model, cx, out),
         // Every hop of a `.any` relation is joined or subqueried with its scope injected.
-        Predicate::Any { path, pred } => {
+        Predicate::Any { path, pred, .. } => {
             let Some(target) =
                 crate::resolve::resolve_any_target(path, model, cx, &mut Sink::default())
             else {

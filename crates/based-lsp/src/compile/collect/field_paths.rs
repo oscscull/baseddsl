@@ -45,7 +45,7 @@ pub(crate) fn pred_paths<'a>(
             pred_paths(b, root, rel, out);
         }
         Predicate::Not(inner) => pred_paths(inner, root, rel, out),
-        Predicate::Any { path, pred } => {
+        Predicate::Any { path, pred, .. } => {
             out.push((root, &path.segments));
             let target = path
                 .segments

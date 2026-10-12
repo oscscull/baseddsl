@@ -10,5 +10,5 @@ mod table;
 pub(crate) use check::check_step;
 pub use check::DataError;
 pub(crate) use invert::invert;
+pub(crate) use lower::lower_step;
 pub use lower::ChunkPlan;
-pub(crate) use lower::{lower_step, Lowered};
