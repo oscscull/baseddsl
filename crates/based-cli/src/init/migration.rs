@@ -8,12 +8,14 @@ pub fn prepare(root: &Path) -> Result<(), CliError> {
     let foreign_keys = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
     let snapshot = Snapshot::from_schema_with(&schema, foreign_keys);
     let steps = migrate::diff_snapshots(&Snapshot::default(), &snapshot);
-    let dialect = based_codegen::Dialect::parse(&project.manifest.dialect);
     let directory = root.join("migrations/0001_init");
     std::fs::create_dir_all(&directory).map_err(|e| io_at("preparing", &directory, e))?;
     for (name, content) in [
         ("up.mig", migrate::render_up(&steps)),
-        ("down.mig", migrate::render_down(&steps, dialect)),
+        (
+            "down.mig",
+            migrate::render_down(&Snapshot::default(), &snapshot),
+        ),
         ("schema.snap", snapshot.render()),
     ] {
         let path = directory.join(name);

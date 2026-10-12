@@ -177,37 +177,33 @@ fn run_verify(root: &Path) -> std::process::Output {
 }
 
 #[test]
-fn gen_prefills_down_mig_with_reverse_sql() {
+fn gen_prefills_down_mig_with_the_typed_reverse() {
     let s = Scratch::new("down");
     s.write("based.toml", MANIFEST);
     s.write("shop.bsl", "Product { id: Id  name: text }\n");
     assert!(run_gen(&s.0, Some("init")).status.success());
 
-    // A pure additive migration is mechanically reversible, so down.mig prefills real SQL.
+    // down.mig is the reverse in the up.mig vocabulary.
     s.write(
         "shop.bsl",
         "Product { id: Id  name: text  barcode: text?  @index barcode }\n",
     );
     assert!(run_gen(&s.0, Some("add barcode")).status.success());
-
     let down = std::fs::read_to_string(s.0.join("migrations/0002_add_barcode/down.mig")).unwrap();
-    assert!(
-        down.contains("ALTER TABLE `product` DROP COLUMN `barcode`"),
-        "\n{down}"
-    );
-    assert!(
-        down.contains("DROP INDEX `idx_product_barcode`"),
-        "\n{down}"
-    );
+    assert!(down.contains("\nformat 2\n"), "\n{down}");
+    assert!(down.contains("drop column product.barcode"), "\n{down}");
+    assert!(down.contains("drop index idx_product_barcode"), "\n{down}");
 
-    // A migration that drops a column can't be reversed → a loud placeholder, no SQL.
+    // A dropped column reverses to re-adding its shape (its data is not restored).
     s.write("shop.bsl", "Product { id: Id  name: text }\n");
     assert!(run_gen(&s.0, Some("drop barcode")).status.success());
     let down3 = std::fs::read_to_string(s.0.join("migrations/0003_drop_barcode/down.mig")).unwrap();
     assert!(
-        down3.contains("is irreversible (data loss); write your own or delete this file"),
+        down3.contains("add column product.barcode text null"),
         "\n{down3}"
     );
+    // The generated downs verify clean.
+    assert!(run_verify(&s.0).status.success());
 }
 
 #[test]

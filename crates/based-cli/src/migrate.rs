@@ -44,21 +44,16 @@ pub fn cmd_migrate_gen(root: &Path, name: Option<&str>, data: bool) -> Result<()
 
     let up = migrate::render_up(&steps);
     let snap = now.render();
-    // Prefill a `down.mig` for the manifest dialect: real reverse SQL where the step is
-    // mechanically reversible, a loud irreversible comment otherwise, so a reverse exists to
-    // complete instead of being silently never written.
-    let dialect = Dialect::parse(&project.manifest.dialect);
     let up_path = dir.join("up.mig");
     let snap_path = dir.join("schema.snap");
     std::fs::write(&up_path, &up).map_err(|e| io_at("writing", &up_path, e))?;
     std::fs::write(&snap_path, &snap).map_err(|e| io_at("writing", &snap_path, e))?;
-    // A data-only migration gets no prefilled down: literal-row creates reverse on their
-    // own, anything else needs a hand-written one.
-    if !steps.is_empty() {
-        let down = migrate::render_down(&steps, dialect);
-        let down_path = dir.join("down.mig");
-        std::fs::write(&down_path, &down).map_err(|e| io_at("writing", &down_path, e))?;
-    }
+    // The typed reverse: the structural steps back to the prior snapshot, with room for
+    // data steps. A data-only migration's down holds no step until one is written (its
+    // literal-row creates reverse on their own).
+    let down = migrate::render_down(&prev, &now);
+    let down_path = dir.join("down.mig");
+    std::fs::write(&down_path, &down).map_err(|e| io_at("writing", &down_path, e))?;
 
     let destructive = steps.iter().filter(|s| s.destructive()).count();
     println!(
@@ -372,7 +367,7 @@ pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
         problems += verify_up_mig(name, &stored, &steps, &snap);
         problems += verify_data_steps(name, &stored, &prev, &snap, dialect);
         if let Ok(down) = std::fs::read_to_string(dir.join("down.mig")) {
-            problems += verify_down_mig(name, &down, &snap, dialect);
+            problems += verify_down_mig(name, &down, &prev, &snap, dialect);
         }
         prev = snap;
     }
@@ -470,15 +465,17 @@ fn verify_data_steps(
     }
 }
 
-/// Check a `down.mig`'s data steps against the post-up state, for the manifest dialect.
-/// Returns the number of problems.
+/// Check a `down.mig`: its structural lines against the reverse the snapshots imply, and
+/// each data step against the state at its line, for the manifest dialect. Returns the
+/// number of problems.
 fn verify_down_mig(
     name: &str,
     down: &str,
+    prev: &based_codegen::migrate::Snapshot,
     snap: &based_codegen::migrate::Snapshot,
     dialect: Dialect,
 ) -> usize {
-    match based_codegen::migrate::plan_down(snap, down, dialect) {
+    match based_codegen::migrate::plan_down(prev, snap, down, dialect) {
         Ok(_) => 0,
         Err(problems) => {
             for p in &problems {

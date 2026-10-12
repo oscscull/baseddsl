@@ -1047,51 +1047,6 @@ fn up_mig_matches_snapshot_detects_structural_drift_only() {
     ));
 }
 
-/// `render_down` prefills real reverse SQL for mechanically reversible steps and a loud
-/// irreversible comment for the rest, newest step first.
-#[test]
-fn render_down_prefills_reversible_and_flags_the_rest() {
-    let steps = vec![
-        Step::CreateTable(table("gadget", vec![col("name", "text", false)])),
-        Step::AddColumn {
-            table: "widget".to_string(),
-            schema: None,
-            column: col("size", "int", true),
-        },
-        Step::DropColumn {
-            table: "widget".to_string(),
-            schema: None,
-            column: "legacy".to_string(),
-        },
-        Step::RenameColumn {
-            table: "widget".to_string(),
-            schema: None,
-            from: "upc".to_string(),
-            to: "barcode".to_string(),
-        },
-    ];
-    let down = render_down(&steps, Sqlite);
-    // Reversible steps became real reverse SQL.
-    assert!(
-        down.contains("ALTER TABLE `widget` DROP COLUMN `size`"),
-        "\n{down}"
-    );
-    assert!(down.contains("DROP TABLE `gadget`"), "\n{down}");
-    assert!(
-        down.contains("ALTER TABLE `widget` RENAME COLUMN `barcode` TO `upc`"),
-        "\n{down}"
-    );
-    // The drop-column can't be reversed → a loud comment inviting a hand-written reverse.
-    assert!(
-        down.contains("is irreversible (data loss); write your own or delete this file"),
-        "\n{down}"
-    );
-    // Reverse order: the rename (last up step) is reversed before the create (first up step).
-    let rename_at = down.find("RENAME COLUMN").unwrap();
-    let drop_table_at = down.find("DROP TABLE `gadget`").unwrap();
-    assert!(rename_at < drop_table_at, "\n{down}");
-}
-
 /// `raw_modeled_tables` flags a raw step touching a snapshot-modeled table (word-boundary,
 /// so `order` doesn't match inside `order_line`).
 #[test]

@@ -48,6 +48,7 @@
 
 mod data;
 mod diff;
+mod down_mig;
 mod evolve;
 mod lifecycle;
 mod model;
@@ -61,6 +62,7 @@ pub use diff::{
     diff, diff_snapshots, drift, has_raw_step, parse_raw_steps, raw_modeled_tables,
     strip_raw_steps, ColumnChange, ScopeChange, Step,
 };
+pub use down_mig::{down_steps, render_down};
 pub use lifecycle::{apply_spent_was, rename_hints, spent_was_edits, RenameHint, SpentWas};
 pub use model::{
     fk_spec_text, foreign_key_snaps, snapshot, target_pk_column, ColumnSnap, ForeignKeySnap,
@@ -70,7 +72,7 @@ pub use script::{
     has_data_step, plan_down, plan_up, DownPlan, ScriptProblem, UpPlan, FORMAT_MARKER,
 };
 pub use sql::{
-    content_hash, migration_sql, render_down, render_migration, render_sql, sql_statements,
+    content_hash, migration_sql, render_migration, render_sql, sql_statements,
     up_mig_matches_snapshot,
 };
 pub use unit::{IdKind, PlanUnit};

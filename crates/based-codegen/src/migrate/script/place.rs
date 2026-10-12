@@ -1,5 +1,5 @@
 //! Interleave the snapshot-derived structural steps with the `raw` and data items of an
-//! in-order `up.mig`, each item after the structural step it follows.
+//! in-order script (`up.mig` / `down.mig`), each item after the structural step it follows.
 
 use super::super::diff::Step;
 use super::super::up_mig::render_step;
@@ -14,6 +14,7 @@ pub(crate) enum Placed<'a> {
 }
 
 pub(crate) fn place<'a>(
+    file: &'static str,
     steps: &'a [Step],
     scanned: &'a Scanned<'_>,
 ) -> Result<Vec<Placed<'a>>, ScriptProblem> {
@@ -28,7 +29,7 @@ pub(crate) fn place<'a>(
         }
         if seen != item.after {
             return Err(ScriptProblem {
-                file: "up.mig",
+                file,
                 line: item.line,
                 message: "a data step or raw line can't sit inside a multi-line structural step"
                     .to_string(),

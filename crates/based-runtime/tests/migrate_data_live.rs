@@ -1,6 +1,7 @@
 //! Migration data steps against **real** MariaDB and Postgres servers, over Docker: a JSON
 //! field copy, a reference-row upsert, the paper backfill through `.any` (chunked), and a
-//! chunked step resuming from a saved cursor. Each test skips cleanly without a daemon.
+//! chunked step resuming from a saved cursor; then an up → down → up round trip through
+//! gen's typed down. Each test skips cleanly without a daemon.
 
 #![cfg(feature = "docker-tests")]
 
@@ -11,7 +12,7 @@ mod docker_postgres;
 
 use std::path::PathBuf;
 
-use based_codegen::migrate::{diff_snapshots, render_up, Snapshot};
+use based_codegen::migrate::{diff_snapshots, render_down, render_up, Snapshot};
 use based_codegen::Dialect;
 use based_runtime::driver::{PoolConfig, ShardRouter};
 use based_runtime::fetch_all;
@@ -287,6 +288,7 @@ async fn data_steps_run_against_live_mariadb() {
     let router = ShardRouter::single(&container.url(), PoolConfig::default())
         .unwrap_or_else(|e| panic!("connect to live MariaDB: {e:?}"));
     scenario(&router, Dialect::MariaDb).await;
+    round_trip(&router, Dialect::MariaDb).await;
 }
 
 #[tokio::test]
@@ -302,4 +304,91 @@ async fn data_steps_run_against_live_postgres() {
     let router = PgRouter::single(&container.url(), PoolConfig::default())
         .unwrap_or_else(|e| panic!("connect to live Postgres: {e:?}"));
     scenario(&router, Dialect::Postgres).await;
+    round_trip(&router, Dialect::Postgres).await;
+}
+
+const ROUND_V1: &str = "snapshot v1 dialect=neutral
+
+table round_widget
+  column title text not_null
+";
+
+const ROUND_V2: &str = "snapshot v1 dialect=neutral
+
+rename column round_widget.title -> name
+
+table round_widget
+  column name text not_null
+  column size int null
+  index idx_round_widget_size (size)
+";
+
+/// Write the round-trip migrations (rename + add column + index) with gen's typed down.
+fn round_trip_tree(dir: &std::path::Path) {
+    let v1 = Snapshot::parse(ROUND_V1).unwrap();
+    let v2 = Snapshot::parse(ROUND_V2).unwrap();
+    for (name, prev, now, snap) in [
+        ("0001_init", Snapshot::default(), v1.clone(), ROUND_V1),
+        ("0002_rename", v1, v2, ROUND_V2),
+    ] {
+        let d = dir.join("migrations").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("up.mig"), render_up(&diff_snapshots(&prev, &now))).unwrap();
+        std::fs::write(d.join("down.mig"), render_down(&prev, &now)).unwrap();
+        std::fs::write(d.join("schema.snap"), snap).unwrap();
+    }
+}
+
+/// Up → down → up through gen's typed down (rename + add column + index), keeping the row.
+async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
+    let q = |s: &str| dialect.quote(s);
+    for t in [
+        "round_widget",
+        "_based_migrations",
+        "_based_migration_progress",
+    ] {
+        exec(backend, &format!("DROP TABLE IF EXISTS {}", q(t)), &[]).await;
+    }
+    let s = Scratch::new(&format!("round-{}", dialect.name()));
+    round_trip_tree(&s.0);
+    let migs = load_migrations(&s.0, dialect).unwrap();
+    apply(backend, dialect, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    exec(
+        backend,
+        &format!(
+            "INSERT INTO {} ({}, {}, {}) VALUES ('{C1}', 'Gizmo', 3)",
+            q("round_widget"),
+            q("id"),
+            q("name"),
+            q("size")
+        ),
+        &[],
+    )
+    .await;
+    let down = ApplyOpts {
+        direction: based_runtime::migrate::Direction::Down,
+        ..ApplyOpts::default()
+    };
+    let report = apply(backend, dialect, &migs, &down).await.unwrap();
+    assert_eq!(report.rolled_back, vec!["0002_rename"]);
+    let titles = strings(
+        backend,
+        &format!("SELECT {} FROM {}", q("title"), q("round_widget")),
+        "title",
+    )
+    .await;
+    assert_eq!(titles, ["Gizmo"]);
+    let report = apply(backend, dialect, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(report.applied, vec!["0002_rename"]);
+    let names = strings(
+        backend,
+        &format!("SELECT {} FROM {}", q("name"), q("round_widget")),
+        "name",
+    )
+    .await;
+    assert_eq!(names, ["Gizmo"]);
 }

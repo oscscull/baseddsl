@@ -3,7 +3,7 @@
 //! edhbuilder backfills (a JSON field copy, reference rows, the paper backfill).
 
 use based_codegen::migrate::{
-    plan_down, plan_up, up_mig_matches_snapshot, IdKind, PlanUnit, Snapshot, UpPlan,
+    plan_down, plan_up, render_down, up_mig_matches_snapshot, IdKind, PlanUnit, Snapshot, UpPlan,
 };
 use based_codegen::Dialect;
 
@@ -332,56 +332,155 @@ table tag
     );
 }
 
-#[test]
-fn down_mig_runs_data_steps_checked_against_the_post_up_state() {
-    let now = after();
-    let down = "format 2
-update all card_printing { set_code = null }
-raw(sqlite) `ALTER TABLE card_printing DROP COLUMN set_code`
+const SHOP_BEFORE: &str = "snapshot v1 dialect=neutral
+
+table account pk=(org, code)
+  column code text not_null
+  column org text not_null
+
+table widget
+  column legacy text null
+  column upc text null
 ";
-    let p = plan_down(&snap(&now), down, Dialect::Sqlite)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        p.units,
-        vec![
-            PlanUnit::Sql("UPDATE `card_printing` SET `set_code` = NULL".into()),
-            PlanUnit::Sql("ALTER TABLE card_printing DROP COLUMN set_code".into()),
-        ]
+
+const SHOP_AFTER: &str = "snapshot v1 dialect=neutral
+
+rename column widget.upc -> barcode
+
+table account pk=(org, code)
+  column code text not_null
+  column org text not_null
+
+table widget
+  column account_code text null
+  column account_org text null
+  column barcode text null
+  column size int null
+  index idx_widget_size (size)
+  fk (account_org, account_code) -> account.(org, code)
+";
+
+#[test]
+fn gen_down_mig_is_the_typed_reverse_of_up() {
+    let down = render_down(&snap(SHOP_BEFORE), &snap(SHOP_AFTER));
+    assert!(down.contains("\nformat 2\n"), "{down}");
+    for line in [
+        "rename column widget.barcode -> upc",
+        "drop column widget.size",
+        "drop column widget.account_org",
+        "drop column widget.account_code",
+        "drop index idx_widget_size",
+        "drop foreign_key widget.(account_org, account_code)",
+        "add column widget.legacy text null",
+    ] {
+        assert!(down.contains(line), "missing `{line}`:\n{down}");
+    }
+    // It plans on every dialect (SQLite drops the foreign key through a table rebuild).
+    for dialect in [
+        Dialect::Sqlite,
+        Dialect::MariaDb,
+        Dialect::MySql,
+        Dialect::Postgres,
+    ] {
+        let p = plan_down(&snap(SHOP_BEFORE), &snap(SHOP_AFTER), &down, dialect)
+            .unwrap_or_else(|e| panic!("{dialect:?}: {e:?}"))
+            .expect("executable");
+        assert!(!p.units.is_empty());
+    }
+}
+
+#[test]
+fn down_mig_checks_each_data_step_at_its_line() {
+    let down = render_down(&snap(SHOP_BEFORE), &snap(SHOP_AFTER));
+    let rename = "rename column widget.barcode -> upc\n";
+    let at = down.find(rename).expect("rename line") + rename.len();
+    // After the rename back, the column is `upc` again.
+    let after = format!(
+        "{}update all widget {{ upc = null }}\n{}",
+        &down[..at],
+        &down[at..]
     );
-    // Checked like up.mig: a name the post-up state lacks is an error.
-    let bad = "format 2\nupdate all card_printing { nope = 1 }\n";
-    let err = plan_down(&snap(&now), bad, Dialect::Sqlite).unwrap_err();
-    assert!(err[0].to_string().contains("down.mig line 2"), "{err:?}");
-    // A structural line has no place in a down script.
-    let structural = "format 2\ndrop column card_printing.set_code\n";
-    assert!(plan_down(&snap(&now), structural, Dialect::Sqlite).is_err());
-    // A legacy raw-SQL down.mig still splits on `;`; an all-comment one is no down at all.
-    let legacy = plan_down(&snap(&now), "-- x\nDROP TABLE a;\n", Dialect::Sqlite).unwrap();
+    let p = plan_down(
+        &snap(SHOP_BEFORE),
+        &snap(SHOP_AFTER),
+        &after,
+        Dialect::Postgres,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        p.units
+            .contains(&PlanUnit::Sql(r#"UPDATE "widget" SET "upc" = NULL"#.into())),
+        "{:?}",
+        p.units
+    );
+    // The same step before the rename sees `barcode`, not `upc`.
+    let start = down.find(rename).unwrap();
+    let before = format!(
+        "{}update all widget {{ upc = null }}\n{}",
+        &down[..start],
+        &down[start..]
+    );
+    let err = plan_down(
+        &snap(SHOP_BEFORE),
+        &snap(SHOP_AFTER),
+        &before,
+        Dialect::Postgres,
+    )
+    .unwrap_err();
+    assert!(
+        err[0].to_string().contains("has no column `upc`"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn down_mig_structural_lines_must_match_the_reverse() {
+    let down = render_down(&snap(SHOP_BEFORE), &snap(SHOP_AFTER));
+    let edited = down.replace("drop column widget.size", "drop column widget.legacy");
+    let err = plan_down(
+        &snap(SHOP_BEFORE),
+        &snap(SHOP_AFTER),
+        &edited,
+        Dialect::Sqlite,
+    )
+    .unwrap_err();
+    assert!(
+        err[0].message.contains("diverge from the reverse"),
+        "{err:?}"
+    );
+    // raw lines and data steps ride alongside without tripping the check.
+    let extra = format!("{down}raw(sqlite) `SELECT 1`\n");
+    assert!(plan_down(
+        &snap(SHOP_BEFORE),
+        &snap(SHOP_AFTER),
+        &extra,
+        Dialect::Sqlite
+    )
+    .is_ok());
+}
+
+#[test]
+fn legacy_down_mig_still_splits_raw_sql() {
+    let legacy = plan_down(
+        &snap(BEFORE),
+        &snap(BEFORE),
+        "-- x\nDROP TABLE a;\n",
+        Dialect::Sqlite,
+    )
+    .unwrap();
     assert_eq!(
         legacy.unwrap().units,
         vec![PlanUnit::Sql("DROP TABLE a".into())]
     );
-    assert!(plan_down(&snap(&now), "-- nothing\n", Dialect::Sqlite)
-        .unwrap()
-        .is_none());
-}
-
-#[test]
-fn gen_down_mig_is_a_script_of_raw_lines() {
-    let now = after();
-    let steps = based_codegen::migrate::diff_snapshots(&snap(BEFORE), &snap(&now));
-    let down = based_codegen::migrate::render_down(&steps, Dialect::Postgres);
-    assert!(down.contains("format 2"), "{down}");
-    let p = plan_down(&snap(&now), &down, Dialect::Postgres)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        p.units,
-        vec![PlanUnit::Sql(
-            r#"ALTER TABLE "card_printing" DROP COLUMN "set_code""#.into()
-        )]
-    );
+    assert!(plan_down(
+        &snap(BEFORE),
+        &snap(BEFORE),
+        "-- nothing\n",
+        Dialect::Sqlite
+    )
+    .unwrap()
+    .is_none());
 }
 
 #[test]

@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use based_codegen::migrate::{diff_snapshots, render_up, IdKind, Snapshot};
+use based_codegen::migrate::{diff_snapshots, render_down, render_up, IdKind, Snapshot};
 use based_codegen::Dialect;
 use based_runtime::fetch_all;
 use based_runtime::migrate::{apply, load_migrations, ApplyOpts, Direction};
@@ -249,4 +249,90 @@ async fn a_typed_down_mig_runs_its_data_steps() {
     let rows = query(&backend, "SELECT id FROM card WHERE paper = 1 ORDER BY id").await;
     let paper: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
     assert_eq!(paper, vec!["c2", "c3"]);
+}
+
+const ROUND_V1: &str = "snapshot v1 dialect=neutral
+
+table round_widget
+  column title text not_null
+";
+
+const ROUND_V2: &str = "snapshot v1 dialect=neutral
+
+rename column round_widget.title -> name
+
+table round_widget
+  column name text not_null
+  column size int null
+  index idx_round_widget_size (size)
+";
+
+/// Write the round-trip migrations (rename + add column + index) with gen's typed down.
+fn round_trip_tree(dir: &std::path::Path) {
+    let v1 = Snapshot::parse(ROUND_V1).unwrap();
+    let v2 = Snapshot::parse(ROUND_V2).unwrap();
+    for (name, prev, now, snap) in [
+        ("0001_init", Snapshot::default(), v1.clone(), ROUND_V1),
+        ("0002_rename", v1, v2, ROUND_V2),
+    ] {
+        let d = dir.join("migrations").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("up.mig"), render_up(&diff_snapshots(&prev, &now))).unwrap();
+        std::fs::write(d.join("down.mig"), render_down(&prev, &now)).unwrap();
+        std::fs::write(d.join("schema.snap"), snap).unwrap();
+    }
+}
+
+async fn columns(backend: &SqliteBackend) -> Vec<String> {
+    query(
+        backend,
+        "SELECT name FROM pragma_table_info('round_widget') ORDER BY name",
+    )
+    .await
+    .iter()
+    .map(|r| r["name"].as_str().unwrap().to_string())
+    .collect()
+}
+
+#[tokio::test]
+async fn typed_down_round_trips_up_down_up() {
+    let s = Scratch::new("round-trip");
+    round_trip_tree(&s.0);
+    let backend = SqliteBackend::in_memory().unwrap();
+    let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    apply(&backend, Dialect::Sqlite, &migs, &opts())
+        .await
+        .unwrap();
+    {
+        let mut db = backend.checkout("").await.unwrap();
+        db.execute(
+            "INSERT INTO round_widget (id, name, size) VALUES ('w1', 'Gizmo', 3)",
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(columns(&backend).await, ["id", "name", "size"]);
+
+    let down = ApplyOpts {
+        direction: Direction::Down,
+        ..opts()
+    };
+    let report = apply(&backend, Dialect::Sqlite, &migs, &down)
+        .await
+        .unwrap();
+    assert_eq!(report.rolled_back, vec!["0002_rename"]);
+    assert_eq!(columns(&backend).await, ["id", "title"]);
+    let titles = query(&backend, "SELECT title FROM round_widget").await;
+    assert_eq!(
+        titles[0]["title"].as_str(),
+        Some("Gizmo"),
+        "the rename kept the data"
+    );
+
+    let report = apply(&backend, Dialect::Sqlite, &migs, &opts())
+        .await
+        .unwrap();
+    assert_eq!(report.applied, vec!["0002_rename"]);
+    assert_eq!(columns(&backend).await, ["id", "name", "size"]);
 }
