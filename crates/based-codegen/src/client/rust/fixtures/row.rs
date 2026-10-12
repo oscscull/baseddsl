@@ -1,7 +1,8 @@
 use super::*;
 
 /// The whole-model row struct a fixture insert returns, plus its [`RowRef`] impl so a row
-/// can stand in for its key.
+/// can stand in for its key. The key's parts may or may not be `Copy`, so the impl clones
+/// each one under an allow.
 pub(super) fn render_row(schema: &CheckedSchema, model: &RModel) -> String {
     let name = format!("{}Row", model.name);
     let mut out = format!(
@@ -12,7 +13,7 @@ pub(super) fn render_row(schema: &CheckedSchema, model: &RModel) -> String {
     if let Some(key) = row_key(model) {
         let ty = key_type(schema, model);
         out.push_str(&format!(
-            "impl RowRef<{ty}> for {name} {{\n    fn key(&self) -> {ty} {{\n        {key}\n    }}\n}}\n"
+            "#[allow(clippy::clone_on_copy)]\nimpl RowRef<{ty}> for {name} {{\n    fn key(&self) -> {ty} {{\n        {key}\n    }}\n}}\n"
         ));
     }
     out

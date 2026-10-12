@@ -1194,6 +1194,7 @@ pub struct OwnerRow {
     pub id: Id<entity::Owner>,
     pub name: String,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Owner>> for OwnerRow {
     fn key(&self) -> Id<entity::Owner> {
         self.id.clone()
@@ -1251,6 +1252,7 @@ pub struct ItemRow {
     pub name: String,
     pub value: i64,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Item>> for ItemRow {
     fn key(&self) -> Id<entity::Item> {
         self.id.clone()
