@@ -185,6 +185,12 @@ fn walk_pred(
                 expand_filter(def, model, cx, in_filters, out);
             }
         }
+        Predicate::Any { path, pred } => {
+            let target = resolve::resolve_any_target(path, model, cx, &mut Sink::default());
+            if let (Some(inner), Some(t)) = (pred, target) {
+                walk_pred(inner, t, cx, in_filters, out);
+            }
+        }
         Predicate::Raw(_) => {}
     }
 }

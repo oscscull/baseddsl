@@ -20,6 +20,7 @@ mod param;
 mod path;
 mod predicate;
 mod relation;
+mod relation_any;
 mod shape_expr;
 mod value;
 
@@ -31,5 +32,6 @@ pub use param::*;
 pub use path::*;
 pub use predicate::*;
 pub use relation::*;
+pub use relation_any::*;
 pub use shape_expr::*;
 pub use value::*;

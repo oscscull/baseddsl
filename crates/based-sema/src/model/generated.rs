@@ -310,6 +310,12 @@ fn gen_check_when(
             format!("`{}` is a named filter", name.node),
             "a generated column's `case` condition uses only the row's own columns",
         ),
+        Predicate::Any { path, .. } => sink.error_note(
+            code::GEN_REACH,
+            path.segments[0].span,
+            format!("`{}.any(…)` reaches a related table", path.segments[0].node),
+            "a generated column's `case` condition uses only the row's own columns",
+        ),
         Predicate::Raw(_) => {}
     }
 }

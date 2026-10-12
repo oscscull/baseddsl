@@ -34,6 +34,11 @@ pub(crate) fn forbid_optional_in_pred(p: &Predicate, at: &str, sink: &mut Sink) 
                 reject_optional_value(a, at, sink);
             }
         }
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                forbid_optional_in_pred(inner, at, sink);
+            }
+        }
         Predicate::Bare(_) | Predicate::Raw(_) => {}
     }
 }

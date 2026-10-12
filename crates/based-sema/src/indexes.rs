@@ -361,7 +361,7 @@ impl Pattern {
                     }
                 }
             }
-            Predicate::Raw(_) => self.opaque = true,
+            Predicate::Any { .. } | Predicate::Raw(_) => self.opaque = true,
         }
     }
 

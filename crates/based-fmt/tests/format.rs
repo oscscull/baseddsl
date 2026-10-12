@@ -235,6 +235,15 @@ fn in_value_list_formats_canonically() {
 }
 
 #[test]
+fn relation_any_formats_canonically() {
+    let got = fmt("filter f = printings.any( digital = false and (lang = \"en\" or lang = \"ja\") ) and not decks.any( );");
+    assert_eq!(
+        got,
+        "filter f = printings.any(digital = false and (lang = \"en\" or lang = \"ja\")) and not decks.any();\n"
+    );
+}
+
+#[test]
 fn comments_preserved_including_between_decorators() {
     let src = "# header\n@soft_delete(deleted_at)\n# between decorators\n@scope Tenant\nOrder {\n  deleted_at: timestamp?\n}\n";
     assert_eq!(fmt(src), src);

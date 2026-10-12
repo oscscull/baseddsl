@@ -188,6 +188,8 @@ query name(params) -> RetType [scoped Name] ;            # or { body } or inline
 Compose with `and` (binds tighter), `or`, `not`, parentheses. Bare bool column: `where (active)`.
 Lists: `status in (open, waiting, $other)` (fixed set), or `col in $arr` with an **array param** (`text[]`, `int[]`, `Order[]`) for a runtime-sized set — `query find_in(vals: text[]) -> CardRow[] { list Card where (color_identity in $vals); }`; each element coerces to the column's family, an empty array matches nothing (`IN (NULL)`), and `vals?: text[]` skips the filter when omitted.
 
+**Related row exists:** `rel.any(pred)` over a to-many relation — `list Card where (printings.any(digital = false))`; `rel.any()` = has any related row, `not rel.any()` = has none. Leading to-one hops are fine (`set.cards.any(…)`); a to-many hop nests (`cards.any(printings.any(…))`). Lowers to `EXISTS`, so rows never fan out. On a column / to-one relation it is E0351.
+
 **Scope acknowledgement** is mandatory on a scoped model: `scoped Tenant` or `unscoped("reason")`.
 
 ## Sorting

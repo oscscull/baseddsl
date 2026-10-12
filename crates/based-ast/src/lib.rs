@@ -900,6 +900,12 @@ pub enum Predicate {
         name: Ident,
         args: Vec<Value>,
     },
+    /// `rel.any(pred)` — a row on the to-many relation `path` exists, matching `pred`
+    /// when given (`rel.any()` = any related row at all).
+    Any {
+        path: Path,
+        pred: Option<Box<Self>>,
+    },
     Raw(RawSql),
 }
 

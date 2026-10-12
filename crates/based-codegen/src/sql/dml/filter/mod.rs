@@ -6,5 +6,6 @@ mod collect;
 mod inline;
 mod optional;
 mod predicate;
+mod relation_any;
 
 pub(crate) use collect::build_wheres;

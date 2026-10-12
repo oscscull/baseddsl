@@ -107,7 +107,8 @@ pub(crate) fn pred_column_paths<'a>(
         Predicate::Cmp { path, .. } | Predicate::InList { path, .. } | Predicate::Bare(path) => {
             out.push((from, &path.segments));
         }
-        Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
+        // A generated column's condition can't hold `.any` (sema rejects it).
+        Predicate::FilterCall { .. } | Predicate::Any { .. } | Predicate::Raw(_) => {}
     }
 }
 

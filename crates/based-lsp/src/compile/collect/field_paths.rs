@@ -5,10 +5,11 @@ use super::*;
 pub(crate) fn clause_paths<'a>(
     c: &'a Clause,
     root: &'a str,
+    rel: RelTarget<'a, '_>,
     out: &mut Vec<(&'a str, &'a [Ident])>,
 ) {
     match c {
-        Clause::Where(p) => pred_paths(p, root, out),
+        Clause::Where(p) => pred_paths(p, root, rel, out),
         Clause::Order(terms) => {
             for t in terms {
                 out.push((root, &t.path.segments));
@@ -26,19 +27,34 @@ pub(crate) fn clause_paths<'a>(
     }
 }
 
+/// The model a relation `field` on `model` points at (resolves `.any` inner roots).
+pub(crate) type RelTarget<'a, 'r> = &'r dyn Fn(&'a str, &str) -> Option<&'a str>;
+
 /// A predicate's field paths (both sides of a comparison, bare bool columns, filter-
-/// call value paths), all rooted at `root`. Filter *names* are not fields.
+/// call value paths), rooted at `root` — or, inside `rel.any(…)`, at the related model.
+/// Filter *names* are not fields.
 pub(crate) fn pred_paths<'a>(
     p: &'a Predicate,
     root: &'a str,
+    rel: RelTarget<'a, '_>,
     out: &mut Vec<(&'a str, &'a [Ident])>,
 ) {
     match p {
         Predicate::Or(a, b) | Predicate::And(a, b) => {
-            pred_paths(a, root, out);
-            pred_paths(b, root, out);
+            pred_paths(a, root, rel, out);
+            pred_paths(b, root, rel, out);
         }
-        Predicate::Not(inner) => pred_paths(inner, root, out),
+        Predicate::Not(inner) => pred_paths(inner, root, rel, out),
+        Predicate::Any { path, pred } => {
+            out.push((root, &path.segments));
+            let target = path
+                .segments
+                .iter()
+                .try_fold(root, |cur, seg| rel(cur, &seg.node));
+            if let (Some(inner), Some(target)) = (pred, target) {
+                pred_paths(inner, target, rel, out);
+            }
+        }
         Predicate::Cmp { path, value, .. } => {
             out.push((root, &path.segments));
             value_paths(value, root, out);
@@ -75,7 +91,11 @@ pub(crate) fn value_paths<'a>(v: &'a Value, root: &'a str, out: &mut Vec<(&'a st
 
 /// A mutation write body's field paths, rooted at each statement's write model,
 /// recursing through `tx`. Covers `where` predicates and assign columns/values.
-pub(crate) fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a [Ident])>) {
+pub(crate) fn write_paths<'a>(
+    body: &'a [WriteStmt],
+    rel: RelTarget<'a, '_>,
+    out: &mut Vec<(&'a str, &'a [Ident])>,
+) {
     for w in body {
         match w {
             WriteStmt::Create {
@@ -95,18 +115,18 @@ pub(crate) fn write_paths<'a>(body: &'a [WriteStmt], out: &mut Vec<(&'a str, &'a
                 where_,
                 assigns,
             } => {
-                pred_paths(where_, model.node.as_str(), out);
+                pred_paths(where_, model.node.as_str(), rel, out);
                 assign_paths(assigns, model.node.as_str(), out);
             }
             WriteStmt::Restore { model, where_ } => {
-                pred_paths(where_, model.node.as_str(), out);
+                pred_paths(where_, model.node.as_str(), rel, out);
             }
             WriteStmt::Delete { model, where_ } | WriteStmt::HardDelete { model, where_ } => {
                 if let Some(p) = where_ {
-                    pred_paths(p, model.node.as_str(), out);
+                    pred_paths(p, model.node.as_str(), rel, out);
                 }
             }
-            WriteStmt::Tx(inner) => write_paths(inner, out),
+            WriteStmt::Tx(inner) => write_paths(inner, rel, out),
             WriteStmt::Raw(_) => {}
         }
     }

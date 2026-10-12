@@ -115,6 +115,13 @@ pub(crate) fn param_use_in_pred(
             }
             None
         }
+        // Inside `rel.any(…)` columns belong to the related model.
+        Predicate::Any { path, pred } => {
+            let related = path.segments.iter().try_fold(model, |cur, seg| {
+                schema.model(cur.member(&seg.node)?.kind.target()?)
+            })?;
+            param_use_in_pred(compiled, related, pred.as_deref()?, name)
+        }
         Predicate::Bare(_) | Predicate::Raw(_) => None,
     }
 }

@@ -56,6 +56,11 @@ fn record_pred_ctx_modes(
                 reject_optional_value(a, "a filter argument", sink);
             }
         }
+        Predicate::Any { pred, .. } => {
+            if let Some(inner) = pred {
+                record_pred_ctx_modes(inner, modes, sink);
+            }
+        }
         Predicate::Bare(_) | Predicate::Raw(_) => {}
     }
 }

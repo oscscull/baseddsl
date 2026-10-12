@@ -293,6 +293,8 @@ impl<'a> Select<'a> {
             // A named-filter call has no aggregate meaning in `having`; sema leaves it
             // unchecked, so lower it to a harmless truth.
             Predicate::FilterCall { .. } => "TRUE".to_string(),
+            // Sema rejects `.any` in `having`.
+            Predicate::Any { .. } => "TRUE".to_string(),
         }
     }
 

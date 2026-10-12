@@ -1472,3 +1472,21 @@ fn aliased_composite_fk_joins_and_writes_on_its_own_columns() {
     );
     assert!(!maria.contains("order_tenant_id"), "\n{maria}");
 }
+
+#[test]
+fn update_where_relation_any_lowers_to_exists() {
+    let out = gen(r#"
+        Card { id: Id, name: text, paper: bool, printings: Printing[] }
+        Printing { id: Id, card: Card, digital: bool }
+        shape CardRow from Card { name }
+        mutation mark_paper() -> CardRow {
+          update Card where (printings.any(digital = false)) { paper = true };
+        }
+        "#);
+    assert!(
+        out.contains(
+            "WHERE EXISTS (SELECT 1 FROM `printing` AS `s1_printing` WHERE `s1_printing`.`card_id` = `card`.`id` AND `s1_printing`.`digital` = "
+        ),
+        "\n{out}"
+    );
+}
