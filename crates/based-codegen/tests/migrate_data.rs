@@ -510,3 +510,40 @@ table deck
     let wrong = "format 2\nupdate card where (deck.any(by name)) { paper = true }\n";
     assert!(problems(tree, tree, wrong).contains("`by name` must name a foreign key of `deck`"));
 }
+
+#[test]
+fn format_2_up_drops_indexes_and_foreign_keys_before_their_columns() {
+    // Up from SHOP_AFTER back to a shape without `size` / the account link: the reverse
+    // direction of the shop fixture, as a forward migration.
+    let prev = snap(&SHOP_AFTER.replace("rename column widget.upc -> barcode\n\n", ""));
+    let now = snap(SHOP_BEFORE);
+    let steps = based_codegen::migrate::diff_snapshots(&prev, &now);
+    let up = based_codegen::migrate::render_up(&steps);
+    let pos = |needle: &str| {
+        up.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}`:\n{up}"))
+    };
+    assert!(pos("drop foreign_key widget.") < pos("drop column widget.account_org"));
+    assert!(pos("drop index idx_widget_size") < pos("drop column widget.size"));
+    // Verify regenerates in the file's order: the format 2 file matches, and so does a
+    // legacy file written in the diff engine's own order.
+    let ordered = based_codegen::migrate::up_steps(&prev, &now, &up);
+    assert!(up_mig_matches_snapshot(&up, &ordered));
+    let legacy: String = steps
+        .iter()
+        .map(|s| {
+            let one = based_codegen::migrate::render_up(std::slice::from_ref(s));
+            one.lines()
+                .filter(|l| !l.starts_with('#') && *l != "format 2")
+                .map(|l| format!("{l}\n"))
+                .collect::<String>()
+        })
+        .collect();
+    let legacy_steps = based_codegen::migrate::up_steps(&prev, &now, &legacy);
+    assert_eq!(legacy_steps, steps, "a legacy file keeps the diff order");
+    assert!(up_mig_matches_snapshot(&legacy, &legacy_steps));
+    // Every dialect plans it (SQLite drops the foreign key through a rebuild).
+    for dialect in [Dialect::Sqlite, Dialect::MariaDb, Dialect::Postgres] {
+        assert!(plan_up(&prev, &now, &up, dialect).is_ok(), "{dialect:?}");
+    }
+}

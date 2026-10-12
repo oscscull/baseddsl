@@ -36,5 +36,6 @@ pub fn content_hash(up_text: &str) -> String {
 /// are tolerated; the format marker, `raw(dialect)` escapes, and data steps ride separately
 /// and are stripped before compare).
 pub fn up_mig_matches_snapshot(up_text: &str, steps: &[Step]) -> bool {
-    content_hash(&strip_raw_steps(up_text)) == content_hash(&strip_raw_steps(&render_up(steps)))
+    content_hash(&strip_raw_steps(up_text))
+        == content_hash(&strip_raw_steps(&render_up_as_is(steps)))
 }

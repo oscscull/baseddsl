@@ -54,6 +54,7 @@ mod lifecycle;
 mod model;
 mod script;
 mod sql;
+mod step_order;
 mod unit;
 mod up_mig;
 
@@ -75,6 +76,7 @@ pub use sql::{
     content_hash, migration_sql, render_migration, render_sql, sql_statements,
     up_mig_matches_snapshot,
 };
+pub use step_order::up_steps;
 pub use unit::{IdKind, PlanUnit};
 pub use up_mig::render_up;
 
