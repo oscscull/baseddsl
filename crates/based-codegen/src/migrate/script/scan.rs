@@ -39,46 +39,65 @@ pub(crate) fn scan(up_text: &str) -> Scanned<'_> {
         saw_raw: false,
     };
     let mut canonical = 0usize;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed = line.trim();
-        if trimmed == FORMAT_MARKER {
-            out.in_order = true;
-            i += 1;
-            continue;
-        }
-        if let Some((tok, opener)) = raw_line_opener(line) {
-            if let Some((sql, next)) = raw_body(&lines, i, opener) {
+    let entries = std::iter::successors(
+        (!lines.is_empty()).then(|| entry(&lines, 0)),
+        |(_, _, next)| (*next < lines.len()).then(|| entry(&lines, *next)),
+    );
+    for (start, kind, _) in entries {
+        let item = |kind| Item {
+            line: start + 1,
+            after: canonical,
+            kind,
+        };
+        match kind {
+            Entry::Marker => out.in_order = true,
+            Entry::Raw(step) => {
                 out.saw_raw = true;
-                if let Some(step) = raw_step(tok, sql) {
-                    out.items.push(Item {
-                        line: i + 1,
-                        after: canonical,
-                        kind: ItemKind::Raw(Box::new(step)),
-                    });
-                }
-                i = next;
-                continue;
+                out.items.extend(step.map(|s| item(ItemKind::Raw(s))));
+            }
+            Entry::Data(text) => out.items.push(item(ItemKind::Data(text))),
+            Entry::Structural(line) => {
+                canonical += usize::from(is_canonical(line));
+                out.structural.push(line);
             }
         }
-        if is_data_opener(trimmed) {
-            let next = data_extent(&lines, i);
-            out.items.push(Item {
-                line: i + 1,
-                after: canonical,
-                kind: ItemKind::Data(lines[i..next].join("\n")),
-            });
-            i = next;
-            continue;
-        }
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            canonical += 1;
-        }
-        out.structural.push(line);
-        i += 1;
     }
     out
+}
+
+/// What one script entry is, by its first line.
+enum Entry<'a> {
+    Marker,
+    /// A terminated `raw(…)` region; `None` for an unknown dialect or an empty body.
+    Raw(Option<Box<Step>>),
+    Data(String),
+    Structural(&'a str),
+}
+
+/// The entry starting at line `i`: its start, kind, and the index of the line after it.
+fn entry<'a>(lines: &[&'a str], i: usize) -> (usize, Entry<'a>, usize) {
+    let line = lines[i];
+    let trimmed = line.trim();
+    if trimmed == FORMAT_MARKER {
+        return (i, Entry::Marker, i + 1);
+    }
+    let raw = raw_line_opener(line).and_then(|(tok, opener)| {
+        raw_body(lines, i, opener).map(|(sql, next)| (raw_step(tok, sql).map(Box::new), next))
+    });
+    if let Some((step, next)) = raw {
+        return (i, Entry::Raw(step), next);
+    }
+    if is_data_opener(trimmed) {
+        let next = data_extent(lines, i);
+        return (i, Entry::Data(lines[i..next].join("\n")), next);
+    }
+    (i, Entry::Structural(line), i + 1)
+}
+
+/// A line that counts toward the structural text: neither blank nor a `#` comment.
+pub(crate) fn is_canonical(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && !t.starts_with('#')
 }
 
 /// If `line` opens a `raw(<dialect>)` step, its dialect token and the text after the opening
@@ -98,25 +117,17 @@ fn raw_body(lines: &[&str], i: usize, opener: &str) -> Option<(String, usize)> {
     if let Some(close) = opener.rfind('`') {
         return Some((opener[..close].trim().to_string(), i + 1));
     }
-    let mut body = opener.trim().to_string();
-    for (j, l) in lines.iter().enumerate().skip(i + 1) {
-        if l.trim() == "`" {
-            return Some((body.trim().to_string(), j + 1));
-        }
-        if !body.is_empty() {
-            body.push('\n');
-        }
-        body.push_str(l);
-    }
-    None
+    let end = i + 1 + lines[i + 1..].iter().position(|l| l.trim() == "`")?;
+    let body = std::iter::once(opener.trim())
+        .chain(lines[i + 1..end].iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((body.trim().to_string(), end + 1))
 }
 
 /// A raw step for a known dialect token with a non-empty body (an unknown token can't
 /// masquerade as a dialect).
 fn raw_step(tok: &str, sql: String) -> Option<Step> {
-    if sql.is_empty() {
-        return None;
-    }
     let dialect = match tok {
         "sqlite" => Dialect::Sqlite,
         "mysql" => Dialect::MySql,
@@ -124,21 +135,16 @@ fn raw_step(tok: &str, sql: String) -> Option<Step> {
         "postgres" | "postgresql" => Dialect::Postgres,
         _ => return None,
     };
-    Some(Step::Raw { dialect, sql })
+    (!sql.is_empty()).then_some(Step::Raw { dialect, sql })
 }
 
 /// Does this line open a data step? `create table <name> {` is the structural create.
 fn is_data_opener(trimmed: &str) -> bool {
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
-    match words.first().copied() {
-        Some("update" | "delete") => words.len() > 1,
-        Some("create") => {
-            let structural = words.get(1) == Some(&"table")
-                && words
-                    .get(2)
-                    .is_some_and(|w| !w.starts_with('{') && !w.starts_with('['));
-            words.len() > 1 && !structural
-        }
+    let mut words = trimmed.split_whitespace();
+    match (words.next(), words.next(), words.next()) {
+        (Some("update" | "delete"), Some(_), _) => true,
+        (Some("create"), Some("table"), Some(name)) => name.starts_with(['{', '[']),
+        (Some("create"), Some(_), _) => true,
         _ => false,
     }
 }
@@ -146,16 +152,15 @@ fn is_data_opener(trimmed: &str) -> bool {
 /// The index one past the last line of the data step starting at `start`: brackets balance,
 /// and the next line does not continue it with `on conflict` or `chunk`.
 fn data_extent(lines: &[&str], start: usize) -> usize {
-    let mut depth = 0i64;
-    let mut j = start;
-    while j < lines.len() {
-        depth += bracket_delta(lines[j]);
-        j += 1;
-        if depth <= 0 && !continues(lines.get(j).copied()) {
-            break;
-        }
-    }
-    j
+    lines[start..]
+        .iter()
+        .scan(0i64, |depth, l| {
+            *depth += bracket_delta(l);
+            Some(*depth)
+        })
+        .zip(start + 1..)
+        .find(|&(depth, next)| depth <= 0 && !continues(lines.get(next).copied()))
+        .map_or(lines.len(), |(_, next)| next)
 }
 
 fn continues(next: Option<&str>) -> bool {

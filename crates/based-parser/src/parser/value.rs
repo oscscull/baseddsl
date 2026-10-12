@@ -121,12 +121,10 @@ impl<'a> Parser<'a> {
     /// (`IN_PROGRESS` lexes as `IN` + `_PROGRESS`).
     fn label(&mut self) -> PResult<Ident> {
         let mut label = self.upper_ident("an enum value")?;
-        while let Some(next) = self.peek() {
-            let glued = next.start == label.span.end
-                && matches!(next.tok, Tok::LowerIdent | Tok::UpperIdent | Tok::Int);
-            if !glued {
-                break;
-            }
+        while let Some(next) = self.peek().filter(|next| {
+            next.start == label.span.end
+                && matches!(next.tok, Tok::LowerIdent | Tok::UpperIdent | Tok::Int)
+        }) {
             self.bump();
             label.node.push_str(self.text(next));
             label.span.end = next.end;

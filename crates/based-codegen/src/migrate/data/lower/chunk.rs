@@ -29,13 +29,10 @@ impl ChunkPlan {
     /// The next batch's keys after `after` (`None` = from the start), in key order.
     pub fn select_sql(&self, after: Option<&[String]>) -> String {
         let keys = self.keys.join(", ");
-        let mut conds: Vec<String> = self.filter.iter().cloned().collect();
-        conds.extend(after.map(|a| self.compare(">", a)));
-        let wheres = if conds.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conds.join(" AND "))
-        };
+        let wheres = Some(self.conds(after).join(" AND "))
+            .filter(|w| !w.is_empty())
+            .map(|w| format!(" WHERE {w}"))
+            .unwrap_or_default();
         format!(
             "SELECT {keys} FROM {}{wheres} ORDER BY {keys} LIMIT {}",
             self.from, self.size
@@ -44,10 +41,18 @@ impl ChunkPlan {
 
     /// The write over the batch `(after, upto]`.
     pub fn apply_sql(&self, after: Option<&[String]>, upto: &[String]) -> String {
-        let mut conds: Vec<String> = self.filter.iter().cloned().collect();
-        conds.extend(after.map(|a| self.compare(">", a)));
+        let mut conds = self.conds(after);
         conds.push(self.compare("<=", upto));
         format!("{} WHERE {}", self.write_head, conds.join(" AND "))
+    }
+
+    /// The step's own filter, then the lower key bound when resuming past `after`.
+    fn conds(&self, after: Option<&[String]>) -> Vec<String> {
+        self.filter
+            .iter()
+            .cloned()
+            .chain(after.map(|a| self.compare(">", a)))
+            .collect()
     }
 
     /// A fetched key value as a SQL literal; `None` for a value that can't be a walk key.
@@ -62,11 +67,12 @@ impl ChunkPlan {
 
     /// The review text: the batch select and write with `<cursor>` / `<last>` placeholders.
     pub fn review(&self) -> String {
-        let cursor: Vec<String> = self.key_columns.iter().map(|_| "<cursor>".into()).collect();
-        let last: Vec<String> = self.key_columns.iter().map(|_| "<last>".into()).collect();
-        let pause = self.pause_ms.map_or(String::new(), |ms| {
-            format!(", pausing {ms}ms between batches")
-        });
+        let cursor = vec!["<cursor>".to_string(); self.key_columns.len()];
+        let last = vec!["<last>".to_string(); self.key_columns.len()];
+        let pause = self
+            .pause_ms
+            .map(|ms| format!(", pausing {ms}ms between batches"))
+            .unwrap_or_default();
         format!(
             "-- chunked: walks `{}` by ({}) in batches of {}, one transaction each{pause}\n{};\n{};",
             self.table,
@@ -78,10 +84,9 @@ impl ChunkPlan {
     }
 
     fn compare(&self, op: &str, values: &[String]) -> String {
-        if let ([k], [v]) = (self.keys.as_slice(), values) {
-            format!("{k} {op} {v}")
-        } else {
-            format!("({}) {op} ({})", self.keys.join(", "), values.join(", "))
+        match (self.keys.as_slice(), values) {
+            ([k], [v]) => format!("{k} {op} {v}"),
+            (keys, values) => format!("({}) {op} ({})", keys.join(", "), values.join(", ")),
         }
     }
 }
@@ -93,24 +98,18 @@ impl Lw<'_> {
         chunk: &Chunk,
         t: &TableView,
     ) -> Result<ChunkPlan, DataError> {
-        let key_columns = match &chunk.by {
-            Some(by) => vec![by.node.clone()],
-            None => t.pk(),
-        };
+        let key_columns = chunk
+            .by
+            .as_ref()
+            .map_or_else(|| t.pk(), |by| vec![by.node.clone()]);
         if key_columns.is_empty() {
             return Err(Self::fail(chunk.span, "a chunked step needs a walk key"));
         }
-        let (filter, write_head) = match &step.op {
+        let (where_, assigns) = match &step.op {
             DataOp::Update {
                 where_, assigns, ..
-            } => (
-                where_.as_ref().map(|p| self.predicate(p, t)).transpose()?,
-                self.update(None, assigns, t, None)?,
-            ),
-            DataOp::Delete { where_, .. } => (
-                where_.as_ref().map(|p| self.predicate(p, t)).transpose()?,
-                self.delete(None, t, None)?,
-            ),
+            } => (where_, Some(assigns)),
+            DataOp::Delete { where_, .. } => (where_, None),
             DataOp::Create { .. } => {
                 return Err(Self::fail(
                     chunk.span,
@@ -118,6 +117,9 @@ impl Lw<'_> {
                 ))
             }
         };
+        let filter = where_.as_ref().map(|p| self.predicate(p, t)).transpose()?;
+        let write_head =
+            assigns.map_or_else(|| self.delete(None, t), |a| self.update(None, a, t))?;
         Ok(ChunkPlan {
             table: t.name().to_string(),
             keys: key_columns.iter().map(|k| self.col_ref(k)).collect(),

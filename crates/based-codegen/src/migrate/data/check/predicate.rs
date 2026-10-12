@@ -87,32 +87,29 @@ impl Ck<'_> {
     }
 
     fn any(&mut self, path: &Path, by: Option<&Ident>, pred: Option<&Predicate>, t: &TableView) {
-        if path.segments.len() != 1 {
+        let [child] = path.segments.as_slice() else {
             self.err(
                 span_of(path),
                 "`.any` in a data step names one child table: `<table>.any(…)`",
             );
             return;
-        }
-        let snap = self.snap;
-        match child_link(snap, t, &path.segments[0].node, by.map(|b| b.node.as_str())) {
-            Ok((child, _)) => {
-                if let Some(p) = pred {
-                    self.predicate(p, &child, Scope::ROW);
-                }
-            }
-            Err(msg) => self.err(path.segments[0].span, msg),
+        };
+        match (
+            child_link(self.snap, t, &child.node, by.map(|b| b.node.as_str())),
+            pred,
+        ) {
+            (Ok((view, _)), Some(p)) => self.predicate(p, &view, Scope::ROW),
+            (Ok(_), None) => {}
+            (Err(msg), _) => self.err(child.span, msg),
         }
     }
 }
 
 pub(crate) fn span_of(path: &Path) -> Span {
     let first = path.segments[0].span;
-    let last = path.segments[path.segments.len() - 1].span;
     Span {
-        file: first.file,
-        start: first.start,
-        end: last.end,
+        end: path.segments.last().map_or(first.end, |s| s.span.end),
+        ..first
     }
 }
 

@@ -78,8 +78,11 @@ pub(crate) fn predicate(p: &Predicate, min: u8) -> String {
             ),
         ),
         Predicate::Any { path: pa, by, pred } => {
-            let mut args: Vec<String> = by.iter().map(|b| format!("by {}", b.node)).collect();
-            args.extend(pred.as_deref().map(|p| predicate(p, 0)));
+            let args: Vec<String> = by
+                .iter()
+                .map(|b| format!("by {}", b.node))
+                .chain(pred.as_deref().map(|p| predicate(p, 0)))
+                .collect();
             (4, format!("{}.any({})", path(pa), args.join(", ")))
         }
         Predicate::Raw(r) => (4, raw_sql(r)),

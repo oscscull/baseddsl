@@ -29,19 +29,13 @@ pub(crate) enum Fam {
 
 impl Fam {
     pub(crate) fn of(ty: &str) -> Self {
-        if ty.ends_with("[]") || ty.starts_with("raw(") {
-            return Self::Opaque;
-        }
-        if let Some(inner) = ty
-            .strip_prefix("enum:int(")
-            .and_then(|s| s.strip_suffix(')'))
-        {
-            return Self::IntEnum(split_values(inner));
-        }
-        if let Some(inner) = ty.strip_prefix("enum(").and_then(|s| s.strip_suffix(')')) {
-            return Self::StrEnum(split_values(inner));
-        }
+        let values = |prefix: &str| {
+            ty.strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(')'))
+                .map(|inner| inner.split(',').map(|s| s.trim().to_string()).collect())
+        };
         match ty {
+            t if t.ends_with("[]") || t.starts_with("raw(") => Self::Opaque,
             "int" | "serial" => Self::Int,
             "float" => Self::Float,
             "text" => Self::Text,
@@ -54,7 +48,10 @@ impl Fam {
             "json" => Self::Json,
             "bytes" => Self::Bytes,
             t if t.starts_with("decimal(") => Self::Decimal,
-            _ => Self::Text,
+            _ => values("enum:int(")
+                .map(Self::IntEnum)
+                .or_else(|| values("enum(").map(Self::StrEnum))
+                .unwrap_or(Self::Text),
         }
     }
 
@@ -85,10 +82,6 @@ impl Fam {
     }
 }
 
-fn split_values(inner: &str) -> Vec<String> {
-    inner.split(',').map(|s| s.trim().to_string()).collect()
-}
-
 /// One column of a table, the elided default `id` re-synthesized.
 #[derive(Debug, Clone)]
 pub(crate) struct Col {
@@ -110,23 +103,25 @@ pub(crate) struct TableView<'a> {
 
 impl<'a> TableView<'a> {
     pub(crate) fn new(t: &'a TableSnap) -> Self {
-        let mut cols: Vec<Col> = t.columns.iter().map(col_of).collect();
-        if !t.no_id && t.pk.is_empty() && t.column("id").is_none() {
-            cols.push(Col {
-                name: "id".to_string(),
-                ty: "uuid".to_string(),
-                fam: Fam::Uuid,
-                nullable: false,
-                has_default: false,
-                generated: false,
-                auto: true,
-            });
-        }
-        let mut view = Self { snap: t, cols };
+        let elided_id = (!t.no_id && t.pk.is_empty() && t.column("id").is_none()).then(|| Col {
+            name: "id".to_string(),
+            ty: "uuid".to_string(),
+            fam: Fam::Uuid,
+            nullable: false,
+            has_default: false,
+            generated: false,
+            auto: true,
+        });
+        let mut view = Self {
+            snap: t,
+            cols: t.columns.iter().map(col_of).chain(elided_id).collect(),
+        };
+        // A lone uuid/ulid key is minted when omitted.
         if let [pk] = view.pk().as_slice() {
-            if let Some(c) = view.cols.iter_mut().find(|c| &c.name == pk) {
-                c.auto |= matches!(c.fam, Fam::Uuid | Fam::Ulid);
-            }
+            view.cols
+                .iter_mut()
+                .filter(|c| &c.name == pk && matches!(c.fam, Fam::Uuid | Fam::Ulid))
+                .for_each(|c| c.auto = true);
         }
         view
     }
@@ -161,34 +156,32 @@ impl<'a> TableView<'a> {
 
     /// The primary-key columns; empty for a keyless table.
     pub(crate) fn pk(&self) -> Vec<String> {
-        if self.snap.no_id {
-            Vec::new()
-        } else if self.snap.pk.is_empty() {
-            vec!["id".to_string()]
-        } else {
-            self.snap.pk.clone()
+        match (self.snap.no_id, self.snap.pk.is_empty()) {
+            (true, _) => Vec::new(),
+            (false, true) => vec!["id".to_string()],
+            (false, false) => self.snap.pk.clone(),
         }
     }
 
     /// Every unique key: the primary key, unique columns, and unique indexes.
     pub(crate) fn unique_keys(&self) -> Vec<Vec<String>> {
-        let mut keys = Vec::new();
-        let pk = self.pk();
-        if !pk.is_empty() {
-            keys.push(pk);
-        }
-        for c in self.snap.columns.iter().filter(|c| c.unique) {
-            keys.push(vec![c.name.clone()]);
-        }
-        for i in self
+        let pk = Some(self.pk()).filter(|pk| !pk.is_empty());
+        let unique_cols = self
+            .snap
+            .columns
+            .iter()
+            .filter(|c| c.unique)
+            .map(|c| vec![c.name.clone()]);
+        let unique_indexes = self
             .snap
             .indexes
             .iter()
             .filter(|i| i.unique && i.raw.is_none())
-        {
-            keys.push(i.columns.clone());
-        }
-        keys
+            .map(|i| i.columns.clone());
+        pk.into_iter()
+            .chain(unique_cols)
+            .chain(unique_indexes)
+            .collect()
     }
 
     /// Is `col` usable as a keyset walk column: unique on its own, or leading an index?

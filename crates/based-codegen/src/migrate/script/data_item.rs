@@ -1,8 +1,6 @@
 //! One data-step item of a script: parse, check against the schema state at its line, and
 //! lower to a unit, with its review text.
 
-use std::fmt::Write as _;
-
 use based_ast::{DataStep, FileId};
 
 use super::super::data::{check_step, lower_step, DataError};
@@ -41,25 +39,13 @@ pub(crate) fn data_unit(
 
 /// The review text of a lowered data step.
 pub(crate) fn review(file: &str, line: usize, unit: &PlanUnit) -> String {
-    let mut out = format!("\n-- data step ({file} line {line})\n");
-    match unit {
-        PlanUnit::Sql(sql) => {
-            let _ = writeln!(out, "{sql};");
-        }
+    let body = match unit {
+        PlanUnit::Sql(sql) => format!("{sql};"),
         PlanUnit::Minted { sql, ids } => {
-            let kinds: Vec<&str> = ids
-                .iter()
-                .map(|k| match k {
-                    super::super::unit::IdKind::Uuid => "uuid",
-                    super::super::unit::IdKind::Ulid => "ulid",
-                })
-                .collect();
-            let _ = writeln!(out, "-- binds ids minted at apply: {}", kinds.join(", "));
-            let _ = writeln!(out, "{sql};");
+            let kinds: Vec<&str> = ids.iter().map(|k| k.name()).collect();
+            format!("-- binds ids minted at apply: {}\n{sql};", kinds.join(", "))
         }
-        PlanUnit::Chunked(plan) => {
-            let _ = writeln!(out, "{}", plan.review());
-        }
-    }
-    out
+        PlanUnit::Chunked(plan) => plan.review(),
+    };
+    format!("\n-- data step ({file} line {line})\n{body}\n")
 }

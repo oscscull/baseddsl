@@ -261,16 +261,8 @@ pub fn load_migrations(
         }
         // The structural steps interleaved with the authored `raw` escapes and data steps
         // (in written order for a `format 2` migration; raw last otherwise).
-        let plan = migrate::plan_up(&prev, &snap, &up_text, dialect).map_err(|problems| {
-            MigrateError::Artifact(format!(
-                "{name}/up.mig: {}",
-                problems
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ))
-        })?;
+        let plan = migrate::plan_up(&prev, &snap, &up_text, dialect)
+            .map_err(|p| script_error(name, "up.mig", &p))?;
         let up_hash = migrate::content_hash(&up_text);
         let destructive = steps.iter().any(based_codegen::migrate::Step::destructive);
         // The rename teach hint keys off this migration's own diff (prev → this snapshot),
@@ -288,16 +280,7 @@ pub fn load_migrations(
         let down_path = path.join("down.mig");
         let authored = if down_path.is_file() {
             migrate::plan_down(&prev, &snap, &read_file(&down_path)?, dialect)
-                .map_err(|problems| {
-                    MigrateError::Artifact(format!(
-                        "{name}/down.mig: {}",
-                        problems
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ))
-                })?
+                .map_err(|p| script_error(name, "down.mig", &p))?
                 .map(|d| d.units)
         } else {
             None
@@ -348,6 +331,12 @@ fn migration_dirs(dir: &Path) -> Result<Vec<(u32, String, std::path::PathBuf)>, 
 fn read_file(path: &Path) -> Result<String, MigrateError> {
     std::fs::read_to_string(path)
         .map_err(|e| MigrateError::Io(format!("reading {}: {e}", path.display())))
+}
+
+/// A migration script's planning problems as one artifact error.
+fn script_error(migration: &str, file: &str, problems: &[impl std::fmt::Display]) -> MigrateError {
+    let problems: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    MigrateError::Artifact(format!("{migration}/{file}: {}", problems.join("; ")))
 }
 
 // ---------- the ledger -----------------------------------------------------

@@ -20,3 +20,12 @@ pub enum IdKind {
     Uuid,
     Ulid,
 }
+
+impl IdKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Uuid => "uuid",
+            Self::Ulid => "ulid",
+        }
+    }
+}

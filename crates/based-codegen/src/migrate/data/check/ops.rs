@@ -22,6 +22,15 @@ impl Ck<'_> {
             );
             return;
         };
+        if let DataOp::Update {
+            where_: Some(p), ..
+        }
+        | DataOp::Delete {
+            where_: Some(p), ..
+        } = &step.op
+        {
+            self.predicate(p, &t, Scope::ROW);
+        }
         match &step.op {
             DataOp::Create {
                 rows,
@@ -34,19 +43,8 @@ impl Ck<'_> {
                     self.conflict(c, &t);
                 }
             }
-            DataOp::Update {
-                where_, assigns, ..
-            } => {
-                if let Some(p) = where_ {
-                    self.predicate(p, &t, Scope::ROW);
-                }
-                self.assigns(assigns, &t, Scope::ROW);
-            }
-            DataOp::Delete { where_, .. } => {
-                if let Some(p) = where_ {
-                    self.predicate(p, &t, Scope::ROW);
-                }
-            }
+            DataOp::Update { assigns, .. } => self.assigns(assigns, &t, Scope::ROW),
+            DataOp::Delete { .. } => {}
         }
         self.chunk(step, &t);
     }
@@ -58,46 +56,43 @@ impl Ck<'_> {
             }
             return;
         };
-        let cols: BTreeSet<&str> = first.assigns.iter().map(|a| a.col.node.as_str()).collect();
+        let col_set = |row: &DataRow| -> BTreeSet<String> {
+            row.assigns.iter().map(|a| a.col.node.clone()).collect()
+        };
+        let cols = col_set(first);
         for row in rows {
             self.assigns(&row.assigns, t, Scope::LITERALS);
-            let these: BTreeSet<&str> = row.assigns.iter().map(|a| a.col.node.as_str()).collect();
-            if these != cols {
+            if col_set(row) != cols {
                 self.err(
                     row.span,
                     "every row of a `create … from [ … ]` sets the same columns",
                 );
             }
         }
-        let missing: Vec<&str> = t
+        let missing: Vec<String> = t
             .cols
             .iter()
-            .filter(|c| !c.nullable && !c.auto && !cols.contains(c.name.as_str()))
-            .map(|c| c.name.as_str())
+            .filter(|c| !c.nullable && !c.auto && !cols.contains(&c.name))
+            .map(|c| format!("`{}`", c.name))
             .collect();
         if !missing.is_empty() {
             self.err(
                 first.span,
                 format!(
                     "missing required column(s) {} (not null, no default)",
-                    missing
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    missing.join(", ")
                 ),
             );
         }
     }
 
     fn conflict(&mut self, c: &DataConflict, t: &TableView) {
-        let mut target: Vec<String> = c.target.iter().map(|i| i.node.clone()).collect();
-        target.sort();
-        let is_key = t.unique_keys().into_iter().any(|mut k| {
+        let sorted = |mut k: Vec<String>| {
             k.sort();
-            k == target
-        });
-        if !is_key {
+            k
+        };
+        let target = sorted(c.target.iter().map(|i| i.node.clone()).collect());
+        if !t.unique_keys().into_iter().map(sorted).any(|k| k == target) {
             self.err(
                 c.span,
                 format!(
@@ -107,10 +102,8 @@ impl Ck<'_> {
                 ),
             );
         }
-        if let Some(s) = &c.spread {
-            if s.source.node != "incoming" {
-                self.err(s.source.span, "the spread is `...incoming`");
-            }
+        if let Some(s) = c.spread.as_ref().filter(|s| s.source.node != "incoming") {
+            self.err(s.source.span, "the spread is `...incoming`");
         }
         self.assigns(
             &c.update,
@@ -129,24 +122,20 @@ impl Ck<'_> {
                 self.err(a.col.span, format!("`{}` is assigned twice", a.col.node));
             }
             let ty = self.expr(&a.value, t, scope);
-            let Some(col) = t.col(&a.col.node) else {
-                self.err(
+            match t.col(&a.col.node) {
+                None => self.err(
                     a.col.span,
                     format!("table `{}` has no column `{}`", t.name(), a.col.node),
-                );
-                continue;
-            };
-            if col.generated {
-                self.err(
+                ),
+                Some(col) if col.generated => self.err(
                     a.col.span,
                     format!(
                         "`{}` is a generated column — its value is derived",
                         col.name
                     ),
-                );
-                continue;
+                ),
+                Some(col) => self.fits(col, &ty, a.col.span),
             }
-            self.fits(col, &ty, a.col.span);
         }
     }
 }

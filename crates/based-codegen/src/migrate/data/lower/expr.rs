@@ -1,13 +1,11 @@
 //! Lower a data-step value expression to SQL.
 
-use std::fmt::Write as _;
-
 use based_ast::{Literal, ShapeExpr, Value};
 
 use super::super::check::DataError;
 use super::super::table::{Col, Fam, TableView};
 use super::json_path::json_path;
-use super::Lw;
+use super::{col_of, Lw};
 use crate::sql::dml::{arith_op_sql, render_func, render_lit};
 
 impl Lw<'_> {
@@ -29,23 +27,19 @@ impl Lw<'_> {
                     self.arith_operand(rhs, t, numeric)?
                 )
             }
-            ShapeExpr::Concat { .. } => {
-                let mut parts = Vec::new();
-                self.concat_parts(e, t, &mut parts)?;
-                self.dialect.concat(&parts)
-            }
+            ShapeExpr::Concat { .. } => self.dialect.concat(&self.concat_parts(e, t)?),
             ShapeExpr::Case { arms, else_, .. } => {
-                let mut s = String::from("CASE");
-                for arm in arms {
-                    let _ = write!(
-                        s,
-                        " WHEN {} THEN {}",
-                        self.predicate(&arm.when, t)?,
-                        self.expr(&arm.then, t, target)?
-                    );
-                }
-                let _ = write!(s, " ELSE {} END", self.expr(else_, t, target)?);
-                s
+                let whens = arms
+                    .iter()
+                    .map(|arm| {
+                        Ok(format!(
+                            " WHEN {} THEN {}",
+                            self.predicate(&arm.when, t)?,
+                            self.expr(&arm.then, t, target)?
+                        ))
+                    })
+                    .collect::<Result<String, DataError>>()?;
+                format!("CASE{whens} ELSE {} END", self.expr(else_, t, target)?)
             }
         })
     }
@@ -57,30 +51,17 @@ impl Lw<'_> {
         t: &TableView,
         numeric: Option<&Col>,
     ) -> Result<String, DataError> {
-        let float = Col {
-            name: String::new(),
-            ty: "float".into(),
-            fam: Fam::Float,
-            nullable: true,
-            has_default: false,
-            generated: false,
-            auto: false,
-        };
+        let float = col_of(Fam::Float, "float");
         self.expr(e, t, Some(numeric.unwrap_or(&float)))
     }
 
-    fn concat_parts(
-        &self,
-        e: &ShapeExpr,
-        t: &TableView,
-        parts: &mut Vec<String>,
-    ) -> Result<(), DataError> {
-        if let ShapeExpr::Concat { lhs, rhs, .. } = e {
-            self.concat_parts(lhs, t, parts)?;
-            self.concat_parts(rhs, t, parts)
-        } else {
-            parts.push(self.expr(e, t, None)?);
-            Ok(())
+    /// The operands of a `||` chain, flattened left to right.
+    fn concat_parts(&self, e: &ShapeExpr, t: &TableView) -> Result<Vec<String>, DataError> {
+        match e {
+            ShapeExpr::Concat { lhs, rhs, .. } => {
+                Ok([self.concat_parts(lhs, t)?, self.concat_parts(rhs, t)?].concat())
+            }
+            _ => Ok(vec![self.expr(e, t, None)?]),
         }
     }
 

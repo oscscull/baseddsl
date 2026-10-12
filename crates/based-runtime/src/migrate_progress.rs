@@ -8,6 +8,7 @@ use crate::run::{fetch_all, DbError, DbRead};
 use crate::value::SqlValue;
 
 const PROGRESS: &str = "_based_migration_progress";
+const COLUMNS: [&str; 5] = ["id", "content_hash", "segment", "cursor", "rows_done"];
 
 /// One saved position.
 pub(super) struct Progress {
@@ -50,19 +51,14 @@ pub(super) async fn save_progress<D: DbRead + ?Sized>(
     rows: u64,
 ) -> Result<(), DbError> {
     clear_progress(db, dialect, key).await?;
+    let marks: Vec<String> = (1..=COLUMNS.len())
+        .map(|n| placeholder(dialect, n))
+        .collect();
     let sql = format!(
-        "INSERT INTO {} ({}, {}, {}, {}, {}) VALUES ({}, {}, {}, {}, {})",
+        "INSERT INTO {} ({}) VALUES ({})",
         dialect.quote(PROGRESS),
-        dialect.quote("id"),
-        dialect.quote("content_hash"),
-        dialect.quote("segment"),
-        dialect.quote("cursor"),
-        dialect.quote("rows_done"),
-        placeholder(dialect, 1),
-        placeholder(dialect, 2),
-        placeholder(dialect, 3),
-        placeholder(dialect, 4),
-        placeholder(dialect, 5),
+        quoted(dialect, &COLUMNS),
+        marks.join(", "),
     );
     let cursor = cursor.map_or(SqlValue::Null, |c| {
         SqlValue::Text(serde_json::to_string(c).unwrap_or_default())
@@ -103,11 +99,8 @@ pub(super) async fn read_progress<D: DbRead + ?Sized>(
     key: &str,
 ) -> Result<Option<Progress>, DbError> {
     let sql = format!(
-        "SELECT {}, {}, {}, {} FROM {} WHERE {} = {}",
-        dialect.quote("content_hash"),
-        dialect.quote("segment"),
-        dialect.quote("cursor"),
-        dialect.quote("rows_done"),
+        "SELECT {} FROM {} WHERE {} = {}",
+        quoted(dialect, &COLUMNS[1..]),
         dialect.quote(PROGRESS),
         dialect.quote("id"),
         placeholder(dialect, 1)
@@ -122,6 +115,13 @@ pub(super) async fn read_progress<D: DbRead + ?Sized>(
             .and_then(|s| serde_json::from_str(s).ok()),
         rows: count(r, "rows_done"),
     }))
+}
+
+fn quoted(dialect: Dialect, cols: &[&str]) -> String {
+    cols.iter()
+        .map(|c| dialect.quote(c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// An integer column read back (drivers may carry it as a number or a string).

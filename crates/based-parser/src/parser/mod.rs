@@ -137,23 +137,22 @@ pub fn parse_data_step(src: &str, file: FileId) -> Result<DataStep, Vec<Diagnost
         file,
         toks: lexing.tokens,
         pos: 0,
-        diags: Vec::new(),
+        diags: lexing
+            .errors
+            .into_iter()
+            .map(|(start, end)| {
+                Diagnostic::error("E0001", "unexpected character").at(Span { file, start, end })
+            })
+            .collect(),
         any_case_labels: true,
     };
-    for (start, end) in lexing.errors {
+    let step = p.data_step();
+    if step.is_ok() && p.peek().is_some() {
         p.diags
-            .push(Diagnostic::error("E0001", "unexpected character").at(Span { file, start, end }));
+            .push(Diagnostic::error("E0002", "trailing tokens after the data step").at(p.here()));
     }
-    match p.data_step() {
-        Ok(step) if p.diags.is_empty() && p.peek().is_none() => Ok(step),
-        Ok(_) => {
-            if p.peek().is_some() {
-                p.diags.push(
-                    Diagnostic::error("E0002", "trailing tokens after the data step").at(p.here()),
-                );
-            }
-            Err(p.diags)
-        }
-        Err(()) => Err(p.diags),
+    match step {
+        Ok(step) if p.diags.is_empty() => Ok(step),
+        _ => Err(p.diags),
     }
 }

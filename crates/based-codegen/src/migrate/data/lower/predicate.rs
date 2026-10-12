@@ -6,7 +6,7 @@ use super::super::check::predicate::span_of;
 use super::super::check::DataError;
 use super::super::relation::child_link;
 use super::super::table::{Col, Fam, TableView};
-use super::Lw;
+use super::{col_of, Lw};
 use crate::sql::dml::sql_op;
 
 impl Lw<'_> {
@@ -30,7 +30,7 @@ impl Lw<'_> {
                 format!("{lhs} IN ({})", items.join(", "))
             }
             Predicate::Bare(path) => {
-                let bool_col = col_of_fam(Fam::Bool, "bool");
+                let bool_col = col_of(Fam::Bool, "bool");
                 format!(
                     "{} = {}",
                     self.lhs(path, t, Some(&bool_col)),
@@ -61,29 +61,26 @@ impl Lw<'_> {
     fn cmp(&self, path: &Path, op: Op, value: &Value, t: &TableView) -> String {
         let target = self.operand_col(path, t, Some(value));
         let lhs = self.lhs(path, t, target.as_ref());
-        if matches!(value, Value::Lit(Literal::Null)) {
-            let test = if op == Op::Ne {
-                "IS NOT NULL"
-            } else {
-                "IS NULL"
-            };
-            return format!("{lhs} {test}");
+        match value {
+            Value::Lit(Literal::Null) if op == Op::Ne => format!("{lhs} IS NOT NULL"),
+            Value::Lit(Literal::Null) => format!("{lhs} IS NULL"),
+            _ => format!(
+                "{lhs} {} {}",
+                sql_op(op),
+                self.value(value, t, target.as_ref())
+            ),
         }
-        let rhs = self.value(value, t, target.as_ref());
-        format!("{lhs} {} {rhs}", sql_op(op))
     }
 
     /// The column a comparison's operands meet as: the left column itself, or — for a json
     /// path — the family its right-hand literal implies.
     fn operand_col(&self, path: &Path, t: &TableView, rhs: Option<&Value>) -> Option<Col> {
-        if path.segments.len() == 1 {
-            return t.col(&path.segments[0].node).cloned();
-        }
-        Some(match rhs {
-            Some(Value::Lit(Literal::Int(_))) => col_of_fam(Fam::Int, "int"),
-            Some(Value::Lit(Literal::Decimal(_))) => col_of_fam(Fam::Float, "float"),
-            Some(Value::Lit(Literal::Bool(_))) => col_of_fam(Fam::Bool, "bool"),
-            _ => col_of_fam(Fam::Text, "text"),
+        Some(match (path.segments.as_slice(), rhs) {
+            ([col], _) => return t.col(&col.node).cloned(),
+            (_, Some(Value::Lit(Literal::Int(_)))) => col_of(Fam::Int, "int"),
+            (_, Some(Value::Lit(Literal::Decimal(_)))) => col_of(Fam::Float, "float"),
+            (_, Some(Value::Lit(Literal::Bool(_)))) => col_of(Fam::Bool, "bool"),
+            _ => col_of(Fam::Text, "text"),
         })
     }
 
@@ -115,7 +112,7 @@ impl Lw<'_> {
         if self.writes_root && child.name() == self.root && self.dialect.is_mysql_family() {
             return Ok(self.materialized(&link, &parent, &alias, &from, filter));
         }
-        let mut wheres: Vec<String> = link
+        let wheres = link
             .iter()
             .map(|(c, p)| {
                 format!(
@@ -124,12 +121,10 @@ impl Lw<'_> {
                     self.dialect.qcol(&parent, p)
                 )
             })
-            .collect();
-        wheres.extend(filter);
-        Ok(format!(
-            "EXISTS (SELECT 1 FROM {from} WHERE {})",
-            wheres.join(" AND ")
-        ))
+            .chain(filter)
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        Ok(format!("EXISTS (SELECT 1 FROM {from} WHERE {wheres})"))
     }
 
     /// `(<parent key>) IN (SELECT * FROM (SELECT <child fk> FROM … WHERE …) AS d<n>)` — the
@@ -142,12 +137,13 @@ impl Lw<'_> {
         from: &str,
         filter: Option<String>,
     ) -> String {
-        let mut wheres: Vec<String> = link
+        let wheres = link
             .iter()
             .map(|(c, _)| format!("{} IS NOT NULL", self.dialect.qcol(alias, c)))
-            .collect();
-        wheres.extend(filter);
-        let keys: Vec<String> = link
+            .chain(filter)
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let keys = link
             .iter()
             .enumerate()
             .map(|(i, (c, _))| {
@@ -157,34 +153,20 @@ impl Lw<'_> {
                     self.q(&format!("k{i}"))
                 )
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .join(", ");
         let parents: Vec<String> = link
             .iter()
             .map(|(_, p)| self.dialect.qcol(parent, p))
             .collect();
-        let lhs = if let [one] = parents.as_slice() {
-            one.clone()
-        } else {
-            format!("({})", parents.join(", "))
+        let lhs = match parents.as_slice() {
+            [one] => one.clone(),
+            many => format!("({})", many.join(", ")),
         };
         self.sub.set(self.sub.get() + 1);
         format!(
-            "{lhs} IN (SELECT * FROM (SELECT {} FROM {from} WHERE {}) AS {})",
-            keys.join(", "),
-            wheres.join(" AND "),
+            "{lhs} IN (SELECT * FROM (SELECT {keys} FROM {from} WHERE {wheres}) AS {})",
             self.q(&format!("d{}", self.sub.get()))
         )
-    }
-}
-
-fn col_of_fam(fam: Fam, ty: &str) -> Col {
-    Col {
-        name: String::new(),
-        ty: ty.to_string(),
-        fam,
-        nullable: true,
-        has_default: false,
-        generated: false,
-        auto: false,
     }
 }

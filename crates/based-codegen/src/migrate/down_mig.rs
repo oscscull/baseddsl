@@ -58,13 +58,12 @@ pub fn render_down(prev: &Snapshot, now: &Snapshot) -> String {
 
 /// The canonical `down.mig` text for already-computed reverse steps.
 pub(crate) fn render_down_steps(steps: &[Step]) -> String {
-    let mut out = String::from(DOWN_HEADER);
-    out.push_str(FORMAT_MARKER);
-    out.push('\n');
-    for s in steps {
-        render_step(&mut out, s);
-    }
-    out
+    steps
+        .iter()
+        .fold(format!("{DOWN_HEADER}{FORMAT_MARKER}\n"), |mut out, s| {
+            render_step(&mut out, s);
+            out
+        })
 }
 
 const DOWN_HEADER: &str = "\
