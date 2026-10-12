@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) fn lower_restore(cx: &LowerCx, model: &RModel, where_: &Predicate) -> LoweredWrite {
     let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
+        .writing(model)
         .with_scope_inject(!cx.unscoped)
         .with_scope_terms(cx.inject);
     // sema (E-restore) guarantees a soft-delete model here; fall back defensively.

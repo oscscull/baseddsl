@@ -31,7 +31,7 @@ impl<'a> Select<'a> {
     /// The `(child_fk_col, parent_pk_col)` correlation pairs of a to-many edge — the child's
     /// back-FK column(s) referencing the parent's primary key. One pair for a single-column
     /// key, several for a composite key.
-    fn to_many_pairs(
+    pub(crate) fn to_many_pairs(
         &self,
         child: &RModel,
         via_field: &str,

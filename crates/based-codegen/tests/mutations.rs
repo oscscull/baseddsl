@@ -1490,3 +1490,26 @@ fn update_where_relation_any_lowers_to_exists() {
         "\n{out}"
     );
 }
+
+#[test]
+fn self_referential_any_in_a_mysql_write_reads_a_derived_table() {
+    let src = r#"
+        User { id: Id, name: text, invited_by: User?, invited_users: User[] (User.invited_by) }
+        mutation prune() -> ok {
+          delete User where (not invited_users.any());
+        }
+        "#;
+    let maria = gen(src);
+    assert!(
+        maria.contains(
+            "NOT (`user`.`id` IN (SELECT * FROM (SELECT `s1_user`.`invited_by_id` AS `k0` FROM `user` AS `s1_user` WHERE `s1_user`.`invited_by_id` IS NOT NULL) AS `d2`))"
+        ),
+        "\n{maria}"
+    );
+    // Other dialects keep the correlated EXISTS.
+    let pg = gen_pg(src);
+    assert!(
+        pg.contains("NOT (EXISTS (SELECT 1 FROM \"user\" AS \"s1_user\""),
+        "\n{pg}"
+    );
+}

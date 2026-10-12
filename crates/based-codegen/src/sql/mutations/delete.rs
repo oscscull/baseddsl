@@ -25,6 +25,7 @@ fn soft_delete_write(
     wipe: bool,
 ) -> LoweredWrite {
     let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
+        .writing(model)
         .with_scope_inject(!cx.unscoped)
         .with_scope_terms(cx.inject);
     let mut sets = vec![tombstone_set(&sel, model, sd, /* deleting = */ true)];
@@ -71,6 +72,7 @@ fn real_delete_write(
     wipe: bool,
 ) -> LoweredWrite {
     let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
+        .writing(model)
         .with_scope_inject(!cx.unscoped)
         .with_scope_terms(cx.inject);
     let mut wheres: Vec<String> = where_

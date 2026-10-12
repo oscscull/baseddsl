@@ -64,6 +64,9 @@ pub(crate) struct Select<'a> {
     /// of these is present-guarded (`:{name}__present`) so an absent arg widens the leaf to
     /// TRUE (queries.md), composing correctly through `and`/`or`.
     pub(crate) optional_params: HashSet<String>,
+    /// The table an UPDATE/DELETE writes, so a MySQL-family `.any` subquery reading it can
+    /// go through a materialized derived table. `None` for a read.
+    pub(crate) write_table: Option<String>,
 }
 
 /// A reachable `create … as name` tx step binding: the model it created, so a
@@ -114,7 +117,14 @@ impl<'a> Select<'a> {
             bare_cols: false,
             incoming: false,
             optional_params: HashSet::new(),
+            write_table: None,
         }
+    }
+
+    /// Mark this select as the WHERE of a write to `model`'s table.
+    pub(crate) fn writing(mut self, model: &RModel) -> Self {
+        self.write_table = Some(model.table.clone());
+        self
     }
 
     /// Render column operands bare (unqualified) — for an upsert conflict-update SET.

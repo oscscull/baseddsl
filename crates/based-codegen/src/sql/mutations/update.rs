@@ -10,6 +10,7 @@ pub(crate) fn lower_update<'a>(
     bindings: &HashMap<&'a str, BackCtx<'a>>,
 ) -> LoweredWrite {
     let mut sel = Select::new(cx.schema, cx.decls, model, cx.dialect)
+        .writing(model)
         .with_bindings(bindings.clone())
         .with_scope_inject(!cx.unscoped)
         .with_scope_terms(cx.inject);

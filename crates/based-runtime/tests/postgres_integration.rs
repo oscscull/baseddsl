@@ -189,6 +189,8 @@ mod optional_filters;
 mod pagination_and_types;
 #[path = "postgres_integration/queries.rs"]
 mod queries;
+#[path = "postgres_integration/relation_any.rs"]
+mod relation_any;
 #[path = "postgres_integration/schemas_and_writes.rs"]
 mod schemas_and_writes;
 #[path = "postgres_integration/scopes_and_idempotency.rs"]
