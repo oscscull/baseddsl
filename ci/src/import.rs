@@ -92,21 +92,34 @@ fn verify(
     namespace: &str,
     environment: &Environment,
 ) -> Result<()> {
-    let first = format!("{namespace}.legacy_account");
-    let second = format!("{namespace}.legacy_entry");
-    let result = command::run(
-        based,
-        &["import", "--table", &first, "--table", &second, "--json"],
-        app,
-        environment,
-    )?;
+    let tables = [
+        "legacy_account",
+        "legacy_entry",
+        "legacy_ledger",
+        "legacy_posting",
+    ]
+    .map(|table| format!("{namespace}.{table}"));
+    let mut arguments = vec!["import"];
+    for table in &tables {
+        arguments.extend(["--table", table.as_str()]);
+    }
+    arguments.push("--json");
+    let result = command::run(based, &arguments, app, environment)?;
     let report: Value = serde_json::from_str(&result)?;
     ensure!(
         report["status"] == "imported"
             && report["written"]
                 .as_array()
-                .is_some_and(|files| files.len() == 2),
+                .is_some_and(|files| files.len() == 4),
         "import report: {report}"
+    );
+    // The composite FK's aliased local columns come back as a per-part column map.
+    let posting = fs::read_to_string(app.join("models/legacyposting.bsl"))?;
+    ensure!(
+        posting.contains(
+            r#"legacy_ledger: LegacyLedger (column region = "post region", ledger_no = "post_ledger")"#
+        ),
+        "composite FK column map not imported:\n{posting}"
     );
     ensure!(
         !app.join("migrations").exists(),
@@ -137,6 +150,16 @@ fn verify(
     ensure!(
         rows == json!([{"heading":"retained original row", "parent_code":{"label":"retained account"}}]),
         "typed read changed fixture: {rows}"
+    );
+    let line = output
+        .lines()
+        .find_map(|line| line.strip_prefix("imported postings: "))
+        .ok_or_else(|| anyhow::anyhow!("missing composite FK typed read"))?;
+    let postings: Value = serde_json::from_str(line)?;
+    ensure!(
+        postings
+            == json!([{"memo": "retained posting", "legacy_ledger": {"region": "north", "ledger_no": 7, "title": "retained ledger"}}]),
+        "composite FK typed read changed fixture: {postings}"
     );
     command::run(
         command::cargo(),

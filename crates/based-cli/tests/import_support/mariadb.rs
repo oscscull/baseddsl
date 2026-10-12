@@ -59,6 +59,8 @@ async fn snapshot(admin: &mut MySqlConnection) -> Vec<String> {
     for statement in [
         "SELECT CONCAT(account_code,':',label) FROM based_import_fixture.legacy_account ORDER BY account_code",
         "SELECT CONCAT(entry_key,':',parent_code,':',heading) FROM based_import_fixture.legacy_entry ORDER BY entry_key",
+        "SELECT CONCAT(region,':',ledger_no,':',title) FROM based_import_fixture.legacy_ledger ORDER BY region, ledger_no",
+        "SELECT CONCAT(posting_key,':',`post region`,':',post_ledger,':',memo) FROM based_import_fixture.legacy_posting ORDER BY posting_key",
     ] {
         facts.extend(sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(statement)).fetch_all(&mut *admin).await.unwrap());
     }

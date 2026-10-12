@@ -13,5 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .imported_entries(client::ImportedEntriesInput {}, ())
         .await?;
     println!("imported read: {}", serde_json::to_string(&rows)?);
+    let postings: Vec<client::PostingRow> = client::embedded(&engine)
+        .imported_postings(client::ImportedPostingsInput {}, ())
+        .await?;
+    println!("imported postings: {}", serde_json::to_string(&postings)?);
     Ok(())
 }
