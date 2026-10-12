@@ -10,10 +10,9 @@ versions. Before v1, `0.x` releases can change public interfaces.
    against a copy of the database.
 4. Apply reviewed migrations separately and verify schema, data, and application calls.
 
-Generated decimal fields use `bigdecimal`; the consuming crate needs
-`bigdecimal = "0.4"`. Every client now carries test fixtures for every model, so a
-schema with any `decimal` column needs it. Review serializers and call sites when
-regenerating.
+Generated decimal fields use `bigdecimal`. An embedded client reaches it through
+`based_runtime`; a wire client with decimal fields needs `bigdecimal = "0.4"`. Review
+serializers and call sites when regenerating.
 
 The bundled SQLite floor is 3.51.3 (libsqlite3-sys 0.37.0), which includes
 the upstream WAL-reset corruption fix. A binary update does not repair existing

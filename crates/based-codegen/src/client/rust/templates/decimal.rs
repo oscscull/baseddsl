@@ -1,6 +1,16 @@
 /// Exact decimal value for generated clients. Emitted only when a client field
-/// uses `Decimal`, so schemas without decimals need no BigDecimal dependency.
-pub(crate) const DECIMAL: &str = r#"
+/// uses `Decimal`; an embedded client reaches `bigdecimal` through `based_runtime`, so
+/// only a wire client needs its own dependency.
+pub(crate) fn decimal(embedded: bool) -> String {
+    let path = if embedded {
+        "based_runtime::bigdecimal"
+    } else {
+        "bigdecimal"
+    };
+    DECIMAL.replace("bigdecimal::", &format!("{path}::"))
+}
+
+const DECIMAL: &str = r#"
 /// An exact decimal backed by `bigdecimal::BigDecimal`. JSON always carries a
 /// plain decimal string; no float conversion or scientific notation enters SQL.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -148,6 +148,7 @@ dependencies = [
  "based-manifest",
  "based-parser",
  "based-sema",
+ "bigdecimal",
  "futures-core",
  "futures-util",
  "libsqlite3-sys",
@@ -1084,7 +1085,6 @@ version = "0.0.0"
 dependencies = [
  "based-build",
  "based-runtime",
- "bigdecimal",
  "dotenvy",
  "serde",
  "serde_json",

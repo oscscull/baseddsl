@@ -33,7 +33,7 @@ pub(crate) fn render(schema: &CheckedSchema, decls: &[Decl], opts: ClientOptions
         .iter()
         .any(|s| s.contains(": Decimal") || s.contains("<Decimal>"))
     {
-        out.push_str(DECIMAL);
+        out.push_str(&decimal(opts.embedded));
     }
     out.push_str(&fixtures);
     out
