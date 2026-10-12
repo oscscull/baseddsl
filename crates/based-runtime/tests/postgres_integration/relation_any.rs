@@ -1,15 +1,15 @@
 use super::*;
 
 const SCHEMA: &str = r#"
-    Card { id: text, name: text, printings: Printing[], @index(name) }
-    Printing { id: text, card: Card, digital: bool, @index(card) }
-    Category { id: text, name: text, parent: Category?, children: Category[] (Category.parent), @index(name) }
-    shape CardName from Card { name }
-    shape CategoryName from Category { name }
-    query paper() -> CardName[] { list Card where (printings.any(digital = false)) order (name); }
-    query unprinted() -> CardName[] { list Card where (not printings.any()) order (name); }
+    AnyCard { id: text, name: text, printings: AnyPrinting[], @index(name) }
+    AnyPrinting { id: text, card: AnyCard, digital: bool, @index(card) }
+    AnyCategory { id: text, name: text, parent: AnyCategory?, children: AnyCategory[] (AnyCategory.parent), @index(name) }
+    shape CardName from AnyCard { name }
+    shape CategoryName from AnyCategory { name }
+    query paper() -> CardName[] { list AnyCard where (printings.any(digital = false)) order (name); }
+    query unprinted() -> CardName[] { list AnyCard where (not printings.any()) order (name); }
     query categories() -> CategoryName[] order (name);
-    mutation prune() -> ok { delete Category where (not children.any()); }
+    mutation prune() -> ok { delete AnyCategory where (not children.any()); }
 "#;
 
 fn names(b: &serde_json::Value) -> Vec<String> {
@@ -29,10 +29,10 @@ async fn relation_any_live_postgres() {
     };
     container
         .exec_batch(
-            "INSERT INTO card (id, name) VALUES ('c1', 'Bolt'), ('c2', 'Arena Only'), ('c3', 'Blank');\n\
-             INSERT INTO printing (id, card_id, digital) VALUES \
+            "INSERT INTO any_card (id, name) VALUES ('c1', 'Bolt'), ('c2', 'Arena Only'), ('c3', 'Blank');\n\
+             INSERT INTO any_printing (id, card_id, digital) VALUES \
              ('p1', 'c1', FALSE), ('p2', 'c1', FALSE), ('p3', 'c2', TRUE);\n\
-             INSERT INTO category (id, name, parent_id) VALUES \
+             INSERT INTO any_category (id, name, parent_id) VALUES \
              ('k1', 'Root', NULL), ('k2', 'Mid', 'k1'), ('k3', 'Leaf', 'k2');",
         )
         .await;
