@@ -2177,6 +2177,7 @@ pub struct CommentRow {
     pub author: Id<entity::User>,
     pub body: String,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Comment>> for CommentRow {
     fn key(&self) -> Id<entity::Comment> {
         self.id.clone()
@@ -2256,6 +2257,7 @@ pub struct DraftNoteRow {
     pub ticket: Id<entity::Ticket>,
     pub body: String,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::DraftNote>> for DraftNoteRow {
     fn key(&self) -> Id<entity::DraftNote> {
         self.id.clone()
@@ -2332,6 +2334,7 @@ pub struct OrgRow {
     pub name: String,
     pub slug: String,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Org>> for OrgRow {
     fn key(&self) -> Id<entity::Org> {
         self.id.clone()
@@ -2395,6 +2398,7 @@ pub struct SessionRow {
     pub user: Id<entity::User>,
     pub token: String,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Session>> for SessionRow {
     fn key(&self) -> Id<entity::Session> {
         self.id.clone()
@@ -2470,6 +2474,7 @@ pub struct TicketRow {
     pub tags: Option<Json>,
     pub duplicate_of: Option<Id<entity::Ticket>>,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Ticket>> for TicketRow {
     fn key(&self) -> Id<entity::Ticket> {
         self.id.clone()
@@ -2570,6 +2575,7 @@ pub struct TimeEntryRow {
     pub note: Option<String>,
     pub logged_at: Timestamp,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::TimeEntry>> for TimeEntryRow {
     fn key(&self) -> Id<entity::TimeEntry> {
         self.id.clone()
@@ -2654,6 +2660,7 @@ pub struct UserRow {
     pub role: Role,
     pub rate: Option<Decimal>,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::User>> for UserRow {
     fn key(&self) -> Id<entity::User> {
         self.id.clone()

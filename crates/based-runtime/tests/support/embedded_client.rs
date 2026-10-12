@@ -1573,6 +1573,7 @@ pub struct OrgRow {
     pub deleted_at: Option<Timestamp>,
     pub name: String,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Org>> for OrgRow {
     fn key(&self) -> Id<entity::Org> {
         self.id.clone()
@@ -1631,6 +1632,7 @@ pub struct OrderRow {
     pub status: String,
     pub total: i64,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Order>> for OrderRow {
     fn key(&self) -> Id<entity::Order> {
         self.id.clone()
@@ -1699,6 +1701,7 @@ pub struct FeatureRow {
     #[serde(deserialize_with = "de_bool_opt")]
     pub beta: Option<bool>,
 }
+#[allow(clippy::clone_on_copy)]
 impl RowRef<Id<entity::Feature>> for FeatureRow {
     fn key(&self) -> Id<entity::Feature> {
         self.id.clone()
