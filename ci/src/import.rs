@@ -206,6 +206,7 @@ based-runtime = {{ git = "https://github.com/oscscull/baseddsl.git", rev = "{com
 sqlx = {{ version = "0.9", default-features = false, features = ["runtime-tokio", "{driver}"{sqlx_tls}] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
+bigdecimal = "0.4"
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
 "#
     )

@@ -21,7 +21,15 @@ fn gen_opts(src: &str, opts: ClientOptions) -> String {
         .map(|d| d.code)
         .collect();
     assert!(errs.is_empty(), "unexpected sema errors: {errs:?}");
-    client_with(&schema, &sf.decls, ClientTarget::Rust, opts)
+    without_fixtures(client_with(&schema, &sf.decls, ClientTarget::Rust, opts))
+}
+
+/// The client surface these tests cover; the trailing fixtures module has its own tests.
+fn without_fixtures(out: String) -> String {
+    match out.find("\n// ---------- test fixtures ----------") {
+        Some(at) => out[..at].to_string(),
+        None => out,
+    }
 }
 
 #[test]
