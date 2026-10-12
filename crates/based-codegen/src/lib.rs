@@ -14,6 +14,7 @@
 //! resolution facts (table names, FK columns, soft-delete mode) — those live on the
 //! IR. It only picks physical representations (SQL types, index names) per dialect.
 
+mod any_write_check;
 #[cfg(feature = "client")]
 pub mod client;
 mod dialect_check;
@@ -22,6 +23,7 @@ pub mod migrate;
 pub mod openapi;
 pub mod sql;
 
+pub use any_write_check::any_write_diagnostics;
 pub use dialect_check::ordered_nest_diagnostics;
 
 /// The SQL compile target (manifest `dialect`). MariaDB is the default.

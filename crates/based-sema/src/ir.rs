@@ -276,6 +276,7 @@ pub mod code {
     // Dialect-gated construct with no compile-target equivalent (E035x): checked once the
     // manifest's target is known (like the E027x target checks), never silently emitted.
     pub const NEST_ORDER_UNSUPPORTED: &str = "E0350"; // an ordered to-many nest / m2m flatten targeting MySQL — its `JSON_ARRAYAGG` rejects `ORDER BY` (MariaDB/Postgres/SQLite honor it), so the ordered nested array can't be generated
+    pub const ANY_SELF_WRITE_UNSUPPORTED: &str = "E0352"; // a write's `.any` reads the written table through a custom `on:` edge — MySQL/MariaDB can't read it in a subquery, and a custom join has no key for a derived table
     pub const RELATION_ANY: &str = "E0351"; // `rel.any(…)` on a column / to-one relation, or reached through a to-many hop
 }
 

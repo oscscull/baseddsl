@@ -27,6 +27,13 @@ pub(super) fn schema(
             declarations,
             dialect,
         ));
+    report
+        .diagnostics
+        .extend(based_codegen::any_write_diagnostics(
+            &schema,
+            declarations,
+            dialect,
+        ));
     report.diagnostics.extend(based_sema::check_foreign_keys(
         &schema,
         based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys),
