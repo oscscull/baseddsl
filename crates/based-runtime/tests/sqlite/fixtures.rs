@@ -7,7 +7,8 @@ use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::{
-    AdoptedSqlite, AdoptedTransport, Compiled, Engine, SeqIdGen, SqliteBackend, TxOptions,
+    AdoptedSqlite, AdoptedTransport, Backend, Compiled, Db, DbError, Engine, SeqIdGen,
+    SqliteBackend, TxOptions,
 };
 use based_sema::check;
 
@@ -63,7 +64,7 @@ async fn engine() -> Engine {
 }
 
 async fn insert(engine: &Engine, model: &str, row: Value) -> Value {
-    let response = engine.insert_fixture(model, row).await;
+    let response = engine.insert_fixture(model, row, "").await;
     assert_eq!(response.status, 200, "{model} fixture: {:?}", response.body);
     response.body
 }
@@ -141,7 +142,7 @@ async fn fixture_sets_engine_managed_columns_when_given() {
 #[tokio::test]
 async fn fixture_errors_name_the_problem() {
     let engine = engine().await;
-    let unknown = engine.insert_fixture("Nope", json!({})).await;
+    let unknown = engine.insert_fixture("Nope", json!({}), "").await;
     assert_eq!(unknown.status, 404);
     assert_eq!(unknown.body["error"]["code"], "unknown_fixture");
 
@@ -149,12 +150,15 @@ async fn fixture_errors_name_the_problem() {
         .insert_fixture(
             "Org",
             json!({ "name": "A", "slug": "a", "tier": "free", "x": 1 }),
+            "",
         )
         .await;
     assert_eq!(field.status, 400);
     assert_eq!(field.body["error"]["code"], "bad_fixture");
 
-    let missing = engine.insert_fixture("Org", json!({ "name": "A" })).await;
+    let missing = engine
+        .insert_fixture("Org", json!({ "name": "A" }), "")
+        .await;
     assert_eq!(missing.status, 400, "{:?}", missing.body);
     let message = missing.body["error"]["message"].as_str().unwrap();
     assert!(message.contains("slug"), "{message}");
@@ -232,4 +236,47 @@ async fn fixture_runs_on_an_adopted_transaction() {
         .await
         .unwrap();
     assert_eq!(count, 1);
+}
+
+/// Records the shard key of every checkout, over a real SQLite backend.
+struct ShardLog {
+    inner: SqliteBackend,
+    keys: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Backend for ShardLog {
+    async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        self.keys.lock().unwrap().push(shard_key.to_string());
+        self.inner.checkout(shard_key).await
+    }
+}
+
+#[tokio::test]
+async fn fixture_inserts_on_the_requested_shard() {
+    let compiled = compiled();
+    let inner = SqliteBackend::in_memory().unwrap();
+    inner
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .unwrap();
+    let log = std::sync::Arc::new(ShardLog {
+        inner,
+        keys: std::sync::Mutex::new(Vec::new()),
+    });
+    let engine = Engine::new(compiled, SharedLog(log.clone()), SeqIdGen::default());
+    let row = json!({ "name": "Sharded", "slug": "sharded", "tier": "free" });
+    let response = engine.insert_fixture("Org", row, "tenant-7").await;
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    assert_eq!(*log.keys.lock().unwrap(), vec!["tenant-7".to_string()]);
+}
+
+/// Lets the test keep a handle on the log the engine owns.
+struct SharedLog(std::sync::Arc<ShardLog>);
+
+#[async_trait::async_trait]
+impl Backend for SharedLog {
+    async fn checkout(&self, shard_key: &str) -> Result<Box<dyn Db>, DbError> {
+        self.0.checkout(shard_key).await
+    }
 }

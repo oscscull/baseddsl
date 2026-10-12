@@ -36,14 +36,17 @@ pub(super) fn render_setter(
     }
 }
 
-/// A setter never shadows the builder's own `insert`.
+/// A setter never shadows the builder's own methods.
 fn setter_name(field: &str) -> String {
-    if field == "insert" {
-        "set_insert".to_string()
+    if BUILDER_METHODS.contains(&field) {
+        format!("set_{field}")
     } else {
         field_ident(field)
     }
 }
+
+/// Builder methods that are not field setters.
+const BUILDER_METHODS: &[&str] = &["insert", "on_shard"];
 
 /// The JSON a relation carries: the target's key under its key field, or a composite key's
 /// parts.

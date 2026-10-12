@@ -5,7 +5,7 @@ use based_project::CheckedProject;
 use std::path::Path;
 
 pub(super) fn client(checked: &CheckedProject) -> Result<Vec<u8>, Error> {
-    let text = based_project::render_build_client(
+    let text = based_project::render_client(
         &checked.project,
         &checked.schema,
         &checked.declarations,

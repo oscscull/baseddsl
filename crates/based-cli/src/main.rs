@@ -79,8 +79,8 @@ enum Command {
     /// Strip caller-supplied X-Based-* headers and prevent direct listener access.
     /// Deployment guide: https://github.com/oscscull/baseddsl/blob/main/book/src/deployment.md
     Serve(serve_options::ServeOptions),
-    /// Insert test-fixture rows read as JSON lines on stdin; generated TypeScript
-    /// fixtures drive this process. Never serves HTTP.
+    /// Insert test-fixture rows read as JSON lines on stdin; generated fixtures drive
+    /// this process. Never serves HTTP.
     Fixtures(fixtures::FixturesOptions),
 }
 

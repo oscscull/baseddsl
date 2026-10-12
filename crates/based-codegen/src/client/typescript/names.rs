@@ -57,10 +57,10 @@ pub(super) fn binding(name: &str) -> String {
     }
 }
 
-/// A builder method name; `insert` stays the builder's own.
+/// A builder method name; the builder's own methods keep theirs.
 pub(super) fn setter_name(field: &str) -> String {
-    if field == "insert" {
-        "set_insert".to_string()
+    if ["insert", "on_shard", "shard", "row"].contains(&field) {
+        format!("set_{field}")
     } else {
         field.to_string()
     }

@@ -198,7 +198,7 @@ ci-example-sqlite: based-cli
 	cd examples/sqlite-quickstart && rm -f "$(SQLITE_DB)" && \
 	  DATABASE_URL="$(SQLITE_DB)" $(BASED) migrate apply --database-url "$(SQLITE_DB)" && \
 	  DATABASE_URL="$(SQLITE_DB)" $(CARGO) run && \
-	  $(CARGO) test --test fixtures
+	  DATABASE_URL="$(SQLITE_DB)" BASED_BIN="$(BASED)" $(CARGO) test --test fixtures
 
 ci-example-mariadb: based-cli
 	$(ROOT)ci/wait-for-db.sh "$(MARIADB_URL)"

@@ -6,7 +6,8 @@
 //! through the transport's streaming call; the NDJSON decoder is emitted with the
 //! module so every HTTP transport shares one framing implementation. A mutation
 //! additionally gets a `<name>_with_key` twin carrying a mutation idempotency key
-//! through the transport's keyed call (HTTP: the `Idempotency-Key` header).
+//! through the transport's keyed call (HTTP: the `Idempotency-Key` header). Every client
+//! also carries a `fixtures` module of typed test-row builders.
 //!
 //! Transport is abstract: `Client<T>` is generic over a `Transport` trait (post JSON to
 //! a route, decode JSON back), which the runtime crate implements. Entity ids map to a
@@ -47,17 +48,5 @@ pub fn client_with(
     opts: ClientOptions,
 ) -> String {
     let ClientTarget::Rust = target;
-    rust::render(schema, decls, opts, false)
-}
-
-/// Like [`client_with`], also emitting the `fixtures` module of typed test-fixture
-/// builders when the client is embedded (they insert through the in-process engine).
-pub fn client_with_fixtures(
-    schema: &CheckedSchema,
-    decls: &[Decl],
-    target: ClientTarget,
-    opts: ClientOptions,
-) -> String {
-    let ClientTarget::Rust = target;
-    rust::render(schema, decls, opts, opts.embedded)
+    rust::render(schema, decls, opts)
 }

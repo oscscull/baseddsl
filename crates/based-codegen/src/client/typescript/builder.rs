@@ -13,6 +13,7 @@ pub(super) fn render_builder(schema: &CheckedSchema, fixture: &FixtureModel<'_>)
         .collect();
     let mut out = format!(
         "\n/** One `{model}` fixture row being built; `{ctor}` starts one. */\nexport class {class} {{\n  \
+         private shard = \"\";\n\n  \
          constructor(private readonly row: Record<string, unknown>) {{}}\n",
         ctor = constructor_name(model),
     );
@@ -20,9 +21,11 @@ pub(super) fn render_builder(schema: &CheckedSchema, fixture: &FixtureModel<'_>)
         out.push_str(&render_setter(schema, fixture.model, field));
     }
     out.push_str(&format!(
-        "\n  /** Insert the row and resolve to it as stored. */\n  \
+        "\n  /** Insert on the shard this key routes to (default: the empty key). */\n  \
+         on_shard(key: string): this {{\n    this.shard = key;\n    return this;\n  }}\n\n  \
+         /** Insert the row and resolve to it as stored. */\n  \
          insert(connection: Connection): Promise<{model}Row> {{\n    \
-         return connection.insert({model:?}, this.row, [{}]) as Promise<{model}Row>;\n  }}\n}}\n",
+         return connection.insert({model:?}, this.row, [{}], this.shard) as Promise<{model}Row>;\n  }}\n}}\n",
         bools.join(", ")
     ));
     out.push_str(&render_constructor(fixture, &class));
@@ -63,7 +66,7 @@ fn render_constructor(fixture: &FixtureModel<'_>, class: &str) -> String {
     let n = if fixture
         .fields
         .iter()
-        .any(|f| matches!(f.role, Role::Placeholder(_)))
+        .any(|f| matches!(&f.role, Role::Placeholder(p) if p.uses_n()))
     {
         "  const n = nextN();\n"
     } else {

@@ -10,7 +10,7 @@ mod client {
     include!(concat!(env!("OUT_DIR"), "/client.rs"));
 }
 
-use client::fixtures;
+use client::fixtures::{self, FixtureTransport};
 
 /// A fresh in-memory database at the latest migration.
 async fn engine() -> Engine {
@@ -63,5 +63,41 @@ async fn fixtures_seed_typed_rows() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     assert_eq!(mine.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn separate_counters_never_collide() {
+    let (first, second) = (fixtures::Counter::new(), fixtures::Counter::new());
+    let taken: std::collections::HashSet<u64> = (0..10_000).map(|_| first.take()).collect();
+    assert!((0..10_000).all(|_| !taken.contains(&second.take())));
+}
+
+/// The same builders through a `based fixtures` process, as a wire client inserts them.
+#[tokio::test]
+async fn fixtures_insert_through_a_fixtures_process() -> Result<(), Box<dyn std::error::Error>> {
+    let (Some(database), Some(based)) = (
+        std::env::var_os("DATABASE_URL"),
+        std::env::var_os("BASED_BIN"),
+    ) else {
+        eprintln!("skipping: set DATABASE_URL to a migrated database and BASED_BIN to `based`");
+        return Ok(());
+    };
+    let connection = fixtures::connect(
+        fixtures::Connect::new(database.to_string_lossy())
+            .cwd(env!("CARGO_MANIFEST_DIR"))
+            .binary(based),
+    )?;
+    let org = fixtures::org().insert(&connection).await?;
+    let buyer = fixtures::user().insert(&connection).await?;
+    let order = fixtures::order(&org, &buyer).insert(&connection).await?;
+    assert_eq!(order.placed_by, buyer.id);
+
+    let unknown = connection
+        .insert_fixture("Nope", serde_json::json!({}), "")
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.status(), Some(404));
+    assert_eq!(unknown.code(), "unknown_fixture");
     Ok(())
 }

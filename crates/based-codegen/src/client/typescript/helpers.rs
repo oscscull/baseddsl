@@ -12,7 +12,7 @@ pub(super) fn render_helpers(fixtures: &[FixtureModel<'_>]) -> String {
         })
     };
     let mut out = String::new();
-    if fields().any(|f| matches!(f.role, Role::Placeholder(_))) {
+    if fields().any(|f| matches!(&f.role, Role::Placeholder(p) if p.uses_n())) {
         out.push_str(NEXT_N);
     }
     if [Placeholder::Timestamp, Placeholder::Date, Placeholder::Time]
@@ -42,11 +42,11 @@ pub(super) fn render_helpers(fixtures: &[FixtureModel<'_>]) -> String {
 }
 
 const NEXT_N: &str = r#"
-let counter = 1;
+const counter = new Counter();
 
-/** The next placeholder number: one per fixture, unique within this process. */
+/** The next placeholder number: one per fixture. */
 function nextN(): number {
-  return counter++;
+  return counter.take();
 }
 "#;
 
@@ -55,21 +55,21 @@ const BASE_TIME = Date.UTC(2000, 0, 1);
 "#;
 
 const TIMESTAMP: &str = r#"
-/** 2000-01-01T00:00:00Z plus `n` seconds. */
+/** 2000-01-01T00:00:00Z plus up to about 31 years of seconds. */
 function timestamp(n: number): string {
-  return new Date(BASE_TIME + n * 1000).toISOString().replace(".000Z", "Z");
+  return new Date(BASE_TIME + (n % 1000000000) * 1000).toISOString().replace(".000Z", "Z");
 }
 "#;
 
 const DATE: &str = r#"
-/** 2000-01-01 plus `n` days. */
+/** 2000-01-01 plus up to 100 years of days. */
 function date(n: number): string {
-  return new Date(BASE_TIME + n * 86400000).toISOString().slice(0, 10);
+  return new Date(BASE_TIME + (n % 36500) * 86400000).toISOString().slice(0, 10);
 }
 "#;
 
 const TIME: &str = r#"
-/** Midnight plus `n` seconds, wrapping at a day. */
+/** A time of day. */
 function time(n: number): string {
   return new Date(BASE_TIME + (n % 86400) * 1000).toISOString().slice(11, 19);
 }
@@ -77,7 +77,8 @@ function time(n: number): string {
 
 const UUID: &str = r#"
 function uuid(n: number): string {
-  return `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+  const high = Math.floor(n / 2 ** 48).toString(16).padStart(8, "0");
+  return `${high}-0000-4000-8000-${(n % 2 ** 48).toString(16).padStart(12, "0")}`;
 }
 "#;
 

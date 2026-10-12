@@ -1785,6 +1785,912 @@ mod __based_adopt_driver {
 #[allow(unused_imports)]
 pub use __based_adopt_driver::*;
 
+// ---------- test fixtures ----------
+
+/// Typed test fixtures: one builder per model. Required columns get placeholders,
+/// required relations are constructor arguments, and everything else stays unset until a
+/// setter fills it. `insert` writes the row, bypassing scopes and guards, and returns it
+/// as stored.
+pub mod fixtures {
+    use super::*;
+
+    /// Something a fixture row can be inserted through: an engine-backed client, or a
+    /// [`Connection`] to a `based fixtures` process.
+    #[allow(async_fn_in_trait)]
+    pub trait FixtureTransport {
+        async fn insert_fixture(
+            &self,
+            model: &str,
+            row: serde_json::Value,
+            shard: &str,
+        ) -> Result<serde_json::Value, ClientError>;
+    }
+
+    impl<T: FixtureTransport> FixtureTransport for Client<T> {
+        async fn insert_fixture(
+            &self,
+            model: &str,
+            row: serde_json::Value,
+            shard: &str,
+        ) -> Result<serde_json::Value, ClientError> {
+            self.transport.insert_fixture(model, row, shard).await
+        }
+    }
+
+    /// Names one row of a model: its key, or a fixture row of that model.
+    pub trait RowRef<K> {
+        fn key(&self) -> K;
+    }
+
+    impl<E> RowRef<Id<E>> for Id<E> {
+        fn key(&self) -> Self {
+            self.clone()
+        }
+    }
+
+    impl<K, T: RowRef<K> + ?Sized> RowRef<K> for &T {
+        fn key(&self) -> K {
+            (**self).key()
+        }
+    }
+
+    /// The placeholder numbers: a sequence starting at a random offset, so separate
+    /// processes sharing a database never collide on unique columns.
+    pub struct Counter {
+        base: u64,
+        taken: std::sync::atomic::AtomicU64,
+    }
+
+    impl Counter {
+        pub fn new() -> Self {
+            use std::hash::{BuildHasher, Hasher};
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u32(std::process::id());
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                hasher.write_u128(now.as_nanos());
+            }
+            // Below 2^52, so the numbers survive a JSON round trip exactly.
+            Self {
+                base: (hasher.finish() >> 32) << 20,
+                taken: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+
+        /// The next number in the sequence.
+        pub fn take(&self) -> u64 {
+            self.base + self.taken.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl Default for Counter {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[allow(dead_code)]
+    mod support {
+        use super::{ClientError, Counter, FixtureTransport};
+
+        type Row = serde_json::Map<String, serde_json::Value>;
+
+        static COUNTER: std::sync::OnceLock<Counter> = std::sync::OnceLock::new();
+
+        /// The next placeholder number: one per fixture.
+        pub(super) fn next_n() -> u64 {
+            COUNTER.get_or_init(Counter::new).take()
+        }
+
+        pub(super) fn put(row: &mut Row, field: &str, value: &impl serde::Serialize) {
+            let value = serde_json::to_value(value).expect("fixture values serialize to JSON");
+            row.insert(field.to_string(), value);
+        }
+
+        /// A relation to a single-column key: `{ "<key field>": key }`.
+        pub(super) fn link(key_field: &str, key: &impl serde::Serialize) -> serde_json::Value {
+            let mut object = Row::new();
+            put(&mut object, key_field, key);
+            serde_json::Value::Object(object)
+        }
+
+        /// A relation to a composite key, already an object of its parts.
+        pub(super) fn link_parts(key: &impl serde::Serialize) -> serde_json::Value {
+            serde_json::to_value(key).expect("fixture keys serialize to JSON")
+        }
+
+        const BASE_SECONDS: u64 = 946_684_800;
+
+        /// 2000-01-01T00:00:00Z plus up to about 31 years of seconds.
+        pub(super) fn timestamp(n: u64) -> String {
+            let seconds = BASE_SECONDS + n % 1_000_000_000;
+            let (y, m, d) = civil(seconds / 86_400);
+            let s = seconds % 86_400;
+            format!(
+                "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+                s / 3600,
+                s / 60 % 60,
+                s % 60
+            )
+        }
+
+        /// 2000-01-01 plus up to 100 years of days.
+        pub(super) fn date(n: u64) -> String {
+            let (y, m, d) = civil(BASE_SECONDS / 86_400 + n % 36_500);
+            format!("{y:04}-{m:02}-{d:02}")
+        }
+
+        /// A time of day.
+        pub(super) fn time(n: u64) -> String {
+            let s = n % 86_400;
+            format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+        }
+
+        pub(super) fn uuid(n: u64) -> String {
+            format!(
+                "{:08x}-0000-4000-8000-{:012x}",
+                n >> 48,
+                n & 0xffff_ffff_ffff
+            )
+        }
+
+        pub(super) fn ulid(n: u64) -> String {
+            format!("{n:026}")
+        }
+
+        /// The civil date `days` after 1970-01-01.
+        fn civil(days: u64) -> (u64, u64, u64) {
+            let z = days + 719_468;
+            let era = z / 146_097;
+            let doe = z % 146_097;
+            let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = yoe + era * 400 + u64::from(m <= 2);
+            (y, m, d)
+        }
+
+        pub(super) async fn insert<R: serde::de::DeserializeOwned>(
+            to: &impl FixtureTransport,
+            model: &str,
+            row: Row,
+            shard: &str,
+        ) -> Result<R, ClientError> {
+            let stored = to
+                .insert_fixture(model, serde_json::Value::Object(row), shard)
+                .await?;
+            serde_json::from_value(stored).map_err(ClientError::decode)
+        }
+
+        /// A wire-shaped reply (`status` + body) as a stored row or a client error.
+        pub(super) fn reply(status: u16, body: serde_json::Value) -> Result<serde_json::Value, ClientError> {
+            if status == 200 {
+                return Ok(body);
+            }
+            let code = body["error"]["code"].as_str().unwrap_or("error");
+            let message = body["error"]["message"].as_str().unwrap_or("fixture insert failed");
+            Err(ClientError::api(status, code, message))
+        }
+    }
+
+    /// Where a `based fixtures` process runs; [`connect`] starts it.
+    #[derive(Debug, Clone)]
+    pub struct Connect {
+        database_url: String,
+        cwd: Option<std::path::PathBuf>,
+        binary: Option<std::path::PathBuf>,
+    }
+
+    impl Connect {
+        /// Insert into the database at `database_url`.
+        pub fn new(database_url: impl Into<String>) -> Self {
+            Self {
+                database_url: database_url.into(),
+                cwd: None,
+                binary: None,
+            }
+        }
+
+        /// The project directory holding `based.toml` (default: the current directory).
+        #[must_use]
+        pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+            self.cwd = Some(dir.into());
+            self
+        }
+
+        /// The `based` executable (default: `BASED_BIN`, then `based` on the PATH).
+        #[must_use]
+        pub fn binary(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.binary = Some(path.into());
+            self
+        }
+    }
+
+    /// Start a `based fixtures` process. It reads requests on stdin and opens no socket;
+    /// dropping the [`Connection`] ends it.
+    pub fn connect(options: Connect) -> Result<Connection, ClientError> {
+        let binary = options
+            .binary
+            .or_else(|| std::env::var_os("BASED_BIN").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("based"));
+        let mut command = std::process::Command::new(binary);
+        command
+            .args(["fixtures", "--database-url", &options.database_url])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit());
+        if let Some(cwd) = &options.cwd {
+            command.current_dir(cwd);
+        }
+        let mut child = command.spawn().map_err(ClientError::transport)?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().map(std::io::BufReader::new);
+        match (stdin, stdout) {
+            (Some(stdin), Some(stdout)) => Ok(Connection {
+                io: std::sync::Mutex::new(ProcessIo {
+                    child,
+                    stdin: Some(stdin),
+                    stdout,
+                }),
+            }),
+            _ => Err(ClientError::transport("based fixtures has no stdio pipes")),
+        }
+    }
+
+    /// A running `based fixtures` process; inserts are answered in order.
+    pub struct Connection {
+        io: std::sync::Mutex<ProcessIo>,
+    }
+
+    struct ProcessIo {
+        child: std::process::Child,
+        stdin: Option<std::process::ChildStdin>,
+        stdout: std::io::BufReader<std::process::ChildStdout>,
+    }
+
+    impl FixtureTransport for Connection {
+        async fn insert_fixture(
+            &self,
+            model: &str,
+            row: serde_json::Value,
+            shard: &str,
+        ) -> Result<serde_json::Value, ClientError> {
+            let request = serde_json::json!({ "model": model, "row": row, "shard": shard });
+            let mut io = self
+                .io
+                .lock()
+                .map_err(|_| ClientError::transport("the fixtures connection is poisoned"))?;
+            let io = &mut *io;
+            let stdin = io
+                .stdin
+                .as_mut()
+                .ok_or_else(|| ClientError::transport("the fixtures connection is closed"))?;
+            std::io::Write::write_all(stdin, format!("{request}\n").as_bytes())
+                .and_then(|()| std::io::Write::flush(stdin))
+                .map_err(ClientError::transport)?;
+            let mut line = String::new();
+            let read = std::io::BufRead::read_line(&mut io.stdout, &mut line)
+                .map_err(ClientError::transport)?;
+            if read == 0 {
+                return Err(ClientError::transport("based fixtures exited"));
+            }
+            let reply: serde_json::Value = serde_json::from_str(&line).map_err(ClientError::decode)?;
+            match reply.get("row") {
+                Some(row) => Ok(row.clone()),
+                None => {
+                    let status = reply["status"].as_u64().and_then(|s| u16::try_from(s).ok());
+                    support::reply(status.unwrap_or(400), reply)
+                }
+            }
+        }
+    }
+
+    impl Drop for Connection {
+        fn drop(&mut self) {
+            if let Ok(io) = self.io.get_mut() {
+                drop(io.stdin.take());
+                let _ = io.child.wait();
+            }
+        }
+    }
+
+    impl FixtureTransport for Embedded<'_> {
+        async fn insert_fixture(
+            &self,
+            model: &str,
+            row: serde_json::Value,
+            shard: &str,
+        ) -> Result<serde_json::Value, ClientError> {
+            let resp = self.engine.insert_fixture(model, row, shard).await;
+            support::reply(resp.status, resp.body)
+        }
+    }
+
+    /// A transaction's connection is already chosen, so the shard key does not apply.
+    impl FixtureTransport for based_runtime::TxTransport {
+        async fn insert_fixture(
+            &self,
+            model: &str,
+            row: serde_json::Value,
+            _shard: &str,
+        ) -> Result<serde_json::Value, ClientError> {
+            let resp = based_runtime::TxTransport::insert_fixture(self, model, row).await;
+            support::reply(resp.status, resp.body)
+        }
+    }
+
+    /// An adopted transaction's connection is already chosen, so the shard key does not
+    /// apply.
+    impl<D: based_runtime::DbRead> FixtureTransport for based_runtime::AdoptedTransport<D> {
+        async fn insert_fixture(
+            &self,
+            model: &str,
+            row: serde_json::Value,
+            _shard: &str,
+        ) -> Result<serde_json::Value, ClientError> {
+            let resp = based_runtime::AdoptedTransport::insert_fixture(self, model, row).await;
+            support::reply(resp.status, resp.body)
+        }
+    }
+
+/// A stored `Comment` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentRow {
+    pub id: Id<entity::Comment>,
+    pub deleted_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub org: Id<entity::Org>,
+    pub ticket: Id<entity::Ticket>,
+    pub author: Id<entity::User>,
+    pub body: String,
+}
+impl RowRef<Id<entity::Comment>> for CommentRow {
+    fn key(&self) -> Id<entity::Comment> {
+        self.id.clone()
+    }
+}
+
+/// One `Comment` fixture row being built; [`comment`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct CommentFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `Comment` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn comment(org: impl RowRef<Id<entity::Org>>, ticket: impl RowRef<Id<entity::Ticket>>, author: impl RowRef<Id<entity::User>>) -> CommentFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("org".to_string(), support::link("id", &org.key()));
+    row.insert("ticket".to_string(), support::link("id", &ticket.key()));
+    row.insert("author".to_string(), support::link("id", &author.key()));
+    row.insert("body".to_string(), serde_json::Value::from(format!("body-{n}")));
+    CommentFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl CommentFixture {
+    pub fn id(mut self, value: Id<entity::Comment>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn created_at(mut self, value: impl Into<Timestamp>) -> Self {
+        let value: Timestamp = value.into();
+        support::put(&mut self.row, "created_at", &value);
+        self
+    }
+    pub fn org(mut self, value: impl RowRef<Id<entity::Org>>) -> Self {
+        self.row.insert("org".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn ticket(mut self, value: impl RowRef<Id<entity::Ticket>>) -> Self {
+        self.row.insert("ticket".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn author(mut self, value: impl RowRef<Id<entity::User>>) -> Self {
+        self.row.insert("author".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn body(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "body", &value);
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<CommentRow, ClientError> {
+        support::insert(to, "Comment", self.row, &self.shard).await
+    }
+}
+
+/// A stored `DraftNote` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DraftNoteRow {
+    pub id: Id<entity::DraftNote>,
+    pub created_at: Timestamp,
+    pub org: Id<entity::Org>,
+    pub author: Id<entity::User>,
+    pub ticket: Id<entity::Ticket>,
+    pub body: String,
+}
+impl RowRef<Id<entity::DraftNote>> for DraftNoteRow {
+    fn key(&self) -> Id<entity::DraftNote> {
+        self.id.clone()
+    }
+}
+
+/// One `DraftNote` fixture row being built; [`draft_note`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct DraftNoteFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `DraftNote` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn draft_note(org: impl RowRef<Id<entity::Org>>, author: impl RowRef<Id<entity::User>>, ticket: impl RowRef<Id<entity::Ticket>>) -> DraftNoteFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("org".to_string(), support::link("id", &org.key()));
+    row.insert("author".to_string(), support::link("id", &author.key()));
+    row.insert("ticket".to_string(), support::link("id", &ticket.key()));
+    row.insert("body".to_string(), serde_json::Value::from(format!("body-{n}")));
+    DraftNoteFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl DraftNoteFixture {
+    pub fn id(mut self, value: Id<entity::DraftNote>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn created_at(mut self, value: impl Into<Timestamp>) -> Self {
+        let value: Timestamp = value.into();
+        support::put(&mut self.row, "created_at", &value);
+        self
+    }
+    pub fn org(mut self, value: impl RowRef<Id<entity::Org>>) -> Self {
+        self.row.insert("org".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn author(mut self, value: impl RowRef<Id<entity::User>>) -> Self {
+        self.row.insert("author".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn ticket(mut self, value: impl RowRef<Id<entity::Ticket>>) -> Self {
+        self.row.insert("ticket".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn body(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "body", &value);
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<DraftNoteRow, ClientError> {
+        support::insert(to, "DraftNote", self.row, &self.shard).await
+    }
+}
+
+/// A stored `Org` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgRow {
+    pub id: Id<entity::Org>,
+    pub name: String,
+    pub slug: String,
+}
+impl RowRef<Id<entity::Org>> for OrgRow {
+    fn key(&self) -> Id<entity::Org> {
+        self.id.clone()
+    }
+}
+
+/// One `Org` fixture row being built; [`org`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct OrgFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `Org` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn org() -> OrgFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("name".to_string(), serde_json::Value::from(format!("name-{n}")));
+    row.insert("slug".to_string(), serde_json::Value::from(format!("slug-{n}")));
+    OrgFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl OrgFixture {
+    pub fn id(mut self, value: Id<entity::Org>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "name", &value);
+        self
+    }
+    pub fn slug(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "slug", &value);
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<OrgRow, ClientError> {
+        support::insert(to, "Org", self.row, &self.shard).await
+    }
+}
+
+/// A stored `Session` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRow {
+    pub id: Id<entity::Session>,
+    pub org: Id<entity::Org>,
+    pub user: Id<entity::User>,
+    pub token: String,
+}
+impl RowRef<Id<entity::Session>> for SessionRow {
+    fn key(&self) -> Id<entity::Session> {
+        self.id.clone()
+    }
+}
+
+/// One `Session` fixture row being built; [`session`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct SessionFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `Session` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn session(org: impl RowRef<Id<entity::Org>>, user: impl RowRef<Id<entity::User>>) -> SessionFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("org".to_string(), support::link("id", &org.key()));
+    row.insert("user".to_string(), support::link("id", &user.key()));
+    row.insert("token".to_string(), serde_json::Value::from(format!("token-{n}")));
+    SessionFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl SessionFixture {
+    pub fn id(mut self, value: Id<entity::Session>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn org(mut self, value: impl RowRef<Id<entity::Org>>) -> Self {
+        self.row.insert("org".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn user(mut self, value: impl RowRef<Id<entity::User>>) -> Self {
+        self.row.insert("user".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn token(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "token", &value);
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<SessionRow, ClientError> {
+        support::insert(to, "Session", self.row, &self.shard).await
+    }
+}
+
+/// A stored `Ticket` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketRow {
+    pub id: Id<entity::Ticket>,
+    pub deleted_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub org: Id<entity::Org>,
+    pub requester: Id<entity::User>,
+    pub assignee: Option<Id<entity::User>>,
+    pub subject: String,
+    pub status: Status,
+    pub priority: Priority,
+    pub tags: Option<Json>,
+    pub duplicate_of: Option<Id<entity::Ticket>>,
+}
+impl RowRef<Id<entity::Ticket>> for TicketRow {
+    fn key(&self) -> Id<entity::Ticket> {
+        self.id.clone()
+    }
+}
+
+/// One `Ticket` fixture row being built; [`ticket`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct TicketFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `Ticket` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn ticket(org: impl RowRef<Id<entity::Org>>, requester: impl RowRef<Id<entity::User>>) -> TicketFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("org".to_string(), support::link("id", &org.key()));
+    row.insert("requester".to_string(), support::link("id", &requester.key()));
+    row.insert("subject".to_string(), serde_json::Value::from(format!("subject-{n}")));
+    TicketFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl TicketFixture {
+    pub fn id(mut self, value: Id<entity::Ticket>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn created_at(mut self, value: impl Into<Timestamp>) -> Self {
+        let value: Timestamp = value.into();
+        support::put(&mut self.row, "created_at", &value);
+        self
+    }
+    pub fn updated_at(mut self, value: impl Into<Timestamp>) -> Self {
+        let value: Timestamp = value.into();
+        support::put(&mut self.row, "updated_at", &value);
+        self
+    }
+    pub fn org(mut self, value: impl RowRef<Id<entity::Org>>) -> Self {
+        self.row.insert("org".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn requester(mut self, value: impl RowRef<Id<entity::User>>) -> Self {
+        self.row.insert("requester".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn assignee(mut self, value: impl RowRef<Id<entity::User>>) -> Self {
+        self.row.insert("assignee".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn subject(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "subject", &value);
+        self
+    }
+    pub fn status(mut self, value: Status) -> Self {
+        support::put(&mut self.row, "status", &value);
+        self
+    }
+    pub fn priority(mut self, value: Priority) -> Self {
+        support::put(&mut self.row, "priority", &value);
+        self
+    }
+    pub fn tags(mut self, value: Json) -> Self {
+        support::put(&mut self.row, "tags", &value);
+        self
+    }
+    pub fn duplicate_of(mut self, value: impl RowRef<Id<entity::Ticket>>) -> Self {
+        self.row.insert("duplicate_of".to_string(), support::link("id", &value.key()));
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<TicketRow, ClientError> {
+        support::insert(to, "Ticket", self.row, &self.shard).await
+    }
+}
+
+/// A stored `TimeEntry` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEntryRow {
+    pub id: Id<entity::TimeEntry>,
+    pub ticket: Id<entity::Ticket>,
+    pub agent: Id<entity::User>,
+    pub hours: f64,
+    pub amount: Decimal,
+    pub note: Option<String>,
+    pub logged_at: Timestamp,
+}
+impl RowRef<Id<entity::TimeEntry>> for TimeEntryRow {
+    fn key(&self) -> Id<entity::TimeEntry> {
+        self.id.clone()
+    }
+}
+
+/// One `TimeEntry` fixture row being built; [`time_entry`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct TimeEntryFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `TimeEntry` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn time_entry(ticket: impl RowRef<Id<entity::Ticket>>, agent: impl RowRef<Id<entity::User>>) -> TimeEntryFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("ticket".to_string(), support::link("id", &ticket.key()));
+    row.insert("agent".to_string(), support::link("id", &agent.key()));
+    row.insert("hours".to_string(), serde_json::Value::from(n as f64));
+    row.insert("amount".to_string(), serde_json::Value::from((n % 100000000).to_string()));
+    row.insert("logged_at".to_string(), serde_json::Value::from(support::timestamp(n)));
+    TimeEntryFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl TimeEntryFixture {
+    pub fn id(mut self, value: Id<entity::TimeEntry>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn ticket(mut self, value: impl RowRef<Id<entity::Ticket>>) -> Self {
+        self.row.insert("ticket".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn agent(mut self, value: impl RowRef<Id<entity::User>>) -> Self {
+        self.row.insert("agent".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn hours(mut self, value: f64) -> Self {
+        support::put(&mut self.row, "hours", &value);
+        self
+    }
+    pub fn amount(mut self, value: Decimal) -> Self {
+        support::put(&mut self.row, "amount", &value);
+        self
+    }
+    pub fn note(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "note", &value);
+        self
+    }
+    pub fn logged_at(mut self, value: impl Into<Timestamp>) -> Self {
+        let value: Timestamp = value.into();
+        support::put(&mut self.row, "logged_at", &value);
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<TimeEntryRow, ClientError> {
+        support::insert(to, "TimeEntry", self.row, &self.shard).await
+    }
+}
+
+/// A stored `User` row, as a fixture insert returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRow {
+    pub id: Id<entity::User>,
+    pub org: Id<entity::Org>,
+    pub name: String,
+    pub email: String,
+    pub role: Role,
+    pub rate: Option<Decimal>,
+}
+impl RowRef<Id<entity::User>> for UserRow {
+    fn key(&self) -> Id<entity::User> {
+        self.id.clone()
+    }
+}
+
+/// One `User` fixture row being built; [`user`] starts one.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct UserFixture {
+    row: serde_json::Map<String, serde_json::Value>,
+    shard: String,
+}
+
+/// A new `User` fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn user(org: impl RowRef<Id<entity::Org>>) -> UserFixture {
+    let n = support::next_n();
+    let mut row = serde_json::Map::new();
+    row.insert("org".to_string(), support::link("id", &org.key()));
+    row.insert("name".to_string(), serde_json::Value::from(format!("name-{n}")));
+    row.insert("email".to_string(), serde_json::Value::from(format!("email-{n}")));
+    UserFixture {
+        row,
+        shard: String::new(),
+    }
+}
+
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+impl UserFixture {
+    pub fn id(mut self, value: Id<entity::User>) -> Self {
+        support::put(&mut self.row, "id", &value);
+        self
+    }
+    pub fn org(mut self, value: impl RowRef<Id<entity::Org>>) -> Self {
+        self.row.insert("org".to_string(), support::link("id", &value.key()));
+        self
+    }
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "name", &value);
+        self
+    }
+    pub fn email(mut self, value: impl Into<String>) -> Self {
+        let value: String = value.into();
+        support::put(&mut self.row, "email", &value);
+        self
+    }
+    pub fn role(mut self, value: Role) -> Self {
+        support::put(&mut self.row, "role", &value);
+        self
+    }
+    pub fn rate(mut self, value: Decimal) -> Self {
+        support::put(&mut self.row, "rate", &value);
+        self
+    }
+    /// Insert on the shard this key routes to (default: the empty key).
+    pub fn on_shard(mut self, key: impl Into<String>) -> Self {
+        self.shard = key.into();
+        self
+    }
+
+    /// Insert the row and return it as stored.
+    pub async fn insert(self, to: &impl FixtureTransport) -> Result<UserRow, ClientError> {
+        support::insert(to, "User", self.row, &self.shard).await
+    }
+}
+}
+
 /// An exact decimal backed by `bigdecimal::BigDecimal`. JSON always carries a
 /// plain decimal string; no float conversion or scientific notation enters SQL.
 #[derive(Debug, Clone, PartialEq, Eq)]

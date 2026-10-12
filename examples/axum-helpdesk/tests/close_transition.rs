@@ -1,6 +1,7 @@
 //! Exercise the actual helpdesk schema and preflight policy against Postgres.
 //! Run after migrations with DATABASE_URL pointing to a disposable test database.
 
+use axum_helpdesk::client::{self, fixtures};
 use axum_helpdesk::close_policy;
 use based_runtime::id::UuidGen;
 use based_runtime::{
@@ -27,35 +28,25 @@ impl Desk {
         };
         let pool = PgPool::connect(&url).await.unwrap();
         let engine = engine(&pool, policy());
-        let unique = uuid::Uuid::new_v4();
-        let org = fixture(
-            &engine,
-            "Org",
-            json!({ "name": "Transition test", "slug": unique.to_string() }),
-        )
-        .await;
-        let user = fixture(
-            &engine,
-            "User",
-            json!({
-                "org": { "id": org },
-                "name": "Agent",
-                "email": format!("{unique}@transition.test"),
-                "role": "agent",
-            }),
-        )
-        .await;
-        let ticket = fixture(
-            &engine,
-            "Ticket",
-            json!({
-                "org": { "id": org },
-                "requester": { "id": user },
-                "subject": "Transition",
-                "status": "resolved",
-            }),
-        )
-        .await;
+        let api = client::embedded(&engine);
+        let org = fixtures::org().name("Transition test").insert(&api).await.unwrap();
+        let user = fixtures::user(&org)
+            .name("Agent")
+            .role(client::Role::Agent)
+            .insert(&api)
+            .await
+            .unwrap();
+        let ticket = fixtures::ticket(&org, &user)
+            .subject("Transition")
+            .status(client::Status::Resolved)
+            .insert(&api)
+            .await
+            .unwrap();
+        let (org, user, ticket) = (
+            org.id.into_raw(),
+            user.id.into_raw(),
+            ticket.id.into_raw(),
+        );
         Some(Self {
             pool,
             org,
@@ -110,13 +101,6 @@ impl Desk {
 fn engine(pool: &PgPool, guards: Guards) -> Engine {
     let compiled = Compiled::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
     Engine::with_guards(compiled, PgRouter::from_pool(pool.clone()), UuidGen, guards).unwrap()
-}
-
-/// Insert one fixture row and return its id.
-async fn fixture(engine: &Engine, model: &str, row: Value) -> String {
-    let inserted = engine.insert_fixture(model, row).await;
-    assert_eq!(inserted.status, 200, "{model} fixture: {:?}", inserted.body);
-    inserted.body["id"].as_str().unwrap().to_string()
 }
 
 fn policy() -> Guards {

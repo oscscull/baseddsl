@@ -7,7 +7,10 @@ pub(super) fn placeholder_expr(field: &str, placeholder: &Placeholder) -> String
         Placeholder::Text => format!("serde_json::Value::from(format!(\"{field}-{{n}}\"))"),
         Placeholder::Int => "serde_json::Value::from(n)".to_string(),
         Placeholder::Float => "serde_json::Value::from(n as f64)".to_string(),
-        Placeholder::Decimal => "serde_json::Value::from(n.to_string())".to_string(),
+        Placeholder::Decimal { whole_digits } => format!(
+            "serde_json::Value::from((n % {}).to_string())",
+            10u64.pow(*whole_digits)
+        ),
         Placeholder::Bool => "serde_json::Value::Bool(false)".to_string(),
         Placeholder::Enum(EnumValue::Str(wire)) => format!("serde_json::Value::from({wire:?})"),
         Placeholder::Enum(EnumValue::Int(value)) => format!("serde_json::Value::from({value}_i64)"),
