@@ -39,14 +39,19 @@ to hold data steps.
 generated columns, missing required columns, and a non-unique conflict target
 are errors, as is anything the target dialect can't run. `data.set` reads a key
 of a `json` column. `child.any(…)` tests for a row in the table whose foreign
-key points here.
+key points here; when it has several, name one: `deck.any(by partner_id, …)`.
+Enum values are written bare in their stored spelling (`status = OPEN`). A
+`create` that omits the primary key gets an id minted at apply time with the
+project's id strategy (uuid or ulid).
 
 `chunk N [by col] [pause 200ms]` on an `update` or `delete` walks the primary
 key (or `col`, which must be unique or indexed) `N` rows at a time, one
 transaction per batch. Progress is recorded, so an interrupted apply resumes.
 
 `--down` reverses a migration of literal-row `create`s by itself. Any other
-data step needs a `down.mig`.
+data step needs a `down.mig`. `migrate gen` writes it as a `format 2` script of
+`raw(<dialect>)` reverse lines, and data steps can sit between them; they are
+checked against the state the up migration leaves.
 
 ## Recovery
 

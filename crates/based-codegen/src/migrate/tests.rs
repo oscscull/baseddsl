@@ -1073,12 +1073,12 @@ fn render_down_prefills_reversible_and_flags_the_rest() {
     let down = render_down(&steps, Sqlite);
     // Reversible steps became real reverse SQL.
     assert!(
-        down.contains("ALTER TABLE `widget` DROP COLUMN `size`;"),
+        down.contains("ALTER TABLE `widget` DROP COLUMN `size`"),
         "\n{down}"
     );
-    assert!(down.contains("DROP TABLE `gadget`;"), "\n{down}");
+    assert!(down.contains("DROP TABLE `gadget`"), "\n{down}");
     assert!(
-        down.contains("ALTER TABLE `widget` RENAME COLUMN `barcode` TO `upc`;"),
+        down.contains("ALTER TABLE `widget` RENAME COLUMN `barcode` TO `upc`"),
         "\n{down}"
     );
     // The drop-column can't be reversed → a loud comment inviting a hand-written reverse.

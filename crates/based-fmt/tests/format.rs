@@ -235,6 +235,12 @@ fn in_value_list_formats_canonically() {
 }
 
 #[test]
+fn relation_any_by_formats_canonically() {
+    let got = fmt("filter f = decks.any( by partner ,  live );");
+    assert_eq!(got, "filter f = decks.any(by partner, live);\n");
+}
+
+#[test]
 fn relation_any_formats_canonically() {
     let got = fmt("filter f = printings.any( digital = false and (lang = \"en\" or lang = \"ja\") ) and not decks.any( );");
     assert_eq!(

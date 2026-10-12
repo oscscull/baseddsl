@@ -26,17 +26,24 @@
 //! each run inside a transaction that also deletes the ledger row. A migration with no
 //! `down.mig` is roll-forward only ([`MigrateError::NoDown`]).
 
+#[path = "migrate_bind.rs"]
+mod bind;
 #[path = "migration_failure.rs"]
 mod failure;
+#[path = "migrate_progress.rs"]
+mod progress;
 #[path = "migrate_resume.rs"]
 mod resume;
+#[cfg(feature = "id-gen")]
+pub use bind::production_mint;
+pub use bind::Mint;
 pub use failure::MigrationFailure;
 pub use resume::ChunkProgress;
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use based_codegen::migrate::{self, Snapshot, UpUnit};
+use based_codegen::migrate::{self, PlanUnit, Snapshot};
 use based_codegen::Dialect;
 
 use crate::run::{fetch_all, Backend, DbError, DbRead, Row};
@@ -55,7 +62,7 @@ pub struct PlannedMigration {
     pub id: String,
     /// The executable up units for the target dialect, in order: statements (structural
     /// steps derive from the snapshots) and chunked data steps.
-    pub up: Vec<UpUnit>,
+    pub up: Vec<PlanUnit>,
     /// The `up.mig` content hash — the ledger tamper guard.
     pub up_hash: String,
     /// Any up step is destructive (a drop / narrowing / new not-null-without-default /
@@ -64,9 +71,10 @@ pub struct PlannedMigration {
     /// Teach-at-checkpoint messages: a drop-one-column/add-one-same-family-column pair on a
     /// table is ambiguous with a rename, so the destructive gate points at `@was` (D105).
     pub rename_hints: Vec<String>,
-    /// The down statements: the author-written `down.mig` (raw per-dialect SQL, split into
-    /// statements), else the automatic reverse of a migration of literal-row creates.
-    pub down_sql: Option<Vec<String>>,
+    /// The down units: the author-written `down.mig` (a `format 2` script of raw lines and
+    /// data steps, or legacy raw SQL), else the automatic reverse of a migration of
+    /// literal-row creates. `None` = roll-forward only.
+    pub down: Option<Vec<PlanUnit>>,
 }
 
 /// One recorded row of the `_based_migrations` ledger.
@@ -97,6 +105,9 @@ pub struct ApplyOpts {
     pub direction: Direction,
     /// Called after each committed batch of a chunked data step.
     pub progress: Option<fn(&ChunkProgress)>,
+    /// Mints the ids a data-step `create` omits, with the project's id strategy (the
+    /// production generator when built with `id-gen`).
+    pub mint: Option<Mint>,
 }
 
 impl Default for ApplyOpts {
@@ -105,8 +116,19 @@ impl Default for ApplyOpts {
             allow_destructive: false,
             direction: Direction::Up,
             progress: None,
+            mint: default_mint(),
         }
     }
+}
+
+#[cfg(feature = "id-gen")]
+fn default_mint() -> Option<Mint> {
+    Some(production_mint)
+}
+
+#[cfg(not(feature = "id-gen"))]
+fn default_mint() -> Option<Mint> {
+    None
 }
 
 /// What [`apply`] did: the ids applied forward and rolled back, in execution order.
@@ -265,12 +287,22 @@ pub fn load_migrations(
         // silent no-op) until the author completes it.
         let down_path = path.join("down.mig");
         let authored = if down_path.is_file() {
-            let stmts = split_sql(&read_file(&down_path)?);
-            (!stmts.is_empty()).then_some(stmts)
+            migrate::plan_down(&snap, &read_file(&down_path)?, dialect)
+                .map_err(|problems| {
+                    MigrateError::Artifact(format!(
+                        "{name}/down.mig: {}",
+                        problems
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ))
+                })?
+                .map(|d| d.units)
         } else {
             None
         };
-        let down_sql = authored.or(plan.auto_down);
+        let down = authored.or(plan.auto_down);
 
         out.push(PlannedMigration {
             number: *number,
@@ -279,7 +311,7 @@ pub fn load_migrations(
             up_hash,
             destructive,
             rename_hints,
-            down_sql,
+            down,
         });
         prev = snap;
     }
@@ -316,25 +348,6 @@ fn migration_dirs(dir: &Path) -> Result<Vec<(u32, String, std::path::PathBuf)>, 
 fn read_file(path: &Path) -> Result<String, MigrateError> {
     std::fs::read_to_string(path)
         .map_err(|e| MigrateError::Io(format!("reading {}: {e}", path.display())))
-}
-
-/// Split a raw SQL script into individual statements on `;`, dropping `--`/`#` comment lines
-/// and blank fragments. A `down.mig` is hand-written raw SQL, terminated by `;`.
-fn split_sql(script: &str) -> Vec<String> {
-    script
-        .split(';')
-        .map(|frag| {
-            frag.lines()
-                .filter(|l| {
-                    let t = l.trim_start();
-                    !t.starts_with("--") && !t.starts_with('#')
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 // ---------- the ledger -----------------------------------------------------
@@ -520,10 +533,16 @@ pub async fn apply(
     rollback.sort_by_key(|m| std::cmp::Reverse(m.number));
     for m in rollback {
         let down = m
-            .down_sql
+            .down
             .as_ref()
             .ok_or_else(|| MigrateError::NoDown { id: m.id.clone() })?;
-        run_in_tx(backend, down, LedgerOp::Delete(&m.id), dialect).await?;
+        let run = resume::Run {
+            id: &m.id,
+            hash: &m.up_hash,
+            down: true,
+            units: down,
+        };
+        run_migration(backend, dialect, &run, opts).await?;
         report.rolled_back.push(m.id.clone());
     }
 
@@ -542,42 +561,44 @@ pub async fn apply(
                 applied: report.applied.clone(),
             });
         }
-        apply_one(backend, dialect, m, opts).await?;
+        let run = resume::Run {
+            id: &m.id,
+            hash: &m.up_hash,
+            down: false,
+            units: &m.up,
+        };
+        run_migration(backend, dialect, &run, opts).await?;
         report.applied.push(m.id.clone());
     }
 
     Ok(report)
 }
 
-/// Apply one pending migration forward. A chunked data step commits batch by batch, so its
-/// migration applies resumably; any other migration runs in one transaction with its
-/// ledger row.
-async fn apply_one(
+/// Run one direction of one migration. A chunked data step commits batch by batch, so its
+/// run is resumable; any other runs in one transaction with its ledger update.
+async fn run_migration(
     backend: &dyn Backend,
     dialect: Dialect,
-    m: &PlannedMigration,
+    run: &resume::Run<'_>,
     opts: &ApplyOpts,
 ) -> Result<(), MigrateError> {
-    if m.up.iter().any(|u| matches!(u, UpUnit::Chunked(_))) {
-        return resume::apply_resumable(backend, dialect, m, opts.progress).await;
+    if run.units.iter().any(|u| matches!(u, PlanUnit::Chunked(_))) {
+        return resume::run_resumable(backend, dialect, run, opts).await;
     }
-    let stmts: Vec<String> =
-        m.up.iter()
-            .filter_map(|u| match u {
-                UpUnit::Sql(s) => Some(s.clone()),
-                UpUnit::Chunked(_) => None,
-            })
-            .collect();
-    run_in_tx(
-        backend,
-        &stmts,
+    let stmts = run
+        .units
+        .iter()
+        .map(|u| bind::bind(u, run.id, opts.mint))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ledger = if run.down {
+        LedgerOp::Delete(run.id)
+    } else {
         LedgerOp::Insert {
-            id: &m.id,
-            hash: &m.up_hash,
-        },
-        dialect,
-    )
-    .await
+            id: run.id,
+            hash: run.hash,
+        }
+    };
+    run_in_tx(backend, &stmts, ledger, dialect).await
 }
 
 /// The ledger write a migration's transaction ends with.
@@ -590,7 +611,7 @@ enum LedgerOp<'a> {
 /// commit; failures must identify the operation without promising rollback.
 async fn run_in_tx(
     backend: &dyn Backend,
-    stmts: &[String],
+    stmts: &[bind::Bound],
     ledger: LedgerOp<'_>,
     dialect: Dialect,
 ) -> Result<(), MigrateError> {
@@ -613,7 +634,7 @@ async fn run_in_tx(
         .map_err(|e| failed("checkout".into(), e))?;
     let mut tx = db.begin().await.map_err(|e| failed("begin".into(), e))?;
     for (index, s) in stmts.iter().enumerate() {
-        tx.execute(s, &[])
+        tx.execute(&s.sql, &s.params)
             .await
             .map_err(|e| failed(format!("statement {} of {}", index + 1, stmts.len()), e))?;
     }
@@ -677,18 +698,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_sql_drops_comments_and_blanks() {
-        let script = "-- reverse\nDROP TABLE `widget`;\n# another\nDROP INDEX `x`;\n";
-        assert_eq!(
-            split_sql(script),
-            vec![
-                "DROP TABLE `widget`".to_string(),
-                "DROP INDEX `x`".to_string()
-            ]
-        );
-    }
-
-    #[test]
     fn ledger_sql_binds_dialect_placeholders() {
         assert!(insert_ledger_sql(Dialect::Postgres).contains("VALUES ($1, $2, CURRENT_TIMESTAMP)"));
         assert!(insert_ledger_sql(Dialect::MariaDb).contains("VALUES (?, ?, CURRENT_TIMESTAMP)"));
@@ -705,7 +714,7 @@ mod tests {
             up_hash: hash.to_string(),
             destructive: false,
             rename_hints: vec![],
-            down_sql: None,
+            down: None,
         }
     }
 

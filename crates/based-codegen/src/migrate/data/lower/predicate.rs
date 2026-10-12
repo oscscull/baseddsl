@@ -37,7 +37,12 @@ impl Lw<'_> {
                     self.dialect.bool_lit(true)
                 )
             }
-            Predicate::Any { path, pred } => self.exists(path, pred.as_deref(), t)?,
+            Predicate::Any { path, by, pred } => self.exists(
+                path,
+                by.as_ref().map(|b| b.node.as_str()),
+                pred.as_deref(),
+                t,
+            )?,
             Predicate::FilterCall { name, .. } => {
                 return Err(Self::fail(
                     name.span,
@@ -91,26 +96,25 @@ impl Lw<'_> {
     fn exists(
         &self,
         path: &Path,
+        by: Option<&str>,
         pred: Option<&Predicate>,
         t: &TableView,
     ) -> Result<String, DataError> {
         let span = span_of(path);
-        let (child, link) =
-            child_link(self.snap, t, &path.segments[0].node).map_err(|m| Self::fail(span, m))?;
-        if self.writes_root && child.name() == self.root && self.dialect.is_mysql_family() {
-            return Err(Self::fail(
-                span,
-                format!(
-                    "{} can't read `{}` in a subquery of a statement writing it — use a raw({}) line",
-                    self.dialect.name(),
-                    self.root,
-                    self.dialect.name()
-                ),
-            ));
-        }
+        let (child, link) = child_link(self.snap, t, &path.segments[0].node, by)
+            .map_err(|m| Self::fail(span, m))?;
         self.sub.set(self.sub.get() + 1);
         let alias = format!("s{}_{}", self.sub.get(), child.name());
         let parent = self.qualify.clone().unwrap_or_else(|| t.name().to_string());
+        let inner = self.nested(alias.clone());
+        let filter = pred.map(|p| inner.predicate(p, &child)).transpose()?;
+        self.sub.set(inner.sub.get());
+        let from = format!("{} AS {}", self.qt(&child), self.q(&alias));
+        // MySQL/MariaDB can't read the table a statement writes in a subquery; a derived
+        // table is materialized first, so its rows are read before the write.
+        if self.writes_root && child.name() == self.root && self.dialect.is_mysql_family() {
+            return Ok(self.materialized(&link, &parent, &alias, &from, filter));
+        }
         let mut wheres: Vec<String> = link
             .iter()
             .map(|(c, p)| {
@@ -121,17 +125,55 @@ impl Lw<'_> {
                 )
             })
             .collect();
-        let inner = self.nested(alias.clone());
-        if let Some(p) = pred {
-            wheres.push(inner.predicate(p, &child)?);
-        }
-        self.sub.set(inner.sub.get());
+        wheres.extend(filter);
         Ok(format!(
-            "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",
-            self.qt(&child),
-            self.q(&alias),
+            "EXISTS (SELECT 1 FROM {from} WHERE {})",
             wheres.join(" AND ")
         ))
+    }
+
+    /// `(<parent key>) IN (SELECT * FROM (SELECT <child fk> FROM … WHERE …) AS d<n>)` — the
+    /// uncorrelated form of `EXISTS` for a self-referential write.
+    fn materialized(
+        &self,
+        link: &[(String, String)],
+        parent: &str,
+        alias: &str,
+        from: &str,
+        filter: Option<String>,
+    ) -> String {
+        let mut wheres: Vec<String> = link
+            .iter()
+            .map(|(c, _)| format!("{} IS NOT NULL", self.dialect.qcol(alias, c)))
+            .collect();
+        wheres.extend(filter);
+        let keys: Vec<String> = link
+            .iter()
+            .enumerate()
+            .map(|(i, (c, _))| {
+                format!(
+                    "{} AS {}",
+                    self.dialect.qcol(alias, c),
+                    self.q(&format!("k{i}"))
+                )
+            })
+            .collect();
+        let parents: Vec<String> = link
+            .iter()
+            .map(|(_, p)| self.dialect.qcol(parent, p))
+            .collect();
+        let lhs = if let [one] = parents.as_slice() {
+            one.clone()
+        } else {
+            format!("({})", parents.join(", "))
+        };
+        self.sub.set(self.sub.get() + 1);
+        format!(
+            "{lhs} IN (SELECT * FROM (SELECT {} FROM {from} WHERE {}) AS {})",
+            keys.join(", "),
+            wheres.join(" AND "),
+            self.q(&format!("d{}", self.sub.get()))
+        )
     }
 }
 

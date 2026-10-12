@@ -4,7 +4,7 @@
 use super::super::diff::Step;
 use super::super::up_mig::render_step;
 use super::scan::{ItemKind, Scanned};
-use super::UpProblem;
+use super::ScriptProblem;
 
 /// One entry of an in-order migration, in execution order.
 pub(crate) enum Placed<'a> {
@@ -16,7 +16,7 @@ pub(crate) enum Placed<'a> {
 pub(crate) fn place<'a>(
     steps: &'a [Step],
     scanned: &'a Scanned<'_>,
-) -> Result<Vec<Placed<'a>>, UpProblem> {
+) -> Result<Vec<Placed<'a>>, ScriptProblem> {
     let counts: Vec<usize> = steps.iter().map(canonical_lines).collect();
     let mut out = Vec::with_capacity(steps.len() + scanned.items.len());
     let (mut next, mut seen) = (0usize, 0usize);
@@ -27,7 +27,8 @@ pub(crate) fn place<'a>(
             next += 1;
         }
         if seen != item.after {
-            return Err(UpProblem {
+            return Err(ScriptProblem {
+                file: "up.mig",
                 line: item.line,
                 message: "a data step or raw line can't sit inside a multi-line structural step"
                     .to_string(),

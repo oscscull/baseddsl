@@ -13,6 +13,9 @@ impl<'a> Parser<'a> {
                 _ if self.tok_at(1) == Some(Tok::LParen) => Ok(Value::Func(self.func_call()?)),
                 _ => Ok(Value::Path(self.path()?)),
             },
+            Some(Tok::UpperIdent) if self.any_case_labels => Ok(Value::Path(Path {
+                segments: vec![self.label()?],
+            })),
             _ => {
                 self.err("expected a value ($param, path, literal, or function call)");
                 Err(())
@@ -112,5 +115,22 @@ impl<'a> Parser<'a> {
         self.text(l).parse::<i64>().map_err(|_| {
             self.err("integer literal out of range");
         })
+    }
+
+    /// A capitalized enum value: the word plus any identifier/number tokens glued to it
+    /// (`IN_PROGRESS` lexes as `IN` + `_PROGRESS`).
+    fn label(&mut self) -> PResult<Ident> {
+        let mut label = self.upper_ident("an enum value")?;
+        while let Some(next) = self.peek() {
+            let glued = next.start == label.span.end
+                && matches!(next.tok, Tok::LowerIdent | Tok::UpperIdent | Tok::Int);
+            if !glued {
+                break;
+            }
+            self.bump();
+            label.node.push_str(self.text(next));
+            label.span.end = next.end;
+        }
+        Ok(label)
     }
 }

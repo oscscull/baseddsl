@@ -1,38 +1,38 @@
 //! Turn one migration's `up.mig` + snapshot pair into its executable units and review text
 //! for a dialect: structural SQL, `raw` escapes, and checked data steps, in execution order.
 
-use std::fmt::Write as _;
-
-use based_ast::FileId;
-
-use super::super::data::{check_step, invert, lower_step, ChunkPlan, DataError, Lowered};
+use super::super::data::invert;
 use super::super::diff::{diff_snapshots, Step};
 use super::super::evolve::evolve;
 use super::super::model::Snapshot;
 use super::super::sql::{migration_sql, render_migration, render_sql, sql_statements};
+use super::super::unit::PlanUnit;
+use super::data_item::{data_unit, review};
 use super::place::{place, Placed};
 use super::scan::{scan, ItemKind, FORMAT_MARKER};
-use super::UpProblem;
+use super::ScriptProblem;
 use crate::Dialect;
 
-/// One executable unit of a migration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpUnit {
-    Sql(String),
-    /// A chunked data step, run batch by batch.
-    Chunked(ChunkPlan),
-}
+const FILE: &str = "up.mig";
 
 /// A migration's up path for one dialect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpPlan {
-    pub units: Vec<UpUnit>,
+    pub units: Vec<PlanUnit>,
     /// The SQL a reviewer reads (`based migrate render`).
     pub review: String,
     /// The automatic down path, when every step is a reversible literal-row `create`.
-    pub auto_down: Option<Vec<String>>,
+    pub auto_down: Option<Vec<PlanUnit>>,
     /// The migration carries typed data steps.
     pub has_data: bool,
+}
+
+fn problem(line: usize, message: String) -> ScriptProblem {
+    ScriptProblem {
+        file: FILE,
+        line,
+        message,
+    }
 }
 
 /// Plan the migration from `prev` to `target` whose authored text is `up_text`. Structural
@@ -42,7 +42,7 @@ pub fn plan_up(
     target: &Snapshot,
     up_text: &str,
     dialect: Dialect,
-) -> Result<UpPlan, Vec<UpProblem>> {
+) -> Result<UpPlan, Vec<ScriptProblem>> {
     let steps = diff_snapshots(prev, target);
     let scanned = scan(up_text);
     if !scanned.in_order {
@@ -51,13 +51,13 @@ pub fn plan_up(
             .iter()
             .find(|i| matches!(i.kind, ItemKind::Data(_)))
         {
-            return Err(vec![UpProblem {
-                line: item.line,
-                message: format!(
+            return Err(vec![problem(
+                item.line,
+                format!(
                     "data steps run in written order — add `{FORMAT_MARKER}` as the first line \
                      (raw lines then run where they are written too)"
                 ),
-            }]);
+            )]);
         }
         return legacy_plan(&steps, up_text, dialect, target);
     }
@@ -98,13 +98,14 @@ pub fn plan_up(
     if !walk.problems.is_empty() {
         return Err(walk.problems);
     }
+    let auto_down = walk
+        .downs
+        .filter(|_| walk.has_data)
+        .map(|d| d.into_iter().rev().map(PlanUnit::Sql).collect());
     Ok(UpPlan {
         units: walk.units,
         review: walk.review,
-        auto_down: walk.downs.filter(|_| walk.has_data).map(|mut d| {
-            d.reverse();
-            d
-        }),
+        auto_down,
         has_data: walk.has_data,
     })
 }
@@ -115,19 +116,19 @@ fn legacy_plan(
     up_text: &str,
     dialect: Dialect,
     target: &Snapshot,
-) -> Result<UpPlan, Vec<UpProblem>> {
-    let problem = |message: String| vec![UpProblem { line: 0, message }];
+) -> Result<UpPlan, Vec<ScriptProblem>> {
+    let whole = |message: String| vec![problem(0, message)];
     let raws = super::super::diff::parse_raw_steps(up_text);
-    let mut units: Vec<UpUnit> = migration_sql(steps, dialect, target)
-        .map_err(problem)?
+    let mut units: Vec<PlanUnit> = migration_sql(steps, dialect, target)
+        .map_err(whole)?
         .into_iter()
-        .map(UpUnit::Sql)
+        .map(PlanUnit::Sql)
         .collect();
     units.extend(
         sql_statements(&raws, dialect)
-            .map_err(problem)?
+            .map_err(whole)?
             .into_iter()
-            .map(UpUnit::Sql),
+            .map(PlanUnit::Sql),
     );
     let mut all = steps.to_vec();
     all.extend(raws);
@@ -139,7 +140,7 @@ fn legacy_plan(
     })
 }
 
-fn header(dialect: Dialect) -> String {
+pub(crate) fn header(dialect: Dialect) -> String {
     format!(
         "-- Rendered by `based migrate render` (dialect: {}). Review before apply.\n",
         dialect.name()
@@ -147,7 +148,7 @@ fn header(dialect: Dialect) -> String {
 }
 
 /// Drop the leading "Rendered by" line of a rendered segment.
-fn body(rendered: &str) -> &str {
+pub(crate) fn body(rendered: &str) -> &str {
     rendered.split_once('\n').map_or("", |(_, rest)| rest)
 }
 
@@ -157,9 +158,9 @@ struct Walk {
     snap: Snapshot,
     /// Structural steps since the last raw/data item.
     pending: Vec<Step>,
-    units: Vec<UpUnit>,
+    units: Vec<PlanUnit>,
     review: String,
-    problems: Vec<UpProblem>,
+    problems: Vec<ScriptProblem>,
     /// Reverse statements so far; `None` once anything irreversible is seen.
     downs: Option<Vec<String>>,
     has_data: bool,
@@ -173,8 +174,8 @@ impl Walk {
         }
         let steps = std::mem::take(&mut self.pending);
         match migration_sql(&steps, self.dialect, &self.snap) {
-            Ok(stmts) => self.units.extend(stmts.into_iter().map(UpUnit::Sql)),
-            Err(message) => self.problems.push(UpProblem { line: 0, message }),
+            Ok(stmts) => self.units.extend(stmts.into_iter().map(PlanUnit::Sql)),
+            Err(message) => self.problems.push(problem(0, message)),
         }
         self.review
             .push_str(body(&render_migration(&steps, self.dialect, &self.snap)));
@@ -182,7 +183,7 @@ impl Walk {
 
     fn raw(&mut self, step: &Step) {
         if let Ok(stmts) = sql_statements(std::slice::from_ref(step), self.dialect) {
-            self.units.extend(stmts.into_iter().map(UpUnit::Sql));
+            self.units.extend(stmts.into_iter().map(PlanUnit::Sql));
         }
         self.review
             .push_str(body(&render_sql(std::slice::from_ref(step), self.dialect)));
@@ -190,52 +191,20 @@ impl Walk {
 
     fn data(&mut self, line: usize, text: &str) {
         self.has_data = true;
-        let at = |e: &DataError| UpProblem {
-            line: line
-                + text[..(e.span.start as usize).min(text.len())]
-                    .matches('\n')
-                    .count(),
-            message: e.message.clone(),
-        };
-        let step = match based_parser::parse_data_step(text, FileId(0)) {
-            Ok(s) => s,
-            Err(diags) => {
+        match data_unit(FILE, line, text, &self.snap, self.dialect) {
+            Ok((step, unit)) => {
+                self.review.push_str(&review(FILE, line, &unit));
+                self.units.push(unit);
+                let inverse = invert(&step, &self.snap, self.dialect);
+                match (&mut self.downs, inverse) {
+                    (Some(d), Some(sql)) => d.push(sql),
+                    (d, _) => *d = None,
+                }
+            }
+            Err(problems) => {
                 self.downs = None;
-                for d in diags {
-                    let start = d.span.map_or(0, |s| s.start as usize).min(text.len());
-                    self.problems.push(UpProblem {
-                        line: line + text[..start].matches('\n').count(),
-                        message: d.message,
-                    });
-                }
-                return;
+                self.problems.extend(problems);
             }
-        };
-        let errs = check_step(&step, &self.snap);
-        if !errs.is_empty() {
-            self.downs = None;
-            self.problems.extend(errs.iter().map(at));
-            return;
-        }
-        match lower_step(&step, &self.snap, self.dialect) {
-            Ok(Lowered::Sql(stmts)) => {
-                let _ = writeln!(self.review, "\n-- data step (up.mig line {line})");
-                for s in &stmts {
-                    let _ = writeln!(self.review, "{s};");
-                }
-                self.units.extend(stmts.into_iter().map(UpUnit::Sql));
-            }
-            Ok(Lowered::Chunked(plan)) => {
-                let _ = writeln!(self.review, "\n-- data step (up.mig line {line})");
-                let _ = writeln!(self.review, "{}", plan.review());
-                self.units.push(UpUnit::Chunked(plan));
-            }
-            Err(e) => self.problems.push(at(&e)),
-        }
-        let inverse = invert(&step, &self.snap, self.dialect);
-        match (&mut self.downs, inverse) {
-            (Some(d), Some(sql)) => d.push(sql),
-            (d, _) => *d = None,
         }
     }
 }

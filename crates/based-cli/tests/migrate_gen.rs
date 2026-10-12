@@ -192,7 +192,7 @@ fn gen_prefills_down_mig_with_reverse_sql() {
 
     let down = std::fs::read_to_string(s.0.join("migrations/0002_add_barcode/down.mig")).unwrap();
     assert!(
-        down.contains("ALTER TABLE `product` DROP COLUMN `barcode`;"),
+        down.contains("ALTER TABLE `product` DROP COLUMN `barcode`"),
         "\n{down}"
     );
     assert!(

@@ -62,3 +62,11 @@ fn any_reached_through_a_to_many_hop_is_an_error() {
     );
     assert_eq!(e, vec!["E0351"]);
 }
+
+#[test]
+fn by_is_for_migration_data_steps_only() {
+    let e = errs_with(
+        "query bad() -> CardRow[] { list Card where (printings.any(by card, digital = false)); }",
+    );
+    assert_eq!(e, vec!["E0351"]);
+}

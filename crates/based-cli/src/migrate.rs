@@ -241,6 +241,7 @@ pub async fn cmd_migrate_apply(
         allow_destructive,
         direction,
         progress: Some(report_chunk),
+        mint: Some(migrate::production_mint),
     };
 
     let urls = shard_urls(root, dialect, database_url)?;
@@ -370,6 +371,9 @@ pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
             std::fs::read_to_string(&up_path).map_err(|e| io_at("reading", &up_path, e))?;
         problems += verify_up_mig(name, &stored, &steps, &snap);
         problems += verify_data_steps(name, &stored, &prev, &snap, dialect);
+        if let Ok(down) = std::fs::read_to_string(dir.join("down.mig")) {
+            problems += verify_down_mig(name, &down, &snap, dialect);
+        }
         prev = snap;
     }
 
@@ -457,6 +461,25 @@ fn verify_data_steps(
             }
             0
         }
+        Err(problems) => {
+            for p in &problems {
+                eprintln!("  {name}: {p}");
+            }
+            problems.len()
+        }
+    }
+}
+
+/// Check a `down.mig`'s data steps against the post-up state, for the manifest dialect.
+/// Returns the number of problems.
+fn verify_down_mig(
+    name: &str,
+    down: &str,
+    snap: &based_codegen::migrate::Snapshot,
+    dialect: Dialect,
+) -> usize {
+    match based_codegen::migrate::plan_down(snap, down, dialect) {
+        Ok(_) => 0,
         Err(problems) => {
             for p in &problems {
                 eprintln!("  {name}: {p}");

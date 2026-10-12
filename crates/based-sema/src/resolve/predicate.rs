@@ -348,7 +348,15 @@ pub(crate) fn check_predicate_in(
         Predicate::FilterCall { name, args } => {
             check_filter_call(name, args, model, cx, params, in_filters, sink);
         }
-        Predicate::Any { path, pred } => {
+        Predicate::Any { path, by, pred } => {
+            if let Some(by) = by {
+                sink.error(
+                    code::RELATION_ANY,
+                    by.span,
+                    "`by` picks the foreign key in a migration data step — a relation already \
+                     knows its key",
+                );
+            }
             // The inner predicate ranges over the related model's rows.
             let target = model.map(|mi| resolve_any_target(path, mi, cx, sink));
             if matches!(target, Some(None)) {

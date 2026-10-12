@@ -904,9 +904,11 @@ pub enum Predicate {
         args: Vec<Value>,
     },
     /// `rel.any(pred)` — a row on the to-many relation `path` exists, matching `pred`
-    /// when given (`rel.any()` = any related row at all).
+    /// when given (`rel.any()` = any related row at all). `by <col>` names the child's
+    /// foreign key in a migration data step whose child table links to the parent twice.
     Any {
         path: Path,
+        by: Option<Ident>,
         pred: Option<Box<Self>>,
     },
     Raw(RawSql),

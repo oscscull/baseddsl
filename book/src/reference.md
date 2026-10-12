@@ -376,7 +376,7 @@ Steps are dialect-neutral (`add column`, `alter column`, `rename table`, `add in
 migrations gap-free with tamper + drift checks.
 
 Data steps sit between them in `up.mig` (`format 2` runs every line in order): `update all t { col = data.key }`,
-`update t where (child.any(…)) { … }`, `create t[] from [ { … } ] on conflict (k) update { ...incoming }`,
+`update t where (child.any([by fk_col,] …)) { … }`, `create t[] from [ { … } ] on conflict (k) update { ...incoming }`,
 `delete t where (…)`; `… chunk 5000 [by col] [pause 200ms]` batches an update/delete. See
 [migrations](migrations.md#data-steps).
 

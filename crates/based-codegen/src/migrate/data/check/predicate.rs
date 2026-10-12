@@ -1,6 +1,6 @@
 //! Check a data step's `where` (and `case when`) predicate over one table.
 
-use based_ast::{Op, Path, Predicate, Span, Value};
+use based_ast::{Ident, Op, Path, Predicate, Span, Value};
 
 use super::super::relation::child_link;
 use super::super::table::{Col, Fam, TableView};
@@ -32,7 +32,7 @@ impl Ck<'_> {
                     );
                 }
             }
-            Predicate::Any { path, pred } => self.any(path, pred.as_deref(), t),
+            Predicate::Any { path, by, pred } => self.any(path, by.as_ref(), pred.as_deref(), t),
             Predicate::FilterCall { name, .. } => self.err(
                 name.span,
                 "named filters aren't available in a migration — write the condition out",
@@ -86,7 +86,7 @@ impl Ck<'_> {
         }
     }
 
-    fn any(&mut self, path: &Path, pred: Option<&Predicate>, t: &TableView) {
+    fn any(&mut self, path: &Path, by: Option<&Ident>, pred: Option<&Predicate>, t: &TableView) {
         if path.segments.len() != 1 {
             self.err(
                 span_of(path),
@@ -95,7 +95,7 @@ impl Ck<'_> {
             return;
         }
         let snap = self.snap;
-        match child_link(snap, t, &path.segments[0].node) {
+        match child_link(snap, t, &path.segments[0].node, by.map(|b| b.node.as_str())) {
             Ok((child, _)) => {
                 if let Some(p) = pred {
                     self.predicate(p, &child, Scope::ROW);

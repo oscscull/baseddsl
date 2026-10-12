@@ -2,6 +2,7 @@
 //! primary key, unique keys, and each column's value family.
 
 use super::super::model::{ColumnSnap, Snapshot, TableSnap};
+use super::super::unit::IdKind;
 
 /// A column's value family, read off its neutral snapshot type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,22 +125,26 @@ impl<'a> TableView<'a> {
         let mut view = Self { snap: t, cols };
         if let [pk] = view.pk().as_slice() {
             if let Some(c) = view.cols.iter_mut().find(|c| &c.name == pk) {
-                c.auto |= c.fam == Fam::Uuid;
+                c.auto |= matches!(c.fam, Fam::Uuid | Fam::Ulid);
             }
         }
         view
     }
 
-    /// The single uuid primary-key column a `create` fills with a fresh uuid when a row
-    /// omits it.
-    pub(crate) fn auto_uuid_pk(&self) -> Option<&str> {
-        match self.pk().as_slice() {
-            [pk] => self
-                .col(pk)
-                .filter(|c| c.fam == Fam::Uuid && !c.has_default)
-                .map(|c| c.name.as_str()),
-            _ => None,
-        }
+    /// The single uuid/ulid primary-key column a `create` fills with an id minted at apply
+    /// time (the project's id strategy) when a row omits it.
+    pub(crate) fn minted_pk(&self) -> Option<(&str, IdKind)> {
+        let pk = self.pk();
+        let [pk] = pk.as_slice() else {
+            return None;
+        };
+        let c = self.col(pk).filter(|c| !c.has_default)?;
+        let kind = match c.fam {
+            Fam::Uuid => IdKind::Uuid,
+            Fam::Ulid => IdKind::Ulid,
+            _ => return None,
+        };
+        Some((c.name.as_str(), kind))
     }
 
     pub(crate) fn find(snap: &'a Snapshot, name: &str) -> Option<Self> {

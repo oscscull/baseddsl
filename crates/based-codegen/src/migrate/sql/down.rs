@@ -5,7 +5,8 @@
 
 use super::*;
 
-/// Render a prefilled `down.mig` (raw per-dialect SQL) reversing `steps`, newest step first.
+/// Render a prefilled `down.mig` reversing `steps`, newest step first: a `format 2` script
+/// whose reverse SQL rides `raw(<dialect>)` lines, so data steps can sit between them.
 /// A mechanically reversible step (`add`⇄`drop`, `rename`⇄`rename`, `create table`⇄`drop
 /// table`) becomes real reverse SQL; anything that loses data or whose forward form doesn't
 /// carry enough to reconstruct (a `drop`, an `alter column`, a `raw` escape) becomes a loud
@@ -16,30 +17,42 @@ pub fn render_down(steps: &[Step], dialect: Dialect) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "-- down.mig — reverse of up.mig (raw {} SQL). Prefilled where mechanically reversible;",
-        dialect.name()
+        "# down.mig — reverse of up.mig. Prefilled where mechanically reversible; every line"
     );
     out.push_str(
-        "-- complete or delete the irreversible steps below before relying on rollback.\n",
+        "# runs in written order. Data steps (`update t where (…) { … }`, `delete t where (…)`)\n\
+         # may sit between the raw lines. Complete or delete the irreversible steps below before\n\
+         # relying on rollback.\n",
     );
+    out.push_str(super::super::script::FORMAT_MARKER);
+    out.push('\n');
     for step in steps.iter().rev() {
         out.push('\n');
         match reverse_statements(step, dialect) {
             Some(stmts) => {
                 for s in stmts {
-                    let _ = writeln!(out, "{s};");
+                    raw_line(&mut out, dialect, &s);
                 }
             }
             None => {
                 let _ = writeln!(
                     out,
-                    "-- {} is irreversible (data loss); write your own or delete this file",
+                    "# {} is irreversible (data loss); write your own or delete this file",
                     step.describe()
                 );
             }
         }
     }
     out
+}
+
+/// One `raw(<dialect>)` line, or a backtick block for multi-line SQL.
+fn raw_line(out: &mut String, dialect: Dialect, sql: &str) {
+    if sql.contains('\n') {
+        let _ = writeln!(out, "raw({}) `\n{sql}\n`", dialect.name());
+    } else {
+        let _ = writeln!(out, "raw({}) `{sql}`", dialect.name());
+    }
 }
 
 /// The reverse SQL for a step, or `None` when it isn't mechanically reversible. `Some(vec![])`

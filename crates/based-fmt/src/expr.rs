@@ -77,14 +77,11 @@ pub(crate) fn predicate(p: &Predicate, min: u8) -> String {
                 args.iter().map(value).collect::<Vec<_>>().join(", ")
             ),
         ),
-        Predicate::Any { path: pa, pred } => (
-            4,
-            format!(
-                "{}.any({})",
-                path(pa),
-                pred.as_deref().map(|p| predicate(p, 0)).unwrap_or_default()
-            ),
-        ),
+        Predicate::Any { path: pa, by, pred } => {
+            let mut args: Vec<String> = by.iter().map(|b| format!("by {}", b.node)).collect();
+            args.extend(pred.as_deref().map(|p| predicate(p, 0)));
+            (4, format!("{}.any({})", path(pa), args.join(", ")))
+        }
         Predicate::Raw(r) => (4, raw_sql(r)),
     };
     if prec < min {
