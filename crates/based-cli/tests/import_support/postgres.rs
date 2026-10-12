@@ -46,6 +46,8 @@ async fn snapshot(admin: &mut PgConnection) -> Vec<String> {
         "SELECT pg_catalog.pg_get_indexdef(c.oid,0,false) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='based_import_fixture' AND c.relkind='i' ORDER BY c.relname",
         "SELECT account_code || ':' || label FROM based_import_fixture.legacy_account ORDER BY account_code",
         "SELECT entry_key::text || ':' || parent_code || ':' || heading FROM based_import_fixture.legacy_entry ORDER BY entry_key",
+        "SELECT region || ':' || ledger_no::text || ':' || title FROM based_import_fixture.legacy_ledger ORDER BY region, ledger_no",
+        "SELECT posting_key::text || ':' || \"post region\" || ':' || post_ledger::text || ':' || memo FROM based_import_fixture.legacy_posting ORDER BY posting_key",
         "SELECT c.relname::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='based_import_fixture' ORDER BY c.relname",
     ] {
         facts.extend(sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(statement)).fetch_all(&mut *admin).await.unwrap());

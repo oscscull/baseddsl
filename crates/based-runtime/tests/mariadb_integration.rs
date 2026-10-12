@@ -166,6 +166,8 @@ async fn call(
 mod backend_and_pagination;
 #[path = "mariadb_integration/bulk_upserts.rs"]
 mod bulk_upserts;
+#[path = "mariadb_integration/composite_fk_aliases.rs"]
+mod composite_fk_aliases;
 #[path = "mariadb_integration/hardening.rs"]
 mod hardening;
 #[path = "mariadb_integration/idempotency.rs"]

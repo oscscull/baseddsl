@@ -43,8 +43,9 @@ impl Snapshot {
 
     /// Every field-reference path in the project, each paired with the model it is
     /// rooted at. Covers shape bodies, query `where`/`order` clauses, signature
-    /// param bindings (`-> edge` / `op col`), and mutation write `where`/assign
-    /// columns — the contexts whose root model is statically known. (Filters are
+    /// param bindings (`-> edge` / `op col`), mutation write `where`/assign columns,
+    /// and composite-relation column-map key parts — the contexts whose root model is
+    /// statically known. (Filters are
     /// omitted: their root is the polymorphic call site.)
     pub(super) fn field_paths(&self) -> Vec<(&str, &[Ident])> {
         let mut out = Vec::new();
@@ -84,6 +85,7 @@ impl Snapshot {
                     }
                 }
                 Decl::Mutation(m) => write_paths(&m.body, &mut out),
+                Decl::Model(m) => column_map_paths(m, &mut out),
                 _ => {}
             }
         }

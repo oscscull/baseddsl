@@ -1,10 +1,12 @@
 use super::*;
+mod column_map_refs;
 mod field_paths;
 mod filter_refs;
 mod inverse;
 mod param_refs;
 mod scope_refs;
 mod type_refs;
+pub(crate) use column_map_refs::*;
 pub(crate) use field_paths::*;
 pub(crate) use filter_refs::*;
 pub(crate) use inverse::*;
