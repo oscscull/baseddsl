@@ -6,14 +6,23 @@
 
 use super::diff::{ColumnChange, ScopeChange, Step};
 use super::model::{fk_spec_text, index_spec_text, render_scope_decl, ColumnSnap, TableSnap};
+use super::step_order::constraint_safe;
 use std::fmt::Write as _;
 
 // ---------- `up.mig` rendering --------------------------------------------
 
-/// Render a neutral step list to the canonical `up.mig` text. Deterministic; each step
+/// Render a neutral step list to the canonical `format 2` `up.mig` text, ordered so
+/// constraints and indexes come off before the columns they cover. Deterministic; each step
 /// is one (or a few) line(s) in the neutral step vocabulary. A destructive step carries a
 /// trailing `# DESTRUCTIVE` marker so a reviewer sees the gate before applying.
 pub fn render_up(steps: &[Step]) -> String {
+    let mut ordered = steps.to_vec();
+    constraint_safe(&mut ordered);
+    render_up_as_is(&ordered)
+}
+
+/// The `up.mig` text for `steps` in exactly the given order.
+pub(crate) fn render_up_as_is(steps: &[Step]) -> String {
     let mut out = String::new();
     out.push_str(UP_HEADER);
     for s in steps {

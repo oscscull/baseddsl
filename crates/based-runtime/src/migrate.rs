@@ -252,8 +252,8 @@ pub fn load_migrations(
         let snap_text = read_file(&path.join("schema.snap"))?;
         let snap = Snapshot::parse(&snap_text)
             .map_err(|e| MigrateError::Artifact(format!("{name}/schema.snap: {e}")))?;
-        let steps = migrate::diff_snapshots(&prev, &snap);
         let up_text = read_file(&path.join("up.mig"))?;
+        let steps = migrate::up_steps(&prev, &snap, &up_text);
         // Structural steps are authoritative from `schema.snap`; a hand-edit to a structural
         // `up.mig` line would otherwise be silently ignored at apply. Refuse it instead.
         if !migrate::up_mig_matches_snapshot(&up_text, &steps) {

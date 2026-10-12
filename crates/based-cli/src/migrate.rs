@@ -169,7 +169,6 @@ pub fn cmd_migrate_render(
             read_snapshot(&existing[idx - 1].1)?
         };
         let now = read_snapshot(dir)?;
-        let steps = migrate::diff_snapshots(&prev, &now);
         let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
         let name = name.as_deref().unwrap_or("?");
         // Structural steps are snapshot-authoritative; refuse to render SQL for a migration
@@ -177,6 +176,7 @@ pub fn cmd_migrate_render(
         // rendered SQL would silently ignore the edit). `raw(<dialect>)` escapes and data
         // steps are authored into `up.mig` — the plan places them as `apply` runs them.
         let up_text = std::fs::read_to_string(dir.join("up.mig")).unwrap_or_default();
+        let steps = migrate::up_steps(&prev, &now, &up_text);
         if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
             return Err(CliError::failure(format!(
                 "migration {name} has a structural up.mig line edited away from schema.snap; \
@@ -360,10 +360,11 @@ pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
                 continue;
             }
         };
-        let steps = migrate::diff_snapshots(&prev, &snap);
         let up_path = dir.join("up.mig");
         let stored =
             std::fs::read_to_string(&up_path).map_err(|e| io_at("reading", &up_path, e))?;
+        // Regenerated in the order the file's format runs them.
+        let steps = migrate::up_steps(&prev, &snap, &stored);
         problems += verify_up_mig(name, &stored, &steps, &snap);
         problems += verify_data_steps(name, &stored, &prev, &snap, dialect);
         if let Ok(down) = std::fs::read_to_string(dir.join("down.mig")) {

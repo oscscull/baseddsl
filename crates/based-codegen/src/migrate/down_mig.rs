@@ -4,24 +4,15 @@
 use super::diff::{diff_snapshots, Step};
 use super::model::{Rename, Snapshot};
 use super::script::FORMAT_MARKER;
+use super::step_order::constraint_safe;
 use super::up_mig::render_step;
 
 /// The steps undoing the migration from `prev` to `now`, in the order up's are undone:
 /// constraints and indexes come off before the columns they cover, and go back on after.
 pub fn down_steps(prev: &Snapshot, now: &Snapshot) -> Vec<Step> {
     let mut steps = diff_snapshots(now, &rollback_target(prev, now));
-    steps.sort_by_key(phase);
+    constraint_safe(&mut steps);
     steps
-}
-
-fn phase(step: &Step) -> u8 {
-    match step {
-        Step::DropForeignKey { .. } => 0,
-        Step::DropIndex { .. } | Step::DropUnique { .. } => 1,
-        Step::AddIndex { .. } | Step::AddUnique { .. } => 3,
-        Step::AddForeignKey { .. } => 4,
-        _ => 2,
-    }
 }
 
 /// `prev` carrying the inverse of `now`'s renames, so a rename reverses as a rename rather

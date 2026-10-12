@@ -6,6 +6,7 @@ use super::super::diff::{diff_snapshots, Step};
 use super::super::evolve::evolve;
 use super::super::model::Snapshot;
 use super::super::sql::{migration_sql, render_migration, render_sql, sql_statements};
+use super::super::step_order::constraint_safe;
 use super::super::unit::PlanUnit;
 use super::data_item::{data_unit, review};
 use super::place::{place, Placed};
@@ -43,7 +44,7 @@ pub fn plan_up(
     up_text: &str,
     dialect: Dialect,
 ) -> Result<UpPlan, Vec<ScriptProblem>> {
-    let steps = diff_snapshots(prev, target);
+    let mut steps = diff_snapshots(prev, target);
     let scanned = scan(up_text);
     if !scanned.in_order {
         if let Some(item) = scanned
@@ -62,6 +63,7 @@ pub fn plan_up(
         }
         return legacy_plan(&steps, up_text, dialect, target);
     }
+    constraint_safe(&mut steps);
     plan_in_order(UP, prev, target, &steps, &scanned, dialect)
 }
 

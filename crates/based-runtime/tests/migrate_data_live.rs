@@ -323,13 +323,23 @@ table round_widget
   index idx_round_widget_size (size)
 ";
 
-/// Write the round-trip migrations (rename + add column + index) with gen's typed down.
+/// Drops the indexed `size` column: the index has to come off first.
+const ROUND_V3: &str = "snapshot v1 dialect=neutral
+
+table round_widget
+  column name text not_null
+";
+
+/// Write the round-trip migrations (rename + add an indexed column, then drop it) with gen's
+/// up and typed down.
 fn round_trip_tree(dir: &std::path::Path) {
     let v1 = Snapshot::parse(ROUND_V1).unwrap();
     let v2 = Snapshot::parse(ROUND_V2).unwrap();
+    let v3 = Snapshot::parse(ROUND_V3).unwrap();
     for (name, prev, now, snap) in [
         ("0001_init", Snapshot::default(), v1.clone(), ROUND_V1),
-        ("0002_rename", v1, v2, ROUND_V2),
+        ("0002_rename", v1, v2.clone(), ROUND_V2),
+        ("0003_drop_size", v2, v3, ROUND_V3),
     ] {
         let d = dir.join("migrations").join(name);
         std::fs::create_dir_all(&d).unwrap();
@@ -339,7 +349,8 @@ fn round_trip_tree(dir: &std::path::Path) {
     }
 }
 
-/// Up → down → up through gen's typed down (rename + add column + index), keeping the row.
+/// Up → down → up through gen's typed down: a rename, then dropping an indexed column (the
+/// index comes off first), keeping the row throughout.
 async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
     let q = |s: &str| dialect.quote(s);
     for t in [
@@ -358,11 +369,10 @@ async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
     exec(
         backend,
         &format!(
-            "INSERT INTO {} ({}, {}, {}) VALUES ('{C1}', 'Gizmo', 3)",
+            "INSERT INTO {} ({}, {}) VALUES ('{C1}', 'Gizmo')",
             q("round_widget"),
             q("id"),
-            q("name"),
-            q("size")
+            q("name")
         ),
         &[],
     )
@@ -371,6 +381,15 @@ async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
         direction: based_runtime::migrate::Direction::Down,
         ..ApplyOpts::default()
     };
+    let report = apply(backend, dialect, &migs, &down).await.unwrap();
+    assert_eq!(report.rolled_back, vec!["0003_drop_size"]);
+    let sizes = strings(
+        backend,
+        &format!("SELECT {} FROM {}", q("size"), q("round_widget")),
+        "size",
+    )
+    .await;
+    assert_eq!(sizes, ["null"], "the dropped column is back, empty");
     let report = apply(backend, dialect, &migs, &down).await.unwrap();
     assert_eq!(report.rolled_back, vec!["0002_rename"]);
     let titles = strings(
@@ -383,7 +402,7 @@ async fn round_trip(backend: &dyn Backend, dialect: Dialect) {
     let report = apply(backend, dialect, &migs, &ApplyOpts::default())
         .await
         .unwrap();
-    assert_eq!(report.applied, vec!["0002_rename"]);
+    assert_eq!(report.applied, vec!["0002_rename", "0003_drop_size"]);
     let names = strings(
         backend,
         &format!("SELECT {} FROM {}", q("name"), q("round_widget")),

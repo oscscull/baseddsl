@@ -6,7 +6,7 @@
 
 use super::diff::{strip_raw_steps, ColumnChange, Step};
 use super::model::{index_name, ColumnSnap, ForeignKeySnap, IndexSnap, Snapshot, TableSnap};
-use super::up_mig::{render_up, scope_change_line};
+use super::up_mig::{render_up_as_is, scope_change_line};
 use crate::Dialect;
 use based_ast::Primitive;
 use std::collections::{HashMap, HashSet};

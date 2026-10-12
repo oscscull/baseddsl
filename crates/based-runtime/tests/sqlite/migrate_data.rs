@@ -267,13 +267,23 @@ table round_widget
   index idx_round_widget_size (size)
 ";
 
-/// Write the round-trip migrations (rename + add column + index) with gen's typed down.
+/// Drops the indexed `size` column: the index has to come off first.
+const ROUND_V3: &str = "snapshot v1 dialect=neutral
+
+table round_widget
+  column name text not_null
+";
+
+/// Write the round-trip migrations (rename + add an indexed column, then drop it) with gen's
+/// up and typed down.
 fn round_trip_tree(dir: &std::path::Path) {
     let v1 = Snapshot::parse(ROUND_V1).unwrap();
     let v2 = Snapshot::parse(ROUND_V2).unwrap();
+    let v3 = Snapshot::parse(ROUND_V3).unwrap();
     for (name, prev, now, snap) in [
         ("0001_init", Snapshot::default(), v1.clone(), ROUND_V1),
-        ("0002_rename", v1, v2, ROUND_V2),
+        ("0002_rename", v1, v2.clone(), ROUND_V2),
+        ("0003_drop_size", v2, v3, ROUND_V3),
     ] {
         let d = dir.join("migrations").join(name);
         std::fs::create_dir_all(&d).unwrap();
@@ -300,24 +310,29 @@ async fn typed_down_round_trips_up_down_up() {
     round_trip_tree(&s.0);
     let backend = SqliteBackend::in_memory().unwrap();
     let migs = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    // Up drops the indexed `size` column (index first, so SQLite accepts it).
     apply(&backend, Dialect::Sqlite, &migs, &opts())
         .await
         .unwrap();
+    assert_eq!(columns(&backend).await, ["id", "name"]);
     {
         let mut db = backend.checkout("").await.unwrap();
         db.execute(
-            "INSERT INTO round_widget (id, name, size) VALUES ('w1', 'Gizmo', 3)",
+            "INSERT INTO round_widget (id, name) VALUES ('w1', 'Gizmo')",
             &[],
         )
         .await
         .unwrap();
     }
-    assert_eq!(columns(&backend).await, ["id", "name", "size"]);
-
     let down = ApplyOpts {
         direction: Direction::Down,
         ..opts()
     };
+    let report = apply(&backend, Dialect::Sqlite, &migs, &down)
+        .await
+        .unwrap();
+    assert_eq!(report.rolled_back, vec!["0003_drop_size"]);
+    assert_eq!(columns(&backend).await, ["id", "name", "size"]);
     let report = apply(&backend, Dialect::Sqlite, &migs, &down)
         .await
         .unwrap();
@@ -333,6 +348,6 @@ async fn typed_down_round_trips_up_down_up() {
     let report = apply(&backend, Dialect::Sqlite, &migs, &opts())
         .await
         .unwrap();
-    assert_eq!(report.applied, vec!["0002_rename"]);
-    assert_eq!(columns(&backend).await, ["id", "name", "size"]);
+    assert_eq!(report.applied, vec!["0002_rename", "0003_drop_size"]);
+    assert_eq!(columns(&backend).await, ["id", "name"]);
 }
