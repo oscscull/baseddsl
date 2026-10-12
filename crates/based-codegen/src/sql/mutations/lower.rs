@@ -208,7 +208,7 @@ fn raw_write(cx: &LowerCx, raw: &RawSql) -> LoweredWrite {
         capture: None,
         wipe: false,
         bulk: None,
-        keyed_delete: false,
+        keyed_ack: false,
     }
 }
 

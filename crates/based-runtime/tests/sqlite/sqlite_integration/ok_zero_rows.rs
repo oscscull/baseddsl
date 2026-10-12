@@ -1,5 +1,5 @@
 //! `-> ok` writes matching zero rows: a filtered bulk write is a no-op success, a keyed
-//! single-row write is `not_found`.
+//! single-row write is `not_found`. A keyed update that changes its own key still hits.
 
 use super::*;
 
@@ -15,6 +15,12 @@ const SCHEMA: &str = r#"
     mutation set_power(id: Id, power: int) -> ok { update Card where (id = $id) { power = $power }; }
     mutation power_by_name(name: text, power: int) -> ok { update Card where (name = $name) { power = $power }; }
     mutation remove(id: Id) -> ok { delete Card where (id = $id); }
+    mutation rename(name: text, to: text) -> ok { update Card where (name = $name) { name = $to }; }
+    @key(sku)
+    Item { sku: text, label: text }
+    shape ItemRow from Item { sku, label }
+    query items() -> ItemRow[] { list Item order (sku); }
+    mutation resku(sku: text, to: text) -> ok { update Item where (sku = $sku) { sku = $to }; }
 "#;
 
 async fn backend(c: &Compiled) -> SqliteBackend {
@@ -27,6 +33,9 @@ async fn backend(c: &Compiled) -> SqliteBackend {
     )
     .await
     .expect("seed");
+    b.execute_batch("INSERT INTO `item` (`sku`, `label`) VALUES ('s-1', 'one');")
+        .await
+        .expect("seed items");
     b
 }
 
@@ -81,4 +90,40 @@ async fn keyed_write_matching_nothing_is_not_found() {
         assert_eq!(resp.status, 404, "{route}: {:?}", resp.body);
         assert_eq!(resp.body["error"]["code"], "not_found");
     }
+}
+
+#[tokio::test]
+async fn keyed_update_changing_its_unique_key_succeeds() {
+    let c = compile_sqlite(SCHEMA);
+    let b = backend(&c).await;
+    let input = json!({ "name": "A", "to": "Z" });
+    let resp = call(&c, &b, "POST", "/m/rename", input, json!({})).await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    let cards = call(&c, &b, "POST", "/q/cards", json!({}), json!({})).await;
+    assert_eq!(
+        cards.body,
+        json!([{ "name": "B", "power": 3 }, { "name": "Z", "power": 0 }])
+    );
+    // Same-value assignment still matches the row.
+    let input = json!({ "name": "B", "to": "B" });
+    let same = call(&c, &b, "POST", "/m/rename", input, json!({})).await;
+    assert_eq!(same.status, 200, "{:?}", same.body);
+    let input = json!({ "name": "A", "to": "Y" });
+    let miss = call(&c, &b, "POST", "/m/rename", input, json!({})).await;
+    assert_eq!(miss.status, 404, "{:?}", miss.body);
+}
+
+#[tokio::test]
+async fn keyed_update_changing_its_primary_key_succeeds() {
+    let c = compile_sqlite(SCHEMA);
+    let b = backend(&c).await;
+    let input = json!({ "sku": "s-1", "to": "s-2" });
+    let resp = call(&c, &b, "POST", "/m/resku", input, json!({})).await;
+    assert_eq!(resp.status, 200, "{:?}", resp.body);
+    let items = call(&c, &b, "POST", "/q/items", json!({}), json!({})).await;
+    assert_eq!(items.body, json!([{ "sku": "s-2", "label": "one" }]));
+    let input = json!({ "sku": "s-1", "to": "s-3" });
+    let miss = call(&c, &b, "POST", "/m/resku", input, json!({})).await;
+    assert_eq!(miss.status, 404, "{:?}", miss.body);
+    assert_eq!(miss.body["error"]["code"], "not_found");
 }

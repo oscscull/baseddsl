@@ -64,3 +64,39 @@ async fn joined_scope_hides_cross_scope_row() {
     assert_eq!(resp.body["buyer"], json!("Ada"));
     assert_eq!(resp.body["org"], json!("Acme"));
 }
+
+#[tokio::test]
+async fn keyed_ok_update_decides_hit_on_matched_rows() {
+    // A keyed `-> ok` update hits on matched rows (CLIENT_FOUND_ROWS): changing its own key,
+    // or assigning the values a row already holds, succeeds; only a miss is `not_found`.
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @key(sku)
+        Item { sku: text, label: text (unique) }
+        shape ItemRow from Item { sku, label }
+        query items() -> ItemRow[] { list Item order (sku); }
+        mutation resku(sku: text, to: text) -> ok { update Item where (sku = $sku) { sku = $to }; }
+        mutation relabel(label: text, to: text) -> ok { update Item where (label = $label) { label = $to }; }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    container
+        .exec_batch("INSERT INTO `item` (`sku`, `label`) VALUES ('s-1', 'one');")
+        .await;
+
+    for (path, args, status) in [
+        ("/m/resku", json!({ "sku": "s-1", "to": "s-2" }), 200),
+        ("/m/relabel", json!({ "label": "one", "to": "uno" }), 200),
+        ("/m/relabel", json!({ "label": "uno", "to": "uno" }), 200),
+        ("/m/resku", json!({ "sku": "s-1", "to": "s-3" }), 404),
+    ] {
+        let resp = call(&c, &router, "POST", path, args, json!({})).await;
+        assert_eq!(resp.status, status, "{path}: {:?}", resp.body);
+    }
+
+    let items = call(&c, &router, "POST", "/q/items", json!({}), json!({})).await;
+    assert_eq!(items.body, json!([{ "sku": "s-2", "label": "uno" }]));
+}

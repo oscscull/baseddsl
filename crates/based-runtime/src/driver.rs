@@ -25,7 +25,7 @@
 //! native `UUID`/`JSON` arrive wire-flagged with the binary charset (typed BINARY/BLOB),
 //! so they decode as raw bytes → UTF-8; `DECIMAL` decodes through `BigDecimal`, whose
 //! `to_plain_string` re-renders the exact wire string. `rows_affected` reports *matched*
-//! rows (sqlx sets `CLIENT_FOUND_ROWS`); nothing in the engine branches on the count.
+//! rows (sqlx sets `CLIENT_FOUND_ROWS`), so a same-value keyed `-> ok` update still hits.
 
 use async_trait::async_trait;
 use futures_util::StreamExt;

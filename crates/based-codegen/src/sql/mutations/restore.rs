@@ -30,6 +30,6 @@ pub(crate) fn lower_restore(cx: &LowerCx, model: &RModel, where_: &Predicate) ->
         capture: None,
         wipe: false,
         bulk: None,
-        keyed_delete: false,
+        keyed_ack: false,
     }
 }

@@ -133,15 +133,15 @@ pub fn plan_mutation(
     }
 
     // 4. A key-bound conditional transition must match before re-selecting by key.
-    //    An `-> ok` mutation's not-found signal is a keyed **real** DELETE (`hard delete
-    //    M where …` / a plain-model `delete M where …` binding a unique column or the full
-    //    key) on the primary model affecting zero rows. A filtered bulk delete, a wipe, or
-    //    a create under `-> ok` never 404s — a bulk insert of an empty array is a success.
+    //    An `-> ok` mutation's not-found signal is a keyed real DELETE or UPDATE (its
+    //    `where` binds a unique column or the full key) on the primary model affecting
+    //    zero rows. A filtered bulk write, a wipe, or a create under `-> ok` never 404s —
+    //    a bulk insert of an empty array is a success.
     let ack_check = low.match_check.or_else(|| {
         if rm.ack {
             low.stmts
                 .iter()
-                .position(|w| w.model == rm.ret_model && w.keyed_delete)
+                .position(|w| w.model == rm.ret_model && w.keyed_ack)
         } else {
             None
         }
