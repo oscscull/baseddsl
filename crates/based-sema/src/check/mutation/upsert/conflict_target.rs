@@ -123,10 +123,14 @@ fn check_scope_columns_targeted(
 }
 
 /// Whether `target` (field names) is a declared unique key of `m`: a single `(unique)`
-/// column (or the pk `id`, always unique), or a `@index (…) unique` whose columns are
-/// exactly the set (order-insensitive).
+/// column, the primary key (`id` or a single or composite `@key`), or a `@index (…) unique`
+/// — each matched as exactly the set of columns (order-insensitive).
 fn is_unique_key(m: &RModel, target: &[&str]) -> bool {
     if target.len() == 1 && m.is_unique(target[0]) {
+        return true;
+    }
+    let pk = m.pk_field_names();
+    if !pk.is_empty() && pk.len() == target.len() && pk.iter().all(|c| target.contains(c)) {
         return true;
     }
     m.indexes.iter().any(|ix| {
