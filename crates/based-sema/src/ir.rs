@@ -229,6 +229,8 @@ pub mod code {
     pub const CFIELD_CASE_MISMATCH: &str = "E0322"; // a `case`'s branches (`then`/`else`) don't share a common type
     pub const CFIELD_NO_PARAMS: &str = "E0323"; // a `$…` operand in a computed field — a shape declaration has no parameters
     pub const CFIELD_IN_AGG: &str = "E0324"; // a computed field alongside an aggregate field — a group is not a row
+    pub const LIMIT_PLACEMENT: &str = "E0358"; // `limit` on a `get`, beside `page`, twice, or a param limit in an inline body
+    pub const LIMIT_VALUE: &str = "E0359"; // a `limit` below 1, `max` on a literal, or a param that isn't a required `int`
     pub const SHAPE_PARAM_UNBOUND: &str = "E0355"; // a query returns a shape whose filter projection reads `$p`, but the query has no param `p` (or its type disagrees with the filter's use)
 
     // Bulk / structured insert — `create Model[] from $rows` / `create Model from $row`

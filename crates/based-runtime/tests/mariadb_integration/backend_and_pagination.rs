@@ -253,3 +253,42 @@ async fn soft_delete_and_restore_read_back() {
         json!([{ "name": "Alpha" }, { "name": "Beta" }])
     );
 }
+
+/// `limit ($n, max 3)`, proven live: a caller-chosen row cap returns plain rows, and a
+/// zero or over-max limit is a 400 `bad_limit`.
+#[tokio::test]
+async fn param_limit_caps_plain_rows() {
+    let Some((c, router, container)) = live_schema(
+        r#"
+        @sort(id asc)
+        Item { id: text, name: text, rank: int }
+        shape ItemCard from Item { name, rank }
+        query recent(n: int) -> ItemCard[] { list Item order (rank desc) limit ($n, max 3); }
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    container
+        .exec_batch(
+            "INSERT INTO `item` (`id`, `name`, `rank`) VALUES \
+                ('i1', 'a', 10), ('i2', 'b', 20), ('i3', 'c', 30), \
+                ('i4', 'd', 40), ('i5', 'e', 50);",
+        )
+        .await;
+
+    let recent = |args: serde_json::Value| call(&c, &router, "POST", "/q/recent", args, json!({}));
+
+    let two = recent(json!({ "n": 2 })).await;
+    assert_eq!(two.status, 200, "{:?}", two.body);
+    assert_eq!(
+        two.body,
+        json!([{ "name": "e", "rank": 50 }, { "name": "d", "rank": 40 }])
+    );
+    for n in [0, -1, 4] {
+        let bad = recent(json!({ "n": n })).await;
+        assert_eq!(bad.status, 400, "{:?}", bad.body);
+        assert_eq!(bad.body["error"]["code"], json!("bad_limit"));
+    }
+}

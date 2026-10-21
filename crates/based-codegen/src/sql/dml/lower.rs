@@ -125,6 +125,7 @@ pub(crate) fn lower_query(
             sql.push_str(" OFFSET :offset");
         }
     }
+    push_limit(&mut sql, q);
     push_lock_clause(&mut sql, q, sel.dialect); // `for update` row lock, appended last
     sql.push_str(";\n");
 

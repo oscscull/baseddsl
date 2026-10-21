@@ -242,6 +242,19 @@ page (50) offset       # offset instead
 page (50) with count   # also return `total`
 ```
 
+## Limit
+
+```
+limit (3)              # at most 3 rows; returns plain rows
+limit ($n)             # caller-chosen: `n: int`, a required param
+limit ($n, max 500)    # reject an `n` above 500
+```
+
+A `list` takes one `limit` or one `page`, not both (E0358); `limit` on a `get` is E0358 too. A literal
+below 1, `max` on a literal, or a param that isn't a required `int` is E0359. A call whose limit is below
+1 or above `max` fails with 400 `bad_limit`. A param limit needs a block body (`{ list … limit ($n); }`),
+since an inline body filters on every param.
+
 ## Streaming
 
 ```

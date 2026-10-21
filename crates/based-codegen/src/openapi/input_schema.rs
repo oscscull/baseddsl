@@ -16,7 +16,15 @@ pub(crate) fn input_schema(schema: &CheckedSchema, c: &Callable) -> Value {
         let entity = c.param_entities.get(&p.name.node).map(String::as_str);
         // A `?` optional filter is 2-state (skip / value): not `required`, but not nullable —
         // null-matching is a body concern, not a param state.
-        let ty = param_schema(schema, c.root, p, entity);
+        let mut ty = param_schema(schema, c.root, p, entity);
+        if let (Some((name, max)), Value::Object(o)) = (c.limit, &mut ty) {
+            if name == p.name.node {
+                o.insert("minimum".to_string(), json!(1));
+                if let Some(max) = max {
+                    o.insert("maximum".to_string(), json!(max));
+                }
+            }
+        }
         props.insert(p.name.node.clone(), ty);
         if !optional {
             required.push(Value::String(p.name.node.clone()));

@@ -167,7 +167,7 @@ pub(crate) fn check_agg_query(
                 format!("aggregate query `{}` can't be paginated", q.name.node),
                 "grouped keyset paging is unsupported — drop `page`",
             ),
-            Clause::GroupBy(_) | Clause::Having(_) | Clause::Unindexed(_) => {}
+            Clause::GroupBy(_) | Clause::Having(_) | Clause::Unindexed(_) | Clause::Limit(_) => {}
         }
     }
 

@@ -18,7 +18,8 @@ pub(super) fn check_clauses(
                     resolve::check_sort_term(t, mi, cx, sink);
                 }
             }
-            Clause::Page(_) => {}
+            // Judged by `check_limit` once the verb is known.
+            Clause::Page(_) | Clause::Limit(_) => {}
             // Validated by the index pass: it either satisfies the index lint or is itself
             // flagged stale when the query turns out indexed.
             Clause::Unindexed(_) => {}

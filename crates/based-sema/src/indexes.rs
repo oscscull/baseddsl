@@ -201,7 +201,7 @@ fn query_pattern(q: &Query, rq: &RQuery, mi: usize, cx: &Cx, usage: &mut [Usage]
                 has_order = true;
                 pat.note_sort(terms, mi, cx, usage);
             }
-            Clause::Page(_) => {}
+            Clause::Page(_) | Clause::Limit(_) => {}
             Clause::Unindexed(u) => pat.annotation = Some(u.clone()),
             // Aggregation clauses don't drive the FK-join index inference (the WHERE row
             // filter still does, via `Clause::Where` above).

@@ -25,6 +25,7 @@ pub(super) const KEYWORDS: &[&str] = &[
     "by",
     "having",
     "page",
+    "limit",
     "unindexed",
     "index",
     "unique",

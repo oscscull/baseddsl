@@ -1,5 +1,5 @@
 //! ORDER BY derivation (the sort cascade + keyset PK tiebreaker) and pagination-clause
-//! detection.
+//! and limit-clause detection.
 
 use super::*;
 
@@ -121,6 +121,28 @@ pub(crate) fn query_page(q: &Query) -> Option<&PageClause> {
         Clause::Page(p) => Some(p),
         _ => None,
     })
+}
+
+/// The query's `limit (…)` clause, if any.
+pub(crate) fn query_limit(q: &Query) -> Option<&LimitClause> {
+    let clauses: &[Clause] = match &q.body {
+        QueryBody::Inline(cs) => cs,
+        QueryBody::Block(s) => &s.clauses,
+        QueryBody::Bare | QueryBody::Raw(_) => return None,
+    };
+    clauses.iter().find_map(|c| match c {
+        Clause::Limit(l) => Some(l),
+        _ => None,
+    })
+}
+
+/// Append `LIMIT <n>` (a literal) or `LIMIT :<param>` (bound per call).
+pub(crate) fn push_limit(sql: &mut String, q: &Query) {
+    match query_limit(q).map(|l| &l.value) {
+        Some(LimitValue::Lit(n)) => sql.push_str(&format!("\nLIMIT {n}")),
+        Some(LimitValue::Param(p)) => sql.push_str(&format!("\nLIMIT :{}", p.name.node)),
+        None => {}
+    }
 }
 
 fn dir(d: SortDir) -> &'static str {

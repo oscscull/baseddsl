@@ -32,8 +32,13 @@ pub(crate) fn callable_param_refs(d: &Decl) -> Vec<&ParamRef> {
 }
 
 pub(crate) fn clause_param_refs<'a>(c: &'a Clause, out: &mut Vec<&'a ParamRef>) {
-    if let Clause::Where(p) = c {
-        pred_param_refs(p, out);
+    match c {
+        Clause::Where(p) => pred_param_refs(p, out),
+        Clause::Limit(LimitClause {
+            value: LimitValue::Param(p),
+            ..
+        }) => out.push(p),
+        _ => {}
     }
 }
 

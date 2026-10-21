@@ -504,3 +504,15 @@ fn composite_column_map_round_trips() {
     );
     assert_eq!(fmt(src), src);
 }
+
+#[test]
+fn limit_clause_round_trips() {
+    assert_eq!(
+        fmt("query r(n: int) -> Card[] { list Run order (started_at desc) limit ($n, max 500); }"),
+        "query r(n: int) -> Card[] {\n  list Run order (started_at desc) limit ($n, max 500);\n}\n"
+    );
+    assert_eq!(
+        fmt("query t() -> Card[] { list Run limit (3); }"),
+        "query t() -> Card[] { list Run limit (3); }\n"
+    );
+}

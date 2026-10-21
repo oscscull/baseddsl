@@ -1,5 +1,5 @@
 //! Reprint a read statement and its parts: the verb head, individual clauses
-//! (where/order/page/group by/having/unindexed), the return type, the `for update`
+//! (where/order/page/limit/group by/having/unindexed), the return type, the `for update`
 //! modifier, and the parameter list.
 
 use crate::*;
@@ -59,6 +59,16 @@ pub(crate) fn clause(c: &Clause) -> String {
                 s.push_str(" with count");
             }
             s
+        }
+        Clause::Limit(l) => {
+            let value = match &l.value {
+                LimitValue::Lit(n) => n.to_string(),
+                LimitValue::Param(p) => param_ref(p),
+            };
+            match l.max {
+                Some(m) => format!("limit ({value}, max {m})"),
+                None => format!("limit ({value})"),
+            }
         }
         Clause::Unindexed(u) => match &u.kind {
             UnindexedKind::MaxRows(n) => format!("unindexed(max_rows: {n})"),

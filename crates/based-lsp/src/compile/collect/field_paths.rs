@@ -23,7 +23,7 @@ pub(crate) fn clause_paths<'a>(
                 out.push((root, &p.segments));
             }
         }
-        Clause::Page(_) | Clause::Unindexed(_) | Clause::Having(_) => {}
+        Clause::Page(_) | Clause::Limit(_) | Clause::Unindexed(_) | Clause::Having(_) => {}
     }
 }
 

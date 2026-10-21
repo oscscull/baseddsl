@@ -63,6 +63,7 @@ pub fn plan_query(compiled: &Compiled, req: &Request) -> Result<QueryPlan, PlanE
     for c in &rq.ctx_requires {
         bind_ctx_into(&mut env, &compiled.schema, c, req)?;
     }
+    check_limit(ast, &env)?;
     if offset_paginated(ast) {
         env.insert("offset".to_string(), bind_offset(req)?);
     }
