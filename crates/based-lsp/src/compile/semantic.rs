@@ -215,7 +215,7 @@ mod tests {
                last: text\n\
                total: int\n\
                deleted_at: timestamp?\n\
-               restore: raw`update {table} set deleted_at = null where {id}`\n\
+               restore: raw`deleted_at = null, total = case when {table}.total < 0 then 0 else total end`\n\
              }\n\
              shape UserRow from User { full = raw`concat(first, ' ', last)` }\n\
              query heavy(min: int) -> UserRow[] {\n\
@@ -231,9 +231,13 @@ mod tests {
         let toks = decode_semantic(&snap, fid);
 
         // The soft-override raw: keywords + engine interpolations.
-        assert!(toks.contains(&("update".into(), "keyword".into())));
+        for kw in ["null", "case", "when"] {
+            assert!(
+                toks.contains(&(kw.into(), "keyword".into())),
+                "{kw} missing in {toks:?}"
+            );
+        }
         assert!(toks.contains(&("{table}".into(), "macro".into())));
-        assert!(toks.contains(&("{id}".into(), "macro".into())));
 
         // The shape value raw: `concat` is a bare word (no token), the `' '` is a string.
         assert!(toks.iter().any(|(t, k)| t == "' '" && k == "string"));
