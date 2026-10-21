@@ -371,8 +371,8 @@ Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate quote
 
 | Position | `{table}` | `{id}` |
 |---|---|---|
-| Value / predicate leaf (shape field, `where`, filter, `having`, `on:`) | `task` | `task.<key>` (the row's alias: a nested shape's subquery alias, the `on:` FK side) |
-| Whole-query body | `task` | `task.<key>` |
+| Value / predicate leaf (shape field, `where`, filter, `having`, `on:`) | `task`, or `app.task` under `@schema("app")` | `task.<key>` (the row's alias: a nested shape's subquery alias, the `on:` FK side) |
+| Whole-query body | `task`, or `app.task` under `@schema("app")` | `task.<key>` |
 | Raw write statement in a mutation | E0354 | E0354 |
 | `raw("…")` type / index, `.mig` `raw(…)` | verbatim | verbatim |
 
@@ -380,7 +380,7 @@ Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate quote
 single `@key(field)`. A composite `@key` has no single column, so `{id}` there is
 E0356; spell the key columns out. `{id}` is already qualified, so never prefix it:
 `{table}.{id}` or `t.{id}` is E0353.
-`{table}` is the bare table name (no `@schema`), for a `FROM`, not a row qualifier. A correlated subquery:
+`{table}` is the table as every generated `FROM` names it (schema-qualified under `@schema`), for a `FROM`, not a row qualifier. A correlated subquery:
 
 ```
 filter open_ask = raw`EXISTS (SELECT 1 FROM ask a WHERE a.task_id = {id} AND a.answer IS NULL)`;
