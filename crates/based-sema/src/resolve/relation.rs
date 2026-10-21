@@ -37,8 +37,9 @@ pub fn check_relation_on(pred: &Predicate, near: usize, far: usize, cx: &Cx, sin
             path.segments[0].span,
             "`.any` isn't allowed in a custom `on:` join condition",
         ),
-        // A raw join fragment is an escape hatch the engine can't resolve — leave it.
-        Predicate::Raw(_) => {}
+        // A raw join fragment is an escape hatch the engine can't resolve; only its
+        // placeholders are checked.
+        Predicate::Raw(raw) => check_raw_id_qualified(raw, Some(&cx.model(near).table), sink),
     }
 }
 

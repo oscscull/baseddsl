@@ -85,6 +85,8 @@ mod operand_typing;
 mod optional_context;
 #[path = "check/optional_filters.rs"]
 mod optional_filters;
+#[path = "check/raw_placeholders.rs"]
+mod raw_placeholders;
 #[path = "check/raw_queries.rs"]
 mod raw_queries;
 #[path = "check/relation_any.rs"]

@@ -81,6 +81,7 @@ pub(super) fn check_write(
                     resolve::check_param_ref(pr, params, sink);
                 }
             }
+            check_raw_write_placeholders(raw, sink);
         }
     }
 }

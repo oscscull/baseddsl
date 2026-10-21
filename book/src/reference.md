@@ -355,7 +355,22 @@ query heavy(min: int) -> UserRow[] {                     # whole-query raw body
 }
 ```
 
-Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate safely.
+Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate quoted identifiers:
+
+| Position | `{table}` | `{id}` |
+|---|---|---|
+| Value / predicate leaf (shape field, `where`, filter, `having`, `on:`) | `task` | `task.id` (the row's alias: a nested shape's subquery alias, the `on:` FK side) |
+| Whole-query body | `task` | `task.id` |
+| Raw write statement in a mutation | E0354 | E0354 |
+| `raw("…")` type / index, `.mig` `raw(…)` | verbatim | verbatim |
+
+`{id}` is already qualified, so never prefix it: `{table}.{id}` or `t.{id}` is E0353.
+`{table}` is the bare table name (no `@schema`), for a `FROM`, not a row qualifier. A correlated subquery:
+
+```
+filter open_ask = raw`EXISTS (SELECT 1 FROM ask a WHERE a.task_id = {id} AND a.answer IS NULL)`;
+```
+
 Engine-built outer rows keep scope/soft-delete filters, but tables inside a raw
 subquery own theirs. A whole raw body on a scoped model requires explicit
 `unscoped("reason")` and owns all its predicates. See [raw boundaries](recipes.md).

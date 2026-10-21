@@ -36,13 +36,13 @@ pub(super) fn check_shape_body(
                 }
             }
             // A rename reaches a column via a path, computes one with raw SQL (a leaf
-            // trapdoor — shapes have no params, so raw is left unchecked), or aggregates
+            // trapdoor — shapes have no params, so only its placeholders are checked), or aggregates
             // a column (`= count()` / `= sum(total)`).
             ShapeField::Rename { value, .. } => match value {
                 ShapeValue::Path(p) => {
                     resolve::resolve_path(p, mi, cx, sink);
                 }
-                ShapeValue::Raw(_) => {}
+                ShapeValue::Raw(raw) => resolve::check_raw_id_qualified(raw, None, sink),
                 ShapeValue::Agg(agg) => check_agg_call(agg, mi, cx, sink),
                 // A per-row derived scalar (`out = price - discount` / `a || b` / `case …`):
                 // type-check the expression against this model.
