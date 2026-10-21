@@ -17,6 +17,33 @@ fn commerce() -> Compiled {
     Compiled::load(&root).unwrap_or_else(|e| panic!("commerce did not load: {e:?}"))
 }
 
+const SQLITE: &str = "dialect = \"sqlite\"\n[schema]\nid = \"serial\"\n";
+const TASK: &str = "Task {\n  id: Id\n  title: text\n}\n\nquery tasks() -> Task[] { list Task; }\n";
+
+#[test]
+fn loads_embedded_sources_with_the_manifest_settings() {
+    let c = Compiled::from_sources(SQLITE, &[("schema/task.bsl", TASK)])
+        .unwrap_or_else(|e| panic!("embedded schema did not load: {e}"));
+    assert_eq!(c.dialect, based_codegen::Dialect::Sqlite);
+    assert!(c.queries.contains_key("tasks"));
+}
+
+#[test]
+fn embedded_diagnostics_name_the_embedded_file() {
+    let broken = "Note {\n  id: Id\n  owner: Nope\n}\n";
+    let e = match Compiled::from_sources(SQLITE, &[("task.bsl", TASK), ("broken.bsl", broken)]) {
+        Ok(_) => panic!("a broken schema must not load"),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("broken.bsl:3:"), "{e}");
+}
+
+#[test]
+fn embedded_manifest_errors_block() {
+    assert!(Compiled::from_sources("dialect = \"oracle\"", &[("task.bsl", TASK)]).is_err());
+    assert!(Compiled::from_sources(SQLITE, &[]).is_err());
+}
+
 #[test]
 fn loads_and_lowers_commerce() {
     let c = commerce();

@@ -42,8 +42,10 @@ generated lands in your source tree, so `cargo fmt` and Clippy configuration
 never touch it, and rust-analyzer resolves the include after its first build.
 The helper adds a one-time compile of the BSL compiler to cold builds.
 
-Runtime schemas, connection setup, and migrations stay explicit. Deploy
-`based.toml` and BSL alongside applications using `Compiled::load`.
+The build also writes `OUT_DIR/schema.rs`, embedding `based.toml` and the BSL
+for `Compiled::from_sources` (see [a small Rust application](embedded.md)).
+Connection setup and migrations stay explicit. `Compiled::load` reads
+`based.toml` and BSL from disk instead.
 
 The application needs `serde` with `derive`, `serde_json`, and its
 runtime/transport dependencies. A wire client with decimal fields also needs

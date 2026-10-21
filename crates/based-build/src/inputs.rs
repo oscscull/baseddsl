@@ -10,12 +10,7 @@ pub(super) struct Inputs {
 }
 impl Inputs {
     pub(super) fn discover(root: &Path) -> Result<Self, Error> {
-        let project = based_manifest::discover(root).map_err(|diagnostics| {
-            based_project::Error::Diagnostics(based_project::Report {
-                sources: Vec::new(),
-                diagnostics,
-            })
-        })?;
+        let project = based_manifest::discover(root).map_err(based_project::Error::manifest)?;
         Ok(Self {
             project,
             manifest: std::fs::read(root.join(based_manifest::MANIFEST_NAME))?,

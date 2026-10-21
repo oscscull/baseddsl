@@ -147,6 +147,7 @@ dependencies = [
  "based-diagnostics",
  "based-manifest",
  "based-parser",
+ "based-project",
  "based-sema",
  "bigdecimal",
  "futures-core",

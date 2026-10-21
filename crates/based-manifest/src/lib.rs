@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 mod generation;
+mod parse;
 mod validate;
 pub use generation::{ClientMode, GenerationConfig};
+pub use parse::parse;
 
 /// Parsed `based.toml`.
 #[derive(Debug, Clone, Deserialize)]
@@ -117,14 +119,7 @@ pub fn discover_allow_empty(root: &Path) -> Result<Project, Vec<Diagnostic>> {
             format!("cannot read {}: {e}", manifest_path.display()),
         )]
     })?;
-    let manifest: Manifest = toml::from_str(&text).map_err(|e| {
-        vec![Diagnostic::error(
-            "E0011",
-            format!("invalid {MANIFEST_NAME}: {e}"),
-        )]
-    })?;
-
-    validate::manifest(&manifest)?;
+    let manifest = parse(&text)?;
 
     // Schema root: the manifest's `root` (relative to the manifest dir), else the
     // manifest dir itself.

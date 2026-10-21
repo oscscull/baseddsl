@@ -1,5 +1,6 @@
 //! Compiler-only `build.rs` client generation. Never connects to a database.
 mod cache;
+mod embed;
 mod environment;
 mod error;
 mod inputs;
@@ -23,12 +24,13 @@ pub fn run() -> Option<Generation> {
     report::report(generate())
 }
 
-/// Generate `OUT_DIR/client.rs` using the Cargo package's `based.toml`.
+/// Generate `OUT_DIR/client.rs` and `OUT_DIR/schema.rs` using the Cargo package's `based.toml`.
 /// Prints Cargo input tracking; no CLI binary, rustfmt, runtime, or migrations.
 pub fn generate() -> Result<Generation, Error> {
     let environment = environment::Environment::cargo()?;
     let inputs = inputs::Inputs::discover(&environment.root)?;
     inputs.track(&environment.root);
+    embed::write(&inputs.project, &environment.root, &environment.out)?;
     let fingerprint = inputs.fingerprint()?;
     let path = environment.out.join("client.rs");
     println!("cargo:rerun-if-changed={}", path.display());

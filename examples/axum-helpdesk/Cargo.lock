@@ -225,6 +225,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "based-project"
+version = "0.1.12"
+dependencies = [
+ "based-ast",
+ "based-codegen",
+ "based-diagnostics",
+ "based-manifest",
+ "based-parser",
+ "based-sema",
+]
+
+[[package]]
 name = "based-runtime"
 version = "0.1.12"
 dependencies = [
@@ -236,6 +248,7 @@ dependencies = [
  "based-diagnostics",
  "based-manifest",
  "based-parser",
+ "based-project",
  "based-sema",
  "bigdecimal",
  "chrono",
