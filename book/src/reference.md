@@ -163,8 +163,15 @@ shape OrderCard from Order {
   ...OrderBase                              # splice another same-model shape's fields
   net       = total - discount              # computed (+ - * /, || concat)
   tier      = case when total > 100 then "premium" else "standard" end
+  is_late   = late($before)                 # named filter, projected as a bool
 }
 ```
+
+**Filter projection:** `out = filter(args)` projects a [named filter](#named-filters) as a
+non-null `bool` per row; a filter that is NULL for the row projects `false`. A zero-param
+filter is `active()`. A `$p` argument binds to the param `p` of every query or mutation
+returning the shape (directly or through `->`); a missing param or a type that disagrees with
+the filter's column is E0355. Other computed fields take no `$` operands.
 
 **Aggregate shape** (pair with [group by](#group-by)): `count()` (→ int), `sum(f)`, `avg(f)`, `min(f)`,
 `max(f)`. Raw value: `full_name = raw`concat(first,' ',last)``. Shapes never filter or sort.
@@ -245,6 +252,9 @@ filter active     = not banned and deleted_at = null;
 filter in_city(c) = address.city.name = $c;
 query users(name) -> UserRow[] where (active and in_city($city));
 ```
+
+A filter both selects and explains: `is_late = late($before)` in a shape projects it as a bool
+(see [Shapes](#shapes)).
 
 ## Group by
 

@@ -32,7 +32,7 @@ impl<'a> Select<'a> {
             return "1 = 0".to_string();
         };
         let mut alias = self.root_alias.clone();
-        let mut prefix = String::new();
+        let mut prefix = self.root_prefix.clone();
         for seg in hops {
             // Sema guarantees every leading hop is a to-one relation.
             let Some((a, p, m)) = self.enter_to_one(&seg.node, &alias, &prefix, cur) else {

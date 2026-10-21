@@ -8,5 +8,6 @@ mod query_reads;
 mod reject;
 
 pub(crate) use query_reads::check_optional_ctx_query;
-use reject::*;
-pub(crate) use reject::{forbid_optional_ctx_writes, forbid_optional_in_pred};
+pub(crate) use reject::{
+    forbid_optional_ctx_writes, forbid_optional_in_pred, reject_optional_value,
+};

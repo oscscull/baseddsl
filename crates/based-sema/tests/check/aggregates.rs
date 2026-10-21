@@ -76,7 +76,7 @@ fn count_with_argument_is_e0240() {
 }
 
 #[test]
-fn unknown_aggregate_is_e0240() {
+fn unknown_call_in_shape_is_e0114() {
     let mut src = AGG_MODELS.to_string();
     src.push_str(
         r#"
@@ -85,7 +85,7 @@ fn unknown_aggregate_is_e0240() {
         "#,
     );
     let (_, d) = analyze(&src);
-    assert!(errors(&d).contains(&"E0240"), "{:?}", codes(&d));
+    assert!(errors(&d).contains(&"E0114"), "{:?}", codes(&d));
 }
 
 #[test]

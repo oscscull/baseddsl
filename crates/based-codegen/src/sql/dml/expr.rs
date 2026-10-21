@@ -39,7 +39,7 @@ impl<'a> Select<'a> {
                 for arm in arms {
                     s.push_str(&format!(
                         " WHEN {} THEN {}",
-                        self.predicate(&arm.when, model),
+                        self.predicate_at(&arm.when, alias, prefix, model),
                         self.shape_expr(&arm.then, alias, prefix, model)
                     ));
                 }

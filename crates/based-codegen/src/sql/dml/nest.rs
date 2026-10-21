@@ -109,6 +109,7 @@ impl<'a> Select<'a> {
             schema: self.schema,
             dialect: self.dialect,
             root_alias,
+            root_prefix: String::new(),
             joins: Vec::new(),
             seen: HashMap::new(),
             filters: self.filters.clone(),
@@ -302,6 +303,10 @@ impl<'a> Select<'a> {
                     // A per-row derived scalar inside a to-many element body.
                     ShapeValue::Computed(expr) => {
                         let sql = self.shape_expr(expr, alias, prefix, model);
+                        pairs.push(format!("'{}', {sql}", out.node));
+                    }
+                    ShapeValue::Filter(fp) => {
+                        let sql = self.filter_projection(fp, alias, prefix, model);
                         pairs.push(format!("'{}', {sql}", out.node));
                     }
                 },

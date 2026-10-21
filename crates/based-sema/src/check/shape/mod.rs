@@ -3,6 +3,7 @@ use super::*;
 
 mod body;
 mod check_shape;
+mod filter_projection;
 mod flatten_path;
 mod nest_ref;
 mod nest_target;
@@ -10,6 +11,7 @@ mod ref_cycle;
 
 use body::*;
 pub(crate) use check_shape::check_shape;
+use filter_projection::*;
 use flatten_path::*;
 use nest_ref::*;
 use nest_target::*;

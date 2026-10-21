@@ -30,6 +30,16 @@ pub(crate) fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery>
     }
     check_optional_params(q, verb, sink);
     check_optional_ctx_query(q, sink);
+    // A raw body writes its own projection, so it binds no shape `$p`.
+    if let (Some(shape), false) = (ret.shape.as_deref(), matches!(q.body, QueryBody::Raw(_))) {
+        let binder = ShapeBinder {
+            callable: &q.name,
+            params: &q.params,
+            ret_span: q.ret.ty.span,
+            infer,
+        };
+        check_shape_params(&binder, shape, ti, cx, sink);
+    }
 
     // An aggregate return shape turns the query into an aggregate query: `group by` /
     // `having` become legal (and required for consistency), and the `get`/sort/pagination
@@ -51,7 +61,8 @@ pub(crate) fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery>
     check_distinct(q, &ret, ti, shape.agg, cx, sink);
     check_for_update(q, &ret, ti, shape.agg, cx, sink);
 
-    let (shard_key, scope_inject, ctx_requires) = resolve_scope_facts(q, ti, cx, sink);
+    let (shard_key, scope_inject, ctx_requires) =
+        resolve_scope_facts(q, ti, ret.shape.as_deref(), cx, sink);
 
     Some(RQuery {
         name: q.name.node.clone(),
@@ -74,6 +85,7 @@ pub(crate) fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery>
 fn resolve_scope_facts(
     q: &Query,
     ti: usize,
+    shape: Option<&str>,
     cx: &Cx,
     sink: &mut Sink,
 ) -> (Option<String>, Vec<ScopeInject>, Vec<CtxReq>) {
@@ -118,8 +130,9 @@ fn resolve_scope_facts(
     // carries exactly the fields the injected `:ctx_<field>` binds read.
     let scope_inject =
         crate::scope::resolve_inject(q.scoped.as_ref(), q.unscoped.is_some(), &touched, cx);
-    let scope_reqs =
+    let mut scope_reqs =
         crate::scope::inject_ctx_reqs(q.scoped.as_ref(), q.unscoped.is_some(), &touched, cx);
+    scope_reqs.extend(crate::ctx::collect_shape(shape, ti, cx));
     let ctx_requires = crate::ctx::collect_query(q, ti, cx, scope_reqs);
     (shard_key, scope_inject, ctx_requires)
 }

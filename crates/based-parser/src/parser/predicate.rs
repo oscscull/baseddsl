@@ -44,17 +44,7 @@ impl<'a> Parser<'a> {
         let first = self.lower_ident("a column, filter, or predicate")?;
         if self.at(Tok::LParen) {
             // filter call: `name(args)`
-            self.bump();
-            let mut args = Vec::new();
-            if !self.at(Tok::RParen) {
-                loop {
-                    args.push(self.value()?);
-                    if !self.eat(Tok::Comma) {
-                        break;
-                    }
-                }
-            }
-            self.expect(Tok::RParen, "`)`")?;
+            let args = self.call_args()?;
             return Ok(Predicate::FilterCall { name: first, args });
         }
         let path = self.path_from(first);

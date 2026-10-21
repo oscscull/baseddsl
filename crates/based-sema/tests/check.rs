@@ -57,6 +57,8 @@ mod distinct;
 mod duplicates;
 #[path = "check/enums.rs"]
 mod enums;
+#[path = "check/filter_projections.rs"]
+mod filter_projections;
 #[path = "check/filters.rs"]
 mod filters;
 #[path = "check/generated_columns.rs"]

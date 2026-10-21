@@ -1,5 +1,5 @@
 //! Reprint a shape's fields, inline and block form (bare, rename, nest, flatten,
-//! spread), the value a rename maps to, and an aggregate call.
+//! spread), the value a rename maps to, an aggregate call, and a filter projection.
 
 use crate::*;
 
@@ -63,7 +63,16 @@ fn shape_value(v: &ShapeValue) -> String {
         ShapeValue::Raw(r) => raw_sql(r),
         ShapeValue::Agg(a) => aggregate(a),
         ShapeValue::Computed(e) => shape_expr(e, 0),
+        ShapeValue::Filter(f) => filter_projection(f),
     }
+}
+
+fn filter_projection(f: &FilterProjection) -> String {
+    format!(
+        "{}({})",
+        f.name.node,
+        f.args.iter().map(value).collect::<Vec<_>>().join(", ")
+    )
 }
 
 fn aggregate(a: &AggCall) -> String {

@@ -1,0 +1,22 @@
+DIAGNOSTICS
+  E0355: `board` has no param `before` for its shape
+  E0355: param `before` is numeric but its shape's filter compares it to `timestamp`
+  W0100: `list` query `board` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
+  W0100: `list` query `due` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
+  W0100: `list` query `wrong` has no sort — results are nondeterministic; add `order (…)` or a model `@sort`
+SCHEMA
+model User  table=user
+  id: Id
+  name: text
+model Task  table=task
+  id: Id
+  status: TaskStatus
+  since: timestamp
+  owner: -> User  fk=owner_id
+  index(status)
+shape TaskCard from Task
+query due  target=Task verb=list many  shape=TaskCard  ctx=[user: -> User]
+query board  target=Task verb=list many  shape=TaskCard  ctx=[user: -> User]
+query wrong  target=Task verb=list many  shape=TaskCard  ctx=[user: -> User]
+filter overdue  arity=1
+filter mine  arity=0

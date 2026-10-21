@@ -25,6 +25,7 @@ mod model;
 mod params;
 mod resolve;
 mod scope;
+mod shape_filters;
 mod spread;
 
 pub use check::is_key_link;

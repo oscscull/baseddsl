@@ -20,6 +20,7 @@ mod computed_result;
 mod count;
 mod expr;
 mod filter;
+mod filter_projection;
 mod join_on;
 mod joins;
 mod keyset;

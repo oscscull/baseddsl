@@ -12,6 +12,9 @@ pub(crate) struct Select<'a> {
     /// operator/literal spellings; everything else is portable across dialects.
     pub(crate) dialect: Dialect,
     pub(crate) root_alias: String,
+    /// Join-path prefix of `root_alias` — empty at the query root, a relation path while
+    /// a predicate lowers against a nested shape's row (`predicate_at`).
+    pub(crate) root_prefix: String,
     pub(crate) joins: Vec<Join>,
     /// path-prefix key (e.g. "placed_by", "address.city") -> join alias.
     pub(crate) seen: HashMap<String, String>,
@@ -104,6 +107,7 @@ impl<'a> Select<'a> {
             schema,
             dialect,
             root_alias: root.table.clone(),
+            root_prefix: String::new(),
             joins: Vec::new(),
             seen: HashMap::new(),
             filters,

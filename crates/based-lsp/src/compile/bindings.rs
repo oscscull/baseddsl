@@ -2,7 +2,8 @@ use super::*;
 
 impl Snapshot {
     /// The param-decl name span a cursor resolves to — whether it sits on a callable's
-    /// `buyer: Id` param declaration or on a `$buyer` use in that callable's body.
+    /// `buyer: Id` param declaration, a `$buyer` use in that callable's body, or a
+    /// `$buyer` filter argument in the shape it returns.
     /// `None` off any param. Params are callable-local, so the returned span identifies
     /// exactly one callable's param.
     pub(super) fn param_ref_at(&self, fid: usize, offset: u32) -> Option<Span> {
@@ -17,7 +18,12 @@ impl Snapshot {
             if let Some(p) = params.iter().find(|p| under(&p.name)) {
                 return Some(p.name.span);
             }
-            for pr in callable_param_refs(d) {
+            // A `$p` in the callable's body, or in a filter projection of the shape it
+            // returns (the first returning callable with that param claims it).
+            let refs = callable_param_refs(d)
+                .into_iter()
+                .chain(returned_shape_param_refs(&self.decls, d));
+            for pr in refs {
                 if pr.path.is_empty() && under(&pr.name) {
                     if let Some(p) = params.iter().find(|p| p.name.node == pr.name.node) {
                         return Some(p.name.span);
@@ -92,6 +98,9 @@ impl Snapshot {
             for pr in callable_param_refs(d) {
                 push(pr);
             }
+        }
+        for pr in shape_decl_param_refs(&self.decls) {
+            push(pr);
         }
         out
     }

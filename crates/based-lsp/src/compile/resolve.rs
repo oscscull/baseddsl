@@ -120,6 +120,11 @@ impl Snapshot {
                     value: ShapeValue::Computed(expr),
                     ..
                 } => computed_paths(expr, from, out),
+                // A filter projection's column arguments are field references.
+                ShapeField::Rename {
+                    value: ShapeValue::Filter(fp),
+                    ..
+                } => fp.args.iter().for_each(|a| value_paths(a, from, out)),
                 ShapeField::Rename { .. } => {}
                 ShapeField::Nest { field, body } => {
                     out.push((from, std::slice::from_ref(field)));

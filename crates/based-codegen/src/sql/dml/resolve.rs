@@ -7,8 +7,8 @@ impl<'a> Select<'a> {
     /// a JOIN for each relation step. A terminal relation resolves to its FK column
     /// (so `where (org = $org)` compares `org_id`), never a join.
     pub(crate) fn resolve(&mut self, path: &Path, root: &RModel) -> (String, String) {
-        let root_alias = self.root_alias.clone();
-        self.resolve_from(path, &root_alias, "", root)
+        let (root_alias, root_prefix) = (self.root_alias.clone(), self.root_prefix.clone());
+        self.resolve_from(path, &root_alias, &root_prefix, root)
     }
 
     /// Resolve a dotted path starting from `start_model` (aliased `start_alias`, at join

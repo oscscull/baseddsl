@@ -229,6 +229,7 @@ pub mod code {
     pub const CFIELD_CASE_MISMATCH: &str = "E0322"; // a `case`'s branches (`then`/`else`) don't share a common type
     pub const CFIELD_NO_PARAMS: &str = "E0323"; // a `$…` operand in a computed field — a shape declaration has no parameters
     pub const CFIELD_IN_AGG: &str = "E0324"; // a computed field alongside an aggregate field — a group is not a row
+    pub const SHAPE_PARAM_UNBOUND: &str = "E0355"; // a query returns a shape whose filter projection reads `$p`, but the query has no param `p` (or its type disagrees with the filter's use)
 
     // Bulk / structured insert — `create Model[] from $rows` / `create Model from $row`
     // (BW1): a `shape` used as the row-input type. Eligibility is checked at the use site.
@@ -285,9 +286,8 @@ pub mod code {
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`
-/// is arg-less; the rest take one column. Sema restricts the grammar's open `agg_func`
-/// to this set (`E0240`).
-pub const KNOWN_AGGS: &[&str] = &["count", "sum", "avg", "min", "max"];
+/// is arg-less; the rest take one column.
+pub const KNOWN_AGGS: &[&str] = based_ast::AGG_FUNCS;
 
 /// The known model-level decorators. Anything else is a `W0101` (still a modifier,
 /// just not one the engine understands).
