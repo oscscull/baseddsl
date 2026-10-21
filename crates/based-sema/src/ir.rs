@@ -278,6 +278,10 @@ pub mod code {
     pub const NEST_ORDER_UNSUPPORTED: &str = "E0350"; // an ordered to-many nest / m2m flatten targeting MySQL — its `JSON_ARRAYAGG` rejects `ORDER BY` (MariaDB/Postgres/SQLite honor it), so the ordered nested array can't be generated
     pub const ANY_SELF_WRITE_UNSUPPORTED: &str = "E0352"; // a write's `.any` reads the written table through a custom `on:` edge — MySQL/MariaDB can't read it in a subquery, and a custom join has no key for a derived table
     pub const RELATION_ANY: &str = "E0351"; // `rel.any(…)` on a column / to-one relation, or reached through a to-many hop
+
+    // Raw placeholder misuse (E0353–E0354): placeholders that would expand to broken SQL.
+    pub const RAW_ID_QUALIFIED: &str = "E0353"; // a `.` before `{id}` in a raw body (`{table}.{id}`) — `{id}` already expands to the qualified key column
+    pub const RAW_WRITE_PLACEHOLDER: &str = "E0354"; // `{table}` / `{id}` in a raw write statement, which has no model to expand them to
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

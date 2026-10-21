@@ -32,7 +32,8 @@ pub(super) fn check_having(
         }
         Predicate::Bare(path) => check_having_path(path, out_names, qspan, sink),
         // A raw predicate term / named-filter call is a leaf escape — left unchecked.
-        Predicate::FilterCall { .. } | Predicate::Raw(_) => {}
+        Predicate::FilterCall { .. } => {}
+        Predicate::Raw(raw) => resolve::check_raw_id_qualified(raw, None, sink),
         Predicate::Any { path, .. } => sink.error(
             code::RELATION_ANY,
             path.segments[0].span,
