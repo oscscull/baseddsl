@@ -478,6 +478,7 @@ dependencies = [
  "based-diagnostics",
  "based-manifest",
  "based-parser",
+ "based-project",
  "based-sema",
  "bigdecimal",
  "chrono",

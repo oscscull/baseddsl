@@ -1,7 +1,9 @@
 //! Checked compiler projects shared by command-line and optional Cargo generation.
 //! No runtime, database, HTTP, output publication, or external tools.
 mod check;
+#[cfg(feature = "client")]
 mod client;
+mod embedded;
 mod error;
 mod parse;
 mod presentation;
@@ -11,7 +13,9 @@ mod sources;
 use based_ast::Decl;
 use based_manifest::Project;
 use based_sema::CheckedSchema;
+#[cfg(feature = "client")]
 pub use client::render_client;
+pub use embedded::check_embedded;
 pub use error::Error;
 pub use report::Report;
 use std::path::{Path, PathBuf};
@@ -27,12 +31,7 @@ pub struct CheckedProject {
 
 /// Discover, parse and check the manifest's closed schema set before generation.
 pub fn load(root: &Path) -> Result<CheckedProject, Error> {
-    let project = based_manifest::discover(root).map_err(|diagnostics| {
-        Error::Diagnostics(Report {
-            sources: Vec::new(),
-            diagnostics,
-        })
-    })?;
+    let project = based_manifest::discover(root).map_err(Error::manifest)?;
     check_project(project)
 }
 

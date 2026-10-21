@@ -96,7 +96,7 @@ pub use id::{IdGen, SeqIdGen};
 pub use idempotency::{
     DbStore, Fingerprint, IdempotencyStore, KeyState, MemStore, NoStore, TxClaim, TxIdempotency,
 };
-pub use load::Compiled;
+pub use load::{Compiled, LoadError};
 pub use migrate::{
     applied as applied_migrations, apply as apply_migrations, ensure_ledger, load_migrations,
     status as migration_status, ApplyOpts, ApplyReport, Direction, LedgerRow, MigrateError,

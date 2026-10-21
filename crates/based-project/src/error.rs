@@ -11,6 +11,16 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Manifest or discovery diagnostics, which precede any source text.
+    pub fn manifest(diagnostics: Vec<based_diagnostics::Diagnostic>) -> Self {
+        Self::Diagnostics(Report {
+            sources: Vec::new(),
+            diagnostics,
+        })
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

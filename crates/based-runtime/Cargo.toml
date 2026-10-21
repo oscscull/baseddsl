@@ -60,6 +60,8 @@ based-diagnostics.workspace = true
 based-manifest.workspace = true
 based-parser.workspace = true
 based-sema.workspace = true
+# The shared check pipeline, without client rendering.
+based-project = { path = "../based-project", default-features = false }
 # Runtime SQL lowering needs neither the client emitter nor OpenAPI generation.
 based-codegen = { path = "../based-codegen", default-features = false }
 serde_json.workspace = true

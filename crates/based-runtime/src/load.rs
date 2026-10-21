@@ -1,5 +1,5 @@
 //! Loading a project into the runtime: the same front end as `based check`
-//! (discover → parse → check), then codegen's query lowering, held in memory.
+//! (parse → check, from disk or embedded sources), then codegen's query lowering, held in memory.
 //!
 //! The runtime never runs on a schema that does not check clean — a codegen
 //! precondition. `Compiled` is the served artifact: the resolved schema, the AST
@@ -9,12 +9,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use based_ast::{Decl, FileId};
+use based_ast::Decl;
 use based_codegen::sql::{lower_mutations, lower_queries, LoweredMutation, LoweredQuery};
 use based_codegen::Dialect;
-use based_diagnostics::{Diagnostic, Severity};
-use based_parser::parse_file;
-use based_sema::{check, CheckedSchema};
+use based_project::CheckedProject;
+use based_sema::CheckedSchema;
+
+/// Why a schema did not load: compiler diagnostics (rendered against their source
+/// names) or an unreadable file. Warnings never block.
+pub use based_project::Error as LoadError;
 
 /// A project compiled and ready to serve: resolved schema + AST + lowered queries
 /// and mutations (the read + write dispatch tables).
@@ -33,50 +36,23 @@ pub struct Compiled {
     pub(crate) fixtures: crate::fixture::Fixtures,
 }
 
-/// How loading failed: either the front end reported errors (the schema is not
-/// clean), or a file could not be read.
-#[derive(Debug)]
-pub enum LoadError {
-    /// One or more parse/sema *errors* (warnings do not block). Rendered by the
-    /// caller — the runtime holds the diagnostics, not the formatting.
-    Check(Vec<Diagnostic>),
-    Io(String),
-}
-
 impl Compiled {
-    /// Discover `**/*.bsl` under `root`, parse + check them, and lower every query.
-    /// Bails with [`LoadError::Check`] on any error diagnostic (a dirty schema must
-    /// never reach codegen). Warnings are tolerated — they do not affect execution.
+    /// Discover `based.toml` and `**/*.bsl` under `root`, check them, and lower every
+    /// callable. Fails on any error diagnostic; warnings are tolerated.
     pub fn load(root: &Path) -> Result<Self, LoadError> {
-        let project = based_manifest::discover(root).map_err(LoadError::Check)?;
-        let dialect = Dialect::parse(&project.manifest.dialect);
+        based_project::load(root).map(Self::from_project)
+    }
 
-        let mut decls = Vec::new();
-        let mut diags = Vec::new();
-        for (i, f) in project.files.iter().enumerate() {
-            let src = std::fs::read_to_string(&f.path)
-                .map_err(|e| LoadError::Io(format!("{}: {e}", f.path.display())))?;
-            match parse_file(&src, FileId(i as u32)) {
-                Ok(sf) => decls.extend(sf.decls),
-                Err(d) => diags.extend(d),
-            }
-        }
-        if diags.iter().any(|d| d.severity == Severity::Error) {
-            return Err(LoadError::Check(diags));
-        }
+    /// Check `based.toml` text plus `(name, text)` sources compiled into the binary,
+    /// exactly as [`Compiled::load`] checks files on disk. Diagnostics cite each `name`.
+    pub fn from_sources(manifest: &str, files: &[(&str, &str)]) -> Result<Self, LoadError> {
+        based_project::check_embedded(manifest, files).map(Self::from_project)
+    }
 
-        let (mut schema, sema_diags) = check(&decls);
-        if sema_diags.iter().any(|d| d.severity == Severity::Error) {
-            return Err(LoadError::Check(sema_diags));
-        }
-        // Resolve `id: Id` primary keys to the project's default generation strategy
-        // (`[schema] id`) before lowering, so serial/ulid DDL + minting see the concrete type.
-        based_sema::resolve_pk_default(
-            &mut schema,
-            based_sema::PkStrategy::parse(&project.manifest.schema.id),
-        );
-
-        Ok(Self::from_checked(schema, decls, dialect))
+    /// The shared tail: lower a checked project for its manifest's dialect.
+    fn from_project(checked: CheckedProject) -> Self {
+        let dialect = Dialect::parse(&checked.project.manifest.dialect);
+        Self::from_checked(checked.schema, checked.declarations, dialect)
     }
 
     /// Build the served artifact from an already-checked schema + AST for a target

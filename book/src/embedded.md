@@ -31,6 +31,31 @@ The Rust entry point loads the schema and opens the database. The demo owns the
 calls; session and lookup code handle context and optional results. Read those
 small files before replacing the sample with your application.
 
+## Ship one binary
+
+The schema is compiled into the executable, so a bundled app needs no
+`schema/` folder at runtime. `build.rs` checks it (a broken schema fails
+`cargo build`) and embeds it:
+
+```rust
+mod schema {
+    include!(concat!(env!("OUT_DIR"), "/schema.rs"));
+}
+
+let compiled = based_runtime::Compiled::from_sources(schema::MANIFEST, schema::SOURCES)?;
+```
+
+Without `based-build`, pass the manifest text and `(name, text)` pairs
+yourself:
+
+```rust
+const SCHEMA: &[(&str, &str)] = &[("task.bsl", include_str!("../schema/task.bsl"))];
+let compiled = Compiled::from_sources(include_str!("../based.toml"), SCHEMA)?;
+```
+
+`from_sources` runs the same check as `Compiled::load`: errors fail and cite
+the embedded name, and warnings do not.
+
 ## Rename a field
 
 Change `name: text` to `title: text @was("name")`. In projections use
