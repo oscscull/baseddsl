@@ -25,6 +25,10 @@ use sqlx::sqlite::{
 };
 use sqlx::{Column, Row as SqlxRow, TypeInfo, ValueRef};
 
+mod location;
+
+pub use location::{SqliteLocation, SqliteLocationError};
+
 use crate::run::{Backend, Db, DbError, DbErrorKind, DbRead, Row, RowStream, Tx};
 use crate::value::SqlValue;
 
@@ -295,19 +299,39 @@ impl SqliteBackend {
         Ok(Self { pool })
     }
 
-    /// A backend over a file database at `path` (created if absent), in **WAL** mode over
-    /// a bounded pool of [`DEFAULT_FILE_POOL`] connections. A file database persists on its
-    /// own — no single-connection pin is needed (that constraint is the in-memory backend's
-    /// alone) — so it runs a real pool, and WAL lets readers proceed concurrently with each
-    /// other and with a writer. Use [`open_with_pool`](Self::open_with_pool) to size the
-    /// pool.
-    pub fn open(path: &str) -> Result<Self, DbError> {
-        Self::open_with_pool(path, DEFAULT_FILE_POOL)
+    /// A backend over `target` — a file path, `:memory:`, or a `sqlite:` URL (see
+    /// [`SqliteLocation`]); any other scheme is an error. A file database is created if
+    /// absent and runs in **WAL** mode over a bounded pool of [`DEFAULT_FILE_POOL`]
+    /// connections: a file persists on its own — no single-connection pin is needed (that
+    /// constraint is the in-memory backend's alone) — and WAL lets readers proceed
+    /// concurrently with each other and with a writer. Use
+    /// [`open_with_pool`](Self::open_with_pool) to size the pool.
+    pub fn open(target: &str) -> Result<Self, DbError> {
+        Self::open_with_pool(target, DEFAULT_FILE_POOL)
     }
 
     /// [`open`](Self::open) with an explicit maximum pool size (clamped to at least 1). A
     /// read-heavy embedding host raises this to run more reads in parallel under WAL.
-    pub fn open_with_pool(path: &str, max_connections: u32) -> Result<Self, DbError> {
+    pub fn open_with_pool(target: &str, max_connections: u32) -> Result<Self, DbError> {
+        Self::open_location_with_pool(&SqliteLocation::parse(target)?, max_connections)
+    }
+
+    /// [`open`](Self::open) over an already-parsed [`SqliteLocation`].
+    pub fn open_location(location: &SqliteLocation) -> Result<Self, DbError> {
+        Self::open_location_with_pool(location, DEFAULT_FILE_POOL)
+    }
+
+    fn open_location_with_pool(
+        location: &SqliteLocation,
+        max_connections: u32,
+    ) -> Result<Self, DbError> {
+        match location {
+            SqliteLocation::Memory => Self::in_memory(),
+            SqliteLocation::File(path) => Ok(Self::open_file(path, max_connections)),
+        }
+    }
+
+    fn open_file(path: &std::path::Path, max_connections: u32) -> Self {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -321,7 +345,7 @@ impl SqliteBackend {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections.max(1))
             .connect_lazy_with(opts);
-        Ok(Self { pool })
+        Self { pool }
     }
 
     /// Build the [`Backend`] over a caller's **existing** sqlx pool — the embed for an

@@ -24,7 +24,12 @@ Live commands select connections in this order:
 3. The selected project's `.env`, in the same variable order.
 
 Empty values fail. A URL variable can contain comma-separated shard URLs; SQLite
-serve accepts one file. Offline checking, formatting, generation, and migration
+serve accepts one file.
+
+A SQLite connection is a file path (`app.db`, `/srv/app.db`), `:memory:`, or a
+`sqlite:` URL: `sqlite:app.db`, `sqlite://app.db`, `sqlite:///srv/app.db`,
+`sqlite::memory:`. The file is created if missing. Any other scheme, and URL
+query parameters, are rejected. Offline checking, formatting, generation, and migration
 planning do not require a connection or read `.env`.
 
 Keep credentials, database files, and `.env` out of source control.
