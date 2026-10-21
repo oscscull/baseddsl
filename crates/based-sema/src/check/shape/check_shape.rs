@@ -31,7 +31,7 @@ pub(crate) fn check_shape(s: &Shape, cx: &Cx, sink: &mut Sink) -> Option<RShape>
             }
             if let ShapeField::Rename {
                 out,
-                value: ShapeValue::Computed(_),
+                value: ShapeValue::Computed(_) | ShapeValue::Filter(_),
             } = f
             {
                 sink.error_note(

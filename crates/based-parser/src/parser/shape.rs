@@ -83,12 +83,14 @@ impl<'a> Parser<'a> {
             });
         }
         if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::LParen) && !self.at_kw("case") {
-            // `out = count()` / `out = sum(total)` — an aggregate. A path holds no `(`, so
-            // `ident (` in a shape value is unambiguously an aggregate call.
-            return Ok(ShapeField::Rename {
-                out: name,
-                value: ShapeValue::Agg(self.aggregate()?),
-            });
+            // `ident (` is a call: an aggregate (`count()` / `sum(total)`) by name, else a
+            // named-filter projection (`overdue($before)`).
+            let value = if AGG_FUNCS.iter().any(|f| self.at_kw(f)) {
+                ShapeValue::Agg(self.aggregate()?)
+            } else {
+                ShapeValue::Filter(self.filter_projection()?)
+            };
+            return Ok(ShapeField::Rename { out: name, value });
         }
         // A per-row scalar expression: arithmetic / concat / `case`, or (the common case) a
         // lone column reach that keeps its `Path` / flatten forms.

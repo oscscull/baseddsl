@@ -10,6 +10,8 @@ mod computed_integration;
 mod conditional_transition;
 #[path = "distinct_integration.rs"]
 mod distinct_integration;
+#[path = "filter_projection_integration.rs"]
+mod filter_projection_integration;
 #[path = "fixtures.rs"]
 mod fixtures;
 #[path = "idempotency_db.rs"]

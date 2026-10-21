@@ -152,10 +152,14 @@ impl Snapshot {
                 out.push(id.1.span);
             }
         }
-        // Callable param uses: every `$param` in the callable owning the target param.
+        // Callable param uses: every `$param` in the callable owning the target param,
+        // and in the filter projections of the shape it returns.
         for d in &self.decls {
             if let Some(p) = decl_params(d).iter().find(|p| p.name.span == target) {
-                for pr in callable_param_refs(d) {
+                let refs = callable_param_refs(d)
+                    .into_iter()
+                    .chain(returned_shape_param_refs(&self.decls, d));
+                for pr in refs {
                     if pr.path.is_empty() && pr.name.node == p.name.node {
                         out.push(pr.name.span);
                     }

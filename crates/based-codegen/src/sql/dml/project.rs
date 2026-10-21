@@ -213,8 +213,8 @@ fn project_body<'a>(
 }
 
 /// Project a renamed field (`out = <value>`): a path reach, a raw expression, an aggregate
-/// (defensive — an aggregate shape lowers via `lower_agg_query`, never this path), or a
-/// per-row computed scalar. One SELECT-list column under the `out`-named alias.
+/// (defensive — an aggregate shape lowers via `lower_agg_query`, never this path), a
+/// per-row computed scalar, or a filter projected as a bool. One SELECT-list column under the `out`-named alias.
 #[allow(clippy::too_many_arguments)]
 fn project_rename<'a>(
     sel: &mut Select<'a>,
@@ -252,6 +252,13 @@ fn project_rename<'a>(
         }
         ShapeValue::Computed(expr) => {
             let sql = sel.shape_expr(expr, alias, prefix, model);
+            cols.push(format!(
+                "{sql} AS {}",
+                sel.q(&out_alias(out_prefix, &out.node))
+            ));
+        }
+        ShapeValue::Filter(fp) => {
+            let sql = sel.filter_projection(fp, alias, prefix, model);
             cols.push(format!(
                 "{sql} AS {}",
                 sel.q(&out_alias(out_prefix, &out.node))

@@ -502,4 +502,46 @@ mod tests {
         // Grade's same-named `pending` variant is untouched.
         assert!(out.contains("enum Grade { pending, top }"), "{out}");
     }
+
+    /// A shape's filter projection: the filter name renames with its decl, and a shape
+    /// `$p` argument resolves to (and renames with) the returning query's param.
+    #[test]
+    fn filter_projection_names_and_params_navigate() {
+        let ws = TempWorkspace::new("rename_filter_projection");
+        ws.write("based.toml", "");
+        ws.write(
+            "schema.bsl",
+            "Task { done: bool  due_at: timestamp }\n\
+             filter late(at) = done = false and due_at <= $at;\n\
+             shape Card from Task { done, is_late = late($at) }\n\
+             query board(at: timestamp) -> Card[] { list Task; }\n",
+        );
+        let snap = compile_manifest(&ws.root, &HashMap::new());
+        assert!(nav_clean(&snap.diagnostics), "{:?}", snap.diagnostics);
+        let fid = snap.file_id_of(&ws.path("schema.bsl")).unwrap();
+        let src = snap.sources[fid].1.clone();
+
+        // Go-to-def on the shape's `$at` lands on the query's param.
+        let arg = (src.find("late($at)").unwrap() + "late($".len()) as u32;
+        let decl = snap.definition_at(fid, arg).expect("shape param resolves");
+        let decl_at = src.find("board(at").unwrap() + "board(".len();
+        assert_eq!(decl.start as usize, decl_at);
+
+        // Renaming the query param rewrites the shape's argument too.
+        let changes = snap.rename_edits(fid, arg, "cutoff").expect("renameable");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        assert!(out.contains("query board(cutoff: timestamp)"), "{out}");
+        assert!(out.contains("is_late = late($cutoff)"), "{out}");
+        // The filter's own param is a different symbol.
+        assert!(out.contains("filter late(at)"), "{out}");
+
+        // The filter name in the shape renames with the filter decl, and hovers its signature.
+        let call = (src.find("late($at)").unwrap() + 1) as u32;
+        let changes = snap.rename_edits(fid, call, "overdue").expect("renameable");
+        let out = apply_edits(&snap, fid, &changes[&file_uri(&snap, fid)]);
+        assert!(out.contains("filter overdue(at)"), "{out}");
+        assert!(out.contains("is_late = overdue($at)"), "{out}");
+        let hover = snap.hover_at(fid, call).expect("filter hover");
+        assert!(hover.contains("filter late(at)"), "{hover}");
+    }
 }

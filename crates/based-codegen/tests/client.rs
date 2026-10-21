@@ -1178,6 +1178,17 @@ fn computed_shape_fields_type_by_inferred_expression() {
 }
 
 #[test]
+fn filter_projection_is_a_bool_field() {
+    let out = gen(r#"
+        Task { id: Id, done: bool, due_at: timestamp }
+        filter late(at) = done = false and due_at <= $at;
+        shape TaskCard from Task { id, is_late = late($at) }
+        query tasks(at: timestamp) -> TaskCard[] { list Task; }
+        "#);
+    assert!(out.contains("pub is_late: bool,"), "\n{out}");
+}
+
+#[test]
 fn optional_filter_param_is_option_type() {
     let out = gen(r#"
         Product {

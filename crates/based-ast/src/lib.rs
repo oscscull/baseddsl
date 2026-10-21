@@ -491,6 +491,18 @@ pub enum ShapeValue {
     /// is inferred from the expression (numeric family / text / the unified CASE branch
     /// type). Not an aggregate — it composes in ordinary (non-group) shapes.
     Computed(ShapeExpr),
+    /// `out = filter_name(args)` — a named filter evaluated per row as a non-null bool
+    /// (a filter that is NULL for the row projects `false`). A `$p` argument binds to
+    /// the same-named param of each query returning the shape.
+    Filter(FilterProjection),
+}
+
+/// A named-filter call in a shape value (`is_overdue = overdue($before)`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterProjection {
+    pub name: Ident,
+    pub args: Vec<Value>,
+    pub span: Span,
 }
 
 /// A per-row scalar expression projected by a computed shape field (`out = <expr>`). The
@@ -546,6 +558,10 @@ impl ShapeExpr {
         }
     }
 }
+
+/// The aggregate function names a shape value's `name(…)` call can take; any other name
+/// is a named-filter projection.
+pub const AGG_FUNCS: &[&str] = &["count", "sum", "avg", "min", "max"];
 
 /// One aggregate call in a shape value. `func` is the (contextual) function name —
 /// `count`/`sum`/`avg`/`min`/`max`, validated in sema; `arg` is the aggregated column

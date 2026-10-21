@@ -765,6 +765,20 @@ fn computed_shape_fields_carry_inferred_schemas() {
 }
 
 #[test]
+fn filter_projection_is_a_required_boolean() {
+    let doc = gen(r#"
+        Task { id: Id, done: bool, due_at: timestamp }
+        filter late(at) = done = false and due_at <= $at;
+        shape TaskCard from Task { id, is_late = late($at) }
+        query tasks(at: timestamp) -> TaskCard[] { list Task; }
+        "#);
+    let row = &doc["components"]["schemas"]["TaskCard"];
+    assert_eq!(row["properties"]["is_late"]["type"], "boolean");
+    let required = row["required"].as_array().unwrap();
+    assert!(required.iter().any(|v| v == "is_late"), "{required:?}");
+}
+
+#[test]
 fn optional_filter_param_is_not_required() {
     // A `?` optional filter param is non-`required` (absent = drop the filter). Under 2-state
     // it is NOT null-accepting — null-matching is a body concern, not a param state.

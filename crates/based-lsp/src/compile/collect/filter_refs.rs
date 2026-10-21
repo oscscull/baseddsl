@@ -1,8 +1,9 @@
 use super::*;
 
 /// Every `filter(...)` call-name identifier across the AST — the sites a name *invokes*
-/// a declared filter (`Predicate::FilterCall`), found by walking every predicate a
-/// query/mutation/filter carries. The reference-collection twin for filters.
+/// a declared filter (`Predicate::FilterCall`, or a shape's filter projection), found by
+/// walking every predicate a query/mutation/filter carries and every shape body. The
+/// reference-collection twin for filters.
 pub(crate) fn collect_filter_refs(decls: &[Decl]) -> Vec<&Ident> {
     let mut out = Vec::new();
     for d in decls {
@@ -17,10 +18,27 @@ pub(crate) fn collect_filter_refs(decls: &[Decl]) -> Vec<&Ident> {
             },
             Decl::Mutation(m) => write_filter_refs(&m.body, &mut out),
             Decl::Filter(f) => pred_filter_refs(&f.pred, &mut out),
+            Decl::Shape(s) => shape_filter_refs(&s.body, &mut out),
             _ => {}
         }
     }
     out
+}
+
+/// Filter-projection names in a shape body (`out = filter(args)`), recursing nests.
+pub(crate) fn shape_filter_refs<'a>(body: &'a [ShapeField], out: &mut Vec<&'a Ident>) {
+    for f in body {
+        match f {
+            ShapeField::Rename {
+                value: ShapeValue::Filter(fp),
+                ..
+            } => out.push(&fp.name),
+            ShapeField::Nest { body, .. } | ShapeField::Flatten { body, .. } => {
+                shape_filter_refs(body, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Filter-call names in a query clause's `where` predicate.

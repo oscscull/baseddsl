@@ -158,7 +158,7 @@ shape_body  = '{' { shape_field sep } [ shape_field ] '}' ;
 (* equal the relation's target; the reference is a pure body expansion (`full` is  *)
 (* per-model, so it is never referenced this way).                                 *)
 shape_field = bare_field                       (* local, same-name             *)
-            | out_name '=' shape_value          (* reach/raw/agg/computed       *)
+            | out_name '=' shape_value          (* reach/raw/agg/filter/computed *)
             | out_name '=' path shape_body      (* far-side flatten (m2m)       *)
             | bare_field shape_body             (* nest a relation into subobj  *)
             | bare_field '->' upper_ident        (* nest via a named shape       *)
@@ -168,7 +168,12 @@ out_name    = lower_ident ;
 (* A lone `path` reaches-and-renames; `raw_sql` / `aggregate` are the escape hatch and  *)
 (* the grouped aggregate; `shape_expr` is a per-row derived scalar. A bare `path` that   *)
 (* is followed by a `shape_body` is the far-side flatten above, not `shape_expr`.        *)
-shape_value = path | raw_sql | aggregate | shape_expr ;
+shape_value = path | raw_sql | aggregate | filter_proj | shape_expr ;
+
+(* A named filter projected as a non-null bool per row (NULL projects false). Any call  *)
+(* name outside `agg_func` is a filter. A `$p` argument binds to the same-named param of  *)
+(* each query/mutation returning the shape; missing or mistyped is E0355.               *)
+filter_proj = filter_name '(' [ value { ',' value } ] ')' ;
 
 (* A computed shape field: a per-row scalar over the row's reachable columns + literals.  *)
 (* Concatenation is the lowest-precedence binary level, then +/-, then * // ; a `case`    *)

@@ -35,6 +35,21 @@ pub fn collect_query(q: &Query, ti: usize, cx: &Cx, scope_reqs: Vec<CtxReq>) -> 
     dedup(out)
 }
 
+/// The `$ctx` a returned shape's filter projections read, each filter body inferred
+/// against the model its field projects from.
+pub fn collect_shape(shape: Option<&str>, ti: usize, cx: &Cx) -> Vec<CtxReq> {
+    let mut out = Vec::new();
+    let Some(body) = shape.and_then(|s| cx.shape_bodies.get(s).copied()) else {
+        return out;
+    };
+    for u in crate::shape_filters::shape_filter_uses(body, ti, cx) {
+        if let Some(def) = cx.filters.get(&u.call.name.node) {
+            expand_filter(def, u.model, cx, &mut Vec::new(), &mut out);
+        }
+    }
+    out
+}
+
 /// The `$ctx` a mutation requires: the scope terms it injects (`scope_reqs`, from
 /// the mutation's chosen `@scope` alternative per touched model — write guards,
 /// the create-time auto-set, and the re-select's joined scopes alike) plus each

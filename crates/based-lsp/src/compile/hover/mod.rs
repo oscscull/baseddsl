@@ -44,6 +44,16 @@ impl Snapshot {
                 return Some(h);
             }
         }
+        // A filter call or shape filter projection → the filter's signature.
+        if let Some(t) = collect_filter_refs(&self.decls).into_iter().find(under) {
+            let def = self.decls.iter().find_map(|d| match d {
+                Decl::Filter(f) if f.name.node == t.node => Some(f),
+                _ => None,
+            });
+            if let Some(f) = def {
+                return Some(filter_hover(f));
+            }
+        }
         // Otherwise the cursor may sit on a declaration's own name.
         self.decl_site_hover(fid, offset)
     }

@@ -37,6 +37,15 @@ pub(crate) fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<R
     check_from_creates(m, cx, sink);
 
     check_keyless_readback(m, &ret, cx, sink);
+    if let (Some(shape), Some(ti)) = (ret.shape.as_deref(), cx.find(&ret.model)) {
+        let binder = ShapeBinder {
+            callable: &m.name,
+            params: &m.params,
+            ret_span: m.ret.ty.span,
+            infer: false,
+        };
+        check_shape_params(&binder, shape, ti, cx, sink);
+    }
 
     let (shard_key, scope_inject, ctx_requires) = resolve_scope_facts(m, &ret, unscoped, cx, sink);
     Some(RMutation {
@@ -138,7 +147,10 @@ fn resolve_scope_facts(
     let scope_inject = crate::scope::resolve_inject(m.scoped.as_ref(), unscoped, &touched, cx);
     // The `$ctx` requirement derives from the same chosen alternative(s) as the
     // injection, so the bag always carries exactly the injected `:ctx_<field>`s.
-    let scope_reqs = crate::scope::inject_ctx_reqs(m.scoped.as_ref(), unscoped, &touched, cx);
+    let mut scope_reqs = crate::scope::inject_ctx_reqs(m.scoped.as_ref(), unscoped, &touched, cx);
+    if let Some(ti) = cx.find(&ret.model) {
+        scope_reqs.extend(crate::ctx::collect_shape(ret.shape.as_deref(), ti, cx));
+    }
     let ctx_requires = crate::ctx::collect_mutation(m, cx, scope_reqs);
     (shard_key, scope_inject, ctx_requires)
 }

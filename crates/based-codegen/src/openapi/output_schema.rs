@@ -151,7 +151,7 @@ fn shape_fields(
 }
 
 /// A renamed/derived field (`out = …`): a column path, a `raw`…`` open object, an
-/// aggregate, or a per-row computed scalar.
+/// aggregate, a per-row computed scalar, or a filter projection.
 fn rename_field(
     schema: &CheckedSchema,
     model: Option<&RModel>,
@@ -190,6 +190,8 @@ fn rename_field(
             let ty = prim.map_or_else(json_schema, primitive_schema);
             (alias.node.clone(), ty, !optional)
         }
+        // A filter projection: a required boolean.
+        ShapeValue::Filter(_) => (alias.node.clone(), primitive_schema(Primitive::Bool), true),
     }
 }
 

@@ -487,6 +487,14 @@ fn computed_shape_field_reprints_with_minimal_parens() {
 }
 
 #[test]
+fn filter_projection_reprints_as_a_call() {
+    assert_eq!(
+        fmt("shape S from T { late=overdue( $before ,1), ok = active() }"),
+        "shape S from T {\n  late = overdue($before, 1)\n  ok   = active()\n}\n"
+    );
+}
+
+#[test]
 fn composite_column_map_round_trips() {
     let src =
         "Line {\n  order: Order (column tenant_id = \"ord_tenant\", id = \"ord \\\"no\\\"\")\n}\n";

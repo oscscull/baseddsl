@@ -50,6 +50,8 @@ mod custom_joins;
 mod distinct;
 #[path = "dml/enum_filters.rs"]
 mod enum_filters;
+#[path = "dml/filter_projections.rs"]
+mod filter_projections;
 #[path = "dml/flattening.rs"]
 mod flattening;
 #[path = "dml/locking.rs"]

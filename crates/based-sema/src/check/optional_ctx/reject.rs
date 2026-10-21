@@ -1,7 +1,7 @@
 use super::*;
 
 /// Reject a stray optional `?` — every position but a query `where`'s `$ctx.<field>`.
-pub(super) fn reject_optional_value(v: &Value, at: &str, sink: &mut Sink) {
+pub(crate) fn reject_optional_value(v: &Value, at: &str, sink: &mut Sink) {
     if let Value::Param(pr) = v {
         if pr.optional {
             let span = pr.path.last().map_or(pr.name.span, |s| s.span);

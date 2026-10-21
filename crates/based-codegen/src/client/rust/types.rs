@@ -83,7 +83,8 @@ fn agg_type(schema: &CheckedSchema, model: Option<&RModel>, agg: &AggCall) -> St
 }
 
 /// The Rust type of an `out = value` shape field: a reach path's column type, `Json`
-/// for a raw expression, an aggregate's type, or a computed expression's inferred type.
+/// for a raw expression, an aggregate's type, a computed expression's inferred type, or
+/// `bool` for a filter projection.
 pub(super) fn rename_type(
     schema: &CheckedSchema,
     model: Option<&RModel>,
@@ -102,6 +103,8 @@ pub(super) fn rename_type(
         // A per-row derived scalar: type inferred from the expression (numeric family /
         // text / the unified CASE branch type).
         ShapeValue::Computed(expr) => computed_type(schema, model, expr),
+        // A filter projection is always a non-null bool.
+        ShapeValue::Filter(_) => primitive(Primitive::Bool).to_string(),
     }
 }
 

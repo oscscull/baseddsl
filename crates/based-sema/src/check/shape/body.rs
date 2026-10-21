@@ -36,8 +36,8 @@ pub(super) fn check_shape_body(
                 }
             }
             // A rename reaches a column via a path, computes one with raw SQL (a leaf
-            // trapdoor — shapes have no params, so only its placeholders are checked), or aggregates
-            // a column (`= count()` / `= sum(total)`).
+            // trapdoor — shapes have no params, so only its placeholders are checked), aggregates a
+            // column (`= count()` / `= sum(total)`), or projects a named filter.
             ShapeField::Rename { value, .. } => match value {
                 ShapeValue::Path(p) => {
                     resolve::resolve_path(p, mi, cx, sink);
@@ -47,6 +47,7 @@ pub(super) fn check_shape_body(
                 // A per-row derived scalar (`out = price - discount` / `a || b` / `case …`):
                 // type-check the expression against this model.
                 ShapeValue::Computed(expr) => resolve::check_shape_expr(expr, mi, cx, sink),
+                ShapeValue::Filter(fp) => check_filter_projection(fp, mi, cx, sink),
             },
             ShapeField::Nest { field, body } => {
                 if let Some(ti) = nest_target(field, mi, cx, sink).and_then(|t| cx.find(t)) {

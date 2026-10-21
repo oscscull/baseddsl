@@ -131,10 +131,14 @@ fn agg_projection<'a>(
                     let e = format!("({})", render_raw(dialect, raw, &root_alias, &root.table));
                     (out.node.clone(), e.clone(), e)
                 }
-                // A computed field never co-occurs with an aggregate (sema `E0324`); lower
-                // it defensively so the branch is total.
+                // A computed field or filter projection never co-occurs with an aggregate
+                // (sema `E0324`); lower it defensively so the branch is total.
                 ShapeValue::Computed(expr) => {
                     let e = sel.shape_expr(expr, &root_alias, "", root);
+                    (out.node.clone(), e.clone(), e)
+                }
+                ShapeValue::Filter(fp) => {
+                    let e = sel.filter_projection(fp, &root_alias, "", root);
                     (out.node.clone(), e.clone(), e)
                 }
             },
