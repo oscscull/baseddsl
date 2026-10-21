@@ -190,6 +190,8 @@ Lists: `status in (open, waiting, $other)` (fixed set), or `col in $arr` with an
 
 **Related row exists:** `rel.any(pred)` over a to-many relation — `list Card where (printings.any(digital = false))`; `rel.any()` = has any related row, `not rel.any()` = has none. Leading to-one hops are fine (`set.cards.any(…)`); a to-many hop nests (`cards.any(printings.any(…))`). Lowers to `EXISTS`, so rows never fan out. On a column / to-one relation it is E0351.
 
+**Path through a to-many relation:** each leaf is its own `.any` — `comments.resolved = false` is `comments.any(resolved = false)`, and `not (…)` means no related row matches, so a predicate and its negation split the parents exactly (a parent with no related rows lands in the negation). `comments.resolved = null` needs a related row whose `resolved` is null. Two leaves may match different rows: `comments.a = 1 and comments.b = 2` is two `EXISTS`; for one row satisfying both, write `comments.any(a = 1 and b = 2)`. Multi-hop paths nest (`posts.comments.resolved`).
+
 **Scope acknowledgement** is mandatory on a scoped model: `scoped Tenant` or `unscoped("reason")`.
 
 ## Sorting

@@ -72,3 +72,5 @@ mod raw_queries;
 mod relation_any;
 #[path = "dml/scopes.rs"]
 mod scopes;
+#[path = "dml/to_many_paths.rs"]
+mod to_many_paths;

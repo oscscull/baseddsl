@@ -1,4 +1,5 @@
-//! A MySQL/MariaDB check for `rel.any(…)` in a write: those dialects can't read the table an
+//! A MySQL/MariaDB check for `rel.any(…)` (or a filter path through a to-many relation,
+//! which lowers the same way) in a write: those dialects can't read the table an
 //! UPDATE/DELETE writes in a subquery. A key-linked edge is read through a materialized
 //! derived table instead, but a custom `on:` edge has no key to project, so it has no valid
 //! SQL there and `check` errors rather than fail at runtime.
@@ -89,7 +90,35 @@ impl<'a> Walk<'a> {
             Predicate::Bare(path) if path.segments.len() == 1 => {
                 self.filter(&path.segments[0].node, model, written, in_filters);
             }
-            _ => {}
+            Predicate::Cmp { path, .. }
+            | Predicate::InList { path, .. }
+            | Predicate::Bare(path) => {
+                self.leaf(path, model, written);
+            }
+            Predicate::Raw(_) => {}
+        }
+    }
+
+    /// Check each to-many hop a leaf path steps through: it lowers as an implicit `.any`.
+    fn leaf(&mut self, path: &Path, model: &'a RModel, written: &str) {
+        let Some((_, hops)) = path.segments.split_last() else {
+            return;
+        };
+        let mut cur = model;
+        for seg in hops {
+            let Some(mem) = cur.member(&seg.node) else {
+                return;
+            };
+            let Some(target) = mem.kind.target().and_then(|t| self.schema.model(t)) else {
+                return;
+            };
+            if matches!(&mem.kind, MemberKind::Inverse { via, .. } if !target.is_unique(via)) {
+                let hop = Path {
+                    segments: vec![seg.clone()],
+                };
+                self.any_edge(&hop, cur, written);
+            }
+            cur = target;
         }
     }
 
