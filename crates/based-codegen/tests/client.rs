@@ -723,6 +723,10 @@ fn typed_ids_are_phantom_newtypes_per_entity() {
     assert!(out.contains("impl<E> Serialize for Id<E>"), "\n{out}");
     assert!(out.contains("pub fn from_raw("), "\n{out}");
     assert!(out.contains("pub fn from_int("), "\n{out}");
+    assert!(
+        out.contains("pub fn as_int(&self) -> Option<i64>"),
+        "\n{out}"
+    );
     // A marker per model, so `Id<entity::Org>` and `Id<entity::User>` differ.
     assert!(out.contains("pub mod entity {"), "\n{out}");
     assert!(out.contains("pub enum Org {}"), "\n{out}");
