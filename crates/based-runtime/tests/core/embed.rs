@@ -570,18 +570,16 @@ async fn typed_stream_pre_body_rejection_is_the_outer_err() {
 /// Drop = cancel on the typed surface, proven against a real engine: the backend pool
 /// holds exactly one connection, so the follow-up typed mutation only succeeds if
 /// dropping the `RowStream` mid-pass returned that connection healthy.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn dropping_the_typed_stream_releases_the_connection() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn dropping_the_typed_stream_releases_the_connection<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::SqliteBackend;
     use futures_util::StreamExt;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
 
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -642,17 +640,15 @@ async fn dropping_the_typed_stream_releases_the_connection() {
 /// Keyed replay against a real database: a retried `place_order_with_key` returns the
 /// first attempt's row and inserts **nothing** — the row count proves no double effect,
 /// not just an equal-looking response.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn keyed_mutation_has_no_double_effect_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn keyed_mutation_has_no_double_effect_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::SqliteBackend;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
 
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -698,17 +694,15 @@ async fn keyed_mutation_has_no_double_effect_on_live_sqlite() {
 /// `purge_order` (a `hard delete`) returns `Ok(())` and the row is really gone; the
 /// same call again — the row no longer exists — is the engine's `404 not_found`,
 /// surfaced as a typed `ClientError` with the stable code.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::SqliteBackend;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
 
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -819,16 +813,15 @@ async fn transaction_retrying_reruns_on_a_serialization_failure() {
 /// A managed closure **commits on `Ok`**, read-decide-write proven live: read an existing
 /// row, decide the write from its value, write a derived row — and after commit the write is
 /// visible on a fresh connection.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn managed_transaction_commits_read_decide_write_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn managed_transaction_commits_read_decide_write_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::{SqliteBackend, TxOptions};
+    use based_runtime::TxOptions;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -887,16 +880,15 @@ async fn managed_transaction_commits_read_decide_write_on_live_sqlite() {
 
 /// A managed closure **rolls back on `Err`**: a write runs, then the closure returns an
 /// application error, and the write leaves no trace — the seeded order is all that remains.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn managed_transaction_rolls_back_on_err_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn managed_transaction_rolls_back_on_err_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::{SqliteBackend, TxOptions};
+    use based_runtime::TxOptions;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -944,17 +936,16 @@ async fn managed_transaction_rolls_back_on_err_on_live_sqlite() {
 
 /// The explicit-handle rung (`engine.begin` → `txn.client()` → `commit`/`rollback`): a
 /// committed write persists, a rolled-back write does not — the caller owns the boundary.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::{SqliteBackend, TxOptions};
+    use based_runtime::TxOptions;
     use client::TransactionExt;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -1044,16 +1035,14 @@ async fn explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite() {
 /// real JSON bool). The generated `FeatureView` reconciles: `enabled: bool` and the nullable
 /// `beta: Option<bool>` both decode from `0`/`1`, so `1` lands as `true`, `0` as `false`, and
 /// SQL `NULL` as `None`. This is the regression guard for the dialect-split bool decode bug.
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn bool_column_round_trips_from_integer_wire_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn bool_column_round_trips_from_integer_wire_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::SqliteBackend;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -1117,17 +1106,16 @@ async fn bool_column_round_trips_from_integer_wire_on_live_sqlite() {
 /// On SQLite the emitted SQL carries no `FOR UPDATE` (a no-op — the transaction locks the whole
 /// database already); the row still reads back, which is what this test checks. The real
 /// lock-is-held proof runs against live Postgres (`for_update_lock_is_held_across_a_transaction_live_postgres`).
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn for_update_method_runs_on_the_transaction_client_on_live_sqlite() {
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn for_update_method_runs_on_the_transaction_client_on_live_sqlite<B: LiveSqlite>() {
     use based_codegen::{sql, Dialect};
-    use based_runtime::{SqliteBackend, TxOptions};
+    use based_runtime::TxOptions;
     use client::TransactionExt;
 
     let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
     let (schema, _) = based_sema::check(&sf.decls);
     let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
-    let backend = SqliteBackend::in_memory().expect("open in-memory sqlite");
+    let backend = B::in_memory();
     backend
         .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
         .await
@@ -1180,3 +1168,62 @@ async fn for_update_method_runs_on_the_transaction_client_on_live_sqlite() {
     .expect("closure commits");
     assert_eq!(total, 100);
 }
+
+/// A live SQLite backend the generic tests above run on, once per enabled driver.
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+trait LiveSqlite: based_runtime::Backend + Sized + 'static {
+    fn in_memory() -> Self;
+    async fn execute_batch(&self, sql: &str) -> Result<(), based_runtime::DbError>;
+}
+
+#[cfg(feature = "sqlite")]
+impl LiveSqlite for based_runtime::SqliteBackend {
+    fn in_memory() -> Self {
+        Self::in_memory().expect("open in-memory sqlite")
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<(), based_runtime::DbError> {
+        Self::execute_batch(self, sql).await
+    }
+}
+
+#[cfg(feature = "sqlite-rusqlite")]
+impl LiveSqlite for based_runtime::RusqliteBackend {
+    fn in_memory() -> Self {
+        Self::in_memory().expect("open in-memory sqlite")
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<(), based_runtime::DbError> {
+        Self::execute_batch(self, sql).await
+    }
+}
+
+/// One `#[tokio::test]` per enabled SQLite driver for each generic live test.
+macro_rules! on_each_sqlite_driver {
+    ($($name:ident),* $(,)?) => {$(
+        mod $name {
+            #[cfg(feature = "sqlite")]
+            #[tokio::test]
+            async fn sqlx() {
+                super::$name::<based_runtime::SqliteBackend>().await;
+            }
+
+            #[cfg(feature = "sqlite-rusqlite")]
+            #[tokio::test]
+            async fn rusqlite() {
+                super::$name::<based_runtime::RusqliteBackend>().await;
+            }
+        }
+    )*};
+}
+
+on_each_sqlite_driver!(
+    dropping_the_typed_stream_releases_the_connection,
+    keyed_mutation_has_no_double_effect_on_live_sqlite,
+    ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite,
+    managed_transaction_commits_read_decide_write_on_live_sqlite,
+    managed_transaction_rolls_back_on_err_on_live_sqlite,
+    explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite,
+    bool_column_round_trips_from_integer_wire_on_live_sqlite,
+    for_update_method_runs_on_the_transaction_client_on_live_sqlite,
+);

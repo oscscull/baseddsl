@@ -4,7 +4,8 @@
 /// consumer's matching driver feature — a consumer forwards it to `based-runtime/<driver>`
 /// (e.g. `postgres = ["based-runtime/postgres"]`), which is what makes
 /// `based_runtime::AdoptedPg` and `based_runtime::sqlx` present. The MySQL/MariaDB family
-/// shares one driver (`sqlx::MySql`), so both dialects emit `adopt_mariadb`.
+/// shares one driver (`sqlx::MySql`), so both dialects emit `adopt_mariadb`. SQLite also
+/// emits `adopt_rusqlite` for the rusqlite driver (feature `sqlite-rusqlite`).
 pub(crate) fn adopt_constructor(dialect: crate::Dialect) -> String {
     use crate::Dialect::{MariaDb, MySql, Postgres, Sqlite};
     let (feature, suffix, sqlx_db, adapter, driver_name) = match dialect {
@@ -18,7 +19,7 @@ pub(crate) fn adopt_constructor(dialect: crate::Dialect) -> String {
             "MariaDB/MySQL",
         ),
     };
-    let constructor = format!(
+    let mut constructor = format!(
         r#"
 /// Adopt a **caller-owned** open {driver_name} transaction — the bring-your-own (`adopt`)
 /// rung of the transaction seam. Route this client's callables (including `for update`
@@ -45,6 +46,9 @@ pub fn adopt_{suffix}<'a>(
 }}
 "#
     );
+    if dialect == Sqlite {
+        constructor.push_str(ADOPT_RUSQLITE);
+    }
     // cfg checking happens before item-level allowances. A scoped module preserves
     // the optional constructor without leaking allowances into application code.
     let scoped = constructor
@@ -59,6 +63,33 @@ pub fn adopt_{suffix}<'a>(
         "\n#[allow(unexpected_cfgs, unused_imports)]\nmod __based_adopt_driver {{\n    use super::*;\n{scoped}\n}}\n#[allow(unused_imports)]\npub use __based_adopt_driver::*;\n"
     )
 }
+
+/// The rusqlite twin of `adopt_sqlite`: rusqlite's transaction guard cannot cross threads,
+/// so it adopts the connection the caller opened a transaction on.
+const ADOPT_RUSQLITE: &str = r#"
+/// Adopt a **caller-owned** rusqlite connection with an open transaction — the
+/// bring-your-own (`adopt`) rung over the rusqlite driver. Route this client's callables
+/// (including `for update` locking reads) through that transaction, so the baseddsl work
+/// commits atomically with the caller's own raw writes on it. Calls fail if no transaction
+/// is open, and run on the calling task.
+///
+/// **`adopt` never begins, commits, or rolls back** — the caller owns the boundary
+/// (e.g. `conn.execute_batch("BEGIN")` … `"COMMIT"`). There is no auto-retry. Feature-gated
+/// so a build without the rusqlite driver simply omits it; forward the feature to
+/// `based-runtime/sqlite-rusqlite`.
+#[cfg(feature = "sqlite-rusqlite")]
+pub fn adopt_rusqlite<'a>(
+    engine: &based_runtime::Engine,
+    conn: &'a mut based_runtime::rusqlite::Connection,
+) -> Client<based_runtime::AdoptedTransport<based_runtime::AdoptedRusqlite<'a>>> {
+    Client {
+        transport: based_runtime::AdoptedTransport::new(
+            engine.clone(),
+            based_runtime::AdoptedRusqlite::new(conn),
+        ),
+    }
+}
+"#;
 
 /// The bring-your-own transaction (`adopt`) `Transport` impl over
 /// `based_runtime::AdoptedTransport<D>` — the same generated client, run on a

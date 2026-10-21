@@ -18,7 +18,7 @@
 # because they need a server; `make ci-live` / `ci-examples` run them once one is up.
 #
 # Two-tier commit gate (one command per tier, so verifying a change never takes several steps):
-#   make check-fast        # iterate: fmt + workspace tests at infra-free features (sqlite,serve).
+#   make check-fast        # iterate: fmt + workspace tests at infra-free features (sqlite,sqlite-rusqlite,serve).
 #                          # No clippy (moved to `check` — one workspace compile, not two), no DB,
 #                          # no examples, no MariaDB/Postgres driver build.
 #   make check             # pre-commit for execution-touching changes: the FULL workspace at
@@ -68,14 +68,14 @@ ensure-nextest:
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo "installing cargo-nextest…"; $(CARGO) install cargo-nextest --locked; }
 
 ## Fast LOCAL iteration gate: format + workspace tests (via nextest) at infra-free features
-## (sqlite,serve). Two things are deliberately NOT here, both deferred to the pre-commit tiers so
+## (sqlite,sqlite-rusqlite,serve). Two things are deliberately NOT here, both deferred to the pre-commit tiers so
 ## nothing reaches a merge unchecked: clippy (it re-compiles the whole workspace a second time —
 ## its cache is separate from the test build's), which runs in `make ci` + `make check`; and
 ## doctests (nextest doesn't run them), which run as the `--doc` step in `ci-workspace`/-full.
 ## No DB, no examples, no extension, no MariaDB/Postgres driver build.
 check-fast: ci-coloring ci-fast-features ensure-nextest
 	$(CARGO) fmt --check
-	$(NEXTEST) --workspace --no-default-features --features sqlite,serve
+	$(NEXTEST) --workspace --no-default-features --features sqlite,sqlite-rusqlite,serve
 
 ## Full pre-commit gate: the full workspace at --all-features, then everything DB-backed
 ## (started here; left running for fast re-runs — `make dev-db-down` cleans up). Also refreshes
@@ -95,15 +95,15 @@ check: ci-workspace-full dev-db-up
 	@echo "check: all gates green"
 
 ## Fast workspace gate: format, lint, coloring, and the full test suite — but only the
-## infra-free features (`sqlite,serve` for the runtime). It deliberately does NOT build the
+## infra-free features (`sqlite,sqlite-rusqlite,serve` for the runtime). It deliberately does NOT build the
 ## MariaDB/Postgres driver stacks (sqlx's mysql/postgres backends): those pull a large
 ## dependency tree, need a live server to actually test, and are covered by `make check`'s
 ## live suites + `ci-workspace-full`. Dropping them is what keeps this tier fast.
 ci-workspace: ci-coloring ci-fast-features ensure-nextest
 	$(CARGO) fmt --check
-	$(CARGO) clippy --workspace --no-default-features --features sqlite,serve -- -D warnings
-	$(NEXTEST) --workspace --no-default-features --features sqlite,serve
-	$(CARGO) test --workspace --no-default-features --features sqlite,serve --doc
+	$(CARGO) clippy --workspace --no-default-features --features sqlite,sqlite-rusqlite,serve -- -D warnings
+	$(NEXTEST) --workspace --no-default-features --features sqlite,sqlite-rusqlite,serve
+	$(CARGO) test --workspace --no-default-features --features sqlite,sqlite-rusqlite,serve --doc
 
 ## Full workspace gate: fmt + coloring + lint/test with the MariaDB/Postgres driver code
 ## compiled and linted too. Part of `make check` (the heavy pre-commit gate). Clippy runs at
@@ -114,8 +114,8 @@ ci-workspace: ci-coloring ci-fast-features ensure-nextest
 ci-workspace-full: ci-coloring ensure-nextest
 	$(CARGO) fmt --check
 	$(CARGO) clippy --workspace --all-features -- -D warnings
-	$(NEXTEST) --workspace --features mariadb,postgres,sqlite,serve
-	$(CARGO) test --workspace --features mariadb,postgres,sqlite,serve --doc
+	$(NEXTEST) --workspace --features mariadb,postgres,sqlite,sqlite-rusqlite,serve
+	$(CARGO) test --workspace --features mariadb,postgres,sqlite,sqlite-rusqlite,serve --doc
 
 ## Keep optional server drivers out of the infra-free dependency graph (including tests).
 ci-fast-features:
@@ -303,6 +303,11 @@ ci-runtime-benchmark:
 	$(CARGO) fmt --manifest-path benchmarks/embedded-runtime/Cargo.toml --check
 	$(CARGO) clippy --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- -D warnings
 	$(CARGO) run --locked --manifest-path benchmarks/embedded-runtime/Cargo.toml -- 5
+
+.PHONY: ci-rusqlite-consumer
+## An app on the newest rusqlite adds the rusqlite driver: one libsqlite3-sys, no sqlx.
+ci-rusqlite-consumer:
+	@CARGO="$(CARGO)" $(ROOT)ci/check-rusqlite-consumer.sh
 
 .PHONY: ci-cargo-generation
 ## Fresh build.rs consumer: lifecycle, formatter isolation and dependency boundary.

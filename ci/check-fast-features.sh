@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo_bin="${CARGO:-cargo}"
-tree=$("$cargo_bin" tree --workspace --no-default-features --features sqlite,serve \
+tree=$("$cargo_bin" tree --workspace --no-default-features --features sqlite,sqlite-rusqlite,serve \
     -e normal,build,dev --prefix none)
 if hits=$(printf '%s\n' "$tree" | grep -E '^(sqlx-mysql|sqlx-postgres|rust_decimal) '); then
     printf 'fast feature boundary violated:\n%s\n' "$hits" >&2

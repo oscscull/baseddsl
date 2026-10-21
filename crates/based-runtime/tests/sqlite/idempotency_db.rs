@@ -8,7 +8,6 @@
 //! table, not per-process memory. This is the property a `MemStore` cannot provide and the
 //! reason a DB-first engine keeps its keys in the database.
 
-#![cfg(feature = "sqlite")]
 
 use serde_json::json;
 
@@ -16,7 +15,8 @@ use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::run::{fetch_all, Backend};
-use based_runtime::{dispatch, Compiled, DbStore, Guards, SeqIdGen, SqliteBackend, WireResponse};
+use based_runtime::{dispatch, Compiled, DbStore, Guards, SeqIdGen, WireResponse};
+use crate::driver::SqliteBackend;
 use based_sema::check;
 
 const SCHEMA: &str = r#"

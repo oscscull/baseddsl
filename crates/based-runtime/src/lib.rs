@@ -47,7 +47,8 @@
 //! [`http::serve`] is the HTTP listener (`based serve`): an axum service. `$ctx` comes from
 //! headers via a pluggable [`http::ContextSource`]. The edge depends only on the
 //! [`run::Backend`] seam, so a second backend drops in without a change here.
-//! [`sqlite::SqliteBackend`] is an infra-free in-memory `Backend` for end-to-end tests.
+//! [`sqlite::SqliteBackend`] is an infra-free in-memory `Backend` for end-to-end tests;
+//! `sqlite_rusqlite::RusqliteBackend` is the same backend over rusqlite.
 //!
 //! ## The in-process door
 //! [`embed::Engine`] is the library twin of the HTTP edge: a [`Compiled`] schema over a
@@ -78,6 +79,9 @@ pub mod driver;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+
+#[cfg(feature = "sqlite-rusqlite")]
+pub mod sqlite_rusqlite;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -117,6 +121,10 @@ pub use value::SqlValue;
 #[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
 pub use sqlx;
 
+// Re-exported so a generated `adopt_rusqlite` names the engine's own rusqlite types.
+#[cfg(feature = "sqlite-rusqlite")]
+pub use rusqlite;
+
 // Re-export the stream crates so a generated client's `-> stream` surface names
 // `based_runtime::futures_core::Stream`, and a consumer can reach `StreamExt`, without
 // declaring either dependency themselves.
@@ -135,6 +143,9 @@ pub use http::{
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::{AdoptedSqlite, SqliteBackend, SqliteDb, SqliteLocation, SqliteLocationError};
+
+#[cfg(feature = "sqlite-rusqlite")]
+pub use sqlite_rusqlite::{AdoptedRusqlite, RusqliteBackend, RusqliteDb};
 
 #[cfg(feature = "postgres")]
 pub use postgres::{AdoptedPg, PgRouter, PostgresDb};

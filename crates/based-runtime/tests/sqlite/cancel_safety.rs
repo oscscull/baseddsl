@@ -12,9 +12,8 @@
 //! the future at each of them (once just *before* the call, once just *after* it
 //! completes), the test drops the future right there, and the invariants are probed
 //! through the same single-connection pool the transaction ran on. Await points
-//! *inside* one driver call are sqlx's own cancel-safety, reused rather than rebuilt.
+//! *inside* one driver call are the driver's own cancel-safety, reused rather than rebuilt.
 
-#![cfg(feature = "sqlite")]
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,10 +28,8 @@ use tokio::sync::Notify;
 use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
-use based_runtime::{
-    fetch_all, run_mutation, Backend, Compiled, Db, DbError, DbRead, IdempotencyStore, MemStore,
-    NoStore, Request, Row, RowStream, RunError, SeqIdGen, SqlValue, SqliteBackend, Tx,
-};
+use based_runtime::{fetch_all, run_mutation, Backend, Compiled, Db, DbError, DbRead, IdempotencyStore, MemStore, NoStore, Request, Row, RowStream, RunError, SeqIdGen, SqlValue, Tx};
+use crate::driver::SqliteBackend;
 use based_sema::check;
 
 /// A two-write `tx` mutation with a declared-shape re-select — the longest driver-seam

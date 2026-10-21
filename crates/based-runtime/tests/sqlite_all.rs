@@ -1,45 +1,10 @@
-//! Aggregated SQLite-backed integration suite: one test binary instead of a dozen, so the
-//! full runtime + sqlx(sqlite) + tokio stack is linked once rather than per file. Each
-//! former `tests/<name>.rs` is now a module under `tests/sqlite/`; test names keep working
-//! (filter by substring, or `--test sqlite_all`). Gated once here — the whole binary is
-//! empty without the `sqlite` feature.
+//! Aggregated SQLite-backed integration suite over the sqlx driver: one test binary instead
+//! of a dozen, so the full runtime + sqlx(sqlite) + tokio stack is linked once rather than
+//! per file. Each module lives under `tests/sqlite/`; `rusqlite_all` runs the same suite over
+//! the rusqlite driver. Gated once here — the whole binary is empty without `sqlite`.
 #![cfg(feature = "sqlite")]
 
-#[path = "sqlite/bulk_integration.rs"]
-mod bulk_integration;
-#[path = "sqlite/cancel_safety.rs"]
-mod cancel_safety;
-#[path = "sqlite/computed_integration.rs"]
-mod computed_integration;
-#[path = "sqlite/conditional_transition.rs"]
-mod conditional_transition;
-#[path = "sqlite/distinct_integration.rs"]
-mod distinct_integration;
-#[path = "sqlite/fixtures.rs"]
-mod fixtures;
-#[path = "sqlite/idempotency_db.rs"]
-mod idempotency_db;
-#[path = "sqlite/in_list_integration.rs"]
-mod in_list_integration;
-#[path = "sqlite/json_roundtrip.rs"]
-mod json_roundtrip;
-#[path = "sqlite/key_composite_integration.rs"]
-mod key_composite_integration;
-#[path = "sqlite/key_integration.rs"]
-mod key_integration;
-#[path = "sqlite/migrate_apply.rs"]
-mod migrate_apply;
-#[path = "sqlite/migrate_data.rs"]
-mod migrate_data;
-#[path = "sqlite/optional_ctx_integration.rs"]
-mod optional_ctx_integration;
-#[path = "sqlite/optional_filter_integration.rs"]
-mod optional_filter_integration;
-#[path = "sqlite/raw_integration.rs"]
-mod raw_integration;
-#[path = "sqlite/serial_integration.rs"]
-mod serial_integration;
-#[path = "sqlite/sqlite_integration.rs"]
-mod sqlite_integration;
-#[path = "sqlite/streaming.rs"]
-mod streaming;
+#[path = "sqlite/driver_sqlx.rs"]
+mod driver;
+
+include!("sqlite/suite.rs");

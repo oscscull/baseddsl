@@ -7,7 +7,6 @@
 //! the optional `in $arr?` composing with the present-guard, per-element family coercion
 //! (`int[]`), and the boundary errors (a non-array arg, a wrong-typed element).
 
-#![cfg(feature = "sqlite")]
 
 use serde_json::json;
 
@@ -15,7 +14,8 @@ use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::idempotency::NoStore;
-use based_runtime::{dispatch, Compiled, Guards, SeqIdGen, SqliteBackend};
+use based_runtime::{dispatch, Compiled, Guards, SeqIdGen};
+use crate::driver::SqliteBackend;
 use based_sema::check;
 
 const SCHEMA: &str = r#"

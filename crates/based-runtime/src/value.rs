@@ -229,13 +229,23 @@ fn by_shape(v: &serde_json::Value) -> SqlValue {
 /// base64 (standard alphabet, padded) between a `bytes` value's wire string and its raw
 /// bytes — the concrete drivers decode at a bind and encode a read `BYTEA`/`BLOB` value
 /// back. Kept here so all three drivers share one codec.
-#[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
+#[cfg(any(
+    feature = "mariadb",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "sqlite-rusqlite"
+))]
 pub(crate) fn b64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(s.trim())
 }
 
-#[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
+#[cfg(any(
+    feature = "mariadb",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "sqlite-rusqlite"
+))]
 pub(crate) fn b64_encode(b: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(b)

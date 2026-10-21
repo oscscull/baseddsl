@@ -7,7 +7,6 @@
 //! destructive-ack gate. The MariaDB twin (`migrate_apply_mariadb.rs`) proves the same against a
 //! live server over Docker; this one runs in the normal `cargo test` gate with no daemon.
 
-#![cfg(feature = "sqlite")]
 
 use std::path::PathBuf;
 
@@ -17,7 +16,7 @@ use based_runtime::migrate::{
     apply, load_migrations, status, ApplyOpts, Direction, MigrateError, MigrationState,
 };
 use based_runtime::run::Backend;
-use based_runtime::sqlite::SqliteBackend;
+use crate::driver::SqliteBackend;
 use based_runtime::value::SqlValue;
 
 /// A throwaway project dir under the OS temp dir, removed on drop.

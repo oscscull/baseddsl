@@ -54,3 +54,30 @@ migration files and Cargo.lock.
 Use a new database file for a fresh run. For MariaDB or PostgreSQL, select
 `--dialect mariadb` or `--dialect postgres` at initialization and export
 `DATABASE_URL` for a database you provide.
+
+## Choose the SQLite driver
+
+`based-runtime` has two SQLite drivers with the same behaviour: pools,
+transactions, binds, migrations, idempotency and errors.
+
+| Feature | Backend | Driver | `libsqlite3-sys` |
+| --- | --- | --- | --- |
+| `sqlite` | `SqliteBackend` | sqlx 0.9 | 0.37.x |
+| `sqlite-rusqlite` | `RusqliteBackend` | rusqlite 0.39–0.40 | 0.37.x or 0.38.x |
+
+Cargo links one `libsqlite3-sys` per build, so pick the driver whose range
+contains the one your application already uses. An application on rusqlite
+0.40 uses `sqlite-rusqlite`:
+
+```toml
+based-runtime = { version = "0.1", default-features = false, features = ["sqlite-rusqlite"] }
+```
+
+`RusqliteBackend` has the same constructors as `SqliteBackend` (`in_memory`,
+`open`, `open_with_pool`). `from_connection` and `from_connector` take
+connections you configured, and `with_connection` runs your own rusqlite code
+on the engine's connection. To include engine calls in your transaction, run
+`BEGIN` on your connection and pass it to the generated `adopt_rusqlite`
+(your crate's `sqlite-rusqlite` feature forwards to
+`based-runtime/sqlite-rusqlite`); the calls fail if no transaction is open. Both features bundle SQLite, version
+3.51.3 or later.
