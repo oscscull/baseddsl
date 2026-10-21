@@ -112,7 +112,10 @@ fn gen_value(
             Emit::Sql(d) => dml::render_lit(d, l),
             Emit::Neutral => neutral_lit(l),
         },
-        Value::Func(f) => dml::render_func(f),
+        Value::Func(f) => match emit {
+            Emit::Sql(d) => dml::render_func(d, f),
+            Emit::Neutral => format!("{}()", f.name.node),
+        },
         // A parameter operand is rejected in sema before codegen.
         Value::Param(_) => String::new(),
     }

@@ -561,9 +561,9 @@ fn sqlite_bool_default_renders_as_integer() {
     assert!(ddl.contains("`live` INTEGER NOT NULL DEFAULT 1"), "\n{ddl}");
     assert!(ddl.contains("`off` INTEGER NOT NULL DEFAULT 0"), "\n{ddl}");
     assert!(!ddl.contains("DEFAULT TRUE"), "\n{ddl}");
-    // now() still lowers to CURRENT_TIMESTAMP (SQLite supports it)
+    // now() writes the canonical UTC text form, so it orders with bound timestamps
     assert!(
-        ddl.contains("`at` TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        ddl.contains("`at` TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000Z', 'now'))"),
         "\n{ddl}"
     );
 }

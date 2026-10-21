@@ -68,7 +68,7 @@ impl Lw<'_> {
     pub(crate) fn value(&self, v: &Value, t: &TableView, target: Option<&Col>) -> String {
         match v {
             Value::Lit(l) => render_lit(self.dialect, l),
-            Value::Func(f) => render_func(f),
+            Value::Func(f) => render_func(self.dialect, f),
             Value::Param(_) => "NULL".to_string(),
             Value::Path(p) => {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();

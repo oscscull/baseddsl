@@ -101,7 +101,7 @@ pub(super) fn bulk_columns(
         }
     }
 
-    // 4. `@created`/`@updated` stamps the shape did not name → `CURRENT_TIMESTAMP`.
+    // 4. `@created`/`@updated` stamps the shape did not name → the dialect's now.
     for col in timestamp_cols(model, &[model.created.as_deref(), model.updated.as_deref()]) {
         bulk_push(&mut columns, &mut have, col, BulkSource::Now);
     }

@@ -4,7 +4,8 @@
 //! neutral middle — one variant per storable family. Coercion is family-aware: the
 //! signature says a param is an `int`, so a JSON string is rejected at the boundary
 //! before any SQL runs. The typed text-riding variants (`Uuid`/`Timestamp`/`Date`/
-//! `Decimal`) still carry their wire strings; only a concrete driver parses them into
+//! `Decimal`) still carry their wire strings (a timestamp or date already validated
+//! and in canonical form); only a concrete driver parses them into
 //! its native parameter types (Postgres binds all parameters binary-typed, so the bind
 //! site must know the value's primitive).
 
@@ -183,12 +184,18 @@ pub fn coerce(
             J::String(s) => Ok(SqlValue::Uuid(s.clone())),
             _ => mismatch(json_kind(v)),
         },
+        // Parsed here so a bad value is a boundary error, and normalized so every
+        // driver (and SQLite's text storage) sees one ordered form.
         Family::Timestamp => match v {
-            J::String(s) => Ok(SqlValue::Timestamp(s.clone())),
+            J::String(s) => crate::temporal::canonical_timestamp(s)
+                .map(SqlValue::Timestamp)
+                .ok_or_else(|| unparseable(family, s)),
             _ => mismatch(json_kind(v)),
         },
         Family::Date => match v {
-            J::String(s) => Ok(SqlValue::Date(s.clone())),
+            J::String(s) => crate::temporal::canonical_date(s)
+                .map(SqlValue::Date)
+                .ok_or_else(|| unparseable(family, s)),
             _ => mismatch(json_kind(v)),
         },
         Family::Time => match v {
@@ -207,6 +214,14 @@ pub fn coerce(
         },
         Family::Json => Ok(SqlValue::Json(v.clone())),
         Family::Any => Ok(by_shape(v)),
+    }
+}
+
+/// A string of the right JSON kind that does not parse as its family.
+fn unparseable(expected: Family, s: &str) -> CoerceError {
+    CoerceError {
+        expected,
+        got: format!("unparseable string {s:?}"),
     }
 }
 

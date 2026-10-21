@@ -49,7 +49,7 @@ impl<'a> Select<'a> {
                 }
             }
             Value::Lit(l) => render_lit(self.dialect, l),
-            Value::Func(f) => render_func(f),
+            Value::Func(f) => render_func(self.dialect, f),
         }
     }
 

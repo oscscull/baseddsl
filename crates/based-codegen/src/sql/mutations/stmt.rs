@@ -126,18 +126,22 @@ pub(crate) fn inject_guards(
     }
 }
 
-/// `@updated` -> `updated_at = CURRENT_TIMESTAMP`, unless the caller set it.
+/// `@updated` -> `updated_at = <now>`, unless the caller set it.
 pub(crate) fn updated_bump(sel: &Select, model: &RModel, assigned: &[String]) -> Option<String> {
     let field = model.updated.as_deref()?;
     let col = physical_col(model, field);
     if assigned.contains(&col) {
         return None;
     }
-    Some(format!("{} = CURRENT_TIMESTAMP", set_lhs(sel, model, &col)))
+    Some(format!(
+        "{} = {}",
+        set_lhs(sel, model, &col),
+        sel.dialect.now_sql()
+    ))
 }
 
 /// The `SET` fragment that writes (or clears) the tombstone for the covered subset
-/// timestamp `CURRENT_TIMESTAMP`/`NULL`, bool `TRUE`/`FALSE`, or the model's
+/// timestamp now/`NULL`, bool `TRUE`/`FALSE`, or the model's
 /// `delete:`/`restore:` override when declared.
 pub(crate) fn tombstone_set(
     sel: &Select,
@@ -155,7 +159,7 @@ pub(crate) fn tombstone_set(
     }
     let col = physical_col(model, &sd.field);
     let val = match (sd.mode, deleting) {
-        (SoftMode::Timestamp, true) => "CURRENT_TIMESTAMP".to_string(),
+        (SoftMode::Timestamp, true) => sel.dialect.now_sql().to_string(),
         (SoftMode::Timestamp, false) => "NULL".to_string(),
         (SoftMode::Bool, true) => sel.dialect.bool_lit(true).to_string(),
         (SoftMode::Bool, false) => sel.dialect.bool_lit(false).to_string(),

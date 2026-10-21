@@ -130,7 +130,7 @@ async fn fixture_sets_engine_managed_columns_when_given() {
     )
     .await;
     assert_eq!(note["id"], "chosen");
-    assert_eq!(note["created_at"], "2000-01-01 00:00:00");
+    assert_eq!(note["created_at"], "2000-01-01T00:00:00.000000Z");
     assert_eq!(note["stars"], 5);
 
     let tag = insert(&engine, "Tag", json!({ "label": "serial" })).await;

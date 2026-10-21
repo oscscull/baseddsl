@@ -495,7 +495,7 @@ fn render_default(dv: &DefaultVal, en: Option<&based_sema::REnum>, dialect: Dial
         DefaultVal::Lit(Literal::Bool(b)) => dialect.bool_lit(*b).to_string(),
         DefaultVal::Lit(Literal::Null) => "NULL".to_string(),
         // `now()` is the only value-position function (ir::KNOWN_FUNCS).
-        DefaultVal::Func(_) => "CURRENT_TIMESTAMP".to_string(),
+        DefaultVal::Func(_) => dialect.now_sql().to_string(),
         // An enum default (`default pending`) is its variant's wire value: a quoted
         // string for a string enum, a bare integer for an int enum.
         DefaultVal::Variant(v) => en.and_then(|e| e.wire_of(&v.node)).map_or_else(

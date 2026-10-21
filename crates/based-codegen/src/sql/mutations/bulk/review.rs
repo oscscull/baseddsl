@@ -21,7 +21,7 @@ pub(super) fn bulk_review_sql(dialect: Dialect, bulk: &BulkInsert) -> String {
             BulkSource::MintUuid => ":mint(uuid)".to_string(),
             BulkSource::MintUlid => ":mint(ulid)".to_string(),
             BulkSource::Ctx { ctx_field } => format!(":ctx_{ctx_field}"),
-            BulkSource::Now => "CURRENT_TIMESTAMP".to_string(),
+            BulkSource::Now => dialect.now_sql().to_string(),
             BulkSource::NestedOneId { nest, key_field } => format!(":nested({nest}).{key_field}"),
             BulkSource::ParentId { key_field } => format!(":parent.{key_field}"),
         })

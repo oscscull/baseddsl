@@ -167,7 +167,7 @@ fn build_insert_columns(
     for col in timestamp_cols(model, &[model.created.as_deref(), model.updated.as_deref()]) {
         if !assigned.contains(&col) {
             cols.push(dialect.quote(&col));
-            vals.push("CURRENT_TIMESTAMP".to_string());
+            vals.push(dialect.now_sql().to_string());
         }
     }
 

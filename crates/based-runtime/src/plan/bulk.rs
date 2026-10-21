@@ -48,7 +48,8 @@ pub(crate) fn build_bulk_step_rows(
         .iter()
         .map(|c| BulkOutCol {
             quoted: compiled.dialect.quote(&c.column),
-            literal: matches!(c.source, BulkSource::Now).then(|| "CURRENT_TIMESTAMP".to_string()),
+            literal: matches!(c.source, BulkSource::Now)
+                .then(|| compiled.dialect.now_sql().to_string()),
         })
         .collect();
     let binds_per_row = bulk

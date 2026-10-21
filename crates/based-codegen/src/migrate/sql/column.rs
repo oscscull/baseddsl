@@ -109,7 +109,7 @@ pub(crate) fn render_neutral_default(d: &str, dialect: Dialect) -> String {
         "false" => dialect.bool_lit(false).to_string(),
         "null" => "NULL".to_string(),
         // `now()` is the only value-position function (ir::KNOWN_FUNCS).
-        _ if d.ends_with("()") => "CURRENT_TIMESTAMP".to_string(),
+        _ if d.ends_with("()") => dialect.now_sql().to_string(),
         // A numeric literal rides through verbatim.
         _ => d.to_string(),
     }

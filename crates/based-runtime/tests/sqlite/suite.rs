@@ -42,3 +42,5 @@ mod soft_override_integration;
 mod sqlite_integration;
 #[path = "streaming.rs"]
 mod streaming;
+#[path = "temporal_integration.rs"]
+mod temporal_integration;
