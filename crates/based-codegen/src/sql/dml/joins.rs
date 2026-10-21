@@ -127,7 +127,7 @@ impl<'a> Select<'a> {
             ..
         } = &mem.kind
         {
-            render_join_on(self.dialect, pred, &cur_model.table, cur_alias, &alias)
+            render_join_on(self.dialect, pred, cur_model, cur_alias, &alias)
         } else {
             self.fk_join_pairs(mem)
                 .iter()
@@ -173,7 +173,7 @@ impl<'a> Select<'a> {
             ..
         }) = tmodel.member(via).map(|m| &m.kind)
         {
-            render_join_on(self.dialect, pred, &tmodel.table, &alias, cur_alias)
+            render_join_on(self.dialect, pred, tmodel, &alias, cur_alias)
         } else {
             let pairs: Vec<(String, String)> = match tmodel.member(via) {
                 Some(m) if matches!(m.kind, MemberKind::Forward { .. }) => self.fk_join_pairs(m),

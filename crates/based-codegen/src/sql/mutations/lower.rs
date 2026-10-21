@@ -198,7 +198,7 @@ fn lower_write<'a>(
 fn raw_write(cx: &LowerCx, raw: &RawSql) -> LoweredWrite {
     LoweredWrite {
         header: String::new(),
-        sql: format!("{};\n", render_raw(cx.dialect, raw, "", "")),
+        sql: format!("{};\n", render_raw(cx.dialect, raw, "", None)),
         model: String::new(),
         gen_id: None,
         conflict_key: None,

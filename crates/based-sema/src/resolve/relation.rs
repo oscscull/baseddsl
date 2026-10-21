@@ -39,7 +39,7 @@ pub fn check_relation_on(pred: &Predicate, near: usize, far: usize, cx: &Cx, sin
         ),
         // A raw join fragment is an escape hatch the engine can't resolve; only its
         // placeholders are checked.
-        Predicate::Raw(raw) => check_raw_id_qualified(raw, Some(&cx.model(near).table), sink),
+        Predicate::Raw(raw) => check_raw_id(raw, Some(cx.model(near)), sink),
     }
 }
 

@@ -280,9 +280,10 @@ pub mod code {
     pub const ANY_SELF_WRITE_UNSUPPORTED: &str = "E0352"; // a write's `.any` reads the written table through a custom `on:` edge — MySQL/MariaDB can't read it in a subquery, and a custom join has no key for a derived table
     pub const RELATION_ANY: &str = "E0351"; // `rel.any(…)` on a column / to-one relation, or reached through a to-many hop
 
-    // Raw placeholder misuse (E0353–E0354): placeholders that would expand to broken SQL.
+    // Raw placeholder misuse (E0353, E0354, E0356): placeholders that would expand to broken SQL.
     pub const RAW_ID_QUALIFIED: &str = "E0353"; // a `.` before `{id}` in a raw body (`{table}.{id}`) — `{id}` already expands to the qualified key column
     pub const RAW_WRITE_PLACEHOLDER: &str = "E0354"; // `{table}` / `{id}` in a raw write statement, which has no model to expand them to
+    pub const RAW_ID_COMPOSITE: &str = "E0356"; // `{id}` against a composite-key model — there is no single key column to expand it to
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`

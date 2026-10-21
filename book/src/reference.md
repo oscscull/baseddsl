@@ -371,12 +371,15 @@ Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate quote
 
 | Position | `{table}` | `{id}` |
 |---|---|---|
-| Value / predicate leaf (shape field, `where`, filter, `having`, `on:`) | `task` | `task.id` (the row's alias: a nested shape's subquery alias, the `on:` FK side) |
-| Whole-query body | `task` | `task.id` |
+| Value / predicate leaf (shape field, `where`, filter, `having`, `on:`) | `task` | `task.<key>` (the row's alias: a nested shape's subquery alias, the `on:` FK side) |
+| Whole-query body | `task` | `task.<key>` |
 | Raw write statement in a mutation | E0354 | E0354 |
 | `raw("…")` type / index, `.mig` `raw(…)` | verbatim | verbatim |
 
-`{id}` is already qualified, so never prefix it: `{table}.{id}` or `t.{id}` is E0353.
+`<key>` is the model's physical key column: `id`, its `(column "…")` rename, or a
+single `@key(field)`. A composite `@key` has no single column, so `{id}` there is
+E0356; spell the key columns out. `{id}` is already qualified, so never prefix it:
+`{table}.{id}` or `t.{id}` is E0353.
 `{table}` is the bare table name (no `@schema`), for a `FROM`, not a row qualifier. A correlated subquery:
 
 ```

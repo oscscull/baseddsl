@@ -144,11 +144,11 @@ pub(crate) fn lower_query(
 }
 
 /// A whole-query raw body: text verbatim, `${param}` → `:param` (bound like any
-/// placeholder), `{table}`/`{id}` → the target model's table. Nothing engine-built
-/// composes — no injected soft-delete/scope, no sort cascade, no pagination; the declared
-/// shape types the result columns by name.
+/// placeholder), `{table}`/`{id}` → the target model's table / key column. Nothing
+/// engine-built composes — no injected soft-delete/scope, no sort cascade, no pagination;
+/// the declared shape types the result columns by name.
 fn lower_raw_query(q: &Query, root: &RModel, dialect: Dialect, raw: &RawSql) -> LoweredQuery {
-    let body = render_raw(dialect, raw, &root.table, &root.table);
+    let body = render_raw(dialect, raw, &root.table, Some(root));
     let body = body.trim_end().trim_end_matches(';').trim_end();
     LoweredQuery {
         name: q.name.node.clone(),

@@ -290,7 +290,7 @@ impl<'a> Select<'a> {
                         pairs.push(format!(
                             "'{}', ({})",
                             out.node,
-                            render_raw(self.dialect, raw, alias, &model.table)
+                            render_raw(self.dialect, raw, alias, Some(model))
                         ));
                     }
                     // An aggregate shape can't be nested (sema `E0245`); handle the arm

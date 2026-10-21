@@ -93,3 +93,100 @@ fn raw_write_without_placeholders_passes_the_placeholder_check() {
     );
     assert!(!codes(&d).contains(&"E0354"), "{:?}", codes(&d));
 }
+
+// ---------- `{id}` against a composite key -----------------------------------
+
+const READING: &str = r#"
+    Device { id: Id, name: text }
+    @key(device, seq)
+    Reading { device: Device, seq: int, value: int }
+    shape R from Reading { value }
+"#;
+
+#[test]
+fn id_on_composite_key_predicate_is_rejected() {
+    let (_, d) = analyze(&format!(
+        "{READING}\nquery q() -> R[] {{ list Reading where (raw`{{id}} IS NOT NULL`) order (value); }}"
+    ));
+    assert_eq!(count(&d, "E0356"), 1, "{:?}", codes(&d));
+    let msg = d
+        .iter()
+        .find(|x| x.code == "E0356")
+        .map(|x| format!("{x:?}"));
+    assert!(
+        msg.is_some_and(|m| m.contains("device_id") && m.contains("reading.seq")),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn id_on_composite_key_named_filter_is_rejected_at_the_call() {
+    let (_, d) = analyze(&format!(
+        "{READING}\nfilter keyed = raw`{{id}} > 0`;\nquery q() -> R[] {{ list Reading where (keyed) order (value); }}"
+    ));
+    assert_eq!(count(&d, "E0356"), 1, "{:?}", codes(&d));
+}
+
+#[test]
+fn id_on_composite_key_shape_value_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Device { id: Id, name: text }
+        @key(device, seq)
+        Reading { device: Device, seq: int, value: int }
+        shape R from Reading { value, k = raw`{id}` }
+        query q() -> R[] { list Reading order (value); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0356"), "{:?}", codes(&d));
+}
+
+#[test]
+fn id_on_composite_key_having_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Device { id: Id, name: text }
+        @key(device, seq)
+        Reading { device: Device, seq: int, value: int }
+        shape S from Reading { v = value, n = count() }
+        query q() -> S[] { list Reading group by (value) having (raw`count({id}) > 1`); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0356"), "{:?}", codes(&d));
+}
+
+#[test]
+fn id_on_composite_key_whole_query_is_rejected() {
+    let (_, d) = analyze(&format!(
+        "{READING}\nquery q() -> R[] {{ raw`SELECT value FROM {{table}} WHERE {{id}} > 0`; }}"
+    ));
+    assert!(errors(&d).contains(&"E0356"), "{:?}", codes(&d));
+}
+
+#[test]
+fn id_on_composite_key_join_is_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Device { id: Id, name: text, legacy: int }
+        @key(dev_ref, seq)
+        Reading {
+          dev_ref: int
+          seq: int
+          device: Device (on: reading.dev_ref = device.legacy and raw`{id} IS NOT NULL`)
+        }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0356"), "{:?}", codes(&d));
+}
+
+#[test]
+fn id_on_single_key_is_clean() {
+    assert_clean(
+        r#"
+        @key(sku)
+        Product { sku: text, name: text }
+        shape P from Product { name }
+        query q() -> P[] { list Product where (raw`{id} <> ''`) order (name); }
+        "#,
+    );
+}

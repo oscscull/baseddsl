@@ -42,7 +42,7 @@ pub(super) fn check_shape_body(
                 ShapeValue::Path(p) => {
                     resolve::resolve_path(p, mi, cx, sink);
                 }
-                ShapeValue::Raw(raw) => resolve::check_raw_id_qualified(raw, None, sink),
+                ShapeValue::Raw(raw) => resolve::check_raw_id(raw, Some(cx.model(mi)), sink),
                 ShapeValue::Agg(agg) => check_agg_call(agg, mi, cx, sink),
                 // A per-row derived scalar (`out = price - discount` / `a || b` / `case …`):
                 // type-check the expression against this model.

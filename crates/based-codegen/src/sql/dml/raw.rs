@@ -3,18 +3,27 @@
 use super::*;
 
 /// Render a raw-SQL fragment: text verbatim, `${param}` -> `:param`,
-/// `{table}`/`{id}` -> safe engine interpolation (root table / its `id`). Only the
-/// engine-interpolated identifiers are dialect-quoted; the raw text is the user's and
-/// is emitted verbatim (an escape hatch — they own its portability).
-pub(crate) fn render_raw(dialect: Dialect, raw: &RawSql, root_alias: &str, table: &str) -> String {
+/// `{table}`/`{id}` -> safe engine interpolation (the row model's table / its physical
+/// key column, qualified by `row_alias`). Only the engine-interpolated identifiers are
+/// dialect-quoted; the raw text is the user's and is emitted verbatim. `model` is `None`
+/// for a raw write, which has no row to expand placeholders against.
+pub(crate) fn render_raw(
+    dialect: Dialect,
+    raw: &RawSql,
+    row_alias: &str,
+    model: Option<&RModel>,
+) -> String {
     let mut s = String::new();
     for part in &raw.parts {
         match part {
             RawPart::Text(t) => s.push_str(t),
             RawPart::Param(pr) => s.push_str(&format!(":{}", param_key(pr))),
             RawPart::Engine(id) => match id.node.as_str() {
-                "table" => s.push_str(&dialect.quote(table)),
-                "id" => s.push_str(&dialect.qcol(root_alias, "id")),
+                "table" => s.push_str(&dialect.quote(model.map_or("", |m| m.table.as_str()))),
+                "id" => {
+                    let key = model.map_or_else(|| "id".to_string(), pk_col);
+                    s.push_str(&dialect.qcol(row_alias, &key));
+                }
                 other => s.push_str(&dialect.quote(other)),
             },
         }

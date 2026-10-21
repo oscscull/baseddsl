@@ -60,7 +60,7 @@ impl<'a> Select<'a> {
             ..
         }) = child.member(via_field).map(|m| &m.kind)
         {
-            return render_join_on(self.dialect, pred, &child.table, child_alias, outer_alias);
+            return render_join_on(self.dialect, pred, child, child_alias, outer_alias);
         }
         self.to_many_pairs(child, via_field, parent)
             .iter()

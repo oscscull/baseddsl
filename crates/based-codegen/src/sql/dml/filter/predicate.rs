@@ -45,7 +45,7 @@ impl<'a> Select<'a> {
             Predicate::Any { path, pred, .. } => self.relation_any(path, pred.as_deref(), model),
             Predicate::Raw(raw) => format!(
                 "({})",
-                render_raw(self.dialect, raw, &self.root_alias, &model.table)
+                render_raw(self.dialect, raw, &self.root_alias, Some(model))
             ),
         }
     }

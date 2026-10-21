@@ -6,7 +6,7 @@ use super::*;
 /// user.legacy_id`) as the join `ON` SQL. Unlike a `where` predicate — resolved
 /// against one model's field paths — a join condition names both joined models
 /// explicitly by table (`<table>.<column>`): the FK-holding `near` model and its
-/// far target. A column qualified by `near_table` resolves to `near_alias`; any
+/// far target. A column qualified by the near model's table resolves to `near_alias`; any
 /// other qualifier is the far side, resolving to `far_alias`. Sema
 /// (`resolve::check_relation_on`) has already verified every path is
 /// `<table>.<column>` naming one of the two models with a real column, and that no
@@ -19,10 +19,11 @@ use super::*;
 pub(crate) fn render_join_on(
     dialect: Dialect,
     pred: &Predicate,
-    near_table: &str,
+    near: &RModel,
     near_alias: &str,
     far_alias: &str,
 ) -> String {
+    let near_table = near.table.as_str();
     let col = |p: &Path| -> String {
         let table = p.segments.first().map_or("", |s| s.node.as_str());
         let column = p.segments.get(1).map_or("", |s| s.node.as_str());
@@ -41,7 +42,7 @@ pub(crate) fn render_join_on(
             _ => "NULL".to_string(),
         }
     };
-    let recur = |p| render_join_on(dialect, p, near_table, near_alias, far_alias);
+    let recur = |p| render_join_on(dialect, p, near, near_alias, far_alias);
     match pred {
         Predicate::And(a, b) => format!("({} AND {})", recur(a), recur(b)),
         Predicate::Or(a, b) => format!("({} OR {})", recur(a), recur(b)),
@@ -62,7 +63,7 @@ pub(crate) fn render_join_on(
             format!("{} IN ({})", col(path), items.join(", "))
         }
         Predicate::Bare(path) => format!("{} = {}", col(path), dialect.bool_lit(true)),
-        Predicate::Raw(raw) => format!("({})", render_raw(dialect, raw, near_alias, near_table)),
+        Predicate::Raw(raw) => format!("({})", render_raw(dialect, raw, near_alias, Some(near))),
         // Sema rejects a named-filter call / `.any` in a join; lower to a harmless truth.
         Predicate::FilterCall { .. } | Predicate::Any { .. } => "TRUE".to_string(),
     }
