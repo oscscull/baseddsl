@@ -167,7 +167,7 @@ pub(crate) fn resolve_soft_delete(
                 code::SOFT_DELETE_TYPE,
                 field.span,
                 format!("`{}` cannot back @soft_delete", field.node),
-                "covered subset: nullable `timestamp`/`date`, or `bool` — else drop to a raw override",
+                "covered subset: nullable `timestamp`/`date`, or `bool`; for another rule, keep a covered field and override `read:`/`delete:`/`restore:` with raw",
             );
             None
         }
@@ -184,6 +184,7 @@ pub(crate) fn resolve_soft_delete(
         models[mi].soft_delete = Some(SoftDelete {
             field: field.node.clone(),
             mode,
+            overrides: SoftOverrides::default(),
         });
     }
 }

@@ -103,6 +103,8 @@ mod schemas;
 mod scopes;
 #[path = "check/shapes.rs"]
 mod shapes;
+#[path = "check/soft_overrides.rs"]
+mod soft_overrides;
 #[path = "check/sort_decorators.rs"]
 mod sort_decorators;
 #[path = "check/tx_bindings.rs"]

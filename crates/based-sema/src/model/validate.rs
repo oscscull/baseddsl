@@ -15,6 +15,7 @@ pub fn validate(
     validate_relations(mi, models, index, sink);
     validate_indexes(ast, mi, models, sink);
     validate_decorators(ast, mi, models, sink);
+    validate_soft_overrides(ast, mi, models, sink);
     validate_fk(ast, mi, models, sink);
     validate_column_aliases(ast, mi, models, index, sink);
     validate_was(ast, mi, models, sink);

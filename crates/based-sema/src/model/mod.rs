@@ -17,6 +17,7 @@ mod keys;
 mod relations;
 mod resolve_exprs;
 mod skeleton;
+mod soft_overrides;
 mod validate;
 
 pub(crate) use column_aliases::*;
@@ -28,4 +29,5 @@ pub(crate) use keys::*;
 pub(crate) use relations::*;
 pub(crate) use resolve_exprs::*;
 pub(crate) use skeleton::*;
+pub(crate) use soft_overrides::*;
 pub(crate) use validate::*;

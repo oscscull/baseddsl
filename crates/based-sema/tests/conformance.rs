@@ -147,7 +147,7 @@ fn summarize_schema(s: &CheckedSchema) -> String {
 
 fn summarize_model(m: &RModel) -> String {
     let mut head = format!("model {}  table={}", m.name, m.table);
-    if let Some(SoftDelete { field, mode }) = &m.soft_delete {
+    if let Some(SoftDelete { field, mode, .. }) = &m.soft_delete {
         head.push_str(&format!(
             "  soft_delete={field}({})",
             match mode {
