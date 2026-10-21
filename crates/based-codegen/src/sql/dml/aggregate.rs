@@ -128,7 +128,7 @@ fn agg_projection<'a>(
                     (out.node.clone(), proj, cmp)
                 }
                 ShapeValue::Raw(raw) => {
-                    let e = format!("({})", render_raw(dialect, raw, &root_alias, &root.table));
+                    let e = format!("({})", render_raw(dialect, raw, &root_alias, Some(root)));
                     (out.node.clone(), e.clone(), e)
                 }
                 // A computed field or filter projection never co-occurs with an aggregate
@@ -292,7 +292,7 @@ impl<'a> Select<'a> {
             }
             Predicate::Raw(raw) => format!(
                 "({})",
-                render_raw(self.dialect, raw, &self.root_alias, &model.table)
+                render_raw(self.dialect, raw, &self.root_alias, Some(model))
             ),
             // A named-filter call has no aggregate meaning in `having`; sema leaves it
             // unchecked, so lower it to a harmless truth.

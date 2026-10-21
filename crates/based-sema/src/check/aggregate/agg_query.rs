@@ -172,6 +172,6 @@ pub(crate) fn check_agg_query(
     }
 
     if let Some(hp) = having {
-        check_having(hp, &out_names, params, q.span, sink);
+        check_having(hp, cx.model(mi), &out_names, params, q.span, sink);
     }
 }

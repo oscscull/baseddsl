@@ -238,7 +238,7 @@ fn project_rename<'a>(
         ShapeValue::Raw(raw) => {
             cols.push(format!(
                 "({}) AS {}",
-                render_raw(sel.dialect, raw, alias, &model.table),
+                render_raw(sel.dialect, raw, alias, Some(model)),
                 sel.q(&out_alias(out_prefix, &out.node))
             ));
         }

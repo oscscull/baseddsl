@@ -2,9 +2,10 @@ use super::*;
 
 /// Every left operand in a `having` predicate must name a projected column of the
 /// aggregate shape (an aggregate alias or a group column), so it maps to something the
-/// grouped result actually has.
+/// grouped result actually has. `model` is the queried model a raw term's `{id}` reads.
 pub(super) fn check_having(
     p: &Predicate,
+    model: &RModel,
     out_names: &[String],
     params: &[String],
     qspan: Span,
@@ -12,10 +13,10 @@ pub(super) fn check_having(
 ) {
     match p {
         Predicate::And(a, b) | Predicate::Or(a, b) => {
-            check_having(a, out_names, params, qspan, sink);
-            check_having(b, out_names, params, qspan, sink);
+            check_having(a, model, out_names, params, qspan, sink);
+            check_having(b, model, out_names, params, qspan, sink);
         }
-        Predicate::Not(inner) => check_having(inner, out_names, params, qspan, sink),
+        Predicate::Not(inner) => check_having(inner, model, out_names, params, qspan, sink),
         Predicate::Cmp { path, value, .. } => {
             check_having_path(path, out_names, qspan, sink);
             if let Value::Param(pr) = value {
@@ -33,7 +34,7 @@ pub(super) fn check_having(
         Predicate::Bare(path) => check_having_path(path, out_names, qspan, sink),
         // A raw predicate term / named-filter call is a leaf escape — left unchecked.
         Predicate::FilterCall { .. } => {}
-        Predicate::Raw(raw) => resolve::check_raw_id_qualified(raw, None, sink),
+        Predicate::Raw(raw) => resolve::check_raw_id(raw, Some(model), sink),
         Predicate::Any { path, .. } => sink.error(
             code::RELATION_ANY,
             path.segments[0].span,

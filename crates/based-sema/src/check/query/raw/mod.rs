@@ -23,7 +23,7 @@ pub(super) fn check_raw_query(
     sink: &mut Sink,
 ) {
     check_raw_query_params(q, raw, params, sink);
-    resolve::check_raw_id_qualified(raw, Some(&cx.model(ti).table), sink);
+    resolve::check_raw_id(raw, Some(cx.model(ti)), sink);
     if q.ret.stream {
         sink.error_note(
             code::RAW_QUERY_STREAM,

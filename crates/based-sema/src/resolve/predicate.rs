@@ -368,10 +368,14 @@ pub(crate) fn check_predicate_in(
         }
         Predicate::Raw(raw) => {
             check_raw_params(raw, params, sink);
-            // A filter body is checked once at its declaration, not again per call site.
+            // A filter body's syntax is checked once at its declaration; its key column
+            // depends on the call-site model, so that is checked per call.
+            let row = model.map(|mi| cx.model(mi));
             if in_filters.is_empty() {
-                let table = model.map(|mi| cx.model(mi).table.as_str());
-                check_raw_id_qualified(raw, table, sink);
+                check_raw_id_qualified(raw, row, sink);
+            }
+            if let Some(m) = row {
+                check_raw_id_composite(raw, m, sink);
             }
             if let Some(mi) = model {
                 if let Some(sd) = &cx.model(mi).soft_delete {

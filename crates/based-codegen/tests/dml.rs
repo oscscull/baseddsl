@@ -68,6 +68,8 @@ mod postgres;
 mod projections;
 #[path = "dml/query_options.rs"]
 mod query_options;
+#[path = "dml/raw_id_key.rs"]
+mod raw_id_key;
 #[path = "dml/raw_queries.rs"]
 mod raw_queries;
 #[path = "dml/relation_any.rs"]
