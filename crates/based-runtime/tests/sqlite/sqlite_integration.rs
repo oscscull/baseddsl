@@ -17,7 +17,6 @@
 //! `Dialect::Sqlite`) run against the loaded schema, so the whole `based gen sql` artifact
 //! (DDL *and* DML) is now proven to execute, not just the query text.
 
-#![cfg(feature = "sqlite")]
 
 use std::path::PathBuf;
 
@@ -28,7 +27,8 @@ use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::idempotency::NoStore;
 use based_runtime::run::Backend;
-use based_runtime::{dispatch, Compiled, Guards, SeqIdGen, SqliteBackend};
+use based_runtime::{dispatch, Compiled, Guards, SeqIdGen};
+use crate::driver::SqliteBackend;
 use based_sema::check;
 
 /// Load the real commerce example — the same front end (discover → parse → check) +

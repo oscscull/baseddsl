@@ -835,6 +835,29 @@ mod __based_adopt_driver {
             ),
         }
     }
+
+    /// Adopt a **caller-owned** rusqlite connection with an open transaction — the
+    /// bring-your-own (`adopt`) rung over the rusqlite driver. Route this client's callables
+    /// (including `for update` locking reads) through that transaction, so the baseddsl work
+    /// commits atomically with the caller's own raw writes on it. Calls fail if no transaction
+    /// is open, and run on the calling task.
+    ///
+    /// **`adopt` never begins, commits, or rolls back** — the caller owns the boundary
+    /// (e.g. `conn.execute_batch("BEGIN")` … `"COMMIT"`). There is no auto-retry. Feature-gated
+    /// so a build without the rusqlite driver simply omits it; forward the feature to
+    /// `based-runtime/sqlite-rusqlite`.
+    #[cfg(feature = "sqlite-rusqlite")]
+    pub fn adopt_rusqlite<'a>(
+        engine: &based_runtime::Engine,
+        conn: &'a mut based_runtime::rusqlite::Connection,
+    ) -> Client<based_runtime::AdoptedTransport<based_runtime::AdoptedRusqlite<'a>>> {
+        Client {
+            transport: based_runtime::AdoptedTransport::new(
+                engine.clone(),
+                based_runtime::AdoptedRusqlite::new(conn),
+            ),
+        }
+    }
 }
 #[allow(unused_imports)]
 pub use __based_adopt_driver::*;

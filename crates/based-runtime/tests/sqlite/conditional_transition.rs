@@ -2,7 +2,8 @@
 
 use based_ast::FileId;
 use based_codegen::{sql, Dialect};
-use based_runtime::{Compiled, Engine, SeqIdGen, SqliteBackend};
+use based_runtime::{Compiled, Engine, SeqIdGen};
+use crate::driver::SqliteBackend;
 use serde_json::json;
 
 #[tokio::test]

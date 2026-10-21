@@ -649,6 +649,20 @@ fn adopt_constructor_is_per_dialect_and_txbound() {
         sq.contains("based_runtime::AdoptedSqlite::new(tx)"),
         "\n{sq}"
     );
+    // SQLite also adopts a rusqlite connection, gated on the rusqlite driver feature.
+    assert!(
+        sq.contains("#[cfg(feature = \"sqlite-rusqlite\")]"),
+        "\n{sq}"
+    );
+    assert!(sq.contains("pub fn adopt_rusqlite<'a>("), "\n{sq}");
+    assert!(
+        sq.contains("based_runtime::AdoptedRusqlite::new(conn)"),
+        "\n{sq}"
+    );
+    assert!(
+        !pg.contains("adopt_rusqlite"),
+        "rusqlite is SQLite-only: {pg}"
+    );
     let my = gen_dialect(Dialect::MySql);
     assert!(my.contains("#[cfg(feature = \"mariadb\")]"), "\n{my}");
     assert!(my.contains("pub fn adopt_mariadb<'a>("), "\n{my}");

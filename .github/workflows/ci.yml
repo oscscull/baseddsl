@@ -34,6 +34,13 @@ jobs:
           components: rustfmt, clippy
       - run: make ci-cargo-generation
 
+  rusqlite-consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make ci-rusqlite-consumer
+
   runtime-benchmark:
     runs-on: ubuntu-latest
     steps:

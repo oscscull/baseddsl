@@ -9,7 +9,7 @@ use based_codegen::Dialect;
 use based_runtime::fetch_all;
 use based_runtime::migrate::{apply, load_migrations, ApplyOpts, Direction};
 use based_runtime::run::Backend;
-use based_runtime::sqlite::SqliteBackend;
+use crate::driver::SqliteBackend;
 use based_runtime::value::SqlValue;
 
 const SNAP: &str = "snapshot v1 dialect=neutral

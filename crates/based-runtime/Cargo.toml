@@ -36,6 +36,10 @@ postgres = [
 # system dependency, no live server) — the infra-free `Db`/`Backend` behind real
 # end-to-end integration tests.
 sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:base64", "dep:libsqlite3-sys"]
+# The same SQLite backend over rusqlite instead of sqlx, for an app that already links
+# rusqlite: Cargo allows one `links = "sqlite3"` crate per build, so the app and the engine
+# share one `libsqlite3-sys`. Independent of `sqlite`; enable either or both.
+sqlite-rusqlite = ["dep:rusqlite", "dep:base64"]
 # The HTTP listener (`based serve`) — the axum socket edge over `serve::dispatch` —
 # plus the production uuid id-gen. Off by default so the core stays a plain library.
 serve = ["dep:axum", "id-gen", "tokio/net"]
@@ -80,6 +84,12 @@ sqlx = { version = "0.9.0", optional = true, default-features = false, features 
 ] }
 # Require the WAL-reset fix for external consumers too, independently of the workspace lockfile.
 libsqlite3-sys = { workspace = true, optional = true }
+# The rusqlite driver (feature `sqlite-rusqlite`). The range covers every release on a
+# WAL-fixed `libsqlite3-sys` (>= 0.37): this workspace resolves the one sqlx-sqlite
+# accepts, an embedder on the newest rusqlite resolves that one.
+rusqlite = { version = ">=0.39, <0.41", optional = true, default-features = false, features = [
+    "bundled",
+] }
 # Parsing the typed text-riding bind values (timestamp/date) into native driver types
 # inside the MariaDB/Postgres driver impls.
 chrono = { version = "0.4", optional = true, default-features = false, features = [

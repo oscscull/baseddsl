@@ -182,11 +182,10 @@ async fn engine_call_stream_yields_rows_in_process() {
 
 // ---- against a real engine (in-memory SQLite) ------------------------------
 
-#[cfg(feature = "sqlite")]
 mod sqlite {
     use super::*;
     use based_codegen::{sql, Dialect};
-    use based_runtime::SqliteBackend;
+    use crate::driver::SqliteBackend;
 
     /// Seed an in-memory SQLite with the generated DDL + three orders.
     async fn backend(c: &Compiled) -> SqliteBackend {

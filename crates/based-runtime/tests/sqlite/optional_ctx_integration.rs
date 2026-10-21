@@ -8,7 +8,6 @@
 //!   - an anonymous caller *does* see an *unowned* deck (`user IS NULL` matches — "owned by no
 //!     one, and you are no one"), the deliberate consequence of "unset context = unset column".
 
-#![cfg(feature = "sqlite")]
 
 use serde_json::json;
 
@@ -16,7 +15,8 @@ use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::idempotency::NoStore;
-use based_runtime::{dispatch, Compiled, Guards, SeqIdGen, SqliteBackend};
+use based_runtime::{dispatch, Compiled, Guards, SeqIdGen};
+use crate::driver::SqliteBackend;
 use based_sema::check;
 
 const SCHEMA: &str = r#"

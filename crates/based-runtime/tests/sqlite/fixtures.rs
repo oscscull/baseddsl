@@ -6,10 +6,8 @@ use serde_json::{json, Value};
 use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
-use based_runtime::{
-    AdoptedSqlite, AdoptedTransport, Backend, Compiled, Db, DbError, Engine, SeqIdGen,
-    SqliteBackend, TxOptions,
-};
+use based_runtime::{Backend, Compiled, Db, DbError, Engine, SeqIdGen, TxOptions};
+use crate::driver::SqliteBackend;
 use based_sema::check;
 
 const SCHEMA: &str = r#"
@@ -202,40 +200,7 @@ async fn fixture_runs_inside_an_engine_transaction() {
 
 #[tokio::test]
 async fn fixture_runs_on_an_adopted_transaction() {
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    let compiled = compiled();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::raw_sql(sqlx::AssertSqlSafe(sql::ddl(
-        &compiled.schema,
-        Dialect::Sqlite,
-    )))
-    .execute(&pool)
-    .await
-    .unwrap();
-    let engine = Engine::new(
-        compiled,
-        SqliteBackend::from_pool(pool.clone()),
-        SeqIdGen::default(),
-    );
-
-    let mut tx = pool.begin().await.unwrap();
-    {
-        let adopted = AdoptedTransport::new(engine.clone(), AdoptedSqlite::new(&mut tx));
-        let row = json!({ "name": "Adopted", "slug": "adopted", "tier": "free" });
-        let response = adopted.insert_fixture("Org", row).await;
-        assert_eq!(response.status, 200, "{:?}", response.body);
-    }
-    tx.commit().await.unwrap();
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM org")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 1);
+    crate::driver::adopted_fixture_inserts(compiled()).await;
 }
 
 /// Records the shard key of every checkout, over a real SQLite backend.

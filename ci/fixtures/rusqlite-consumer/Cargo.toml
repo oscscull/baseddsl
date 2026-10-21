@@ -1,0 +1,15 @@
+[package]
+name = "rusqlite-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: an app on the newest rusqlite resolves its own libsqlite3-sys.
+[workspace]
+
+[dependencies]
+based-runtime = { path = "../../../crates/based-runtime", default-features = false, features = [
+    "sqlite-rusqlite",
+] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt"] }
