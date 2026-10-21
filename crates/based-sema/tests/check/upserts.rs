@@ -32,6 +32,35 @@ fn upsert_composite_unique_index_is_clean() {
 }
 
 #[test]
+fn upsert_composite_key_target_is_clean() {
+    assert_clean(
+        r#"
+        @key(source, external_id)
+        SyncState { source: text, external_id: text, snapshot: text }
+        mutation set_sync_snapshot(source: text, external_id: text, snapshot: text) -> ok {
+          create SyncState { source = $source, external_id = $external_id, snapshot = $snapshot }
+            on conflict (external_id, source) update { snapshot = $snapshot };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn upsert_partial_composite_key_target_is_e0250() {
+    let (_, d) = analyze(
+        r#"
+        @key(source, external_id)
+        SyncState { source: text, external_id: text, snapshot: text }
+        mutation set_sync_snapshot(source: text, external_id: text, snapshot: text) -> ok {
+          create SyncState { source = $source, external_id = $external_id, snapshot = $snapshot }
+            on conflict (source) update { snapshot = $snapshot };
+        }
+        "#,
+    );
+    assert_eq!(errors(&d), ["E0250"]);
+}
+
+#[test]
 fn upsert_non_unique_target_is_e0250() {
     let (_, d) = analyze(
         r#"
