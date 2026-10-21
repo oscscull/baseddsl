@@ -326,128 +326,40 @@ pub async fn cmd_migrate_status(root: &Path, database_url: Vec<String>) -> Resul
 /// its `schema.snap` chain implies (no hand-edit drift) and the latest snapshot matches the
 /// current `.bsl` (no uncaptured schema changes). Never touches a database.
 pub fn cmd_migrate_verify(root: &Path) -> Result<(), CliError> {
-    use based_codegen::migrate;
+    use based_project::Severity;
 
     let (project, schema, _decls, _sources, _warnings) = load_checked(root)?;
-    let fks = based_sema::ForeignKeys::parse(&project.manifest.schema.foreign_keys);
-    let dialect = Dialect::parse(&project.manifest.dialect);
-    let existing = existing_migrations(&root.join("migrations"))?;
+    let migrations = based_project::read_migrations(root).map_err(|e| match e {
+        based_project::Error::Io { path, source } => io_at("reading", &path, source),
+        other @ based_project::Error::Diagnostics(_) => CliError::failure(other.to_string()),
+    })?;
+    let sources: Vec<_> = migrations
+        .iter()
+        .map(based_project::MigrationFiles::source)
+        .collect();
+    let findings = based_project::verify_migrations(&schema, &project.manifest, &sources);
 
     let mut problems = 0usize;
-    let mut prev = migrate::Snapshot::default();
-    for (idx, (n, dir)) in existing.iter().enumerate() {
-        let name = dir.file_name().map(|s| s.to_string_lossy().into_owned());
-        let name = name.as_deref().unwrap_or("?");
-        if *n != (idx as u32) + 1 {
-            eprintln!("  {name}: number out of sequence (expected {:04})", idx + 1);
-            problems += 1;
-        }
-        let snap_path = dir.join("schema.snap");
-        let snap_text =
-            std::fs::read_to_string(&snap_path).map_err(|e| io_at("reading", &snap_path, e))?;
-        let snap = match migrate::Snapshot::parse(&snap_text) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("  {name}: {e}");
+    for finding in &findings {
+        match finding.severity {
+            Severity::Problem => {
                 problems += 1;
-                continue;
+                eprintln!("  {finding}");
             }
-        };
-        let up_path = dir.join("up.mig");
-        let stored =
-            std::fs::read_to_string(&up_path).map_err(|e| io_at("reading", &up_path, e))?;
-        // Regenerated in the order the file's format runs them.
-        let steps = migrate::up_steps(&prev, &snap, &stored);
-        problems += verify_up_mig(name, &stored, &steps, &snap);
-        // Data steps (and `raw` placement) checked against the schema state at their lines.
-        let up = migrate::plan_up(&prev, &snap, &stored, dialect);
-        if up.as_ref().is_ok_and(|plan| plan.has_data) {
-            println!("  {name}: data steps checked");
+            Severity::Warning | Severity::Note => println!("  {finding}"),
         }
-        problems += report_problems(name, up);
-        if let Ok(down) = std::fs::read_to_string(dir.join("down.mig")) {
-            problems += report_problems(name, migrate::plan_down(&prev, &snap, &down, dialect));
-        }
-        prev = snap;
     }
-
-    // The latest snapshot must equal the current schema — else there are uncaptured
-    // changes. Compared via the diff (not raw equality) so a spent `@was` — whose rename
-    // is already captured — reads as no change even while it lingers in the `.bsl`.
-    let current = migrate::Snapshot::from_schema_with(&schema, fks);
-    if existing.is_empty() {
-        if !current.tables.is_empty() {
-            eprintln!("  no migrations yet — run `based migrate gen` to capture the schema");
-            problems += 1;
-        }
-    } else if !migrate::diff_snapshots(&prev, &current).is_empty() {
-        eprintln!("  schema has uncaptured changes not in any migration — run `based migrate gen`");
-        problems += 1;
-    }
-
     if problems > 0 {
         return Err(CliError::summary(
             false,
             format!(
                 "verify failed: {problems} problem(s) across {} migration(s) (see above)",
-                existing.len()
+                migrations.len()
             ),
         ));
     }
-    println!("ok: {} migration(s) verified", existing.len());
+    println!("ok: {} migration(s) verified", migrations.len());
     Ok(())
-}
-
-/// Verify one migration's stored `up.mig` against the steps its snapshot chain implies:
-/// a structural drift from `schema.snap` is a problem; a `raw` step makes the migration
-/// only partially verifiable (reported), and a raw step touching a modeled table is warned
-/// about (the snapshot is blind to it). Returns the number of problems found.
-fn verify_up_mig(
-    name: &str,
-    stored: &str,
-    steps: &[based_codegen::migrate::Step],
-    snap: &based_codegen::migrate::Snapshot,
-) -> usize {
-    use based_codegen::migrate;
-
-    let mut problems = 0usize;
-    // The structural steps the snapshots imply must still match the stored `up.mig`
-    // (byte-canonical, `raw` lines stripped). A `raw(<dialect>)` escape isn't derivable
-    // from the snapshots (opaque SQL), so a raw-carrying migration is reported `partial`.
-    if !migrate::up_mig_matches_snapshot(stored, steps) {
-        eprintln!("  {name}: up.mig has drifted from schema.snap (re-run `based migrate gen`)");
-        problems += 1;
-    } else if migrate::has_raw_step(stored) {
-        println!("  {name}: partial (carries a raw step — not offline-verifiable)");
-    }
-    // A raw step that mutates a snapshot-modeled table makes the snapshot blind to the
-    // change (a raw on a view/trigger/extension is safe). A warning, not a failure.
-    for step in migrate::parse_raw_steps(stored) {
-        if let migrate::Step::Raw { sql, .. } = &step {
-            let touched = migrate::raw_modeled_tables(sql, snap);
-            if !touched.is_empty() {
-                println!(
-                    "  {name}: {} raw step touches modeled table(s) {} — the snapshot is blind to it",
-                    based_sema::code::RAW_MIGRATION_MODELED,
-                    touched.join(", ")
-                );
-            }
-        }
-    }
-    problems
-}
-
-/// Print a migration script's planning problems; returns how many there were.
-fn report_problems<T, P: std::fmt::Display>(name: &str, planned: Result<T, Vec<P>>) -> usize {
-    planned.map_or_else(
-        |problems| {
-            for p in &problems {
-                eprintln!("  {name}: {p}");
-            }
-            problems.len()
-        },
-        |_| 0,
-    )
 }
 
 /// Read + parse a migration directory's `schema.snap`.

@@ -5,6 +5,7 @@ mod check;
 mod client;
 mod embedded;
 mod error;
+mod migrations;
 mod parse;
 mod presentation;
 mod report;
@@ -17,6 +18,9 @@ use based_sema::CheckedSchema;
 pub use client::render_client;
 pub use embedded::check_embedded;
 pub use error::Error;
+pub use migrations::{
+    read_migrations, verify_migrations, Finding, MigrationFiles, MigrationSource, Severity,
+};
 pub use report::Report;
 use std::path::{Path, PathBuf};
 

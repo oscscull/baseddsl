@@ -43,8 +43,10 @@ never touch it, and rust-analyzer resolves the include after its first build.
 The helper adds a one-time compile of the BSL compiler to cold builds.
 
 The build also writes `OUT_DIR/schema.rs`, embedding `based.toml` and the BSL
-for `Compiled::from_sources` (see [a small Rust application](embedded.md)).
-Connection setup and migrations stay explicit. `Compiled::load` reads
+for `Compiled::from_sources`, and `migrations/` as `schema::MIGRATIONS` (see
+[a small Rust application](embedded.md)). When `migrations/` exists, a build
+fails on anything `based migrate verify` rejects. Connection setup and applying
+migrations stay explicit. `Compiled::load` reads
 `based.toml` and BSL from disk instead.
 
 The application needs `serde` with `derive`, `serde_json`, and its

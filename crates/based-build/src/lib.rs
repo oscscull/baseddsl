@@ -4,6 +4,7 @@ mod embed;
 mod environment;
 mod error;
 mod inputs;
+mod migrations;
 mod output;
 mod report;
 
@@ -25,12 +26,20 @@ pub fn run() -> Option<Generation> {
 }
 
 /// Generate `OUT_DIR/client.rs` and `OUT_DIR/schema.rs` using the Cargo package's `based.toml`.
-/// Prints Cargo input tracking; no CLI binary, rustfmt, runtime, or migrations.
+/// When the package has a `migrations/` directory, it is embedded as `schema::MIGRATIONS`
+/// and must pass `based migrate verify`. Prints Cargo input tracking; no CLI binary,
+/// rustfmt, runtime, or database.
 pub fn generate() -> Result<Generation, Error> {
     let environment = environment::Environment::cargo()?;
     let inputs = inputs::Inputs::discover(&environment.root)?;
     inputs.track(&environment.root);
-    embed::write(&inputs.project, &environment.root, &environment.out)?;
+    let migrations = inputs.migrations.as_deref().unwrap_or_default();
+    embed::write(
+        &inputs.project,
+        migrations,
+        &environment.root,
+        &environment.out,
+    )?;
     let fingerprint = inputs.fingerprint()?;
     let path = environment.out.join("client.rs");
     println!("cargo:rerun-if-changed={}", path.display());
@@ -45,6 +54,9 @@ pub fn generate() -> Result<Generation, Error> {
     let checked = based_project::check_project(inputs.project)?;
     for warning in &checked.report.diagnostics {
         println!("cargo:warning={}: {}", warning.code, warning.message);
+    }
+    if inputs.migrations.is_some() {
+        migrations::verify(&checked, migrations)?;
     }
     let bytes = output::client(&checked)?;
     let changed = output::publish(&path, bytes)?;
