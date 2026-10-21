@@ -134,7 +134,7 @@ pub use http::{
 };
 
 #[cfg(feature = "sqlite")]
-pub use sqlite::{AdoptedSqlite, SqliteBackend, SqliteDb};
+pub use sqlite::{AdoptedSqlite, SqliteBackend, SqliteDb, SqliteLocation, SqliteLocationError};
 
 #[cfg(feature = "postgres")]
 pub use postgres::{AdoptedPg, PgRouter, PostgresDb};

@@ -46,6 +46,16 @@ fn live_connection_precedence_and_selected_dotenv_are_independent_of_cwd() {
     assert!(project.0.join("flag.db").exists());
     assert!(!project.0.join("unused-flag.db").exists());
 
+    success(project.run(
+        "src",
+        &["migrate", "status", "--database-url", "sqlite:url.db"],
+    ));
+    assert!(project.0.join("url.db").exists());
+    assert!(!project.0.join("sqlite:url.db").exists());
+    let absolute = format!("sqlite://{}", project.0.join("abs.db").display());
+    success(project.run("src", &["migrate", "status", "--database-url", &absolute]));
+    assert!(project.0.join("abs.db").exists());
+
     // A distinct nested project reads only its own .env, never parent secrets.
     project.write(
         "src/based.toml",

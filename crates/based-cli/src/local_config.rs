@@ -1,6 +1,7 @@
 //! Resolve live-command connection configuration without mutating process env.
 use crate::error::CliError;
 use based_codegen::Dialect;
+use based_runtime::SqliteLocation;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -15,20 +16,16 @@ pub fn shard_urls(
             "no database url: pass --database-url <url> or set BASED_DATABASE_URL / DATABASE_URL in the environment or project .env",
         ));
     }
-    if dialect == Dialect::Sqlite && urls.iter().any(|url| url.contains("://")) {
-        return Err(CliError::usage(
-            "sqlite connection must be a file path or :memory:, not a server URL (value redacted)",
-        ));
+    if dialect != Dialect::Sqlite {
+        return Ok(urls);
     }
-    Ok(urls
-        .into_iter()
-        .map(|url| {
-            if dialect != Dialect::Sqlite || url == ":memory:" || Path::new(&url).is_absolute() {
-                return url;
-            }
-            root.join(url).to_string_lossy().into_owned()
-        })
-        .collect())
+    urls.iter().map(|url| sqlite_path(root, url)).collect()
+}
+
+/// A SQLite path or `sqlite:` URL as a bare path, relative files anchored at `root`.
+fn sqlite_path(root: &Path, url: &str) -> Result<String, CliError> {
+    let location = SqliteLocation::parse(url).map_err(|e| CliError::usage(e.to_string()))?;
+    Ok(location.anchored(root).to_path_string())
 }
 
 fn connection_values(root: &Path, explicit: Vec<String>) -> Result<Vec<String>, CliError> {
