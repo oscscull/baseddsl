@@ -371,8 +371,10 @@ pub(crate) fn variant_wire<'a>(
 pub(crate) fn string_in_family(s: String, family: Family) -> SqlValue {
     match family {
         Family::Uuid => SqlValue::Uuid(s),
-        Family::Timestamp => SqlValue::Timestamp(s),
-        Family::Date => SqlValue::Date(s),
+        Family::Timestamp => {
+            SqlValue::Timestamp(crate::temporal::canonical_timestamp(&s).unwrap_or(s))
+        }
+        Family::Date => SqlValue::Date(crate::temporal::canonical_date(&s).unwrap_or(s)),
         Family::Time => SqlValue::Time(s),
         Family::Decimal => SqlValue::Decimal(s),
         Family::Bytes => SqlValue::Bytes(s),

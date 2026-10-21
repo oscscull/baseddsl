@@ -71,7 +71,7 @@ async fn tx_binding_reuses_bound_steps_scope_column_end_to_end() {
     );
 }
 
-/// D124 (H6-R1): a bound create's `@created` timestamp — engine-set to `CURRENT_TIMESTAMP`,
+/// D124 (H6-R1): a bound create's `@created` timestamp — engine-set to the current time,
 /// unknowable at plan time — is read back and reused by a sibling step. The persisted
 /// `Event.at` must equal the Ticket's real `created_at` (never NULL, never a different
 /// instant): the bound create re-selects its written row, so `$t.created_at` reads the

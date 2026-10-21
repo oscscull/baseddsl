@@ -26,10 +26,10 @@ pub(crate) fn render_lit(dialect: Dialect, l: &Literal) -> String {
     }
 }
 
-pub(crate) fn render_func(f: &FuncCall) -> String {
+pub(crate) fn render_func(dialect: Dialect, f: &FuncCall) -> String {
     // `now()` is the only value-position function (ir::KNOWN_FUNCS).
     match f.name.node.as_str() {
-        "now" => "CURRENT_TIMESTAMP".to_string(),
+        "now" => dialect.now_sql().to_string(),
         other => format!("{other}()"),
     }
 }

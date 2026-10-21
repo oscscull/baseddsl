@@ -144,6 +144,17 @@ impl Dialect {
         }
     }
 
+    /// The current-time expression an engine-written timestamp (`now()`, `@created`,
+    /// `@updated`, a soft-delete stamp) uses. SQLite stores timestamps as text, so it
+    /// writes the canonical bind form (UTC, six fractional digits) to keep stored values
+    /// in one lexically ordered format; the parentheses make it valid as a column default.
+    pub fn now_sql(self) -> &'static str {
+        match self {
+            Self::MariaDb | Self::MySql | Self::Postgres => "CURRENT_TIMESTAMP",
+            Self::Sqlite => "(strftime('%Y-%m-%dT%H:%M:%f000Z', 'now'))",
+        }
+    }
+
     /// The boolean literal spelling. MariaDB/Postgres have the `TRUE`/`FALSE`
     /// keywords; SQLite stores bools as integers, so it is `1`/`0`.
     pub fn bool_lit(self, b: bool) -> &'static str {

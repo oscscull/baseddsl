@@ -50,6 +50,7 @@ Order {
 
 - `Id` resolves to the project default id strategy; put `id: Id` on every model.
 - `decimal(p,s)` — `1 ≤ s ≤ p ≤ 38`; bare `decimal` = `decimal(38, 9)`. Rides the wire as an exact JSON string. Generated Rust uses `client::Decimal`, backed by `bigdecimal`; an embedded client reaches it through `based_runtime`, and a wire client with decimal fields needs `bigdecimal = "0.4"`. Its serializer writes plain decimal notation and never converts through `f64`. Parsing and SQLite TEXT storage preserve the input scale; database DECIMAL columns may normalize to their declared scale when read back. Compare numeric values when scale spelling is not part of the contract.
+- `timestamp` and `date` are parsed when bound; an unparseable value is a 400 `bad_arg`. A `timestamp` accepts RFC 3339 or `YYYY-MM-DD HH:MM:SS[.f]` (no zone = UTC) and is stored as UTC; a `date` is `YYYY-MM-DD`. SQLite stores them as text in one fixed form (`2026-10-21T08:00:00.000000Z`), which `now()`, `@created`, `@updated` and soft-delete stamps also write, so comparisons, `order` and cursors follow time order.
 - `json` rides the wire as **structured JSON** (the object/array itself, at any nesting) and round-trips: read a value out, write it back unchanged. Client type `serde_json::Value`.
 - `bytes` rides the wire as a base64 string. `ulid` / `serial` are id-generation strategies (valid as `id`; `serial` = DB-generated sequential int).
 

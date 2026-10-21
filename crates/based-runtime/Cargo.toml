@@ -16,7 +16,6 @@ mariadb = [
     "sqlx/mysql",
     "sqlx/chrono",
     "sqlx/bigdecimal",
-    "dep:chrono",
     "dep:base64",
 ]
 # The concrete Postgres driver + shard router, over sqlx's Postgres driver. Postgres
@@ -29,7 +28,6 @@ postgres = [
     "sqlx/bigdecimal",
     "sqlx/uuid",
     "sqlx/json",
-    "dep:chrono",
     "dep:base64",
 ]
 # The SQLite driver + backend over sqlx's async SQLite driver (bundled engine, no
@@ -92,9 +90,8 @@ libsqlite3-sys = { workspace = true, optional = true }
 rusqlite = { version = ">=0.39, <0.41", optional = true, default-features = false, features = [
     "bundled",
 ] }
-# Parsing the typed text-riding bind values (timestamp/date) into native driver types
-# inside the MariaDB/Postgres driver impls.
-chrono = { version = "0.4", optional = true, default-features = false, features = [
+# Validating and normalizing timestamp/date values at the bind boundary.
+chrono = { version = "0.4", default-features = false, features = [
     "std",
 ] }
 # The axum HTTP listener behind `based serve` (feature `serve`).

@@ -72,6 +72,7 @@ pub mod run;
 pub mod scan;
 pub mod serve;
 pub mod shard;
+mod temporal;
 pub mod tx;
 pub mod value;
 

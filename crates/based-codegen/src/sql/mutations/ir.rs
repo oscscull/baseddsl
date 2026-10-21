@@ -245,7 +245,7 @@ pub enum BulkSource {
     Ctx {
         ctx_field: String,
     },
-    /// `CURRENT_TIMESTAMP` — an engine `@created`/`@updated` stamp, absent from the shape.
+    /// The dialect's current time — an engine `@created`/`@updated` stamp, absent from the shape.
     Now,
 }
 

@@ -83,9 +83,9 @@ fn bind_all<'q>(
             SqlValue::Int(i) => q.bind(*i),
             SqlValue::Float(f) => q.bind(*f),
             SqlValue::Bool(b) => q.bind(i64::from(*b)),
+            SqlValue::Timestamp(s) => q.bind(crate::temporal::naive_utc_timestamp(s)),
             SqlValue::Text(s)
             | SqlValue::Uuid(s)
-            | SqlValue::Timestamp(s)
             | SqlValue::Date(s)
             | SqlValue::Time(s)
             | SqlValue::Decimal(s) => q.bind(s.clone()),

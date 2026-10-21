@@ -105,7 +105,7 @@ fn bind_all<'q>(
                     .map_err(|e| DbError::new(format!("invalid uuid `{s}`: {e}")))?,
             ),
             SqlValue::Timestamp(s) => q.bind(
-                parse_timestamp(s)
+                crate::temporal::parse_timestamp(s)
                     .ok_or_else(|| DbError::new(format!("invalid timestamp `{s}`")))?,
             ),
             SqlValue::Date(s) => q.bind(
@@ -130,28 +130,6 @@ fn bind_all<'q>(
         };
     }
     Ok(q)
-}
-
-/// Parse a wire timestamp into UTC. Accepts the engine's own canonical form
-/// (`2024-01-02 12:30:45.500000+00`), RFC 3339, and a naive datetime (space or `T`
-/// separated, taken as UTC — matching how the server reads an offset-less literal into
-/// `timestamptz` under the UTC timezone the engine assumes).
-fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::{DateTime, NaiveDateTime, Utc};
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%dT%H:%M:%S%.f%#z"] {
-        if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
-            return Some(dt.with_timezone(&Utc));
-        }
-    }
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
-        if let Ok(n) = NaiveDateTime::parse_from_str(s, fmt) {
-            return Some(n.and_utc());
-        }
-    }
-    None
 }
 
 /// Parse a wire time-of-day (`HH:MM:SS` with an optional fractional part) into a
@@ -870,30 +848,5 @@ mod tests {
         // 2000-02-29 is day 59 since 2000-01-01.
         let (y, m, d) = civil_from_days(59 + PG_EPOCH_DAYS_FROM_UNIX);
         assert_eq!((y, m, d), (2000, 2, 29));
-    }
-
-    /// The typed bind path round-trips the engine's own canonical timestamp string —
-    /// the exact form `pg_timestamp` emits — plus the common external forms.
-    #[test]
-    fn parse_timestamp_accepts_wire_forms() {
-        for s in [
-            "2024-01-02 12:30:45.500000+00",
-            "2024-01-02 12:30:45+00",
-            "2024-01-02T12:30:45.5Z",
-            "2024-01-02T12:30:45+00:00",
-            "2024-01-02 12:30:45",
-            "2024-01-02T12:30:45.500000",
-        ] {
-            assert!(parse_timestamp(s).is_some(), "should parse: {s}");
-        }
-        assert!(parse_timestamp("not a time").is_none());
-        // The canonical wire string parses back to the same instant it encodes.
-        let dt = parse_timestamp("2024-01-02 12:30:45.500000+00").unwrap();
-        assert_eq!(
-            dt.timestamp_micros(),
-            parse_timestamp("2024-01-02T12:30:45.5Z")
-                .unwrap()
-                .timestamp_micros()
-        );
     }
 }
