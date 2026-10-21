@@ -10,10 +10,10 @@
 
 use std::path::PathBuf;
 
-use based_codegen::Dialect;
 use based_runtime::fetch_all;
 use based_runtime::migrate::{
-    apply, load_migrations, status, ApplyOpts, Direction, MigrateError, MigrationState,
+    apply, from_sources, load_migrations, status, ApplyOpts, Dialect, Direction, MigrateError,
+    MigrationSource, MigrationState,
 };
 use based_runtime::run::Backend;
 use crate::driver::SqliteBackend;
@@ -486,5 +486,77 @@ fn missing_dir_number_is_an_order_error() {
     // 0003 with no 0002 → a gap in the sequence.
     s.migration("0003_add_size", SIZE_UP, SIZE_SNAP, None);
     let err = load_migrations(&s.0, Dialect::Sqlite).unwrap_err();
+    assert!(matches!(err, MigrateError::Order(_)), "{err}");
+}
+
+const EMBEDDED: &[MigrationSource] = &[
+    MigrationSource {
+        id: "0002_add_size",
+        up: SIZE_UP,
+        down: Some(SIZE_DOWN),
+        snapshot: SIZE_SNAP,
+    },
+    MigrationSource {
+        id: "0001_init",
+        up: INIT_UP,
+        down: None,
+        snapshot: INIT_SNAP,
+    },
+];
+
+#[tokio::test]
+async fn embedded_sources_apply_with_the_same_ledger_as_files() {
+    let (s, backend) = scenario("embedded");
+    let migs = from_sources(Dialect::Sqlite, EMBEDDED).unwrap();
+    let from_disk = load_migrations(&s.0, Dialect::Sqlite).unwrap();
+    let ids = |m: &[based_runtime::PlannedMigration]| {
+        m.iter()
+            .map(|m| (m.id.clone(), m.up_hash.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&migs), ids(&from_disk));
+
+    let report = apply(&backend, Dialect::Sqlite, &migs, &ApplyOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(report.applied, vec!["0001_init", "0002_add_size"]);
+    assert!(has_column(&backend, "size").await);
+
+    // The files-loaded set sees the embedded apply as already done.
+    let report = apply(&backend, Dialect::Sqlite, &from_disk, &ApplyOpts::default())
+        .await
+        .unwrap();
+    assert!(report.applied.is_empty());
+
+    // The tamper guard holds for embedded text edited after apply.
+    let edited = [
+        EMBEDDED[1],
+        MigrationSource {
+            up: "add column widget.size int null\nraw(sqlite) `SELECT 1`\n",
+            ..EMBEDDED[0]
+        },
+    ];
+    let err = apply(
+        &backend,
+        Dialect::Sqlite,
+        &from_sources(Dialect::Sqlite, &edited).unwrap(),
+        &ApplyOpts::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, MigrateError::Tamper { .. }), "{err}");
+}
+
+#[test]
+fn embedded_sources_refuse_gaps_and_unnumbered_ids() {
+    let gap = [EMBEDDED[0]];
+    let err = from_sources(Dialect::Sqlite, &gap).unwrap_err();
+    assert!(matches!(err, MigrateError::Order(_)), "{err}");
+
+    let unnumbered = [MigrationSource {
+        id: "init",
+        ..EMBEDDED[1]
+    }];
+    let err = from_sources(Dialect::Sqlite, &unnumbered).unwrap_err();
     assert!(matches!(err, MigrateError::Order(_)), "{err}");
 }

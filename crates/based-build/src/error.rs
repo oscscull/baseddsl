@@ -7,6 +7,8 @@ pub enum Error {
     Io(std::io::Error),
     Compile(based_project::Error),
     Publish(based_artifacts::Error),
+    /// `migrations/` failed the same checks as `based migrate verify`.
+    Migrations(Vec<based_project::Finding>),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -15,6 +17,12 @@ impl fmt::Display for Error {
             Self::Io(error) => write!(f, "build artifact I/O: {error}"),
             Self::Compile(error) => write!(f, "{error}"),
             Self::Publish(error) => write!(f, "{error}"),
+            Self::Migrations(problems) => {
+                for problem in problems {
+                    writeln!(f, "migrations/{problem}")?;
+                }
+                write!(f, "migration verify failed: {} problem(s); fix them or re-run `based migrate gen`", problems.len())
+            }
         }
     }
 }
@@ -25,6 +33,7 @@ impl std::error::Error for Error {
             Self::Io(error) => Some(error),
             Self::Compile(error) => Some(error),
             Self::Publish(error) => Some(error),
+            Self::Migrations(_) => None,
         }
     }
 }

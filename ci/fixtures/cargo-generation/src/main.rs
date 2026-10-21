@@ -3,6 +3,11 @@ mod client {
     include!(concat!(env!("OUT_DIR"), "/client.rs"));
 }
 
+#[allow(dead_code)]
+mod schema {
+    include!(concat!(env!("OUT_DIR"), "/schema.rs"));
+}
+
 #[tokio::main]
 async fn main() {
     // Runtime loading stays explicit. Build-time client generation supplies no engine assets.
@@ -13,4 +18,9 @@ async fn main() {
     let api = client::embedded(&engine);
     let rows = api.items(client::ItemsInput {}, ()).await.unwrap();
     assert_eq!(rows[0].name, "Ada");
+
+    let migrations =
+        based_runtime::migrate::from_sources(based_runtime::Dialect::Sqlite, schema::MIGRATIONS)
+            .unwrap();
+    println!("migrations={}", migrations.len());
 }

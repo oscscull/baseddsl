@@ -44,7 +44,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use based_codegen::migrate::{self, PlanUnit, Snapshot};
-use based_codegen::Dialect;
+pub use based_codegen::Dialect;
+pub use based_project::MigrationSource;
 
 use crate::run::{fetch_all, Backend, DbError, DbRead, Row};
 use crate::value::SqlValue;
@@ -223,114 +224,98 @@ impl std::fmt::Display for MigrateError {
 
 impl std::error::Error for MigrateError {}
 
-// ---------- loading migrations from disk ----------------------------------
+// ---------- loading migrations --------------------------------------------
 
 /// Read `<root>/migrations/NNNN_slug/` into an ordered [`PlannedMigration`] list for the
-/// given dialect. Each migration's steps are re-derived as `diff(prev snapshot, this
-/// snapshot)` and rendered to executable SQL; the `up.mig` bytes are hashed for the ledger;
-/// a `down.mig` (raw SQL) is split into statements if present, else a migration of
-/// literal-row creates reverses automatically. The numbers must be a
-/// gap-free `1..N` sequence (zero-padded, sequential).
+/// given dialect, exactly as [`from_sources`] plans the same files.
 pub fn load_migrations(
     root: &Path,
     dialect: Dialect,
 ) -> Result<Vec<PlannedMigration>, MigrateError> {
-    let dir = root.join("migrations");
-    let mut dirs = migration_dirs(&dir)?;
-    dirs.sort_by_key(|(n, ..)| *n);
+    let files =
+        based_project::read_migrations(root).map_err(|e| MigrateError::Io(e.to_string()))?;
+    let sources: Vec<_> = files
+        .iter()
+        .map(based_project::MigrationFiles::source)
+        .collect();
+    from_sources(dialect, &sources)
+}
 
-    let mut out = Vec::with_capacity(dirs.len());
+/// Plan migrations supplied as text — e.g. `schema::MIGRATIONS`, embedded by `based-build`
+/// — into an ordered [`PlannedMigration`] list for the given dialect. Each migration's
+/// steps are re-derived as `diff(prev snapshot, this snapshot)` and rendered to executable
+/// SQL; the `up.mig` text is hashed for the ledger; a `down.mig` is planned if present, else
+/// a migration of literal-row creates reverses automatically. The ids must number a
+/// gap-free `1..N` sequence.
+pub fn from_sources(
+    dialect: Dialect,
+    sources: &[MigrationSource<'_>],
+) -> Result<Vec<PlannedMigration>, MigrateError> {
+    let mut numbered = sources
+        .iter()
+        .map(|source| {
+            source.number().map(|n| (n, source)).ok_or_else(|| {
+                MigrateError::Order(format!(
+                    "migration `{}` has no `NNNN_` number prefix",
+                    source.id
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    numbered.sort_by_key(|(n, _)| *n);
+
+    let mut out = Vec::with_capacity(numbered.len());
     let mut prev = Snapshot::default();
-    for (i, (number, name, path)) in dirs.iter().enumerate() {
-        // Gap-free sequential invariant: the i-th migration (0-based) must be number i+1.
-        if *number != (i as u32) + 1 {
+    for (i, (number, source)) in numbered.into_iter().enumerate() {
+        let name = source.id;
+        if usize::try_from(number).ok() != Some(i + 1) {
             return Err(MigrateError::Order(format!(
                 "migration numbering has a gap or is out of order at `{name}` (expected {:04})",
                 i + 1
             )));
         }
-        let snap_text = read_file(&path.join("schema.snap"))?;
-        let snap = Snapshot::parse(&snap_text)
+        let snap = Snapshot::parse(source.snapshot)
             .map_err(|e| MigrateError::Artifact(format!("{name}/schema.snap: {e}")))?;
-        let up_text = read_file(&path.join("up.mig"))?;
-        let steps = migrate::up_steps(&prev, &snap, &up_text);
-        // Structural steps are authoritative from `schema.snap`; a hand-edit to a structural
-        // `up.mig` line would otherwise be silently ignored at apply. Refuse it instead.
-        if !migrate::up_mig_matches_snapshot(&up_text, &steps) {
-            return Err(MigrateError::UpMigDrift { id: name.clone() });
+        let up_text = source.up;
+        let steps = migrate::up_steps(&prev, &snap, up_text);
+        // Structural steps derive from `schema.snap`, so a hand-edited structural `up.mig`
+        // line would otherwise be silently ignored at apply.
+        if !migrate::up_mig_matches_snapshot(up_text, &steps) {
+            return Err(MigrateError::UpMigDrift {
+                id: name.to_string(),
+            });
         }
-        // The structural steps interleaved with the authored `raw` escapes and data steps
-        // (in written order for a `format 2` migration; raw last otherwise).
-        let plan = migrate::plan_up(&prev, &snap, &up_text, dialect)
+        let plan = migrate::plan_up(&prev, &snap, up_text, dialect)
             .map_err(|p| script_error(name, "up.mig", &p))?;
-        let up_hash = migrate::content_hash(&up_text);
         let destructive = steps.iter().any(based_codegen::migrate::Step::destructive);
-        // The rename teach hint keys off this migration's own diff (prev → this snapshot),
-        // so the destructive gate can point a drop+add at `@was` (D105).
+        // Keyed off this migration's own diff, so the destructive gate can point a
+        // drop+add at `@was` (D105).
         let rename_hints = migrate::rename_hints(&prev, &snap)
             .iter()
             .map(based_codegen::migrate::RenameHint::message)
             .collect();
 
-        // A `down.mig` counts only if it carries an executable statement. `gen` prefills one
-        // with `-- … is irreversible …` comment lines for steps it can't mechanically
-        // reverse; an untouched all-comment placeholder splits to zero statements, so the
-        // migration stays roll-forward only (a `--down` on it is a loud `NoDown`, not a
-        // silent no-op) until the author completes it.
-        let down_path = path.join("down.mig");
-        let authored = if down_path.is_file() {
-            migrate::plan_down(&prev, &snap, &read_file(&down_path)?, dialect)
+        // An all-comment `down.mig` placeholder plans to no statements, so the migration
+        // stays roll-forward only until the author completes it.
+        let authored = match source.down {
+            Some(down) => migrate::plan_down(&prev, &snap, down, dialect)
                 .map_err(|p| script_error(name, "down.mig", &p))?
-                .map(|d| d.units)
-        } else {
-            None
+                .map(|d| d.units),
+            None => None,
         };
-        let down = authored.or(plan.auto_down);
 
         out.push(PlannedMigration {
-            number: *number,
-            id: name.clone(),
+            number,
+            id: name.to_string(),
             up: plan.units,
-            up_hash,
+            up_hash: migrate::content_hash(up_text),
             destructive,
             rename_hints,
-            down,
+            down: authored.or(plan.auto_down),
         });
         prev = snap;
     }
     Ok(out)
-}
-
-/// The `migrations/NNNN_slug/` directories as `(number, dir_name, path)`. A non-conforming
-/// entry (no `NNNN_` prefix) is ignored — only zero-padded sequential dirs order the ledger.
-fn migration_dirs(dir: &Path) -> Result<Vec<(u32, String, std::path::PathBuf)>, MigrateError> {
-    let mut out = Vec::new();
-    if !dir.exists() {
-        return Ok(out);
-    }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| MigrateError::Io(format!("reading {}: {e}", dir.display())))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| MigrateError::Io(e.to_string()))?;
-        let ft = entry
-            .file_type()
-            .map_err(|e| MigrateError::Io(e.to_string()))?;
-        if !ft.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((num, _)) = name.split_once('_') {
-            if let Ok(n) = num.parse::<u32>() {
-                out.push((n, name, entry.path()));
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn read_file(path: &Path) -> Result<String, MigrateError> {
-    std::fs::read_to_string(path)
-        .map_err(|e| MigrateError::Io(format!("reading {}: {e}", path.display())))
 }
 
 /// A migration script's planning problems as one artifact error.

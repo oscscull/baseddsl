@@ -118,6 +118,43 @@ pub fn verify() -> Result<()> {
             .any(|entry| entry.file_name() == "client.rs"),
         "client escaped OUT_DIR"
     );
+    migrations(&root, &app, &build_env)?;
+    Ok(())
+}
+
+/// `migrations/` embeds as `schema::MIGRATIONS` and fails the build on `migrate verify` problems.
+fn migrations(root: &Path, app: &Path, env: &Environment) -> Result<()> {
+    let run = |app: &Path| command::run(command::cargo(), &["run", "--locked"], app, env);
+    ensure!(
+        run(app)?.contains("migrations=0"),
+        "absent migrations/ not empty"
+    );
+    crate::files::copy_tree(
+        &root.join("ci/fixtures/cargo-generation-migrations"),
+        &app.join("migrations"),
+    )?;
+    ensure!(run(app)?.contains("migrations=1"), "migration not embedded");
+
+    let up = app.join("migrations/0001_init/up.mig");
+    let original = fs::read_to_string(&up)?;
+    crate::files::replace(&up, "column name text", "column title text")?;
+    let error = command::fail(command::cargo(), &["build", "--locked"], app, env)?;
+    ensure!(
+        error.contains("0001_init: up.mig has drifted from schema.snap"),
+        "drifted up.mig built: {error}"
+    );
+    fs::write(&up, original)?;
+    build(app, env)?;
+
+    let source = app.join("schema/item.bsl");
+    crate::files::replace(&source, "name: text", "name: text, note: text?")?;
+    let error = command::fail(command::cargo(), &["build", "--locked"], app, env)?;
+    ensure!(
+        error.contains("schema has uncaptured changes"),
+        "uncaptured schema change built: {error}"
+    );
+    crate::files::replace(&source, "name: text, note: text?", "name: text")?;
+    build(app, env)?;
     Ok(())
 }
 

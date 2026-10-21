@@ -56,6 +56,28 @@ let compiled = Compiled::from_sources(include_str!("../based.toml"), SCHEMA)?;
 `from_sources` runs the same check as `Compiled::load`: errors fail and cite
 the embedded name, and warnings do not.
 
+### Migrate on start
+
+`build.rs` also embeds `migrations/` as `schema::MIGRATIONS`, so the app can
+create or upgrade its own database without a migrations folder:
+
+```rust
+use based_runtime::migrate::{self, ApplyOpts};
+
+let backend = based_runtime::SqliteBackend::open(&path)?;
+let migrations = migrate::from_sources(compiled.dialect, schema::MIGRATIONS)?;
+migrate::apply(&backend, compiled.dialect, &migrations, &ApplyOpts::default()).await?;
+let engine = based_runtime::Engine::new(compiled, backend, based_runtime::id::UuidGen);
+```
+
+`cargo build` fails on anything `based migrate verify` rejects: a gap in the
+numbering, an `up.mig` edited away from its `schema.snap`, or a schema change
+no migration captures. Apply keeps the same `_based_migrations` ledger as
+`based migrate apply`, so the two can manage the same database. An applied
+migration edited later is refused, and destructive steps need
+`ApplyOpts { allow_destructive: true, .. }`. `Dialect` is re-exported as
+`based_runtime::Dialect` for code that names it directly.
+
 ## Rename a field
 
 Change `name: text` to `title: text @was("name")`. In projections use

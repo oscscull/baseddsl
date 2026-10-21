@@ -90,6 +90,7 @@ pub mod postgres;
 #[cfg(feature = "serve")]
 pub mod http;
 
+pub use based_codegen::Dialect;
 pub use embed::Engine;
 pub use guard::{GuardRequest, GuardSetupError, GuardVerdict, Guards};
 pub use id::{IdGen, SeqIdGen};
@@ -98,9 +99,10 @@ pub use idempotency::{
 };
 pub use load::{Compiled, LoadError};
 pub use migrate::{
-    applied as applied_migrations, apply as apply_migrations, ensure_ledger, load_migrations,
-    status as migration_status, ApplyOpts, ApplyReport, Direction, LedgerRow, MigrateError,
-    MigrationState, PlannedMigration,
+    applied as applied_migrations, apply as apply_migrations, ensure_ledger,
+    from_sources as migrations_from_sources, load_migrations, status as migration_status,
+    ApplyOpts, ApplyReport, Direction, LedgerRow, MigrateError, MigrationSource, MigrationState,
+    PlannedMigration,
 };
 pub use plan::{
     plan_mutation, plan_query, Envelope, MutationPlan, PlanError, QueryPlan, Request, Stmt,
