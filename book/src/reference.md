@@ -202,7 +202,7 @@ the filter's column is E0355. Other computed fields take no `$` operands.
 query name(params) -> RetType [scoped Name] ;            # or { body } or inline clauses;
 ```
 
-- **Return:** `ok | Shape | Shape[] | stream Shape`. Singular infers `get`, `[]` infers `list`.
+- **Return:** `ok | Shape | Shape[] | stream Shape`. Singular infers `get`, `[]` infers `list`. A `get` must AND an equality on every column of a unique key (`id`, a `(unique)` column, a composite `@key`, or a `@index(…) unique`); E0144.
 - **Bare** (params become an equality-AND filter): `query orders(user, company) -> OrderCard[];`
 - **Full body:** `query recent(org) -> OrderCard[] { list Order where (org = $org) order (placed_at desc); }`
 

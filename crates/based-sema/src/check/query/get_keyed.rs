@@ -1,19 +1,17 @@
 use super::*;
 
-/// A `get` is validly keyed if some equality-constrained column is unique, or the
-/// equality columns together cover the model's full composite `@key` (the PK is unique).
+/// A `get` is validly keyed if its equality-constrained columns cover some unique key: a
+/// unique column, every part of a composite `@key`, or every column of a unique index.
 pub(super) fn get_is_keyed(q: &Query, ti: usize, cx: &Cx) -> bool {
-    let m = cx.model(ti);
     if let QueryBody::Block(s) = &q.body {
-        let smi = cx.find(&s.model.node).unwrap_or(ti);
-        let sm = cx.model(smi);
+        let sm = cx.model(cx.find(&s.model.node).unwrap_or(ti));
         let mut cols = Vec::new();
         for c in &s.clauses {
             if let Clause::Where(p) = c {
                 collect_eq_cols(p, &mut cols);
             }
         }
-        cols.iter().any(|c| sm.is_unique(c)) || covers_composite_key(sm, &cols)
+        covers_unique_key(sm, &cols)
     } else {
         let cols: Vec<String> = q
             .params
@@ -25,24 +23,27 @@ pub(super) fn get_is_keyed(q: &Query, ti: usize, cx: &Cx) -> bool {
                 _ => None,
             })
             .collect();
-        cols.iter().any(|c| m.is_unique(c)) || covers_composite_key(m, &cols)
+        covers_unique_key(cx.model(ti), &cols)
     }
 }
 
-/// The equality-constrained columns cover the model's full composite `@key` — the PK is a
-/// unique index, so keying on every part identifies at most one row.
-fn covers_composite_key(m: &RModel, eq_cols: &[String]) -> bool {
-    m.is_composite_key() && m.key.iter().all(|k| eq_cols.iter().any(|c| c == k))
+/// The equality-constrained columns pin every column of at least one unique key, so the
+/// query matches at most one row.
+fn covers_unique_key(m: &RModel, eq_cols: &[String]) -> bool {
+    let covered = |cols: &[String]| !cols.is_empty() && cols.iter().all(|k| eq_cols.contains(k));
+    eq_cols.iter().any(|c| m.is_unique(c))
+        || (m.is_composite_key() && covered(&m.key))
+        || m.indexes.iter().any(|ix| ix.unique && covered(&ix.columns))
 }
 
-/// Collect single-segment columns constrained by equality anywhere in a predicate.
+/// Collect single-segment columns constrained by equality in AND position. An equality
+/// under `or` or `not` doesn't restrict every matching row, so it can't key the query.
 fn collect_eq_cols(p: &Predicate, out: &mut Vec<String>) {
     match p {
-        Predicate::And(a, b) | Predicate::Or(a, b) => {
+        Predicate::And(a, b) => {
             collect_eq_cols(a, out);
             collect_eq_cols(b, out);
         }
-        Predicate::Not(inner) => collect_eq_cols(inner, out),
         Predicate::Cmp {
             path, op: Op::Eq, ..
         } if path.segments.len() == 1 => {

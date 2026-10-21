@@ -63,6 +63,8 @@ mod filter_projections;
 mod filters;
 #[path = "check/generated_columns.rs"]
 mod generated_columns;
+#[path = "check/get_keys.rs"]
+mod get_keys;
 #[path = "check/happy_path.rs"]
 mod happy_path;
 #[path = "check/indexes.rs"]
