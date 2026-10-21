@@ -145,6 +145,13 @@ fn custom_on_self_any_in_a_write_errors_on_the_mysql_family() {
 }
 
 #[test]
+fn custom_on_self_to_many_path_in_a_write_errors_on_the_mysql_family() {
+    let src = CUSTOM_ON_TREE.replace("not group.coded.any()", "group.coded.group_code = \"x\"");
+    assert_eq!(any_write_codes(&src, Dialect::MariaDb), vec!["E0352"]);
+    assert!(any_write_codes(&src, Dialect::Postgres).is_empty());
+}
+
+#[test]
 fn key_linked_self_any_in_a_write_is_clean_on_mariadb() {
     let src = r#"
         User { id: Id, name: text, invited_by: User?, invited_users: User[] (User.invited_by) }

@@ -12,6 +12,19 @@ impl<'a> Select<'a> {
         pred: Option<&Predicate>,
         model: &RModel,
     ) -> String {
+        self.relation_exists(path, model, |sub, child| {
+            pred.map(|p| sub.predicate(p, child))
+        })
+    }
+
+    /// The `EXISTS` over the to-many edge `path` ends on, its extra condition lowered by
+    /// `inner` in the child's own scope (`None` = existence only).
+    pub(super) fn relation_exists(
+        &mut self,
+        path: &Path,
+        model: &RModel,
+        inner: impl FnOnce(&mut Self, &'a RModel) -> Option<String>,
+    ) -> String {
         let Some((last, hops)) = path.segments.split_last() else {
             return "1 = 0".to_string();
         };
@@ -41,8 +54,8 @@ impl<'a> Select<'a> {
         if let Some(scope) = sub.scope_join_pred(&child_alias, child) {
             filters.push(scope);
         }
-        if let Some(p) = pred {
-            filters.push(sub.predicate(p, child));
+        if let Some(cond) = inner(&mut sub, child) {
+            filters.push(cond);
         }
         self.sub_counter = sub.sub_counter;
         let from = format!("{} AS {}", self.qt(child), self.q(&child_alias));
