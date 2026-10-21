@@ -137,13 +137,22 @@ pub(crate) fn updated_bump(sel: &Select, model: &RModel, assigned: &[String]) ->
 }
 
 /// The `SET` fragment that writes (or clears) the tombstone for the covered subset
-/// timestamp `CURRENT_TIMESTAMP`/`NULL`, bool `TRUE`/`FALSE`.
+/// timestamp `CURRENT_TIMESTAMP`/`NULL`, bool `TRUE`/`FALSE`, or the model's
+/// `delete:`/`restore:` override when declared.
 pub(crate) fn tombstone_set(
     sel: &Select,
     model: &RModel,
     sd: &SoftDelete,
     deleting: bool,
 ) -> String {
+    let custom = if deleting {
+        &sd.overrides.delete
+    } else {
+        &sd.overrides.restore
+    };
+    if let Some(raw) = custom {
+        return render_raw(sel.dialect, raw, &sel.root_alias, Some(model));
+    }
     let col = physical_col(model, &sd.field);
     let val = match (sd.mode, deleting) {
         (SoftMode::Timestamp, true) => "CURRENT_TIMESTAMP".to_string(),

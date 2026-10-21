@@ -146,7 +146,27 @@ restore Order where (id = $id);       # clear it
 hard delete Order where (id = $id);   # real DELETE
 ```
 
-Override an op's SQL on a member line: `read|delete|restore : raw`…``.
+A member line replaces one op's generated SQL with a raw fragment; the others stay default:
+
+```
+@soft_delete(deleted_at)
+Order {
+  deleted_at: timestamp?
+  archived: bool
+  read: raw`deleted_at IS NULL AND NOT archived`                    # live-row predicate
+  delete: raw`deleted_at = CURRENT_TIMESTAMP, archived = true`      # soft delete's SET list
+  restore: raw`deleted_at = NULL, archived = false`                 # restore's SET list
+}
+```
+
+`read` replaces the live filter everywhere it is injected: queries, joins, nested
+shapes, `.any`, write guards, and read-backs. `delete` and `restore` replace only the
+tombstone assignment; the engine keeps the `UPDATE`, the `where`, the scope, and the
+`@updated` bump. `hard delete` is unaffected. `{table}` / `{id}` follow the
+[raw](#raw) rules. Bare columns are unqualified, so in a joined statement they must
+not collide with another table's columns. Misuse is E0357: an override without
+`@soft_delete`, a repeated op, a `${param}`, or a whole statement (`update …`,
+`where …`) instead of the fragment.
 
 ## Shapes
 
@@ -373,6 +393,7 @@ Inside backticks: `${param}` binds a param; `{table}` / `{id}` interpolate quote
 |---|---|---|
 | Value / predicate leaf (shape field, `where`, filter, `having`, `on:`) | `task`, or `app.task` under `@schema("app")` | `task.<key>` (the row's alias: a nested shape's subquery alias, the `on:` FK side) |
 | Whole-query body | `task`, or `app.task` under `@schema("app")` | `task.<key>` |
+| Soft-delete `read:` / `delete:` / `restore:` override | `task`, or `app.task` under `@schema("app")` | `task.<key>` (the row's alias in a join or nested shape) |
 | Raw write statement in a mutation | E0354 | E0354 |
 | `raw("…")` type / index, `.mig` `raw(…)` | verbatim | verbatim |
 

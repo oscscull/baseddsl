@@ -6,7 +6,7 @@
 //! codegen reads (alongside the AST) — the resolution facts that are *not* in the
 //! AST (inferred verb, relation targets, table names, soft-delete mode) live here.
 
-use based_ast::{DefaultVal, Predicate, Primitive, RawSpec, SortTerm, Span, Verb};
+use based_ast::{DefaultVal, Predicate, Primitive, RawSpec, RawSql, SortTerm, Span, Verb};
 use based_diagnostics::Diagnostic;
 use std::collections::HashMap;
 
@@ -284,6 +284,7 @@ pub mod code {
     pub const RAW_ID_QUALIFIED: &str = "E0353"; // a `.` before `{id}` in a raw body (`{table}.{id}`) — `{id}` already expands to the qualified key column
     pub const RAW_WRITE_PLACEHOLDER: &str = "E0354"; // `{table}` / `{id}` in a raw write statement, which has no model to expand them to
     pub const RAW_ID_COMPOSITE: &str = "E0356"; // `{id}` against a composite-key model — there is no single key column to expand it to
+    pub const SOFT_OVERRIDE: &str = "E0357"; // a `read|delete|restore: raw`…`` override that can't apply: no `@soft_delete`, a repeat, a `${param}`, or a whole statement where a predicate / SET list belongs
 }
 
 /// The closed set of aggregate functions usable in a shape value (shapes.md). `count`
@@ -967,6 +968,18 @@ pub enum SoftMode {
 pub struct SoftDelete {
     pub field: String,
     pub mode: SoftMode,
+    pub overrides: SoftOverrides,
+}
+
+/// Member-line `read|delete|restore: raw`…`` replacements for the generated SQL.
+#[derive(Debug, Clone, Default)]
+pub struct SoftOverrides {
+    /// The live-rows predicate, in place of the tombstone test.
+    pub read: Option<RawSql>,
+    /// The soft `delete`'s `SET` assignments, in place of writing the tombstone.
+    pub delete: Option<RawSql>,
+    /// The `restore`'s `SET` assignments, in place of clearing the tombstone.
+    pub restore: Option<RawSql>,
 }
 
 #[derive(Debug, Clone)]

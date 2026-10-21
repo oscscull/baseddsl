@@ -36,6 +36,8 @@ mod optional_filter_integration;
 mod raw_integration;
 #[path = "serial_integration.rs"]
 mod serial_integration;
+#[path = "soft_override_integration.rs"]
+mod soft_override_integration;
 #[path = "sqlite_integration.rs"]
 mod sqlite_integration;
 #[path = "streaming.rs"]
