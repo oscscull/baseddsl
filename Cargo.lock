@@ -253,7 +253,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "based-artifacts"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -261,11 +261,11 @@ dependencies = [
 
 [[package]]
 name = "based-ast"
-version = "0.1.12"
+version = "0.1.13"
 
 [[package]]
 name = "based-build"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-artifacts",
  "based-manifest",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "based-catalog"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "based-catalog-bsl"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-catalog",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "based-catalog-mariadb"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-catalog",
  "sqlx",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "based-catalog-postgres"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-catalog",
  "sqlx",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "based-catalog-sqlite"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-catalog",
  "libsqlite3-sys",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "based-ci"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "based-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-artifacts",
  "based-ast",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "based-codegen"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -391,14 +391,14 @@ dependencies = [
 
 [[package]]
 name = "based-diagnostics"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
 ]
 
 [[package]]
 name = "based-facts"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "based-fmt"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "based-lsp"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-codegen",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "based-manifest"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "based-parser"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "based-project"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-codegen",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "based-runtime"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "based-sema"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "based-ast",
  "based-diagnostics",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "based-version"
-version = "0.1.12"
+version = "0.1.13"
 
 [[package]]
 name = "beef"
