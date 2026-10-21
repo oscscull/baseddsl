@@ -96,6 +96,17 @@ fn generated_client_is_current() {
     );
 }
 
+/// A serial id reads back as the integer it was built from; a uuid/ulid id has none.
+#[test]
+fn serial_id_reads_back_as_int() {
+    let serial: client::Id<client::entity::Order> = client::Id::from_int(42);
+    assert_eq!(serial.as_int(), Some(42));
+    let wire: client::Id<client::entity::Order> = serde_json::from_value(json!(7)).unwrap();
+    assert_eq!(wire.as_int(), Some(7));
+    let uuid: client::Id<client::entity::Order> = client::Id::from_raw("42");
+    assert_eq!(uuid.as_int(), None);
+}
+
 /// A typed `get` round-trips: the engine's shaped `200` decodes into `Option<OrderCard>`.
 /// The client comes straight from the generated `client::embedded(&engine)` — no bridge.
 #[tokio::test]

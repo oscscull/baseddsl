@@ -104,6 +104,14 @@ impl<E> Id<E> {
             _entity: PhantomData,
         }
     }
+    /// The id as an integer: `Some` for a `serial` id, `None` for a uuid/ulid id.
+    pub fn as_int(&self) -> Option<i64> {
+        if self.numeric {
+            self.raw.parse().ok()
+        } else {
+            None
+        }
+    }
     /// The underlying id as a string (a `serial` id's decimal form).
     pub fn as_str(&self) -> &str {
         &self.raw
