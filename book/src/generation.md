@@ -77,3 +77,23 @@ It also refuses symlinks and migration-history destinations. Identical files kee
 their timestamps. Each replacement is atomic; a late filesystem failure may leave
 some files updated, and the error identifies that partial set. Generation never
 applies migrations.
+
+## Inspecting SQL
+
+`based explain` prints the statements a query or mutation executes, in run
+order, exactly as the driver receives them: positional placeholders for the
+project dialect, then what each one binds.
+
+```sh
+based explain . order_by_id
+based explain . place_order --dialect postgres
+based explain .            # every callable; same as --all
+```
+
+Binds read `$param`, `$param present (1/0)` for an optional filter, `$ctx.field`,
+or `name (engine)` for values the engine supplies (minted ids, cursors). An
+array param expands to one placeholder per element at run time.
+
+Set `BASED_LOG_SQL=1` to log every executed statement to stderr from
+`based serve` or an embedded `Engine`, with its bind count. Bound values are
+never logged.

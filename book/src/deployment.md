@@ -32,6 +32,7 @@ start without it using a restricted runtime role. See [replay semantics](idempot
 | Idempotency store | `--idempotency-store` | Any store, `serve_with_store` |
 | Guards | `--guard-config` callbacks | `Guards`: closures or callbacks |
 | Shutdown | SIGTERM/SIGINT drain | `Handle::shutdown` |
+| Statement log | `BASED_LOG_SQL=1` | `BASED_LOG_SQL=1` (also `Engine`) |
 
 Request bodies are capped at 1 MiB in both; responses are not capped. Pool limits
 bound database connections, not HTTP concurrency. Put request concurrency and

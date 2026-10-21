@@ -4,12 +4,15 @@
 //! `based gen sql`: the same front end, then emit SQL DDL from the checked schema.
 //! `based gen client`: a typed Rust client module. `based gen openapi`: an OpenAPI 3.1
 //! spec over the same wire (polyglot clients via `openapi-generator`).
+//! `based explain`: the statements a query/mutation executes, with their bind order.
 //!
 //! This entry parses arguments and dispatches to the per-command-group handlers; each
 //! group lives in its own sibling module.
 
 mod check;
+mod dialect_flag;
 mod error;
+mod explain;
 mod external_guards;
 mod fixtures;
 mod gen;
@@ -61,6 +64,8 @@ enum Command {
         #[command(subcommand)]
         target: GenTarget,
     },
+    /// Print the SQL a query or mutation executes, with each placeholder's bind source.
+    Explain(explain::options::ExplainOptions),
     /// Show the engine-derived facts (inferred inverses + indexes).
     Facts {
         /// Explicit project root; otherwise find the nearest ancestor based.toml.
@@ -216,6 +221,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 migrate::cmd_migrate_verify(&project_root::resolve(root.as_deref())?)
             }
         },
+        Command::Explain(options) => explain::cmd_explain(options),
         Command::Facts { root, json } => {
             project::cmd_facts(&project_root::resolve(root.as_deref())?, json)
         }

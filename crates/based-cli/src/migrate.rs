@@ -129,14 +129,7 @@ pub fn cmd_migrate_render(
     // Only the manifest dialect is needed — render reads stored artifacts, not the schema,
     // so it does not run the full front end (it works even against an in-progress schema).
     let project = discover_project(root)?;
-    let dialect = match dialect {
-        Some(d) => Dialect::try_parse(d).ok_or_else(|| {
-            CliError::usage(format!(
-                "invalid --dialect {d:?}; expected mariadb | mysql | sqlite | postgres"
-            ))
-        })?,
-        None => Dialect::parse(&project.manifest.dialect),
-    };
+    let dialect = crate::dialect_flag::resolve(dialect, &project.manifest.dialect)?;
 
     let migrations_dir = root.join("migrations");
     let existing = existing_migrations(&migrations_dir)?;

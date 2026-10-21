@@ -58,6 +58,7 @@
 
 pub mod cursor;
 pub mod embed;
+pub mod explain;
 #[cfg(feature = "external-guards")]
 pub mod external_guard;
 mod fixture;

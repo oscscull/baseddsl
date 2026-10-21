@@ -9,8 +9,13 @@ impl Project {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("based-discovery-{}-{stamp}", std::process::id()));
+        // Parallel tests can read the same clock tick; the counter keeps roots distinct.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "based-discovery-{}-{stamp}-{n}",
+            std::process::id()
+        ));
         let project = Self(root);
         project.write("based.toml", "dialect = \"sqlite\"\nroot = \"schema\"\n");
         project.write(
