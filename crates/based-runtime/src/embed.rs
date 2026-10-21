@@ -112,7 +112,7 @@ impl Engine {
         Ok(Self {
             inner: Arc::new(EngineInner {
                 compiled,
-                backend: Arc::new(backend),
+                backend: Arc::from(crate::run::with_statement_log(backend)),
                 id_gen: Box::new(id_gen),
                 store: Box::new(MemStore::new()),
                 guards,
@@ -244,6 +244,20 @@ impl Engine {
     /// [`crate::run::DbRead`], so an engine-owned `Tx` and a borrowed adopted transaction
     /// take the identical path.
     pub async fn dispatch_on<D: crate::run::DbRead + ?Sized>(
+        &self,
+        db: &mut D,
+        route: &str,
+        args: serde_json::Value,
+        ctx: serde_json::Value,
+    ) -> WireResponse {
+        if crate::run::log_sql_enabled() {
+            let mut logged = crate::run::Logged(db);
+            return self.dispatch_on_db(&mut logged, route, args, ctx).await;
+        }
+        self.dispatch_on_db(db, route, args, ctx).await
+    }
+
+    async fn dispatch_on_db<D: crate::run::DbRead + ?Sized>(
         &self,
         db: &mut D,
         route: &str,

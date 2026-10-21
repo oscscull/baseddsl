@@ -4,8 +4,12 @@
 
 #[path = "core/embed.rs"]
 mod embed;
+#[path = "core/explain.rs"]
+mod explain;
 #[path = "core/load.rs"]
 mod load;
+#[path = "core/log_sql.rs"]
+mod log_sql;
 #[path = "core/mutation.rs"]
 mod mutation;
 #[cfg(feature = "id-gen")]

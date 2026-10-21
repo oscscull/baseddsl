@@ -352,7 +352,7 @@ pub async fn serve_with_guards(
     let draining = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Shared {
         compiled,
-        backend: Box::new(backend),
+        backend: crate::run::with_statement_log(backend),
         ctx_source: Box::new(ctx_source),
         idempotency: store,
         draining: Arc::clone(&draining),
