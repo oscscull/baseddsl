@@ -96,3 +96,24 @@ fn explain_all_covers_every_callable_in_order() {
     assert_eq!(names, ["items", "rename", "add"]);
     assert!(explain(&compiled, "missing").is_empty());
 }
+
+#[test]
+fn param_limit_explains_as_a_bound_placeholder() {
+    let src = r#"
+        @sort(id asc)
+        Item { id: Id, name: text }
+        query recent(n: int) -> Item[] { list Item order (name) limit ($n); }
+    "#;
+    let sf = parse_file(src, FileId(0)).unwrap_or_else(|d| panic!("parse failed: {d:#?}"));
+    let (schema, diags) = based_sema::check(&sf.decls);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != based_diagnostics::Severity::Error),
+        "{diags:?}"
+    );
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+    let stmt = &explain(&compiled, "recent")[0].statements[0];
+    assert!(stmt.sql.ends_with("LIMIT ?;"), "{stmt:?}");
+    assert_eq!(stmt.params.last(), Some(&"$n".to_string()), "{stmt:?}");
+}

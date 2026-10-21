@@ -34,6 +34,8 @@ pub(crate) struct Callable<'a> {
     /// How this callable paginates, driving the extra input property:
     /// a keyset page a `cursor` string, an offset page an `offset` integer.
     pub(crate) page: PageInput,
+    /// A `limit ($p[, max N])` param and its max, bounding that param's input schema.
+    pub(crate) limit: Option<(&'a str, Option<u64>)>,
 }
 
 /// How a callable paginates, driving its extra request-body property.
@@ -114,6 +116,7 @@ fn query_callable<'a>(
         is_mutation: false,
         stream: rq.stream,
         page: page_input(q),
+        limit: limit_param(q),
     })
 }
 
@@ -161,6 +164,7 @@ fn mutation_callable<'a>(
         is_mutation: true,
         stream: false,
         page: PageInput::None,
+        limit: None,
     })
 }
 
@@ -179,6 +183,18 @@ fn page_input(q: &Query) -> PageInput {
             _ => None,
         })
         .unwrap_or(PageInput::None)
+}
+
+/// A query's `limit ($p[, max N])` param name and max.
+fn limit_param(q: &Query) -> Option<(&str, Option<u64>)> {
+    match crate::sql::dml::query_limit(q)? {
+        LimitClause {
+            value: LimitValue::Param(p),
+            max,
+            ..
+        } => Some((p.name.node.as_str(), *max)),
+        _ => None,
+    }
 }
 
 /// Whether a query's `page` clause declares `with count` — its `Page` envelope then

@@ -1188,3 +1188,34 @@ fn relation_any_takes_a_leading_by_column() {
         }
     ));
 }
+
+#[test]
+fn limit_clause_takes_a_literal_or_a_param_with_max() {
+    let sf = parse_ok(
+        r#"
+        query a(n: int) -> R[] { list Run order (started_at desc) limit ($n, max 500); }
+        query b() -> R[] { list Run limit (3); }
+        "#,
+    );
+    let limit_of = |d: &Decl| -> LimitClause {
+        let Decl::Query(q) = d else {
+            panic!("expected query")
+        };
+        let QueryBody::Block(s) = &q.body else {
+            panic!("expected block body")
+        };
+        s.clauses
+            .iter()
+            .find_map(|c| match c {
+                Clause::Limit(l) => Some(l.clone()),
+                _ => None,
+            })
+            .expect("limit clause")
+    };
+    let a = limit_of(&sf.decls[0]);
+    assert!(matches!(&a.value, LimitValue::Param(p) if p.name.node == "n"));
+    assert_eq!(a.max, Some(500));
+    let b = limit_of(&sf.decls[1]);
+    assert_eq!(b.value, LimitValue::Lit(3));
+    assert_eq!(b.max, None);
+}

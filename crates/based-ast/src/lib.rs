@@ -689,6 +689,8 @@ pub enum Clause {
     Where(Predicate),
     Order(Vec<SortTerm>),
     Page(PageClause),
+    /// `limit (N | $p[, max N])` — cap a `list` at a row count, returning plain rows.
+    Limit(LimitClause),
     Unindexed(Unindexed),
     /// `group by (col, …)` — grouping columns for an aggregate-shape query. Every
     /// non-aggregate projected column must appear here.
@@ -720,6 +722,22 @@ pub struct PageClause {
     pub size: u64,
     pub offset: bool,
     pub with_count: bool,
+}
+
+/// `limit (N | $p[, max N])` — the row cap of a `list`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LimitClause {
+    pub value: LimitValue,
+    /// `max N` — the largest value a param limit may take; a larger one is rejected.
+    pub max: Option<u64>,
+    pub span: Span,
+}
+
+/// The row count of a `limit`: a literal, or a query param bound per call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LimitValue {
+    Lit(u64),
+    Param(ParamRef),
 }
 
 #[derive(Debug, Clone, PartialEq)]

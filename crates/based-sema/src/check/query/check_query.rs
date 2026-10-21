@@ -26,6 +26,8 @@ pub(crate) fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery>
     // required.
     let infer = matches!(q.body, QueryBody::Bare | QueryBody::Inline(_));
     for p in &q.params {
+        // A `limit` param caps rows; it never maps onto a column.
+        let infer = infer && !is_limit_param(q, &p.name.node);
         check_param(p, ti, infer, cx, sink);
     }
     check_optional_params(q, verb, sink);
@@ -60,6 +62,7 @@ pub(crate) fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery>
     check_query_envelope(q, ti, &shape, cx, sink);
     check_distinct(q, &ret, ti, shape.agg, cx, sink);
     check_for_update(q, &ret, ti, shape.agg, cx, sink);
+    check_limit(q, verb, sink);
 
     let (shard_key, scope_inject, ctx_requires) =
         resolve_scope_facts(q, ti, ret.shape.as_deref(), cx, sink);

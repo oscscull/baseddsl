@@ -72,6 +72,7 @@ pub(crate) fn lower_agg_query<'a>(
     if !order.is_empty() {
         sql.push_str(&format!("\nORDER BY {}", order.join(", ")));
     }
+    push_limit(&mut sql, q);
     sql.push_str(";\n");
 
     LoweredQuery {

@@ -145,6 +145,7 @@ impl<'a> Parser<'a> {
         self.at_kw("where")
             || self.at_kw("order")
             || self.at_kw("page")
+            || self.at_kw("limit")
             || self.at_kw("unindexed")
             || self.at_kw("group")
             || self.at_kw("having")
@@ -160,6 +161,8 @@ impl<'a> Parser<'a> {
             self.order_clause()
         } else if self.eat_kw("page") {
             self.page_clause()
+        } else if self.at_kw("limit") {
+            self.limit_clause()
         } else if self.eat_kw("group") {
             self.group_by_clause()
         } else if self.eat_kw("having") {
@@ -167,7 +170,7 @@ impl<'a> Parser<'a> {
         } else if self.at_kw("unindexed") {
             self.unindexed_clause()
         } else {
-            self.err("expected `where`, `order`, `page`, or `unindexed`");
+            self.err("expected `where`, `order`, `page`, `limit`, or `unindexed`");
             Err(())
         }
     }
@@ -197,6 +200,33 @@ impl<'a> Parser<'a> {
             size: n as u64,
             offset,
             with_count,
+        }))
+    }
+
+    /// `limit (N | $p[, max N])` — a row cap.
+    fn limit_clause(&mut self) -> PResult<Clause> {
+        let start = self.bump().unwrap().start;
+        self.expect(Tok::LParen, "`(`")?;
+        let value = if self.at(Tok::Dollar) {
+            LimitValue::Param(self.param_ref()?)
+        } else {
+            LimitValue::Lit(self.int_lit()? as u64)
+        };
+        let max = if self.eat(Tok::Comma) {
+            self.expect_kw("max", "`max`")?;
+            Some(self.int_lit()? as u64)
+        } else {
+            None
+        };
+        let end = self.expect(Tok::RParen, "`)`")?.end;
+        Ok(Clause::Limit(LimitClause {
+            value,
+            max,
+            span: Span {
+                file: self.file,
+                start,
+                end,
+            },
         }))
     }
 

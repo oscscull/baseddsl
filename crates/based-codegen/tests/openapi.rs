@@ -809,3 +809,19 @@ fn optional_filter_param_is_not_required() {
         "status must not be required: {input}"
     );
 }
+
+#[test]
+fn limit_param_is_bounded_and_returns_plain_rows() {
+    let doc = gen(r#"
+        Post { id: Id, title: text }
+        shape PostCard from Post { title }
+        query recent(n: int) -> PostCard[] {
+          list Post order (id desc) limit ($n, max 500);
+        }
+        "#);
+    let input = &doc["components"]["schemas"]["RecentInput"];
+    assert_eq!(input["properties"]["n"]["type"], "integer");
+    assert_eq!(input["properties"]["n"]["minimum"], 1);
+    assert_eq!(input["properties"]["n"]["maximum"], 500);
+    assert_eq!(ok_schema(&doc, "/q/recent")["type"], "array");
+}

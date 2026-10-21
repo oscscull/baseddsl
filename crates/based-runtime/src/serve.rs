@@ -347,12 +347,17 @@ pub fn resolve_shard_key(
 /// is an internal invariant break (codegen/planner disagreement) → 500.
 fn plan_error_response(e: PlanError) -> WireResponse {
     use PlanError::{
-        BadArg, BadCtx, BadCursor, MissingArg, MissingCtx, UnboundPlaceholder, UnknownMutation,
-        UnknownQuery,
+        BadArg, BadCtx, BadCursor, BadLimit, MissingArg, MissingCtx, UnboundPlaceholder,
+        UnknownMutation, UnknownQuery,
     };
     let status = match &e {
         UnknownQuery(_) | UnknownMutation(_) => 404,
-        MissingArg(_) | BadArg { .. } | MissingCtx(_) | BadCtx { .. } | BadCursor(_) => 400,
+        MissingArg(_)
+        | BadArg { .. }
+        | MissingCtx(_)
+        | BadCtx { .. }
+        | BadCursor(_)
+        | BadLimit { .. } => 400,
         UnboundPlaceholder(_) => 500,
     };
     WireResponse::error(status, e.code(), e.to_string())

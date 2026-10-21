@@ -170,3 +170,54 @@ async fn distinct_with_count_totals_deduped_rows() {
         "distinct `with count` overcounted"
     );
 }
+
+/// `limit ($n, max 3)` against a real engine: a caller-chosen row cap returns plain rows
+/// (no page envelope), and a zero, negative, or over-max limit is a 400 `bad_limit`.
+#[tokio::test]
+async fn param_limit_caps_plain_rows_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        @sort(id asc)
+        Item { id: Id, name: text, rank: int }
+        shape ItemCard from Item { name, rank }
+        query recent(n: int) -> ItemCard[] { list Item order (rank desc) limit ($n, max 3); }
+        query top() -> ItemCard[] { list Item order (rank desc) limit (1); }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `item` (`id`, `name`, `rank`) VALUES
+                ('i1', 'a', 10), ('i2', 'b', 20), ('i3', 'c', 30),
+                ('i4', 'd', 40), ('i5', 'e', 50);
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    let recent = |args: serde_json::Value| call(&c, &backend, "POST", "/q/recent", args, json!({}));
+
+    let two = recent(json!({ "n": 2 })).await;
+    assert_eq!(two.status, 200, "{:?}", two.body);
+    assert_eq!(
+        two.body,
+        json!([{ "name": "e", "rank": 50 }, { "name": "d", "rank": 40 }])
+    );
+    let three = recent(json!({ "n": 3 })).await;
+    assert_eq!(three.body.as_array().map(Vec::len), Some(3));
+
+    for n in [0, -1, 4] {
+        let bad = recent(json!({ "n": n })).await;
+        assert_eq!(bad.status, 400, "{:?}", bad.body);
+        assert_eq!(bad.body["error"]["code"], json!("bad_limit"));
+    }
+
+    let top = call(&c, &backend, "POST", "/q/top", json!({}), json!({})).await;
+    assert_eq!(top.body, json!([{ "name": "e", "rank": 50 }]));
+}

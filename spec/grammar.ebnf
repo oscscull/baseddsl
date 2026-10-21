@@ -366,7 +366,7 @@ for_update  = 'for' 'update' [ 'nowait' | 'skip' 'locked' ] ;
                                         (* (SELECT … FOR UPDATE [NOWAIT|SKIP     *)
                                         (* LOCKED]); tx-client-only, no-op on    *)
                                         (* SQLite (all wait modes).              *)
-clause      = where_clause | order_clause | page_clause | unindexed_clause
+clause      = where_clause | order_clause | page_clause | limit_clause | unindexed_clause
             | group_clause | having_clause ;
 where_clause= 'where' '(' predicate ')' ;
 order_clause= 'order' '(' sort_term { ',' sort_term } ')' ;
@@ -382,6 +382,9 @@ having_clause= 'having' '(' predicate ')' ;
 
 (* Pagination (pagination.md): keyset default; offset / count are loud opt-ins.*)
 page_clause = 'page' '(' INT ')' [ 'offset' ] [ 'with' 'count' ] ;
+(* `limit` caps a `list` at plain rows: a literal, or a required `int` param bound per   *)
+(* call; never beside `page` or on a `get` (E0358). Below 1 / `max` on a literal (E0359).  *)
+limit_clause = 'limit' '(' ( INT | '$' param_name ) [ ',' 'max' INT ] ')' ;
 
 (* Missing-index annotation (indexing.md): the query is knowingly unindexed.    *)
 (* `max_rows` is a checked assertion; `unsafe` is the loud, greppable opt-out.  *)

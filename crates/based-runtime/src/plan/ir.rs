@@ -319,6 +319,12 @@ pub enum PlanError {
     /// A keyset `cursor` arg was present but malformed/tampered/of the wrong arity. The
     /// caller sent a bad cursor — a boundary error.
     BadCursor(String),
+    /// A `limit ($p)` arg was below 1 or above the declared `max`.
+    BadLimit {
+        name: String,
+        got: i64,
+        max: Option<u64>,
+    },
 }
 
 impl PlanError {
@@ -327,8 +333,8 @@ impl PlanError {
     /// of failure rather than the message text. Stable across releases.
     pub fn code(&self) -> &'static str {
         use PlanError::{
-            BadArg, BadCtx, BadCursor, MissingArg, MissingCtx, UnboundPlaceholder, UnknownMutation,
-            UnknownQuery,
+            BadArg, BadCtx, BadCursor, BadLimit, MissingArg, MissingCtx, UnboundPlaceholder,
+            UnknownMutation, UnknownQuery,
         };
         match self {
             UnknownQuery(_) => "unknown_query",
@@ -339,6 +345,7 @@ impl PlanError {
             BadCtx { .. } => "bad_ctx",
             UnboundPlaceholder(_) => "internal",
             BadCursor(_) => "bad_cursor",
+            BadLimit { .. } => "bad_limit",
         }
     }
 }
@@ -346,8 +353,8 @@ impl PlanError {
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use PlanError::{
-            BadArg, BadCtx, BadCursor, MissingArg, MissingCtx, UnboundPlaceholder, UnknownMutation,
-            UnknownQuery,
+            BadArg, BadCtx, BadCursor, BadLimit, MissingArg, MissingCtx, UnboundPlaceholder,
+            UnknownMutation, UnknownQuery,
         };
         match self {
             UnknownQuery(n) => write!(f, "no query `{n}`"),
@@ -376,6 +383,16 @@ impl std::fmt::Display for PlanError {
                 write!(f, "unbound placeholder `:{n}` (codegen/planner mismatch)")
             }
             BadCursor(msg) => write!(f, "invalid cursor: {msg}"),
+            BadLimit {
+                name,
+                got,
+                max: Some(max),
+            } => write!(f, "argument `{name}`: limit must be 1..={max}, got {got}"),
+            BadLimit {
+                name,
+                got,
+                max: None,
+            } => write!(f, "argument `{name}`: limit must be at least 1, got {got}"),
         }
     }
 }
