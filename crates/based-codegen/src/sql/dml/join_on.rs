@@ -23,11 +23,10 @@ pub(crate) fn render_join_on(
     near_alias: &str,
     far_alias: &str,
 ) -> String {
-    let near_table = near.table.as_str();
     let col = |p: &Path| -> String {
         let table = p.segments.first().map_or("", |s| s.node.as_str());
         let column = p.segments.get(1).map_or("", |s| s.node.as_str());
-        let alias = if table == near_table {
+        let alias = if table == near.table {
             near_alias
         } else {
             far_alias

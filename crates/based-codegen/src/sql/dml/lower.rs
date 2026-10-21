@@ -144,7 +144,7 @@ pub(crate) fn lower_query(
 }
 
 /// A whole-query raw body: text verbatim, `${param}` → `:param` (bound like any
-/// placeholder), `{table}`/`{id}` → the target model's table / key column. Nothing
+/// placeholder), `{table}`/`{id}` → the target model's (schema-qualified) table / key column. Nothing
 /// engine-built composes — no injected soft-delete/scope, no sort cascade, no pagination;
 /// the declared shape types the result columns by name.
 fn lower_raw_query(q: &Query, root: &RModel, dialect: Dialect, raw: &RawSql) -> LoweredQuery {
