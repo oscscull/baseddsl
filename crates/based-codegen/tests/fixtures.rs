@@ -194,3 +194,20 @@ fn every_emitted_allow_carries_a_reason() {
         assert!(allow.contains("reason = \""), "{allow}");
     }
 }
+
+#[test]
+fn an_all_fraction_decimal_placeholder_is_zero() {
+    let sf = parse_file("Rate { id: Id, share: decimal(38,38) }", FileId(0)).unwrap();
+    let (schema, _) = check(&sf.decls);
+    let out = client_with(
+        &schema,
+        &sf.decls,
+        ClientTarget::Rust,
+        ClientOptions::default(),
+    );
+    assert!(
+        out.contains(r#"row.insert("share".to_string(), serde_json::Value::from("0"));"#),
+        "{out}"
+    );
+    assert!(!out.contains("n % 1)"), "{out}");
+}
