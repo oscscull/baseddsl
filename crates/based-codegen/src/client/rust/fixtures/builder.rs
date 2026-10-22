@@ -13,7 +13,7 @@ pub(super) fn render_builder(schema: &CheckedSchema, fixture: &FixtureModel<'_>)
     out.push_str(&render_constructor(schema, fixture, &builder));
     // Setters are named after fields, which may look like conversions or operators.
     out.push_str(&format!(
-        "\n#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]\nimpl {builder} {{\n"
+        "\n#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = \"builder methods are named after model fields\")]\nimpl {builder} {{\n"
     ));
     for field in &fixture.fields {
         out.push_str(&render_setter(schema, fixture.model, field));
@@ -65,7 +65,7 @@ fn render_constructor(schema: &CheckedSchema, fixture: &FixtureModel<'_>, builde
         body.extend(fills);
     }
     format!(
-        "\n/// A new `{model}` fixture.\n#[allow(clippy::too_many_arguments)]\npub fn {ctor}({params}) -> {builder} {{\n{body}    {builder} {{\n        row,\n        shard: String::new(),\n    }}\n}}\n",
+        "\n/// A new `{model}` fixture.\n#[allow(clippy::too_many_arguments, reason = \"one argument per required field\")]\npub fn {ctor}({params}) -> {builder} {{\n{body}    {builder} {{\n        row,\n        shard: String::new(),\n    }}\n}}\n",
         ctor = constructor_name(model),
         params = params.join(", "),
     )

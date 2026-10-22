@@ -13,7 +13,7 @@ pub(super) fn render_row(schema: &CheckedSchema, model: &RModel) -> String {
     if let Some(key) = row_key(model) {
         let ty = key_type(schema, model);
         out.push_str(&format!(
-            "#[allow(clippy::clone_on_copy)]\nimpl RowRef<{ty}> for {name} {{\n    fn key(&self) -> {ty} {{\n        {key}\n    }}\n}}\n"
+            "#[allow(clippy::clone_on_copy, reason = \"key type may or may not be Copy\")]\nimpl RowRef<{ty}> for {name} {{\n    fn key(&self) -> {ty} {{\n        {key}\n    }}\n}}\n"
         ));
     }
     out

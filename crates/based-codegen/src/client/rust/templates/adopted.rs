@@ -60,7 +60,7 @@ pub fn adopt_{suffix}<'a>(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "\n#[allow(unexpected_cfgs, unused_imports)]\nmod __based_adopt_driver {{\n    use super::*;\n{scoped}\n}}\n#[allow(unused_imports)]\npub use __based_adopt_driver::*;\n"
+        "\n#[allow(unexpected_cfgs, unused_imports, reason = \"adopted driver code is copied verbatim\")]\nmod __based_adopt_driver {{\n    use super::*;\n{scoped}\n}}\n#[allow(unused_imports, reason = \"adopted driver exports may go unused\")]\npub use __based_adopt_driver::*;\n"
     )
 }
 

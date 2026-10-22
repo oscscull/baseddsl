@@ -8,7 +8,7 @@ mod report;
 mod trace;
 mod workload;
 
-#[allow(dead_code)]
+#[allow(dead_code, reason = "not every generated item is exercised")]
 mod client {
     include!("../generated/client.rs");
 }

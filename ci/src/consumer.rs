@@ -64,6 +64,21 @@ pub fn verify_with(
         app,
         &env,
     )?;
+    command::run(
+        command::cargo(),
+        &[
+            "clippy",
+            "--features",
+            dialect,
+            "--bin",
+            "based-consumer-contract",
+            "--",
+            "-D",
+            "clippy::allow_attributes_without_reason",
+        ],
+        app,
+        &env,
+    )?;
     if let Some(commit) = commit {
         ensure!(
             fs::read_to_string(app.join("Cargo.lock"))?.contains(&format!("#{commit}")),

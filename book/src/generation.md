@@ -29,7 +29,7 @@ fn main() {
 Include the client from `OUT_DIR`:
 
 ```rust
-#[allow(dead_code)]
+#[allow(dead_code, reason = "not every generated item is exercised")]
 mod client {
     include!(concat!(env!("OUT_DIR"), "/client.rs"));
 }
