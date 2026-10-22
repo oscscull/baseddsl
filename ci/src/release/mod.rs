@@ -2,6 +2,7 @@ mod archive;
 mod checksums;
 mod extension;
 mod metadata;
+mod notes;
 mod smoke;
 
 use anyhow::{ensure, Result};
@@ -41,6 +42,15 @@ pub fn extension(directory: &Path, output: &Path) -> Result<()> {
     extension::verify(&directory.join(&name), source["version"].as_str().unwrap())?;
     fs::create_dir_all(output)?;
     fs::copy(directory.join(&name), output.join(&name))?;
+    Ok(())
+}
+
+pub fn release_notes(output: &Path) -> Result<()> {
+    let source = metadata::source(None, true)?;
+    fs::write(
+        output,
+        notes::for_version(source["version"].as_str().unwrap())?,
+    )?;
     Ok(())
 }
 

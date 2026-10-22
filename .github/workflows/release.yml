@@ -126,12 +126,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           name: based-release-assets
           path: assets
+      - run: cargo run --locked -p based-ci -- release-notes "$RUNNER_TEMP/notes.md"
       - name: Create draft for owner review
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" assets/* --draft --verify-tag --title "Based $TAG" --notes-file book/src/upgrading.md
+        run: gh release create "$TAG" assets/* --draft --verify-tag --title "Based $TAG" --notes-file "$RUNNER_TEMP/notes.md"
