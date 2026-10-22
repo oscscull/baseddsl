@@ -362,7 +362,7 @@ impl std::error::Error for ClientError {
 /// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
 /// client's socket, or the in-process engine's execution). Codegen only depends on
 /// this shape.
-#[allow(async_fn_in_trait)]
+#[allow(async_fn_in_trait, reason = "transports choose their own Send bounds")]
 pub trait Transport {
     async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
@@ -816,7 +816,7 @@ impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> 
     }
 }
 
-#[allow(unexpected_cfgs, unused_imports)]
+#[allow(unexpected_cfgs, unused_imports, reason = "adopted driver code is copied verbatim")]
 mod __based_adopt_driver {
     use super::*;
 
@@ -867,7 +867,7 @@ mod __based_adopt_driver {
         }
     }
 }
-#[allow(unused_imports)]
+#[allow(unused_imports, reason = "adopted driver exports may go unused")]
 pub use __based_adopt_driver::*;
 
 // ---------- test fixtures ----------
@@ -881,7 +881,7 @@ pub mod fixtures {
 
     /// Something a fixture row can be inserted through: an engine-backed client, or a
     /// [`Connection`] to a `based fixtures` process.
-    #[allow(async_fn_in_trait)]
+    #[allow(async_fn_in_trait, reason = "transports choose their own Send bounds")]
     pub trait FixtureTransport {
         async fn insert_fixture(
             &self,
@@ -953,7 +953,7 @@ pub mod fixtures {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "fixture support is used only by some schemas")]
     mod support {
         use super::{ClientError, Counter, FixtureTransport};
 
@@ -1225,7 +1225,7 @@ pub struct OwnerRow {
     pub id: Id<entity::Owner>,
     pub name: String,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::Owner>> for OwnerRow {
     fn key(&self) -> Id<entity::Owner> {
         self.id.clone()
@@ -1241,7 +1241,7 @@ pub struct OwnerFixture {
 }
 
 /// A new `Owner` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn owner() -> OwnerFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -1252,7 +1252,7 @@ pub fn owner() -> OwnerFixture {
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl OwnerFixture {
     pub fn id(mut self, value: Id<entity::Owner>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -1283,7 +1283,7 @@ pub struct ItemRow {
     pub name: String,
     pub value: i64,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::Item>> for ItemRow {
     fn key(&self) -> Id<entity::Item> {
         self.id.clone()
@@ -1299,7 +1299,7 @@ pub struct ItemFixture {
 }
 
 /// A new `Item` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn item(owner: impl RowRef<Id<entity::Owner>>) -> ItemFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -1312,7 +1312,7 @@ pub fn item(owner: impl RowRef<Id<entity::Owner>>) -> ItemFixture {
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl ItemFixture {
     pub fn id(mut self, value: Id<entity::Item>) -> Self {
         support::put(&mut self.row, "id", &value);

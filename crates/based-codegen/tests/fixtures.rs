@@ -176,3 +176,21 @@ fn typescript_fixtures_mirror_the_rust_builders() {
     assert!(out.contains("export class Counter"), "{out}");
     assert!(out.contains("on_shard(key: string): this"), "{out}");
 }
+
+#[test]
+fn every_emitted_allow_carries_a_reason() {
+    let (schema, decls) = schema();
+    let options = ClientOptions {
+        embedded: true,
+        dialect: Some(based_codegen::Dialect::Postgres),
+    };
+    let out = client_with(&schema, &decls, ClientTarget::Rust, options);
+    let allows: Vec<_> = out
+        .lines()
+        .filter(|line| line.trim_start().starts_with("#[allow("))
+        .collect();
+    assert!(allows.len() > 5, "{out}");
+    for allow in allows {
+        assert!(allow.contains("reason = \""), "{allow}");
+    }
+}

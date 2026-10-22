@@ -502,7 +502,7 @@ where
 /// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
 /// client's socket, or the in-process engine's execution). Codegen only depends on
 /// this shape.
-#[allow(async_fn_in_trait)]
+#[allow(async_fn_in_trait, reason = "transports choose their own Send bounds")]
 pub trait Transport {
     async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
@@ -1762,7 +1762,7 @@ impl<D: based_runtime::DbRead> Transport for based_runtime::AdoptedTransport<D> 
 
 impl<D: based_runtime::DbRead> TxBound for based_runtime::AdoptedTransport<D> {}
 
-#[allow(unexpected_cfgs, unused_imports)]
+#[allow(unexpected_cfgs, unused_imports, reason = "adopted driver code is copied verbatim")]
 mod __based_adopt_driver {
     use super::*;
 
@@ -1790,7 +1790,7 @@ mod __based_adopt_driver {
         }
     }
 }
-#[allow(unused_imports)]
+#[allow(unused_imports, reason = "adopted driver exports may go unused")]
 pub use __based_adopt_driver::*;
 
 /// An exact decimal backed by `based_runtime::bigdecimal::BigDecimal`. JSON always carries a
@@ -1836,7 +1836,7 @@ pub mod fixtures {
 
     /// Something a fixture row can be inserted through: an engine-backed client, or a
     /// [`Connection`] to a `based fixtures` process.
-    #[allow(async_fn_in_trait)]
+    #[allow(async_fn_in_trait, reason = "transports choose their own Send bounds")]
     pub trait FixtureTransport {
         async fn insert_fixture(
             &self,
@@ -1908,7 +1908,7 @@ pub mod fixtures {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "fixture support is used only by some schemas")]
     mod support {
         use super::{ClientError, Counter, FixtureTransport};
 
@@ -2185,7 +2185,7 @@ pub struct CommentRow {
     pub author: Id<entity::User>,
     pub body: String,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::Comment>> for CommentRow {
     fn key(&self) -> Id<entity::Comment> {
         self.id.clone()
@@ -2201,7 +2201,7 @@ pub struct CommentFixture {
 }
 
 /// A new `Comment` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn comment(org: impl RowRef<Id<entity::Org>>, ticket: impl RowRef<Id<entity::Ticket>>, author: impl RowRef<Id<entity::User>>) -> CommentFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2215,7 +2215,7 @@ pub fn comment(org: impl RowRef<Id<entity::Org>>, ticket: impl RowRef<Id<entity:
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl CommentFixture {
     pub fn id(mut self, value: Id<entity::Comment>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -2265,7 +2265,7 @@ pub struct DraftNoteRow {
     pub ticket: Id<entity::Ticket>,
     pub body: String,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::DraftNote>> for DraftNoteRow {
     fn key(&self) -> Id<entity::DraftNote> {
         self.id.clone()
@@ -2281,7 +2281,7 @@ pub struct DraftNoteFixture {
 }
 
 /// A new `DraftNote` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn draft_note(org: impl RowRef<Id<entity::Org>>, author: impl RowRef<Id<entity::User>>, ticket: impl RowRef<Id<entity::Ticket>>) -> DraftNoteFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2295,7 +2295,7 @@ pub fn draft_note(org: impl RowRef<Id<entity::Org>>, author: impl RowRef<Id<enti
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl DraftNoteFixture {
     pub fn id(mut self, value: Id<entity::DraftNote>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -2342,7 +2342,7 @@ pub struct OrgRow {
     pub name: String,
     pub slug: String,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::Org>> for OrgRow {
     fn key(&self) -> Id<entity::Org> {
         self.id.clone()
@@ -2358,7 +2358,7 @@ pub struct OrgFixture {
 }
 
 /// A new `Org` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn org() -> OrgFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2370,7 +2370,7 @@ pub fn org() -> OrgFixture {
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl OrgFixture {
     pub fn id(mut self, value: Id<entity::Org>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -2406,7 +2406,7 @@ pub struct SessionRow {
     pub user: Id<entity::User>,
     pub token: String,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::Session>> for SessionRow {
     fn key(&self) -> Id<entity::Session> {
         self.id.clone()
@@ -2422,7 +2422,7 @@ pub struct SessionFixture {
 }
 
 /// A new `Session` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn session(org: impl RowRef<Id<entity::Org>>, user: impl RowRef<Id<entity::User>>) -> SessionFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2435,7 +2435,7 @@ pub fn session(org: impl RowRef<Id<entity::Org>>, user: impl RowRef<Id<entity::U
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl SessionFixture {
     pub fn id(mut self, value: Id<entity::Session>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -2482,7 +2482,7 @@ pub struct TicketRow {
     pub tags: Option<Json>,
     pub duplicate_of: Option<Id<entity::Ticket>>,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::Ticket>> for TicketRow {
     fn key(&self) -> Id<entity::Ticket> {
         self.id.clone()
@@ -2498,7 +2498,7 @@ pub struct TicketFixture {
 }
 
 /// A new `Ticket` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn ticket(org: impl RowRef<Id<entity::Org>>, requester: impl RowRef<Id<entity::User>>) -> TicketFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2511,7 +2511,7 @@ pub fn ticket(org: impl RowRef<Id<entity::Org>>, requester: impl RowRef<Id<entit
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl TicketFixture {
     pub fn id(mut self, value: Id<entity::Ticket>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -2583,7 +2583,7 @@ pub struct TimeEntryRow {
     pub note: Option<String>,
     pub logged_at: Timestamp,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::TimeEntry>> for TimeEntryRow {
     fn key(&self) -> Id<entity::TimeEntry> {
         self.id.clone()
@@ -2599,7 +2599,7 @@ pub struct TimeEntryFixture {
 }
 
 /// A new `TimeEntry` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn time_entry(ticket: impl RowRef<Id<entity::Ticket>>, agent: impl RowRef<Id<entity::User>>) -> TimeEntryFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2614,7 +2614,7 @@ pub fn time_entry(ticket: impl RowRef<Id<entity::Ticket>>, agent: impl RowRef<Id
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl TimeEntryFixture {
     pub fn id(mut self, value: Id<entity::TimeEntry>) -> Self {
         support::put(&mut self.row, "id", &value);
@@ -2668,7 +2668,7 @@ pub struct UserRow {
     pub role: Role,
     pub rate: Option<Decimal>,
 }
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy, reason = "key type may or may not be Copy")]
 impl RowRef<Id<entity::User>> for UserRow {
     fn key(&self) -> Id<entity::User> {
         self.id.clone()
@@ -2684,7 +2684,7 @@ pub struct UserFixture {
 }
 
 /// A new `User` fixture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "one argument per required field")]
 pub fn user(org: impl RowRef<Id<entity::Org>>) -> UserFixture {
     let n = support::next_n();
     let mut row = serde_json::Map::new();
@@ -2697,7 +2697,7 @@ pub fn user(org: impl RowRef<Id<entity::Org>>) -> UserFixture {
     }
 }
 
-#[allow(clippy::wrong_self_convention, clippy::should_implement_trait)]
+#[allow(clippy::wrong_self_convention, clippy::should_implement_trait, reason = "builder methods are named after model fields")]
 impl UserFixture {
     pub fn id(mut self, value: Id<entity::User>) -> Self {
         support::put(&mut self.row, "id", &value);

@@ -5,7 +5,7 @@ use based_runtime::{apply_migrations, load_migrations, ApplyOpts, Compiled, Engi
 use based_runtime::{SqliteBackend, TxOptions};
 use std::path::Path;
 
-#[allow(dead_code)]
+#[allow(dead_code, reason = "not every generated item is exercised")]
 mod client {
     include!(concat!(env!("OUT_DIR"), "/client.rs"));
 }

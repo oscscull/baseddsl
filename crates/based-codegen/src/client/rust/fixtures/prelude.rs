@@ -12,7 +12,7 @@ pub mod fixtures {
 
     /// Something a fixture row can be inserted through: an engine-backed client, or a
     /// [`Connection`] to a `based fixtures` process.
-    #[allow(async_fn_in_trait)]
+    #[allow(async_fn_in_trait, reason = "transports choose their own Send bounds")]
     pub trait FixtureTransport {
         async fn insert_fixture(
             &self,
@@ -84,7 +84,7 @@ pub mod fixtures {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "fixture support is used only by some schemas")]
     mod support {
         use super::{ClientError, Counter, FixtureTransport};
 

@@ -46,7 +46,7 @@ fn render(project: &Project, migrations: &[MigrationFiles], root: &Path) -> Stri
 
 fn render_migrations(migrations: &[MigrationFiles]) -> String {
     let mut text = String::from(
-        "#[allow(dead_code)]\n\
+        "#[allow(dead_code, reason = \"not every embedder applies migrations\")]\n\
          pub const MIGRATIONS: &[based_runtime::migrate::MigrationSource<'static>] = &[\n",
     );
     for migration in migrations {
@@ -96,5 +96,6 @@ mod tests {
             text.contains("down: Some(include_str!(\"/app/migrations/0002_more/down.mig\"))"),
             "{text}"
         );
+        assert!(text.starts_with("#[allow(dead_code, reason = "), "{text}");
     }
 }

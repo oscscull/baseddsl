@@ -361,7 +361,7 @@ impl std::error::Error for ClientError {
 /// requirements passes `ctx: &()`. Async: a transport awaits its round-trip (an HTTP
 /// client's socket, or the in-process engine's execution). Codegen only depends on
 /// this shape.
-#[allow(async_fn_in_trait)]
+#[allow(async_fn_in_trait, reason = "transports choose their own Send bounds")]
 pub trait Transport {
     async fn call<I, C, O>(&self, route: &str, input: &I, ctx: &C) -> Result<O, ClientError>
     where
