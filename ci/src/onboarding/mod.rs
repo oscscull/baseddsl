@@ -1,3 +1,6 @@
+//! Run the embedded tutorial in a clean external project with the given binary.
+mod tutorial;
+
 use crate::{
     command::{self, Environment},
     initializer,
@@ -7,24 +10,24 @@ use sqlx::Row;
 use std::{fs, path::Path};
 
 pub async fn verify(based: &Path) -> Result<()> {
+    tutorial::require_documented(&command::root().join("book/src/embedded.md"))?;
     let based = based.canonicalize()?;
     let scratch = tempfile::tempdir()?;
     let env = crate::source::mirror(scratch.path())?;
-    let app = scratch.path().join("app");
-    initializer::fresh(&based, &app, "embedded", "sqlite", &env)?;
+    run(&based, tutorial::INIT, scratch.path(), &env)?;
+    let app = scratch.path().join("items");
+    ensure!(
+        fs::read(app.join("schema/item.bsl"))? == fs::read(tutorial::starter_schema())?,
+        "initializer schema differs from the tutorial's"
+    );
     let manifest = fs::read_to_string(app.join("Cargo.toml"))?;
     ensure!(
         manifest.contains("git = \"https://github.com/oscscull/baseddsl.git\"")
             && !manifest.contains("path ="),
         "consumer did not use pinned public Git source"
     );
-    command::run(
-        &based,
-        &["migrate", "apply", "--database-url", "local.db"],
-        &app,
-        &env,
-    )?;
-    initializer::identity(&command::run(command::cargo(), &["run"], &app, &env)?)?;
+    run(&based, tutorial::MIGRATE, &app, &env)?;
+    initializer::identity(&run(&based, tutorial::RUN, &app, &env)?)?;
     ensure!(
         fs::read_to_string(app.join("Cargo.lock"))?
             .contains(&format!("#{}", command::git(&["rev-parse", "HEAD"])?)),
@@ -32,30 +35,21 @@ pub async fn verify(based: &Path) -> Result<()> {
     );
     let before = rows(&app, "name").await?;
     ensure!(before.len() == 2, "wrong lesson rows");
-    rename(&app)?;
-    for args in [
-        &["check"][..],
-        &["migrate", "gen", ".", "rename_item_title"],
-        &["migrate", "verify"],
-        &["migrate", "render", ".", "--number", "2"],
-    ] {
-        command::run(&based, args, &app, &env)?;
+    fs::copy(tutorial::renamed_schema(), app.join("schema/item.bsl"))?;
+    for args in tutorial::EVOLVE {
+        run(&based, args, &app, &env)?;
     }
     ensure!(
         rows(&app, "name").await? == before,
         "generation changed data"
     );
-    command::run(
-        &based,
-        &["migrate", "apply", "--database-url", "local.db"],
-        &app,
-        &env,
-    )?;
+    run(&based, tutorial::MIGRATE, &app, &env)?;
     ensure!(
         rows(&app, "title").await? == before,
         "rename changed rows or relationship IDs"
     );
-    initializer::identity(&command::run(command::cargo(), &["run"], &app, &env)?)?;
+    initializer::identity(&run(&based, tutorial::RUN, &app, &env)?)?;
+    reset(&based, &app, &env).await?;
     command::run(command::cargo(), &["fmt", "--check"], &app, &env)?;
     command::run(
         command::cargo(),
@@ -68,15 +62,23 @@ pub async fn verify(based: &Path) -> Result<()> {
     Ok(())
 }
 
-fn rename(app: &Path) -> Result<()> {
-    let path = app.join("schema/item.bsl");
-    let source = fs::read_to_string(&path)?
-        .replace("  name: text", "  title: text @was(\"name\")")
-        .replace("\n  name\n", "\n  name = title\n")
-        .replace("parent { id, name }", "parent { id, name = title }")
-        .replace("name = $name", "title = $name");
-    fs::write(path, source)?;
+/// The documented reset leaves a fresh database that one run fills with one pair again.
+async fn reset(based: &Path, app: &Path, env: &Environment) -> Result<()> {
+    run(based, tutorial::RESET, app, env)?;
+    ensure!(!app.join("local.db").exists(), "reset left the database");
+    run(based, tutorial::MIGRATE, app, env)?;
+    run(based, tutorial::RUN, app, env)?;
+    ensure!(rows(app, "title").await?.len() == 2, "reset kept old rows");
     Ok(())
+}
+
+/// Run a tutorial command, with `based` as the binary under test.
+fn run(based: &Path, args: &[&str], cwd: &Path, env: &Environment) -> Result<String> {
+    match args[0] {
+        "based" => command::run(based, &args[1..], cwd, env),
+        "cargo" => command::run(command::cargo(), &args[1..], cwd, env),
+        program => command::run(program, &args[1..], cwd, env),
+    }
 }
 
 async fn rows(app: &Path, column: &str) -> Result<Vec<(String, String, String, Option<String>)>> {
