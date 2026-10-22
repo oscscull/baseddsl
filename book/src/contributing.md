@@ -29,3 +29,30 @@ cargo run -p based-ci -- package --binary-dir target/release \
 
 The release workflow produces matching native archives and VSIX with checksums.
 Only an explicit matching version tag creates a draft for owner review.
+
+## Releasing
+
+Only the owner tags and publishes.
+
+1. Choose the version. Update the workspace version, `editors/vscode/package.json`
+   and its lockfile together, and rename `## Unreleased` in
+   [release notes](release-notes.md) to that version; packaging fails without it.
+2. On the merged main commit, require every CI check and a manual release dry run
+   (`gh workflow run release.yml --ref main`). Download its artifacts and check
+   `SHA256SUMS`, each `--version` line, and `RELEASE-NOTES.md`.
+3. Tag that exact commit and push the tag:
+
+   ```sh
+   git tag -a "v$VERSION" "$COMMIT" -m "Based v$VERSION"
+   git push origin "v$VERSION"
+   ```
+
+4. The tag run creates a draft release. Review its assets, then publish with
+   `gh release edit "v$VERSION" --draft=false`.
+5. Install from the published archive in a clean environment and run the
+   [embedded](embedded.md) and [standalone](standalone.md) first steps.
+
+To roll back a bad release, never move a tag or replace published assets. Mark the
+release with an advisory naming a known-good version, then fix forward with a new
+version and notes. Rolling back tools does not roll back data; recover databases
+through [migration recovery](migrations.md).

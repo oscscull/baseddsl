@@ -54,6 +54,9 @@ enum Task {
         directory: PathBuf,
         output: PathBuf,
     },
+    ReleaseNotes {
+        output: PathBuf,
+    },
     Initializer {
         #[arg(long)]
         based: PathBuf,
@@ -98,6 +101,7 @@ async fn main() -> Result<()> {
             expected_count,
         } => release::collect(&directory, expected_count),
         Task::Extension { directory, output } => release::extension(&directory, &output),
+        Task::ReleaseNotes { output } => release::release_notes(&output),
         Task::Initializer { based } => initializer::verify(&based).await,
         Task::EmbeddedTutorial { based } => onboarding::verify(&based).await,
         Task::StandaloneTutorial { based } => standalone::verify(&based),

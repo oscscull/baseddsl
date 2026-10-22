@@ -14,6 +14,7 @@
 - [Importing an existing database](import.md)
 - [Performance](performance.md)
 - [Upgrading](upgrading.md)
+- [Release notes](release-notes.md)
 - [Compatibility and reports](support.md)
 - [Changing Based](contributing.md)
 - [VS Code](editor.md)

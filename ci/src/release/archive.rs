@@ -1,4 +1,4 @@
-use super::metadata;
+use super::{metadata, notes};
 use anyhow::{ensure, Result};
 use serde_json::{json, Value};
 use std::{
@@ -36,10 +36,10 @@ pub fn package(binary_dir: &Path, output: &Path, target: &str, source: &Value) -
         crate::command::root().join("LICENSE"),
         scratch.path().join("LICENSE"),
     )?;
-    let notes = crate::command::root().join("book/src/upgrading.md");
-    if notes.exists() {
-        fs::copy(notes, scratch.path().join("RELEASE-NOTES.md"))?;
-    }
+    fs::write(
+        scratch.path().join("RELEASE-NOTES.md"),
+        notes::for_version(version)?,
+    )?;
     let mut manifest = source.clone();
     manifest["target"] = json!(target);
     manifest["binaries"] = json!(identities);
