@@ -1,5 +1,5 @@
 //! The standalone tutorial's commands: executed by the gate and required verbatim in the book.
-use anyhow::{ensure, Result};
+use anyhow::Result;
 use std::path::Path;
 
 pub const INIT: &[&str] = &["based", "init", "items", "--mode", "standalone"];
@@ -89,31 +89,5 @@ const ALL: &[&[&str]] = &[
 
 /// Fail when the book no longer shows a command the gate runs.
 pub fn require_documented(book: &Path) -> Result<()> {
-    let text = std::fs::read_to_string(book)?.replace("\\\n", " ");
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    for args in ALL {
-        let line = shell(args);
-        ensure!(
-            text.contains(&line),
-            "{} no longer shows: {line}",
-            book.display()
-        );
-    }
-    Ok(())
-}
-
-fn shell(args: &[&str]) -> String {
-    args.iter()
-        .map(|arg| {
-            let plain = arg
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-_./:=".contains(c));
-            if plain {
-                arg.to_string()
-            } else {
-                format!("'{arg}'")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::book::require_commands(book, ALL)
 }

@@ -1,5 +1,6 @@
 mod artifacts;
 mod benchmark;
+mod book;
 mod cargo_generation;
 mod client;
 mod command;

@@ -1,6 +1,7 @@
 # Larger applications
 
-The initializer teaches a first run. These examples show larger workloads:
+[The tutorial](embedded.md) teaches a first run. These examples show larger
+workloads and are also the deeper test fixtures for each database:
 
 | Example | Use it to learn |
 |---|---|
