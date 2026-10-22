@@ -86,7 +86,10 @@ impl Snapshot {
                     }
                 }
                 Decl::Mutation(m) => write_paths(&m.body, &rel, &mut out),
-                Decl::Model(m) => column_map_paths(m, &mut out),
+                Decl::Model(m) => {
+                    column_map_paths(m, &mut out);
+                    model_attr_paths(m, &mut out);
+                }
                 _ => {}
             }
         }
