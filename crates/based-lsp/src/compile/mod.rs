@@ -13,10 +13,11 @@
 //! fallback.
 
 use based_ast::{
-    AggCall, Assign, AssignRhs, BaseType, Clause, Decl, EnumDecl, Field, FileId, GeneratedField,
-    Ident, LimitClause, LimitValue, Member, Model, Modifier, Mutation, NamedFilter, Op, Param,
-    ParamBinding, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart, RawSql, ScopeDecl,
-    Shape, ShapeExpr, ShapeField, ShapeValue, Span, TypeExpr, Value, VariantValue, WriteStmt,
+    AggCall, Assign, AssignRhs, BaseType, Clause, Decl, DecoArg, EnumDecl, Field, FileId,
+    GeneratedField, Ident, LimitClause, LimitValue, Member, Model, Modifier, Mutation, NamedFilter,
+    Op, Param, ParamBinding, ParamRef, Predicate, Primitive, Query, QueryBody, RawPart, RawSql,
+    ScopeDecl, Shape, ShapeExpr, ShapeField, ShapeValue, Span, TypeExpr, Value, VariantValue,
+    WriteStmt,
 };
 use based_diagnostics::Diagnostic;
 use based_facts::{Fact, FactKind};
