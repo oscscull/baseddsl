@@ -28,6 +28,8 @@ mod key_integration;
 mod migrate_apply;
 #[path = "migrate_data.rs"]
 mod migrate_data;
+#[path = "migrate_rebuild_fks.rs"]
+mod migrate_rebuild_fks;
 #[path = "optional_ctx_integration.rs"]
 mod optional_ctx_integration;
 #[path = "optional_filter_integration.rs"]

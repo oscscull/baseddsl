@@ -19,6 +19,7 @@ mod sqlite_rebuild;
 mod statements;
 
 pub use hash::{content_hash, up_mig_matches_snapshot};
+pub use sqlite_rebuild::SQLITE_REBUILD_OPEN;
 
 pub(crate) use column::*;
 pub(crate) use snap_parse::*;

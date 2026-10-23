@@ -30,6 +30,8 @@
 mod bind;
 #[path = "migration_failure.rs"]
 mod failure;
+#[path = "migrate_foreign_keys.rs"]
+mod foreign_keys;
 #[path = "migrate_progress.rs"]
 mod progress;
 #[path = "migrate_resume.rs"]
@@ -47,7 +49,7 @@ use based_codegen::migrate::{self, PlanUnit, Snapshot};
 pub use based_codegen::Dialect;
 pub use based_project::MigrationSource;
 
-use crate::run::{fetch_all, Backend, DbError, DbRead, Row};
+use crate::run::{fetch_all, Backend, DbError, DbRead, Row, Tx};
 use crate::value::SqlValue;
 
 /// The engine-owned ledger table. Underscore-prefixed so it never collides with a user
@@ -606,11 +608,30 @@ async fn run_in_tx(
         .checkout("")
         .await
         .map_err(|e| failed("checkout".into(), e))?;
-    let mut tx = db.begin().await.map_err(|e| failed("begin".into(), e))?;
+    let rebuild = foreign_keys::has_rebuild(dialect, stmts.iter().map(|s| s.sql.as_str()));
+    let mut tx = foreign_keys::begin(db, rebuild)
+        .await
+        .map_err(|e| failed("begin".into(), e))?;
+    if let Err((stage, e)) = run_statements(&mut *tx, stmts, ledger, dialect).await {
+        // Explicit, so a foreign-keys-off rebuild restores enforcement before returning.
+        let _ = tx.rollback().await;
+        return Err(failed(stage, e));
+    }
+    tx.commit().await.map_err(|e| failed("commit".into(), e))?;
+    Ok(())
+}
+
+/// The migration's statements, then its ledger write, on `tx`; a failure names its stage.
+async fn run_statements(
+    tx: &mut dyn Tx,
+    stmts: &[bind::Bound],
+    ledger: LedgerOp<'_>,
+    dialect: Dialect,
+) -> Result<(), (String, DbError)> {
     for (index, s) in stmts.iter().enumerate() {
         tx.execute(&s.sql, &s.params)
             .await
-            .map_err(|e| failed(format!("statement {} of {}", index + 1, stmts.len()), e))?;
+            .map_err(|e| (format!("statement {} of {}", index + 1, stmts.len()), e))?;
     }
     let (sql, params) = match ledger {
         LedgerOp::Insert { id, hash } => (
@@ -627,8 +648,7 @@ async fn run_in_tx(
     };
     tx.execute(&sql, &params)
         .await
-        .map_err(|e| failed("ledger update".into(), e))?;
-    tx.commit().await.map_err(|e| failed("commit".into(), e))?;
+        .map_err(|e| ("ledger update".into(), e))?;
     Ok(())
 }
 
