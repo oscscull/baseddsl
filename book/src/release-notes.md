@@ -3,7 +3,11 @@
 Each release has a section here; its archive and GitHub release carry that section.
 Follow [upgrading](upgrading.md) for every version change.
 
-## Unreleased
+## 1.0.0
+
+The first stable release: the surfaces in Compatibility and reports follow
+semantic versioning from here. Upgrading from 0.1.x: regenerate every client.
+
 
 - `list` takes a `limit` clause for a caller-chosen row cap.
 - `Id::as_int` reads a `serial` id back as an integer.
@@ -12,6 +16,8 @@ Follow [upgrading](upgrading.md) for every version change.
 - `get` and upsert conflict targets accept composite unique keys.
 - Raw `{id}` expands to the model's real key column and `{table}` is schema-qualified;
   soft-delete raw overrides are applied instead of ignored.
+- Field names in model decorators and `@index` resolve as LSP references.
+- Every `#[allow]` in generated Rust states its reason.
 
 ## 0.1.13
 

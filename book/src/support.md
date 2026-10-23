@@ -4,9 +4,8 @@ The current database matrix is bundled SQLite, MariaDB 11.4, and PostgreSQL 16.
 MariaDB evidence does not establish MySQL support. Native host requirements are in
 [installation](installation.md). Embedded Rust and standalone HTTP use the same engine.
 
-Before v1, public interfaces can change between `0.x` versions; the
-[release notes](release-notes.md) list each change. From v1, a breaking change to a
-surface below needs a new major version.
+From 1.0, a breaking change to a surface below needs a new major version; the
+[release notes](release-notes.md) list each change.
 
 | Surface | Stable from v1 | Not covered |
 |---|---|---|
