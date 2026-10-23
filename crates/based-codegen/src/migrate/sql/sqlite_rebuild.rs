@@ -69,10 +69,15 @@ fn folded_table(step: &Step) -> Option<&str> {
     }
 }
 
+/// The statement a SQLite table rebuild opens with. A migration containing it must run with
+/// foreign keys off (see the runtime's apply), since the swap's rename and drop would
+/// otherwise re-point and cascade into child tables.
+pub const SQLITE_REBUILD_OPEN: &str = "PRAGMA legacy_alter_table = ON";
+
 /// The SQLite 12-step table rebuild for `table`, recreating it at its `target` shape and
-/// copying the surviving rows. Follows the procedure SQLite documents: `legacy_alter_table`
-/// keeps the rename from re-pointing other tables' FKs, `defer_foreign_keys` holds FK checks
-/// to the (apply-owned) commit so the transient swap doesn't trip them. Columns added in this
+/// copying the surviving rows. Follows the procedure SQLite documents: apply runs it with
+/// foreign keys off, where `legacy_alter_table` keeps the rename from re-pointing other
+/// tables' FKs; `defer_foreign_keys` covers a connection that enforces them anyway. Columns added in this
 /// migration have no source and are left to their default; a renamed column copies from its
 /// old name; a schema move copies out of the old namespace into the new.
 fn sqlite_rebuild_statements(table: &str, target: &Snapshot, steps: &[Step]) -> Vec<String> {
@@ -96,7 +101,7 @@ fn sqlite_rebuild_statements(table: &str, target: &Snapshot, steps: &[Step]) -> 
     let target_q = d.quote_table(tt.schema.as_deref(), table);
 
     let mut stmts = vec![
-        "PRAGMA legacy_alter_table = ON".to_string(),
+        SQLITE_REBUILD_OPEN.to_string(),
         "PRAGMA defer_foreign_keys = ON".to_string(),
         format!("ALTER TABLE {source} RENAME TO {}", d.quote(&tmp)),
         create_table,

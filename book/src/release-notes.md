@@ -3,6 +3,11 @@
 Each release has a section here; its archive and GitHub release carry that section.
 Follow [upgrading](upgrading.md) for every version change.
 
+## Unreleased
+
+- A SQLite migration that rebuilds a table no longer breaks its child tables' foreign
+  keys: apply turns foreign keys off around the rebuild and checks them before commit.
+
 ## 1.0.0
 
 The first stable release: the surfaces in Compatibility and reports follow

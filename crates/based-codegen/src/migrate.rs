@@ -74,7 +74,7 @@ pub use script::{
 };
 pub use sql::{
     content_hash, migration_sql, render_migration, render_sql, sql_statements,
-    up_mig_matches_snapshot,
+    up_mig_matches_snapshot, SQLITE_REBUILD_OPEN,
 };
 pub use step_order::up_steps;
 pub use unit::{IdKind, PlanUnit};

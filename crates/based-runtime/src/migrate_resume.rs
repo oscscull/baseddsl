@@ -7,6 +7,7 @@ use based_codegen::Dialect;
 
 use super::bind::bind;
 use super::failure::MigrationFailure;
+use super::foreign_keys;
 use super::progress::{clear_progress, create_progress_sql, read_progress, save_progress};
 use super::{delete_ledger_sql, insert_ledger_sql, ApplyOpts, MigrateError};
 use crate::run::{fetch_all, Backend, DbError, DbRead, Tx};
@@ -134,9 +135,11 @@ impl Resume<'_> {
         }
     }
 
-    async fn begin(&self) -> Result<Box<dyn Tx>, MigrateError> {
+    async fn begin(&self, rebuild: bool) -> Result<Box<dyn Tx>, MigrateError> {
         let db = self.backend.checkout("").await?;
-        db.begin().await.map_err(self.failed("begin"))
+        foreign_keys::begin(db, rebuild)
+            .await
+            .map_err(self.failed("begin"))
     }
 
     async fn commit(&self, tx: Box<dyn Tx>) -> Result<(), MigrateError> {
@@ -145,25 +148,32 @@ impl Resume<'_> {
 
     /// Close the segment at `at` and commit `tx`.
     async fn finish(&self, mut tx: Box<dyn Tx>, at: Position) -> Result<(), MigrateError> {
-        finish_segment(&mut *tx, self.dialect, self.run, at.i, at.last)
-            .await
-            .map_err(self.failed("progress update"))?;
+        if let Err(e) = finish_segment(&mut *tx, self.dialect, self.run, at.i, at.last).await {
+            let _ = tx.rollback().await;
+            return Err(self.failed("progress update")(e));
+        }
         self.commit(tx).await
     }
 
     /// Plain statements, in one transaction with the segment's close.
     async fn statements(&self, units: &[PlanUnit], at: Position) -> Result<(), MigrateError> {
-        let mut tx = self.begin().await?;
-        for (n, u) in units.iter().enumerate() {
-            let b = bind(u, self.run.id, self.opts.mint)?;
-            tx.execute(&b.sql, &b.params)
-                .await
-                .map_err(self.failed(format!(
+        let bound = units
+            .iter()
+            .map(|u| bind(u, self.run.id, self.opts.mint))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rebuild = foreign_keys::has_rebuild(self.dialect, bound.iter().map(|b| b.sql.as_str()));
+        let mut tx = self.begin(rebuild).await?;
+        for (n, b) in bound.iter().enumerate() {
+            if let Err(e) = tx.execute(&b.sql, &b.params).await {
+                // Explicit, so a foreign-keys-off rebuild restores enforcement before returning.
+                let _ = tx.rollback().await;
+                return Err(self.failed(format!(
                     "segment {} statement {} of {}",
                     at.i + 1,
                     n + 1,
-                    units.len()
-                )))?;
+                    bound.len()
+                ))(e));
+            }
         }
         self.finish(tx, at).await
     }
@@ -179,7 +189,7 @@ impl Resume<'_> {
         let mut chunk = 0u64;
         loop {
             chunk += 1;
-            let mut tx = self.begin().await?;
+            let mut tx = self.begin(false).await?;
             let keys = fetch_all(tx.fetch(&plan.select_sql(cursor.as_deref()), &[]))
                 .await
                 .map_err(self.failed(format!("{} batch select", plan.table)))?;
