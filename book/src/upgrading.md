@@ -1,7 +1,8 @@
 # Upgrading
 
 Keep CLI, language server, extension, runtime, and generated clients at matching
-versions. Before v1, `0.x` releases can change public interfaces.
+versions. Breaking changes come only in a new major version; see
+[compatibility](support.md).
 
 1. Back up database and migration history. Keep the previous tool installation.
 2. Pin the new source/version for the runtime and `based-build`, then regenerate
@@ -24,7 +25,6 @@ Rolling back tools does not roll back data or schema. See
 
 ## Known limitations
 
-- Pre-v1: BSL, generated code, and HTTP formats can change between `0.x` releases.
 - Tested on bundled SQLite, MariaDB 11.4, and PostgreSQL 16. MySQL is untested.
 - `based serve` trusts `X-Based-Context` and has no identity provider; put it
   behind an authenticating edge ([deployment](deployment.md)).

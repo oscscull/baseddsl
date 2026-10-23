@@ -2,7 +2,7 @@
   "name": "based-vscode",
   "displayName": "Based DSL",
   "description": "Language support for the Based DSL (.bsl): diagnostics, inlay hints, and hover via based-lsp.",
-  "version": "0.1.13",
+  "version": "1.0.0",
   "license": "AGPL-3.0-only",
   "publisher": "based",
   "repository": {
