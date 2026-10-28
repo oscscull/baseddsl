@@ -294,8 +294,8 @@ impl Pattern {
         let bucket = match op {
             Op::Eq | Op::In => &mut self.eq,
             Op::Gt | Op::Lt | Op::Ge | Op::Le | Op::Like => &mut self.range,
-            // `!=` / `has` exclude nothing an index can lead with.
-            Op::Ne | Op::Has => return,
+            // `!=` / `has` / a pattern list exclude nothing an index can lead with.
+            Op::Ne | Op::Has | Op::LikeAll | Op::LikeAny => return,
         };
         if !bucket.iter().any(|c| c == field) {
             bucket.push(field.to_string());

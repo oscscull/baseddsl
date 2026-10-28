@@ -46,6 +46,8 @@ pub(super) const KEYWORDS: &[&str] = &[
     "not",
     "in",
     "has",
+    "all",
+    "any",
     "on",
     "full",
     "stream",

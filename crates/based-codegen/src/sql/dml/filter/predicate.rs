@@ -95,14 +95,5 @@ fn compare(dialect: Dialect, lhs: &str, op: Op, value: &Value, rhs: &str) -> Str
         };
         return format!("{lhs} {nullness}");
     }
-    match op {
-        // `in` needs a value list; `has` is JSON-array containment — MySQL's
-        // `value MEMBER OF(arr)` vs. Postgres's `arr @> value`.
-        Op::In => format!("{lhs} IN ({rhs})"),
-        Op::Has => match dialect {
-            Dialect::Postgres => format!("{lhs} @> {rhs}"),
-            _ => format!("{rhs} MEMBER OF({lhs})"),
-        },
-        _ => format!("{lhs} {} {rhs}", sql_op(op)),
-    }
+    compare_sql(dialect, lhs, op, rhs)
 }

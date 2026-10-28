@@ -957,6 +957,10 @@ pub enum Op {
     Ge,
     Le,
     Like,
+    /// `~ all $patterns` — the text column matches every pattern in a `text[]` param.
+    LikeAll,
+    /// `~ any $patterns` — the text column matches at least one pattern in a `text[]` param.
+    LikeAny,
     In,
     Has,
 }

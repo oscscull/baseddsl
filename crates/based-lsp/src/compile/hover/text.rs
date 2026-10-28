@@ -56,6 +56,8 @@ pub(super) fn op_str(op: Op) -> &'static str {
         Op::Ge => ">=",
         Op::Le => "<=",
         Op::Like => "~",
+        Op::LikeAll => "~ all",
+        Op::LikeAny => "~ any",
         Op::In => "in",
         Op::Has => "has",
     }
@@ -67,6 +69,14 @@ pub(super) fn op_gloss(op: Op) -> &'static str {
         Op::Has => "containment (array/json); the column is the left operand",
         Op::In => "membership; the column is the left operand",
         Op::Like => "SQL `LIKE`, pattern passed verbatim; the column is the left operand",
+        Op::LikeAll => {
+            "SQL `LIKE` against every pattern in the list (an empty list matches all rows); \
+             the column is the left operand"
+        }
+        Op::LikeAny => {
+            "SQL `LIKE` against any pattern in the list (an empty list matches no row); \
+             the column is the left operand"
+        }
         _ => "the column is the left operand",
     }
 }

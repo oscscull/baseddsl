@@ -66,20 +66,11 @@ fn param_condition(sel: &mut Select, p: &Param, root: &RModel) -> String {
             let (alias, col) = sel.resolve(&single(&edge.node), root);
             format!("{} = {ph}", sel.qcol(&alias, &col))
         }
-        // `since: timestamp > created_at`: explicit column + operator. The collection
-        // ops mirror the predicate lowering — `in` takes a value list, `has` is JSON
-        // containment (Postgres `col @> value`, MySQL-family `value MEMBER OF(col)`).
+        // `since: timestamp > created_at`: explicit column + operator, lowered as the
+        // predicate form lowers it.
         Some(ParamBinding::ColOp { op, col }) => {
             let (alias, c) = sel.resolve(&single(&col.node), root);
-            let lhs = sel.qcol(&alias, &c);
-            match op {
-                Op::In => format!("{lhs} IN ({ph})"),
-                Op::Has => match sel.dialect {
-                    Dialect::Postgres => format!("{lhs} @> {ph}"),
-                    _ => format!("{ph} MEMBER OF({lhs})"),
-                },
-                _ => format!("{lhs} {} {ph}", sql_op(*op)),
-            }
+            compare_sql(sel.dialect, &sel.qcol(&alias, &c), *op, &ph)
         }
         // same-name equality on the mapped column (a relation field maps to its FK).
         None => {

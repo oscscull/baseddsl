@@ -338,6 +338,89 @@ fn in_value_list_and_single_bind_forms() {
 }
 
 #[test]
+fn like_all_and_any_take_a_pattern_list() {
+    let sf = parse_ok(
+        r#"
+        filter f(terms, banned) = body ~ all $terms and not (body ~ any $banned);
+        query find(terms: text[] ~ all body) -> Card[];
+        "#,
+    );
+    let Decl::Filter(nf) = &sf.decls[0] else {
+        panic!("expected filter");
+    };
+    let Predicate::And(l, r) = &nf.pred else {
+        panic!("expected and, got {:?}", nf.pred);
+    };
+    assert!(matches!(
+        &**l,
+        Predicate::Cmp { op: Op::LikeAll, value: Value::Param(pr), .. } if pr.name.node == "terms"
+    ));
+    let Predicate::Not(inner) = &**r else {
+        panic!("expected not, got {r:?}");
+    };
+    assert!(matches!(
+        &**inner,
+        Predicate::Cmp {
+            op: Op::LikeAny,
+            ..
+        }
+    ));
+    let Decl::Query(q) = &sf.decls[1] else {
+        panic!("expected query");
+    };
+    assert!(matches!(
+        &q.params[0].binding,
+        Some(ParamBinding::ColOp { op: Op::LikeAll, col }) if col.node == "body"
+    ));
+}
+
+#[test]
+fn like_against_columns_named_all_and_any_stays_scalar() {
+    let sf = parse_ok(
+        "filter f = (a ~ all) and b ~ any or c ~ all;\n\
+         shape S from M { x = case when d ~ any then 1 else 0 end }",
+    );
+    let Decl::Filter(nf) = &sf.decls[0] else {
+        panic!("expected filter");
+    };
+    let mut ops = Vec::new();
+    fn walk(p: &Predicate, ops: &mut Vec<(Op, String)>) {
+        match p {
+            Predicate::And(a, b) | Predicate::Or(a, b) => {
+                walk(a, ops);
+                walk(b, ops);
+            }
+            Predicate::Cmp {
+                op,
+                value: Value::Path(v),
+                ..
+            } => ops.push((*op, v.segments[0].node.clone())),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    walk(&nf.pred, &mut ops);
+    assert_eq!(
+        ops,
+        vec![
+            (Op::Like, "all".to_string()),
+            (Op::Like, "any".to_string()),
+            (Op::Like, "all".to_string())
+        ]
+    );
+    let Decl::Shape(sh) = &sf.decls[1] else {
+        panic!("expected shape");
+    };
+    let ShapeField::Rename {
+        value: ShapeValue::Computed(ShapeExpr::Case { arms, .. }),
+        ..
+    } = &sh.body[0]
+    else {
+        panic!("expected a case field, got {:?}", sh.body[0]);
+    };
+    assert!(matches!(arms[0].when, Predicate::Cmp { op: Op::Like, .. }));
+}
+
+#[test]
 fn relation_any_with_and_without_a_predicate() {
     let sf = parse_ok("filter f = printings.any(digital = false) or not decks.any();");
     let Decl::Filter(nf) = &sf.decls[0] else {

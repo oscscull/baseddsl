@@ -7,7 +7,7 @@ use super::super::check::DataError;
 use super::super::relation::child_link;
 use super::super::table::{Col, Fam, TableView};
 use super::{col_of, Lw};
-use crate::sql::dml::sql_op;
+use crate::sql::dml::compare_sql;
 
 impl Lw<'_> {
     pub(crate) fn predicate(&self, p: &Predicate, t: &TableView) -> Result<String, DataError> {
@@ -64,10 +64,11 @@ impl Lw<'_> {
         match value {
             Value::Lit(Literal::Null) if op == Op::Ne => format!("{lhs} IS NOT NULL"),
             Value::Lit(Literal::Null) => format!("{lhs} IS NULL"),
-            _ => format!(
-                "{lhs} {} {}",
-                sql_op(op),
-                self.value(value, t, target.as_ref())
+            _ => compare_sql(
+                self.dialect,
+                &lhs,
+                op,
+                &self.value(value, t, target.as_ref()),
             ),
         }
     }

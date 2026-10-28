@@ -32,6 +32,8 @@ pub(crate) fn check_mutation(m: &Mutation, cx: &Cx, sink: &mut Sink) -> Option<R
         );
     }
 
+    check_like_list_params(&m.params, write_predicates(&m.body), cx, sink);
+
     // Shape-as-input eligibility for every `create … from $param` — checked at the
     // use site, with the mutation's param types in hand.
     check_from_creates(m, cx, sink);

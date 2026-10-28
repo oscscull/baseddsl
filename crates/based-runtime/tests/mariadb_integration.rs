@@ -172,6 +172,8 @@ mod composite_fk_aliases;
 mod hardening;
 #[path = "mariadb_integration/idempotency.rs"]
 mod idempotency;
+#[path = "mariadb_integration/like_lists.rs"]
+mod like_lists;
 #[path = "mariadb_integration/mutations_and_scopes.rs"]
 mod mutations_and_scopes;
 #[path = "mariadb_integration/nested_writes_and_filters.rs"]

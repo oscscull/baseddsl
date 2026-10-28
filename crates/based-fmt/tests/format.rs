@@ -166,6 +166,16 @@ fn shape_flatten_formats_canonically() {
 }
 
 #[test]
+fn like_lists_round_trip() {
+    let src = "filter f(a, b) = body ~ all $a and not body ~ any $b;\n";
+    assert_eq!(
+        fmt("filter f(a, b) = body ~  all $a and not (body ~ any  $b);"),
+        src
+    );
+    assert_eq!(fmt(src), src);
+}
+
+#[test]
 fn query_block_inline_and_expanded_by_clause_count() {
     // 0 clauses: inline block.
     assert_eq!(

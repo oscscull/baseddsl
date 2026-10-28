@@ -5,6 +5,8 @@ Follow [upgrading](upgrading.md) for every version change.
 
 ## Unreleased
 
+- `col ~ all $terms` / `col ~ any $terms` match a text column against a `text[]` list
+  of LIKE patterns, on every dialect; an empty list needs no special case.
 - A SQLite migration that rebuilds a table no longer breaks its child tables' foreign
   keys: apply turns foreign keys off around the rebuild and checks them before commit.
 

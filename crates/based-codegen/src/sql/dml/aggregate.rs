@@ -266,14 +266,7 @@ impl<'a> Select<'a> {
                     let rhs = self
                         .having_variant_lit(path, model, value, group_paths)
                         .unwrap_or_else(|| self.value(value, model));
-                    match op {
-                        Op::In => format!("{lhs} IN ({rhs})"),
-                        Op::Has => match self.dialect {
-                            Dialect::Postgres => format!("{lhs} @> {rhs}"),
-                            _ => format!("{rhs} MEMBER OF({lhs})"),
-                        },
-                        _ => format!("{lhs} {} {rhs}", sql_op(*op)),
-                    }
+                    compare_sql(self.dialect, &lhs, *op, &rhs)
                 }
             }
             Predicate::InList { path, values } => {

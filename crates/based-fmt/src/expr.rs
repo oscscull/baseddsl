@@ -103,6 +103,8 @@ pub(crate) fn op_str(op: Op) -> &'static str {
         Op::Ge => ">=",
         Op::Le => "<=",
         Op::Like => "~",
+        Op::LikeAll => "~ all",
+        Op::LikeAny => "~ any",
         Op::In => "in",
         Op::Has => "has",
     }

@@ -54,6 +54,8 @@ mod enum_filters;
 mod filter_projections;
 #[path = "dml/flattening.rs"]
 mod flattening;
+#[path = "dml/like_lists.rs"]
+mod like_lists;
 #[path = "dml/limits.rs"]
 mod limits;
 #[path = "dml/locking.rs"]

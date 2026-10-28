@@ -245,6 +245,7 @@ fn check_errors_name_the_problem_and_line() {
         ("update all card { id = \"x\" } chunk 10", "can't assign `id`"),
         ("update card where (format.any()) { paper = true }", "has no foreign key to `card`"),
         ("update all card { paper = $flag }", "no parameters"),
+        ("update card where (name ~ any \"x%\") { paper = true }", "match a list param"),
     ];
     for (step, want) in cases {
         let up = format!("format 2\n\n{step}\n");

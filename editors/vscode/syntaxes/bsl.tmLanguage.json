@@ -51,6 +51,12 @@
           "name": "keyword.control.bsl"
         },
         {
+          "match": "~\\s*(all|any)\\b",
+          "captures": {
+            "1": { "name": "keyword.operator.word.bsl" }
+          }
+        },
+        {
           "match": "\\b(and|or|not|in|has)\\b",
           "name": "keyword.operator.word.bsl"
         },
