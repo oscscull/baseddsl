@@ -48,14 +48,7 @@ pub(crate) fn render_join_on(
         Predicate::Not(inner) => format!("NOT ({})", recur(inner)),
         Predicate::Cmp { path, op, value } => {
             let (lhs, rhs) = (col(path), val(value));
-            match op {
-                Op::In => format!("{lhs} IN ({rhs})"),
-                Op::Has => match dialect {
-                    Dialect::Postgres => format!("{lhs} @> {rhs}"),
-                    _ => format!("{rhs} MEMBER OF({lhs})"),
-                },
-                _ => format!("{lhs} {} {rhs}", sql_op(*op)),
-            }
+            compare_sql(dialect, &lhs, *op, &rhs)
         }
         Predicate::InList { path, values } => {
             let items: Vec<String> = values.iter().map(&val).collect();

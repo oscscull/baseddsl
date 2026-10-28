@@ -56,6 +56,11 @@ impl Ck<'_> {
                 span_of(path),
                 "`in` takes a value list in a data step: `col in (a, b)`",
             ),
+            Op::LikeAll | Op::LikeAny => self.err(
+                span_of(path),
+                "`~ all` / `~ any` match a list param, which a data step doesn't have — \
+                 combine `~` comparisons with `and` / `or`",
+            ),
             Op::Like if !matches!(lhs, Ty::Col(Fam::Text) | Ty::JsonPath | Ty::Unknown) => {
                 self.err(span_of(path), "`~` (like) needs a text column");
             }

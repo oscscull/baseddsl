@@ -24,6 +24,8 @@ mod json_roundtrip;
 mod key_composite_integration;
 #[path = "key_integration.rs"]
 mod key_integration;
+#[path = "like_list_integration.rs"]
+mod like_list_integration;
 #[path = "migrate_apply.rs"]
 mod migrate_apply;
 #[path = "migrate_data.rs"]

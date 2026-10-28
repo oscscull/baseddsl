@@ -75,6 +75,8 @@ mod inverses;
 mod keyless_models;
 #[path = "check/keys.rs"]
 mod keys;
+#[path = "check/like_lists.rs"]
+mod like_lists;
 #[path = "check/limits.rs"]
 mod limits;
 #[path = "check/lints.rs"]

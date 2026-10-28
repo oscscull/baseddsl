@@ -31,6 +31,7 @@ pub(crate) fn check_query(q: &Query, cx: &Cx, sink: &mut Sink) -> Option<RQuery>
         check_param(p, ti, infer, cx, sink);
     }
     check_optional_params(q, verb, sink);
+    check_like_list_params(&q.params, query_predicates(q), cx, sink);
     check_optional_ctx_query(q, sink);
     // A raw body writes its own projection, so it binds no shape `$p`.
     if let (Some(shape), false) = (ret.shape.as_deref(), matches!(q.body, QueryBody::Raw(_))) {

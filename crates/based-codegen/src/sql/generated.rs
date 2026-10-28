@@ -143,6 +143,8 @@ fn dsl_op(op: based_ast::Op) -> &'static str {
         Op::Ge => ">=",
         Op::Le => "<=",
         Op::Like => "~",
+        Op::LikeAll => "~ all",
+        Op::LikeAny => "~ any",
         Op::In => "in",
         Op::Has => "has",
     }
@@ -230,11 +232,10 @@ fn gen_cmp(
         };
     }
     let rhs = gen_cmp_rhs(schema, model, path, value, emit);
-    let op_s = match emit {
-        Emit::Sql(_) => dml::sql_op(op),
-        Emit::Neutral => dsl_op(op),
-    };
-    format!("{lhs} {op_s} {rhs}")
+    match emit {
+        Emit::Sql(d) => dml::compare_sql(d, &lhs, op, &rhs),
+        Emit::Neutral => format!("{lhs} {} {rhs}", dsl_op(op)),
+    }
 }
 
 /// A generated-column comparison RHS: an enum column's bare variant resolves to its wire

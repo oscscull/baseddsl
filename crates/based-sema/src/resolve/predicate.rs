@@ -67,16 +67,21 @@ pub(crate) fn check_cmp_types(
 
     // 1. Operator applicability on the left operand.
     match op {
-        Op::Like => {
+        Op::Like | Op::LikeAll | Op::LikeAny => {
             if !matches!(lhs, Terminal::Scalar(Primitive::Text)) {
                 sink.error(
                     code::OP_TYPE,
                     span,
                     format!(
-                        "`~` (like) needs a text column, but {} is not text",
+                        "`{}` (like) needs a text column, but {} is not text",
+                        op_sym(op),
                         terminal_name(&lhs)
                     ),
                 );
+                return;
+            }
+            if op != Op::Like {
+                check_like_list_operand(op, value, span, sink);
                 return;
             }
         }
@@ -130,6 +135,20 @@ pub(crate) fn check_cmp_types(
             ),
         );
     }
+}
+
+/// `~ all` / `~ any` match a runtime pattern list, so the right operand is a list param
+/// (its `text[]` type is checked per callable, where param types are known).
+fn check_like_list_operand(op: Op, value: &Value, span: Span, sink: &mut Sink) {
+    if matches!(value, Value::Param(pr) if pr.name.node != "ctx") {
+        return;
+    }
+    sink.error_note(
+        code::OP_TYPE,
+        span,
+        format!("`{}` needs a list param on its right", op_sym(op)),
+        "pass the patterns as a `text[]` param, e.g. `body ~ all $terms`; for one pattern use `~`",
+    );
 }
 
 /// Type-check one `in` value-list element: unlike the single-bind `in $param`
@@ -187,6 +206,8 @@ pub(crate) fn op_sym(op: Op) -> &'static str {
         Op::Ge => ">=",
         Op::Le => "<=",
         Op::Like => "~",
+        Op::LikeAll => "~ all",
+        Op::LikeAny => "~ any",
         Op::In => "in",
         Op::Has => "has",
     }

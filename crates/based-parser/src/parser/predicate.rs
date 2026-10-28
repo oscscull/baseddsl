@@ -124,7 +124,10 @@ impl<'a> Parser<'a> {
             Some(Tok::Lt) => Op::Lt,
             Some(Tok::Ge) => Op::Ge,
             Some(Tok::Le) => Op::Le,
-            Some(Tok::Tilde) => Op::Like,
+            Some(Tok::Tilde) => {
+                self.bump();
+                return Ok(self.like_quantifier());
+            }
             Some(Tok::LowerIdent) => match self.ident_at(0) {
                 Some("in") => Op::In,
                 Some("has") => Op::Has,
@@ -140,5 +143,21 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         Ok(op)
+    }
+
+    /// After `~`: `all` / `any` quantifies over a pattern list when an operand follows it
+    /// (`~ all $terms`, a binding's `~ any col`); otherwise it is a column named `all`/`any`.
+    fn like_quantifier(&mut self) -> Op {
+        let operand_follows = matches!(
+            self.tok_at(1),
+            Some(Tok::Dollar | Tok::Str | Tok::Int | Tok::Float | Tok::Minus)
+        ) || matches!(self.ident_at(1), Some(w) if !matches!(w, "and" | "or" | "then"));
+        let op = match self.ident_at(0) {
+            Some("all") if operand_follows => Op::LikeAll,
+            Some("any") if operand_follows => Op::LikeAny,
+            _ => return Op::Like,
+        };
+        self.bump();
+        op
     }
 }

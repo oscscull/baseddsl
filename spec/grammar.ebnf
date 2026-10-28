@@ -424,6 +424,8 @@ filter_call = filter_name [ '(' [ value { ',' value } ] ')' ] ;
 
 op          = '=' | '!=' | '>' | '<' | '>=' | '<='
             | '~'                       (* like                                 *)
+            | '~' 'all'                 (* like every pattern of a text[] param *)
+            | '~' 'any'                 (* like any pattern of a text[] param   *)
             | 'in'
             | 'has' ;                   (* array/json containment               *)
 

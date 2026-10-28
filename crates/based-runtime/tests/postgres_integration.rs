@@ -177,6 +177,8 @@ mod backend;
 mod composite_fk_aliases;
 #[path = "postgres_integration/hardening.rs"]
 mod hardening;
+#[path = "postgres_integration/like_lists.rs"]
+mod like_lists;
 #[path = "postgres_integration/locking_and_adopt.rs"]
 mod locking_and_adopt;
 #[path = "postgres_integration/mutations.rs"]
