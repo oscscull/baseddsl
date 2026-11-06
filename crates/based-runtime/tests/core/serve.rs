@@ -354,6 +354,49 @@ async fn db_fault_maps_to_503() {
     assert_eq!(resp.body["error"]["message"], "connection reset by peer");
 }
 
+/// An integrity violation is a non-retryable caller error with its own stable code:
+/// `409` for a clash with stored rows, `422` for a value the column rejects.
+#[tokio::test]
+async fn integrity_violations_map_to_caller_errors() {
+    use based_runtime::{DbError, DbErrorKind};
+
+    let c = compile(SCHEMA);
+    for (kind, status, code) in [
+        (DbErrorKind::UniqueViolation, 409, "unique_violation"),
+        (
+            DbErrorKind::ForeignKeyViolation,
+            409,
+            "foreign_key_violation",
+        ),
+        (DbErrorKind::NotNullViolation, 422, "not_null_violation"),
+        (DbErrorKind::CheckViolation, 422, "check_violation"),
+    ] {
+        let db = MockDb::failing_with(DbError::of(kind, "constraint failed: order.status"));
+        let ids = SeqIdGen::default();
+        let resp = dispatch(
+            &c,
+            &db,
+            "",
+            &ids,
+            &NoStore,
+            &Guards::new(),
+            None,
+            "POST",
+            "/m/place_order",
+            json!({ "org": "org-1", "status": "open", "total": 1 }),
+            json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status, status, "{code}");
+        assert_eq!(resp.body["error"]["code"], code);
+        assert_eq!(
+            resp.body["error"]["message"],
+            "constraint failed: order.status"
+        );
+    }
+}
+
 /// A malformed route path is a 404 `not_found`; a non-POST method is 405.
 #[tokio::test]
 async fn bad_route_and_method() {

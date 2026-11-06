@@ -766,6 +766,52 @@ async fn ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite<B: L
     assert_eq!(err.code(), "not_found");
 }
 
+/// A write that duplicates a stored key is a caller error: a non-retryable `409
+/// unique_violation` naming the column, never the retryable `503` of an outage.
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+async fn duplicate_key_is_a_409_unique_violation_on_live_sqlite<B: LiveSqlite>() {
+    use based_codegen::{sql, Dialect};
+
+    let sf = based_parser::parse_file(SCHEMA, FileId(0)).expect("parse");
+    let (schema, _) = based_sema::check(&sf.decls);
+    let compiled = Compiled::from_checked(schema, sf.decls, Dialect::Sqlite);
+
+    let backend = B::in_memory();
+    backend
+        .execute_batch(&sql::ddl(&compiled.schema, Dialect::Sqlite))
+        .await
+        .expect("generated DDL");
+    // `SeqIdGen` mints `id-0` first, so the create collides with this row's key.
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `org` (`id`, `name`) VALUES ('org-1', 'Acme');
+            INSERT INTO `order` (`id`, `org_id`, `status`, `total`) VALUES
+                ('id-0', 'org-1', 'open', 10);
+            "#,
+        )
+        .await
+        .expect("seed fixtures");
+
+    let engine = Engine::new(compiled, backend, SeqIdGen::default());
+    let api = client::embedded(&engine);
+
+    let err = api
+        .place_order(
+            client::PlaceOrderInput {
+                org: client::Id::from_raw("org-1"),
+                status: "new".into(),
+                total: 5,
+            },
+            (),
+        )
+        .await
+        .expect_err("a duplicate key is rejected");
+    assert_eq!(err.status(), Some(409), "{err}");
+    assert_eq!(err.code(), "unique_violation");
+    assert!(err.message().contains("order.id"), "{err}");
+}
+
 // ---------- transactions: read-decide-write seam (transactions.md) ----------
 
 /// `transaction_retrying` re-runs the whole closure on a classified serialization/deadlock
@@ -1232,6 +1278,7 @@ on_each_sqlite_driver!(
     dropping_the_typed_stream_releases_the_connection,
     keyed_mutation_has_no_double_effect_on_live_sqlite,
     ack_delete_round_trips_and_missing_row_is_not_found_on_live_sqlite,
+    duplicate_key_is_a_409_unique_violation_on_live_sqlite,
     managed_transaction_commits_read_decide_write_on_live_sqlite,
     managed_transaction_rolls_back_on_err_on_live_sqlite,
     explicit_transaction_handle_commits_and_rolls_back_on_live_sqlite,

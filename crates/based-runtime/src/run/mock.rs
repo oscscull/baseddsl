@@ -24,9 +24,15 @@ impl MockDb {
 
     /// A mock whose every `fetch`/`execute` fails with `message` (the DB-fault path).
     pub fn failing(message: impl Into<String>) -> Self {
+        Self::failing_with(DbError::new(message))
+    }
+
+    /// A mock whose every `fetch`/`execute` fails with `error` — a classified failure
+    /// such as a constraint violation.
+    pub fn failing_with(error: DbError) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(MockState {
-                fail: Some(message.into()),
+                fail: Some(error),
                 ..MockState::default()
             })),
         }
@@ -74,7 +80,7 @@ impl MockDb {
         let mut st = self.state.lock().unwrap();
         st.calls.push((sql.to_string(), params.to_vec()));
         match &st.fail {
-            Some(m) => Err(DbError::new(m.clone())),
+            Some(e) => Err(e.clone()),
             None => Ok(()),
         }
     }
@@ -184,7 +190,7 @@ struct MockState {
     responses: std::collections::VecDeque<Vec<Row>>,
     calls: Vec<(String, Vec<SqlValue>)>,
     tx: Vec<&'static str>,
-    fail: Option<String>,
+    fail: Option<DbError>,
     /// `fetch` yields its batch, then this failure — the stream-broke-late case.
     fail_mid_stream: Option<String>,
     /// What every `execute` reports as rows affected (default 0).

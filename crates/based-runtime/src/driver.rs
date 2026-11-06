@@ -44,14 +44,17 @@ pub use crate::shard::{PoolConfig, ShardId};
 
 /// MariaDB deadlock (1213, `ER_LOCK_DEADLOCK`) and lock-wait timeout (1205,
 /// `ER_LOCK_WAIT_TIMEOUT`): the server rolled the transaction back for lock contention, so
-/// the mutation path may retry it. Everything else is an opaque operational `503`.
+/// the mutation path may retry it. A constraint violation (1062 duplicate key, …) is its
+/// integrity kind; everything else is an opaque operational `503`.
 fn map_mysql_err(e: sqlx::Error) -> DbError {
     let kind = match e
         .as_database_error()
         .and_then(|d| d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
     {
         Some(se) if se.number() == 1213 || se.number() == 1205 => DbErrorKind::Deadlock,
-        _ => DbErrorKind::Other,
+        // MariaDB's `ER_CONSTRAINT_FAILED`; sqlx knows only MySQL's 3819.
+        Some(se) if se.number() == 4025 => DbErrorKind::CheckViolation,
+        _ => crate::sqlx_integrity::integrity_kind(&e).unwrap_or(DbErrorKind::Other),
     };
     DbError::of(kind, e.to_string())
 }

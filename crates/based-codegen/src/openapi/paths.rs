@@ -80,18 +80,23 @@ fn augment_mutation(
         "404".to_string(),
         error_response("No such mutation, or the write matched no row (absent or out of scope)."),
     );
-    // Mutations may carry the idempotency key; the 409/422 outcomes exist only
-    // for a keyed write.
+    // A write the data's constraints reject, or an idempotency-key outcome.
     parameters.push(json!({ "$ref": "#/components/parameters/IdempotencyKey" }));
     responses.insert(
         "409".to_string(),
         error_response(
-            "A request with this idempotency key is still in flight; retry once it settles.",
+            "The write duplicates a unique value (`unique_violation`) or breaks a reference \
+             (`foreign_key_violation`); or a request with this idempotency key is still in \
+             flight (`idempotency_conflict`) — retry once it settles.",
         ),
     );
     responses.insert(
         "422".to_string(),
-        error_response("This idempotency key was already used for a different request."),
+        error_response(
+            "The write leaves a required column null (`not_null_violation`) or fails a check \
+             (`check_violation`); or this idempotency key was already used for a different \
+             request (`idempotency_key_reuse`).",
+        ),
     );
     // A guarded mutation can be denied by its host guard before the write runs.
     if let Some(g) = schema

@@ -45,19 +45,19 @@ const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// [`SqliteBackend::open_with_pool`].
 const DEFAULT_FILE_POOL: u32 = 5;
 
-/// Map a sqlx error to the runtime's [`DbError`] (→ the wire's retryable `503`). A
-/// `SQLITE_BUSY` (5) / `SQLITE_LOCKED` (6) — a writer lost the lock race after the busy
-/// timeout — is a deadlock-class failure the mutation path may retry; everything else is
-/// opaque.
+/// Map a sqlx error to the runtime's [`DbError`]. A `SQLITE_BUSY` (5) / `SQLITE_LOCKED`
+/// (6) — a writer lost the lock race after the busy timeout — is a deadlock-class failure
+/// the mutation path may retry; a constraint violation is its integrity kind; everything
+/// else is opaque.
 fn map_sqlite_err(e: sqlx::Error) -> DbError {
-    let kind = match e
+    let code = e
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
-        .and_then(|c| c.parse::<i64>().ok())
-    {
+        .and_then(|c| c.parse::<i64>().ok());
+    let kind = match code {
         // Extended result codes carry the primary code in the low byte.
         Some(code) if code & 0xff == 5 || code & 0xff == 6 => DbErrorKind::Deadlock,
-        _ => DbErrorKind::Other,
+        _ => crate::sqlx_integrity::integrity_kind(&e).unwrap_or(DbErrorKind::Other),
     };
     DbError::of(kind, e.to_string())
 }
