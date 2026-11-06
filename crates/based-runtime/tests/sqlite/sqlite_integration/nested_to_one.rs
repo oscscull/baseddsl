@@ -197,3 +197,78 @@ async fn absent_optional_to_one_nest_is_json_null() {
         "a matched optional nest sheds the presence probe"
     );
 }
+
+/// A required relation nested under an optional one keeps every outer row: a report
+/// with no post, or whose post's author is soft-deleted, comes back with `post: null`.
+#[tokio::test]
+async fn required_nest_under_absent_optional_nest_keeps_the_row() {
+    let c = compile_sqlite(
+        r#"
+        @soft_delete(deleted_at)
+        User { id: Id, deleted_at: timestamp?, name: text }
+        Post { id: Id, title: text, author: User }
+        @sort(id asc)
+        Report { id: Id, message: text, post: Post? }
+        shape UserRef from User { id, name }
+        shape PostRef from Post { id, title, author -> UserRef }
+        shape ReportRow from Report { id, message, post -> PostRef }
+        query reports() -> ReportRow[] { list Report; }
+        query reports_by_author(name: text) -> ReportRow[] {
+          list Report where (post.author.name = $name);
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("generated DDL failed: {e:?}\n{ddl}"));
+    backend
+        .execute_batch(
+            r#"
+            INSERT INTO `user` (`id`, `deleted_at`, `name`) VALUES
+                ('u1', NULL, 'Ada'), ('u2', '2026-01-01T00:00:00.000000Z', 'Gone');
+            INSERT INTO `post` (`id`, `title`, `author_id`) VALUES
+                ('p1', 'Hello', 'u1'), ('p2', 'Orphaned', 'u2');
+            INSERT INTO `report` (`id`, `message`, `post_id`) VALUES
+                ('r1', 'no post', NULL), ('r2', 'has post', 'p1'), ('r3', 'deleted author', 'p2');
+            "#,
+        )
+        .await
+        .expect("seed");
+
+    let all = call(&c, &backend, "POST", "/q/reports", json!({}), json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        all.body,
+        json!([
+            { "id": "r1", "message": "no post", "post": null },
+            {
+                "id": "r2",
+                "message": "has post",
+                "post": { "id": "p1", "title": "Hello", "author": { "id": "u1", "name": "Ada" } },
+            },
+            { "id": "r3", "message": "deleted author", "post": null },
+        ])
+    );
+
+    let by_author = call(
+        &c,
+        &backend,
+        "POST",
+        "/q/reports_by_author",
+        json!({ "name": "Ada" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(by_author.status, 200, "{:?}", by_author.body);
+    let ids: Vec<&str> = by_author
+        .body
+        .as_array()
+        .expect("report list")
+        .iter()
+        .map(|r| r["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["r2"]);
+}

@@ -13,21 +13,66 @@ pub(crate) struct Join {
     pub(crate) schema: Option<String>,
     pub(crate) alias: String,
     pub(crate) on: String,
+    /// Alias of the join this one hangs off, so a required join beneath an optional one
+    /// renders inside that optional join's group. `None` at the root and in a write's join.
+    pub(crate) parent: Option<String>,
 }
 
 /// Append each accumulated join to a statement (`<kind> <table> AS <alias> ON <on>`),
 /// identifiers quoted for the dialect. Shared by the read side (SELECT/COUNT) and the
 /// write side (`mutations`'s multi-table UPDATE/DELETE) so the two can't drift.
+///
+/// An optional join with a required join beneath it renders as one group,
+/// `LEFT JOIN (<t> AS <a> JOIN … ) ON <on>`, so a missing optional row (or a missing
+/// required row under it) nulls the whole branch and keeps the outer row.
 pub(crate) fn push_joins(s: &mut String, dialect: Dialect, joins: &[Join]) {
-    for j in joins {
-        s.push_str(&format!(
-            "\n{} {} AS {} ON {}",
-            j.kind,
-            dialect.quote_table(j.schema.as_deref(), &j.table),
-            dialect.quote(&j.alias),
-            j.on
-        ));
+    let mut done = vec![false; joins.len()];
+    for i in 0..joins.len() {
+        if !done[i] {
+            push_join(s, dialect, joins, i, &mut done);
+        }
     }
+}
+
+/// Render join `i`, grouping its descendants with it when it opens an optional branch.
+fn push_join(s: &mut String, dialect: Dialect, joins: &[Join], i: usize, done: &mut [bool]) {
+    done[i] = true;
+    let j = &joins[i];
+    let table = format!(
+        "{} AS {}",
+        dialect.quote_table(j.schema.as_deref(), &j.table),
+        dialect.quote(&j.alias)
+    );
+    let groups = j.kind == "LEFT JOIN"
+        && joins
+            .iter()
+            .any(|c| c.kind == "JOIN" && c.parent.as_deref() == Some(j.alias.as_str()));
+    if !groups {
+        s.push_str(&format!("\n{} {table} ON {}", j.kind, j.on));
+        return;
+    }
+    let mut inner = table;
+    for k in i + 1..joins.len() {
+        if !done[k] && descends_from(joins, k, &j.alias) {
+            push_join(&mut inner, dialect, joins, k, done);
+        }
+    }
+    s.push_str(&format!("\nLEFT JOIN ({inner}) ON {}", j.on));
+}
+
+/// Whether join `k` sits beneath the join aliased `ancestor`.
+fn descends_from(joins: &[Join], k: usize, ancestor: &str) -> bool {
+    let mut parent = joins[k].parent.as_deref();
+    while let Some(p) = parent {
+        if p == ancestor {
+            return true;
+        }
+        parent = joins
+            .iter()
+            .find(|j| j.alias == p)
+            .and_then(|j| j.parent.as_deref());
+    }
+    false
 }
 
 /// Extend the dotted join-path prefix key (`address` + `city` -> `address.city`), the key
@@ -143,6 +188,7 @@ impl<'a> Select<'a> {
             alias.clone(),
             on,
             prefix,
+            cur_alias,
         );
         (alias, tmodel)
     }
@@ -199,12 +245,15 @@ impl<'a> Select<'a> {
             alias.clone(),
             on,
             prefix,
+            cur_alias,
         );
         (alias, tmodel)
     }
 
-    /// Record a materialized join, keyed by its path prefix so the next reach through the
-    /// same path reuses it.
+    /// Record a materialized join hanging off `parent_alias`, keyed by its path prefix so
+    /// the next reach through the same path reuses it. A write keeps its joins flat, since
+    /// its `where` only narrows the target rows.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record(
         &mut self,
         kind: &'static str,
@@ -213,14 +262,17 @@ impl<'a> Select<'a> {
         alias: String,
         on: String,
         prefix: &str,
+        parent_alias: &str,
     ) {
         self.seen.insert(prefix.to_string(), alias.clone());
+        let parent = self.write_table.is_none().then(|| parent_alias.to_string());
         self.joins.push(Join {
             kind,
             table,
             schema,
             alias,
             on,
+            parent,
         });
     }
 }
