@@ -3,7 +3,7 @@
 Each release has a section here; its archive and GitHub release carry that section.
 Follow [upgrading](upgrading.md) for every version change.
 
-## Unreleased
+## 1.0.1
 
 - `col ~ all $terms` / `col ~ any $terms` match a text column against a `text[]` list
   of LIKE patterns, on every dialect; an empty list needs no special case.
@@ -12,7 +12,12 @@ Follow [upgrading](upgrading.md) for every version change.
 - A write the database's constraints reject is a caller error instead of a retryable
   `503 database_error`: `409 unique_violation` / `foreign_key_violation`, `422
   not_null_violation` / `check_violation`, on every dialect and client.
-- A read that nests a required relation under an optional one keeps rows whose optional relation is missing or deleted, returning it as `null`.
+- A read that nests a required relation under an optional one keeps rows whose optional
+  relation is missing or deleted, returning it as `null`.
+- On SQLite, `delete` and `update` whose `where` follows a relation emit SQL SQLite
+  accepts.
+- A model's own primary key compares with a value typed as that model, such as
+  `id = $ctx.user`.
 - `date(x)` / `week(x)` bucket a timestamp by UTC day or ISO week (Monday), as a `date`
   shape field and a `group by` key, on every dialect.
 
