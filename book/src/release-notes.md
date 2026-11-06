@@ -12,6 +12,7 @@ Follow [upgrading](upgrading.md) for every version change.
 - A write the database's constraints reject is a caller error instead of a retryable
   `503 database_error`: `409 unique_violation` / `foreign_key_violation`, `422
   not_null_violation` / `check_violation`, on every dialect and client.
+- A read that nests a required relation under an optional one keeps rows whose optional relation is missing or deleted, returning it as `null`.
 
 ## 1.0.0
 

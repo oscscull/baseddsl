@@ -182,3 +182,124 @@ fn nest_ref_recurses_through_named_shapes() {
         "\n{ddl}"
     );
 }
+
+// ---------- required joins beneath an optional one ---------------------------
+
+const REPORTS: &str = r#"
+    User { id: Id, name: text }
+    Post { id: Id, title: text, author: User }
+    @sort(id asc)
+    Report { id: Id, message: text, post: Post? }
+    shape UserRef from User { id, name }
+    shape PostRef from Post { id, title, author -> UserRef }
+    shape ReportRow from Report { id, message, post -> PostRef }
+    query reports() -> ReportRow[] { list Report; }
+    query reports_by_author(name: text) -> ReportRow[] {
+      list Report where (post.author.name = $name);
+    }
+    "#;
+
+const GROUPED_BACKTICK: &str = "LEFT JOIN (`post` AS `j_post`\nJOIN `user` AS `j_post_author` ON \
+     `j_post_author`.`id` = `j_post`.`author_id`) ON `j_post`.`id` = `report`.`post_id`";
+
+#[test]
+fn required_join_under_optional_one_groups_into_the_left_join() {
+    // An inner join against the optional join's NULL side would drop every report
+    // without a post, so the author join renders inside the post join's group.
+    let my = gen(REPORTS);
+    let q = query_section(&my, "reports");
+    assert!(q.contains(GROUPED_BACKTICK), "\n{q}");
+    assert!(q.contains("`j_post`.`id` AS `post.__present`"), "\n{q}");
+    assert!(!q.contains("`post.author.__present`"), "\n{q}");
+
+    let lite = gen_for(REPORTS, Dialect::Sqlite);
+    let q = query_section(&lite, "reports");
+    assert!(q.contains(GROUPED_BACKTICK), "\n{q}");
+
+    let pg = gen_pg(REPORTS);
+    let q = query_section(&pg, "reports");
+    assert!(
+        q.contains(
+            "LEFT JOIN (\"post\" AS \"j_post\"\nJOIN \"user\" AS \"j_post_author\" ON \
+             \"j_post_author\".\"id\" = \"j_post\".\"author_id\") ON \
+             \"j_post\".\"id\" = \"report\".\"post_id\""
+        ),
+        "\n{q}"
+    );
+}
+
+#[test]
+fn filter_through_optional_then_required_path_uses_the_grouped_join() {
+    // The filter reads the grouped author column; a report without a post has a NULL
+    // name there, which the comparison excludes.
+    let ddl = gen(REPORTS);
+    let q = query_section(&ddl, "reports_by_author");
+    assert!(q.contains(GROUPED_BACKTICK), "\n{q}");
+    assert!(q.contains("`j_post_author`.`name` = :name"), "\n{q}");
+    assert_eq!(q.matches("AS `j_post_author`").count(), 1, "\n{q}");
+}
+
+#[test]
+fn soft_deleted_required_join_under_optional_one_stays_in_the_group() {
+    // A tombstoned author nulls the whole post branch and keeps the report.
+    let ddl = gen(r#"
+        @soft_delete(deleted_at)
+        User { id: Id, deleted_at: timestamp?, name: text }
+        @soft_delete(deleted_at)
+        Post { id: Id, deleted_at: timestamp?, title: text, author: User }
+        @sort(id asc)
+        Report { id: Id, message: text, post: Post? }
+        shape ReportRow from Report { id, post { title, author { name } } }
+        query reports() -> ReportRow[] { list Report; }
+        "#);
+    assert!(
+        ddl.contains(
+            "LEFT JOIN (`post` AS `j_post`\nJOIN `user` AS `j_post_author` ON \
+             `j_post_author`.`id` = `j_post`.`author_id` AND `j_post_author`.`deleted_at` IS NULL) \
+             ON `j_post`.`id` = `report`.`post_id` AND `j_post`.`deleted_at` IS NULL"
+        ),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn required_join_under_optional_one_groups_inside_a_json_array() {
+    let ddl = gen(r#"
+        User { id: Id, name: text, reports: Report[] (Report.filed_by) }
+        Post { id: Id, title: text, author: User }
+        @sort(id asc)
+        Report { id: Id, filed_by: User, post: Post? }
+        shape ReportRow from Report { id, post { title, author { name } } }
+        shape UserReports from User { name, reports -> ReportRow }
+        query user_reports(id) -> UserReports;
+        "#);
+    assert!(
+        ddl.contains("LEFT JOIN (`post` AS `j_post`\nJOIN `user` AS `j_post_author` ON"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("CASE WHEN `j_post`.`id` IS NULL THEN NULL ELSE"),
+        "\n{ddl}"
+    );
+}
+
+#[test]
+fn optional_join_under_an_optional_one_stays_ungrouped() {
+    // A LEFT join beneath a LEFT join already keeps the outer row.
+    let ddl = gen(r#"
+        User { id: Id, name: text }
+        Post { id: Id, title: text, editor: User? }
+        @sort(id asc)
+        Report { id: Id, post: Post? }
+        shape ReportRow from Report { id, post { title, editor { name } } }
+        query reports() -> ReportRow[] { list Report; }
+        "#);
+    assert!(
+        ddl.contains("LEFT JOIN `post` AS `j_post` ON `j_post`.`id` = `report`.`post_id`"),
+        "\n{ddl}"
+    );
+    assert!(
+        ddl.contains("LEFT JOIN `user` AS `j_post_editor` ON"),
+        "\n{ddl}"
+    );
+}
