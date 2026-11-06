@@ -40,14 +40,15 @@ use crate::value::SqlValue;
 /// Postgres deadlock (`40P01`, `deadlock_detected`) and serialization failure (`40001`): the
 /// server rolled the transaction back for a concurrency conflict, so the mutation path may
 /// retry it. A `statement_timeout` cancel (`57014`) is not retried — re-running would just
-/// time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`.
+/// time out again — so it stays [`Other`](DbErrorKind::Other) → an opaque `503`. A
+/// constraint violation (`23505` unique, …) is its integrity kind.
 fn map_pg_err(e: sqlx::Error) -> DbError {
     let kind = match e
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
     {
         Some(c) if c == "40P01" || c == "40001" => DbErrorKind::Deadlock,
-        _ => DbErrorKind::Other,
+        _ => crate::sqlx_integrity::integrity_kind(&e).unwrap_or(DbErrorKind::Other),
     };
     DbError::of(kind, e.to_string())
 }

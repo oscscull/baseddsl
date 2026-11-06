@@ -33,8 +33,8 @@
 //! ## Wire + driver
 //! [`serve::dispatch`] is the wire surface: it routes `POST /q|m/<name>` → the callable,
 //! runs it, and maps every outcome to a [`serve::WireResponse`] — a pure core testable
-//! against [`run::MockDb`]. A [`plan::PlanError`] maps to `4xx`, a [`run::DbError`] to a
-//! retryable `503`.
+//! against [`run::MockDb`]. A [`plan::PlanError`] maps to `4xx`; a [`run::DbError`] maps to
+//! a retryable `503`, or to `409`/`422` when the write broke an integrity constraint.
 //!
 //! Execution is native async over the [`run::DbRead`]/[`run::Db`]/[`run::Tx`]/
 //! [`run::Backend`] traits: `fetch` returns a row stream, and a transaction is a consuming
@@ -84,6 +84,9 @@ pub mod sqlite;
 
 #[cfg(feature = "sqlite-rusqlite")]
 pub mod sqlite_rusqlite;
+
+#[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
+mod sqlx_integrity;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;

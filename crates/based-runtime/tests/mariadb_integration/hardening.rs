@@ -129,3 +129,54 @@ async fn cross_lock(
     tx.commit().await?;
     Ok(())
 }
+
+/// Each integrity violation classifies as its own kind, live: a caller error (`409`/`422`)
+/// the wire never reports as the retryable `503` of an outage.
+#[tokio::test]
+async fn constraint_violations_classify_by_kind() {
+    let Some((router, container)) = hardening(PoolConfig::default()).await else {
+        return;
+    };
+    container
+        .exec_batch(
+            "DROP TABLE IF EXISTS `member`;\n\
+             DROP TABLE IF EXISTS `team`;\n\
+             CREATE TABLE `team` (`id` VARCHAR(16) PRIMARY KEY);\n\
+             CREATE TABLE `member` (\n\
+               `id` VARCHAR(16) PRIMARY KEY,\n\
+               `email` VARCHAR(64) NOT NULL UNIQUE,\n\
+               `age` INT CHECK (`age` >= 0),\n\
+               `team_id` VARCHAR(16),\n\
+               FOREIGN KEY (`team_id`) REFERENCES `team` (`id`)\n\
+             );\n\
+             INSERT INTO `team` (`id`) VALUES ('t');\n\
+             INSERT INTO `member` (`id`, `email`, `age`, `team_id`) VALUES ('m', 'a@x', 1, 't');",
+        )
+        .await;
+    for (sql, kind) in [
+        (
+            "INSERT INTO `member` (`id`, `email`) VALUES ('m2', 'a@x')",
+            DbErrorKind::UniqueViolation,
+        ),
+        (
+            "INSERT INTO `member` (`id`, `email`) VALUES ('m', 'b@x')",
+            DbErrorKind::UniqueViolation,
+        ),
+        (
+            "INSERT INTO `member` (`id`, `email`, `team_id`) VALUES ('m3', 'c@x', 'nope')",
+            DbErrorKind::ForeignKeyViolation,
+        ),
+        (
+            "INSERT INTO `member` (`id`, `email`) VALUES ('m4', NULL)",
+            DbErrorKind::NotNullViolation,
+        ),
+        (
+            "INSERT INTO `member` (`id`, `email`, `age`) VALUES ('m5', 'e@x', -1)",
+            DbErrorKind::CheckViolation,
+        ),
+    ] {
+        let mut db = router.checkout("").await.expect("checkout");
+        let err = db.execute(sql, &[]).await.expect_err(sql);
+        assert_eq!(err.kind, kind, "{sql}: {}", err.message);
+    }
+}

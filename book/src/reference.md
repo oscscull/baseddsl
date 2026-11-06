@@ -459,3 +459,17 @@ transparent over the wire. `page` returns `{ rows, cursor }` (+ `total` with cou
 Every Rust client also carries `client::fixtures`, typed test-row builders
 (`fixtures::order(&org, &buyer).insert(&api)`); TypeScript gets the same builders from
 `based gen fixtures --lang ts -o <path>`. See [test fixtures](fixtures.md).
+
+A failed call carries an HTTP status and a stable `code` (`ClientError::status()` / `code()`;
+the same envelope over HTTP). A write the database's constraints reject is a caller error, so
+retrying it cannot succeed:
+
+| Status | Code | Cause |
+|---|---|---|
+| 409 | `unique_violation` | duplicate unique or primary key value |
+| 409 | `foreign_key_violation` | reference to a missing row, or removal of a referenced row |
+| 422 | `not_null_violation` | null in a non-nullable column |
+| 422 | `check_violation` | value fails a check constraint |
+| 503 | `database_error`, `deadlock`, `pool_exhausted` | operational fault; retryable |
+
+The message is the database's, naming the column or constraint.

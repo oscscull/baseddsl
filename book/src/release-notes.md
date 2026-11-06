@@ -9,6 +9,9 @@ Follow [upgrading](upgrading.md) for every version change.
   of LIKE patterns, on every dialect; an empty list needs no special case.
 - A SQLite migration that rebuilds a table no longer breaks its child tables' foreign
   keys: apply turns foreign keys off around the rebuild and checks them before commit.
+- A write the database's constraints reject is a caller error instead of a retryable
+  `503 database_error`: `409 unique_violation` / `foreign_key_violation`, `422
+  not_null_violation` / `check_violation`, on every dialect and client.
 
 ## 1.0.0
 

@@ -4,7 +4,8 @@
 use super::*;
 
 /// The error envelope schema: `{ "error": { code, message } }` — exactly what
-/// `serve::dispatch` returns for a boundary (`4xx`) or database (`503`) failure.
+/// `serve::dispatch` returns for a boundary (`4xx`), constraint (`409`/`422`), or
+/// database (`503`) failure.
 pub(crate) fn error_schema() -> Value {
     json!({
         "type": "object",

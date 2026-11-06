@@ -154,11 +154,10 @@ pub(crate) fn run_result_to_response(result: Result<serde_json::Value, RunError>
     match result {
         Ok(body) => WireResponse::ok(body),
         Err(RunError::Plan(e)) => plan_error_response(e),
-        // The database failed (connection, timeout, deadlock, a shard down, pool
-        // exhausted). The SQL is machine-generated from a checked schema, so this is
-        // overwhelmingly operational, not a query bug → a retryable 503 (the client /
-        // LB can retry, another shard's traffic is unaffected).
-        Err(RunError::Db(e)) => WireResponse::error(503, e.code(), e.message),
+        // An operational fault (connection, timeout, deadlock, a shard down, pool
+        // exhausted) is a retryable 503; a write the data's constraints reject (duplicate
+        // unique value, dangling reference, …) is a caller error the retry cannot fix.
+        Err(RunError::Db(e)) => WireResponse::error(e.status(), e.code(), e.message),
         // The mutation's `where` (with its scope/soft-delete guards) matched no row —
         // nothing was written. 404: the caller named a row that does not exist for them
         // (same response whether the row is absent or out of scope, so existence never
@@ -218,7 +217,7 @@ pub async fn dispatch_stream(
     }
     let db = match backend.checkout(shard_key).await {
         Ok(db) => db,
-        Err(e) => return Err(WireResponse::error(503, e.code(), e.message)),
+        Err(e) => return Err(WireResponse::error(e.status(), e.code(), e.message)),
     };
     run_query_stream(compiled, db, &Request::new(name, args, ctx)).map_err(plan_error_response)
 }
