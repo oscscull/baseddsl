@@ -207,6 +207,153 @@ fn ctx_conflict_within_one_callable_errors() {
 }
 
 #[test]
+fn ctx_model_key_matches_that_models_own_id() {
+    // A `User` key compared with `User.id` is the same value as the scope's `User` key, so
+    // the mutation requires `$ctx.user` once, still typed as the model key.
+    let (schema, d) = analyze(
+        r#"
+        scope Owner (user: User = $ctx.user)
+        User { id: uuid  session_version: int }
+        @scope Owner
+        Deck { id: uuid  user: User  @index(user) }
+
+        mutation drop_me() -> ok scoped Owner {
+          tx {
+            delete Deck where (user = $ctx.user);
+            delete User where (id = $ctx.user);
+          }
+        }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let m = schema
+        .mutations
+        .iter()
+        .find(|m| m.name == "drop_me")
+        .unwrap();
+    let user: Vec<_> = m
+        .ctx_requires
+        .iter()
+        .filter(|r| r.field == "user")
+        .collect();
+    assert_eq!(user.len(), 1, "{:?}", m.ctx_requires);
+    assert!(
+        matches!(&user[0].ty, based_sema::CtxField::Relation(t) if t == "User"),
+        "{:?}",
+        user[0].ty
+    );
+}
+
+#[test]
+fn ctx_own_id_use_agrees_with_model_key_across_callables() {
+    // A callable that reads `$ctx.user` only through `User.id` keeps its scalar type and
+    // still agrees with the `User` key another callable reads.
+    let (schema, d) = analyze(
+        r#"
+        User { id: Id, name: text }
+        Doc { id: Id, owner: User, title: text, @index owner }
+        shape D from Doc { title }
+        shape U from User { name }
+        query mine() -> D[] { list Doc where (owner = $ctx.user) order (title); }
+        query me() -> U { get User where (id = $ctx.user); }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+    let me = schema.queries.iter().find(|q| q.name == "me").unwrap();
+    assert!(
+        matches!(me.ctx_requires[..], [ref r] if matches!(r.ty, based_sema::CtxField::Scalar(_))),
+        "{:?}",
+        me.ctx_requires
+    );
+}
+
+#[test]
+fn ctx_own_id_through_a_relation_matches_model_key() {
+    // `owner.id` is still `User`'s whole key.
+    let (_, d) = analyze(
+        r#"
+        User { id: Id, name: text }
+        Doc { id: Id, owner: User, title: text, @index owner }
+        shape D from Doc { title }
+        query a() -> D[] { list Doc where (owner = $ctx.user) order (title); }
+        query b() -> D[] { list Doc where (owner.id = $ctx.user) order (title); }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn ctx_serial_and_natural_keys_match_model_key() {
+    let (_, d) = analyze(
+        r#"
+        User { id: serial, name: text }
+        @key(code)
+        Team { code: text, name: text }
+        Doc { id: Id, owner: User, team: Team, title: text, @index owner, @index team }
+        shape D from Doc { title }
+        shape U from User { name }
+        shape T from Team { name }
+        query mine() -> D[] { list Doc where (owner = $ctx.user) order (title); }
+        query ours() -> D[] { list Doc where (team = $ctx.team) order (title); }
+        query me() -> U { get User where (id = $ctx.user); }
+        query my_team() -> T { get Team where (code = $ctx.team); }
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn ctx_other_models_id_conflicts_with_model_key() {
+    // `Doc.id` is a `Doc` key, never a `User` key, though both are uuids.
+    let (_, d) = analyze(
+        r#"
+        User { id: Id, name: text }
+        Doc { id: Id, owner: User, title: text, @index owner }
+        shape D from Doc { title }
+        query a() -> D[] { list Doc where (owner = $ctx.user) order (title); }
+        query b() -> D { get Doc where (id = $ctx.user); }
+        "#,
+    );
+    assert_eq!(errors(&d), vec!["E0161"]);
+}
+
+#[test]
+fn ctx_non_key_uuid_column_conflicts_with_model_key() {
+    // A uuid column that is not the model's key stays a plain `uuid`.
+    let (_, d) = analyze(
+        r#"
+        User { id: Id, token: uuid, name: text, @index token }
+        Doc { id: Id, owner: User, title: text, @index owner }
+        mutation drop_mine() -> ok {
+          tx {
+            delete Doc where (owner = $ctx.user);
+            delete User where (token = $ctx.user);
+          }
+        }
+        "#,
+    );
+    assert_eq!(errors(&d), vec!["E0161"]);
+}
+
+#[test]
+fn ctx_composite_key_part_conflicts_with_model_key() {
+    // One part of a composite key is not the model's whole key.
+    let (_, d) = analyze(
+        r#"
+        Tenant { id: Id, name: text }
+        @key(tenant, code)
+        Member { tenant: Tenant  code: uuid  name: text }
+        Seat { id: Id, member: Member, label: text, @index member }
+        shape S from Seat { label }
+        shape M from Member { name }
+        query a() -> S[] { list Seat where (member = $ctx.m) order (label); }
+        query b() -> M[] { list Member where (code = $ctx.m) order (name); }
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0161"), "{:?}", codes(&d));
+}
+
+#[test]
 fn ctx_from_create_assign_is_recorded() {
     // A `create` can set a column from context; the field types from that column.
     let (schema, d) = analyze(

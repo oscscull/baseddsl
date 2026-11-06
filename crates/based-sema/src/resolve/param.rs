@@ -4,12 +4,15 @@ use super::*;
 pub enum Mapped<'a> {
     Scalar(Primitive),
     Relation(&'a str),
+    /// The named model's own whole primary key, of the given primitive.
+    Key(&'a str, Primitive),
 }
 
 /// An explicit param annotation must agree with the column it maps onto. A
 /// relation param may be typed as its target model *or* as its key (`Id`/`Uuid`);
-/// a scalar param must match the column's family. Loose on purpose (family, not
-/// exact primitive) so `Uuid`↔`Id` and the like don't spuriously conflict.
+/// a scalar param must match the column's family; a model's own key also accepts
+/// that model. Loose on purpose (family, not exact primitive) so `Uuid`↔`Id` and the
+/// like don't spuriously conflict.
 pub fn check_param_type(
     ann: &TypeExpr,
     mapped: Mapped,
@@ -17,6 +20,8 @@ pub fn check_param_type(
     sink: &mut Sink,
 ) {
     match (&ann.base, mapped) {
+        (BaseType::Model(m), Mapped::Key(owner, _)) if m.node == owner => {}
+        (_, Mapped::Key(_, pcol)) => check_param_type(ann, Mapped::Scalar(pcol), target_key, sink),
         (BaseType::Primitive(pann), Mapped::Scalar(pcol)) => {
             if prim_family(*pann) != prim_family(pcol) {
                 sink.error(

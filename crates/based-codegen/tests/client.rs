@@ -308,6 +308,28 @@ fn public_callable_takes_unit_ctx_and_emits_no_ctx_struct() {
 }
 
 #[test]
+fn ctx_model_key_compared_with_own_id_stays_the_typed_id() {
+    // `$ctx.user` read as a `User` key and against `User.id` is one field, the typed id.
+    let out = gen(r#"
+        scope Owner (user: User = $ctx.user)
+        User { id: uuid  session_version: int }
+        @scope Owner
+        Deck { id: uuid  user: User  @index(user) }
+        mutation drop_me() -> ok scoped Owner {
+          tx {
+            delete Deck where (user = $ctx.user);
+            delete User where (id = $ctx.user);
+          }
+        }
+        "#);
+    assert!(out.contains("pub struct DropMeCtx {"), "\n{out}");
+    assert!(
+        out.contains("pub struct DropMeCtx {\n    pub user: Id<entity::User>,\n}"),
+        "\n{out}"
+    );
+}
+
+#[test]
 fn ctx_scalar_field_typed_by_inference() {
     // A `$ctx` field compared against a scalar column infers that column's type
     // (here `int`), not a Uuid — the same inference untyped params use.

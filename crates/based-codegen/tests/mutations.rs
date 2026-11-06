@@ -671,6 +671,25 @@ fn update_where_across_relation_uses_multi_table_form() {
 }
 
 #[test]
+fn ctx_model_key_binds_against_fk_and_own_id() {
+    // One `$ctx.user` value binds both the scoped FK and the owner's own primary key.
+    let out = gen(r#"
+        scope Owner (user: User = $ctx.user)
+        User { id: uuid  session_version: int }
+        @scope Owner
+        Deck { id: uuid  user: User  @index(user) }
+        mutation drop_me() -> ok scoped Owner {
+          tx {
+            delete Deck where (user = $ctx.user);
+            delete User where (id = $ctx.user);
+          }
+        }
+        "#);
+    assert!(out.contains("`user_id` = :ctx_user"), "\n{out}");
+    assert!(out.contains("`id` = :ctx_user"), "\n{out}");
+}
+
+#[test]
 fn create_auto_sets_the_scope_column_from_ctx() {
     // On a scoped model the scope column is engine-managed on create : auto-set
     // from `:ctx_<field>`, never a caller param. Cross-scope create is inexpressible.

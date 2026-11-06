@@ -385,6 +385,7 @@ pub fn inject_ctx_reqs(
                 span,
                 // A scope is always injected — its context value is required, never optional.
                 optional: false,
+                key_of: None,
             })
         })
         .collect()

@@ -28,7 +28,7 @@ pub(super) fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut
         // Bare/inline queries map an unbound param onto a same-named column; block
         // queries reference params via `$`, so a bare param maps to nothing.
         None if infer => match m.member(&p.name.node).map(|mm| &mm.kind) {
-            Some(MemberKind::Scalar { ty, .. }) => Some(resolve::Mapped::Scalar(*ty)),
+            Some(MemberKind::Scalar { ty, .. }) => Some(scalar_mapped(m, &p.name.node, *ty)),
             Some(k @ (MemberKind::Forward { .. } | MemberKind::Inverse { .. })) => {
                 Some(resolve::Mapped::Relation(k.target().unwrap()))
             }
@@ -53,7 +53,7 @@ pub(super) fn check_param(p: &Param, ti: usize, infer: bool, cx: &Cx, sink: &mut
         // than silently mis-coercing at runtime.
         let target_key = match &mapped {
             resolve::Mapped::Relation(t) => target_key_primitive(cx, t),
-            resolve::Mapped::Scalar(_) => None,
+            resolve::Mapped::Scalar(_) | resolve::Mapped::Key(..) => None,
         };
         resolve::check_param_type(ann, mapped, target_key, sink);
     }
@@ -73,7 +73,7 @@ fn mapped_member<'a>(
     sink: &mut Sink,
 ) -> Option<resolve::Mapped<'a>> {
     match m.member(name).map(|mm| &mm.kind) {
-        Some(MemberKind::Scalar { ty, .. }) => Some(resolve::Mapped::Scalar(*ty)),
+        Some(MemberKind::Scalar { ty, .. }) => Some(scalar_mapped(m, name, *ty)),
         Some(k @ (MemberKind::Forward { .. } | MemberKind::Inverse { .. })) => {
             Some(resolve::Mapped::Relation(k.target().unwrap()))
         }
@@ -81,6 +81,15 @@ fn mapped_member<'a>(
             unknown_field(cx, ti, at, sink);
             None
         }
+    }
+}
+
+/// A scalar column's mapping: the model's own key when `field` is its whole primary key.
+fn scalar_mapped<'a>(m: &'a RModel, field: &str, ty: Primitive) -> resolve::Mapped<'a> {
+    if resolve::member_key_model(m, field).is_some() {
+        resolve::Mapped::Key(&m.name, ty)
+    } else {
+        resolve::Mapped::Scalar(ty)
     }
 }
 
