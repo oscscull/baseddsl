@@ -1032,6 +1032,28 @@ fn mariadb_delete_across_relation_keeps_multi_table_form() {
     );
 }
 
+#[test]
+fn delete_through_optional_then_required_path_keeps_flat_joins() {
+    // A write's `where` only narrows the target rows, so its joins stay ungrouped.
+    let out = gen(r#"
+        User { id: Id, name: text }
+        Post { id: Id, author: User }
+        Report { id: Id, post: Post? }
+        mutation clear_reports(name: text) -> ok {
+          hard delete Report where (post.author.name = $name);
+        }
+        "#);
+    assert!(
+        out.contains("LEFT JOIN `post` AS `j_post` ON `j_post`.`id` = `report`.`post_id`"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("\nJOIN `user` AS `j_post_author` ON"),
+        "\n{out}"
+    );
+    assert!(!out.contains("LEFT JOIN ("), "\n{out}");
+}
+
 // ---------- multi-scope DNF: create auto-set of the named alternative  ---
 
 /// A `create` on an AND model (`@scope Page, Author`) auto-sets *both* scope columns
