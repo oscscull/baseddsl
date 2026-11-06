@@ -15,10 +15,10 @@ pub(crate) fn set_lhs(sel: &Select, _model: &RModel, col: &str) -> String {
 }
 
 /// `UPDATE t [join] SET ... WHERE ...`. A relation-reaching `where` seeds joins, which
-/// differ by dialect: MySQL puts them inline (`UPDATE t JOIN j ON … SET …`), Postgres
-/// moves the joined tables into a `FROM` list and folds the join `ON` into the `WHERE`
-/// (`UPDATE t SET … FROM j WHERE <join-on> AND …`). Without joins both are the plain
-/// single-table `UPDATE t SET … WHERE …`.
+/// differ by dialect: MySQL puts them inline (`UPDATE t JOIN j ON … SET …`), Postgres and
+/// SQLite move the joined tables into a `FROM` list and fold the join `ON` into the
+/// `WHERE` (`UPDATE t SET … FROM j WHERE <join-on> AND …`). Without joins all are the
+/// plain single-table `UPDATE t SET … WHERE …`.
 pub(crate) fn update_stmt(
     sel: &Select,
     model: &RModel,
@@ -26,7 +26,7 @@ pub(crate) fn update_stmt(
     wheres: &[String],
 ) -> String {
     let mut s = format!("UPDATE {}", sel.qt(model));
-    if sel.dialect == Dialect::Postgres {
+    if matches!(sel.dialect, Dialect::Postgres | Dialect::Sqlite) {
         s.push_str(&format!("\nSET {}", sets.join(", ")));
         let mut wheres = wheres.to_vec();
         push_from_using(&mut s, sel, &mut wheres, "FROM");
@@ -43,6 +43,9 @@ pub(crate) fn update_stmt(
 /// `DELETE FROM t WHERE ...`, or a multi-table delete when the `where` reaches across
 /// relations: MySQL's `DELETE t FROM t JOIN …`, Postgres's `DELETE FROM t USING j
 /// WHERE <join-on> AND …` (the join tables go in `USING`, the `ON` into `WHERE`).
+/// SQLite has neither form, so the joins and conditions move into a correlated
+/// `DELETE FROM t WHERE EXISTS (SELECT 1 FROM j WHERE <join-on> AND …)`, which needs no
+/// key column and so holds for single, composite and keyless tables alike.
 pub(crate) fn delete_stmt(sel: &Select, model: &RModel, wheres: &[String]) -> String {
     let mut s = String::new();
     match sel.dialect {
@@ -51,6 +54,20 @@ pub(crate) fn delete_stmt(sel: &Select, model: &RModel, wheres: &[String]) -> St
             let mut wheres = wheres.to_vec();
             push_from_using(&mut s, sel, &mut wheres, "USING");
             push_where(&mut s, &wheres);
+        }
+        Dialect::Sqlite if !sel.joins.is_empty() => {
+            let conds: Vec<String> = sel
+                .joins
+                .iter()
+                .map(|j| j.on.clone())
+                .chain(wheres.iter().cloned())
+                .collect();
+            s.push_str(&format!(
+                "DELETE FROM {}\nWHERE EXISTS (\n  SELECT 1 FROM {}\n  WHERE {}\n)",
+                sel.qt(model),
+                join_tables(sel).join(", "),
+                conds.join(" AND ")
+            ));
         }
         _ if sel.joins.is_empty() => {
             s.push_str(&format!("DELETE FROM {}", sel.qt(model)));
@@ -70,9 +87,9 @@ pub(crate) fn delete_stmt(sel: &Select, model: &RModel, wheres: &[String]) -> St
     s
 }
 
-/// Postgres multi-table form: emit the joined tables as a comma-separated `FROM` (for
-/// UPDATE) or `USING` (for DELETE) list, and prepend each join's `ON` condition to the
-/// `WHERE` — Postgres has no inline join in an UPDATE/DELETE, so the join predicate
+/// Postgres/SQLite multi-table form: emit the joined tables as a comma-separated `FROM`
+/// (for UPDATE) or `USING` (for a Postgres DELETE) list, and prepend each join's `ON`
+/// condition to the `WHERE` — neither has an inline join in an UPDATE/DELETE, so the join predicate
 /// becomes an ordinary WHERE conjunct. A `LEFT JOIN`'s outer semantics are lost here,
 /// but a mutation `where` only *narrows* the target set (it never projects the joined
 /// row), so an inner join is the correct — and only expressible — shape.
@@ -80,8 +97,17 @@ fn push_from_using(s: &mut String, sel: &Select, wheres: &mut Vec<String>, keywo
     if sel.joins.is_empty() {
         return;
     }
-    let tables: Vec<String> = sel
-        .joins
+    s.push_str(&format!("\n{keyword} {}", join_tables(sel).join(", ")));
+    // Fold each join `ON` into the WHERE, ahead of the existing conditions.
+    let ons: Vec<String> = sel.joins.iter().map(|j| j.on.clone()).collect();
+    let mut folded = ons;
+    folded.append(wheres);
+    *wheres = folded;
+}
+
+/// Each join as a `table AS alias` entry of a comma-separated table list.
+fn join_tables(sel: &Select) -> Vec<String> {
+    sel.joins
         .iter()
         .map(|j| {
             format!(
@@ -90,13 +116,7 @@ fn push_from_using(s: &mut String, sel: &Select, wheres: &mut Vec<String>, keywo
                 sel.q(&j.alias)
             )
         })
-        .collect();
-    s.push_str(&format!("\n{keyword} {}", tables.join(", ")));
-    // Fold each join `ON` into the WHERE, ahead of the existing conditions.
-    let ons: Vec<String> = sel.joins.iter().map(|j| j.on.clone()).collect();
-    let mut folded = ons;
-    folded.append(wheres);
-    *wheres = folded;
+        .collect()
 }
 
 pub(crate) fn push_where(s: &mut String, wheres: &[String]) {

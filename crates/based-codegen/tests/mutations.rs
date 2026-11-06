@@ -866,6 +866,153 @@ fn pg_hard_delete_across_relation_uses_using_clause() {
     );
 }
 
+#[test]
+fn sqlite_delete_across_relation_uses_correlated_exists() {
+    // SQLite has no multi-table DELETE: the joins and conditions move into an EXISTS
+    // subquery correlated on the target table.
+    let out = gen_for(
+        r#"
+        User { id: Id, name: text }
+        Deck { id: Id, user: User, @index(user) }
+        DeckCard { id: Id, deck: Deck, @index(deck) }
+        mutation clear_user_cards(user: User) -> ok {
+          delete DeckCard where (deck.user = $user);
+        }
+        "#,
+        Dialect::Sqlite,
+    );
+    assert!(
+        out.contains(
+            "DELETE FROM `deck_card`\nWHERE EXISTS (\n  SELECT 1 FROM `deck` AS `j_deck`\n  \
+             WHERE `j_deck`.`id` = `deck_card`.`deck_id` AND `j_deck`.`user_id` = :user\n);"
+        ),
+        "\n{out}"
+    );
+    assert!(!out.contains("DELETE `deck_card` FROM"), "\n{out}");
+    assert!(!out.contains("\nJOIN "), "\n{out}");
+}
+
+#[test]
+fn sqlite_delete_across_two_hop_path_lists_every_join() {
+    let out = gen_for(
+        r#"
+        User { id: Id, name: text }
+        Deck { id: Id, user: User, @index(user) }
+        DeckCard { id: Id, deck: Deck, @index(deck) }
+        mutation clear_named_cards(name: text) -> ok {
+          delete DeckCard where (deck.user.name = $name);
+        }
+        "#,
+        Dialect::Sqlite,
+    );
+    assert!(
+        out.contains("SELECT 1 FROM `deck` AS `j_deck`, `user` AS `j_deck_user`"),
+        "\n{out}"
+    );
+    assert!(
+        out.contains("`j_deck`.`id` = `deck_card`.`deck_id` AND "),
+        "\n{out}"
+    );
+    assert!(out.contains("`j_deck_user`.`name` = :name\n);"), "\n{out}");
+}
+
+#[test]
+fn sqlite_delete_across_relation_on_composite_and_keyless_tables() {
+    // The EXISTS form correlates through the join path, so it needs no key column.
+    for model in [
+        "@key(deck, slot)\n        DeckCard { deck: Deck, slot: int }",
+        "@no_id(\"legacy\")\n        DeckCard { deck: Deck, slot: int, @index(deck) }",
+    ] {
+        let out = gen_for(
+            &format!(
+                r#"
+        User {{ id: Id, name: text }}
+        Deck {{ id: Id, user: User, @index(user) }}
+        {model}
+        mutation clear_user_cards(user: User) -> ok {{
+          delete DeckCard where (deck.user = $user);
+        }}
+        "#
+            ),
+            Dialect::Sqlite,
+        );
+        assert!(
+            out.contains(
+                "DELETE FROM `deck_card`\nWHERE EXISTS (\n  SELECT 1 FROM `deck` AS `j_deck`\n  \
+                 WHERE `j_deck`.`id` = `deck_card`.`deck_id` AND `j_deck`.`user_id` = :user\n);"
+            ),
+            "\n{out}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_update_across_relation_uses_from_clause() {
+    // SQLite has no inline-join UPDATE: the joined table goes in `FROM` and the join
+    // `ON` folds into the WHERE, as on Postgres.
+    let out = gen_for(
+        r#"
+        User { id: Id, name: text }
+        Deck { id: Id, user: User, @index(user) }
+        DeckCard { id: Id, deck: Deck, name: text, @index(deck) }
+        mutation rename_user_cards(user: User, name: text) -> ok {
+          update DeckCard where (deck.user = $user) { name = $name };
+        }
+        "#,
+        Dialect::Sqlite,
+    );
+    assert!(
+        out.contains(
+            "UPDATE `deck_card`\nSET `name` = :name\nFROM `deck` AS `j_deck`\n\
+             WHERE `j_deck`.`id` = `deck_card`.`deck_id` AND `j_deck`.`user_id` = :user;"
+        ),
+        "\n{out}"
+    );
+    assert!(!out.contains("\nJOIN "), "\n{out}");
+}
+
+#[test]
+fn sqlite_soft_delete_across_relation_uses_from_clause() {
+    // A soft delete is a tombstone UPDATE, so it takes the same `FROM` form.
+    let out = gen_for(
+        r#"
+        User { id: Id, name: text }
+        Deck { id: Id, user: User, @index(user) }
+        @soft_delete(deleted_at)
+        DeckCard { id: Id, deck: Deck, deleted_at: timestamp?, @index(deck) }
+        mutation clear_user_cards(user: User) -> ok {
+          delete DeckCard where (deck.user = $user);
+        }
+        "#,
+        Dialect::Sqlite,
+    );
+    assert!(
+        out.contains("UPDATE `deck_card`\nSET `deleted_at` = "),
+        "\n{out}"
+    );
+    assert!(out.contains("\nFROM `deck` AS `j_deck`\n"), "\n{out}");
+    assert!(!out.contains("\nJOIN "), "\n{out}");
+}
+
+#[test]
+fn mariadb_delete_across_relation_keeps_multi_table_form() {
+    let out = gen(r#"
+        User { id: Id, name: text }
+        Deck { id: Id, user: User, @index(user) }
+        DeckCard { id: Id, deck: Deck, @index(deck) }
+        mutation clear_user_cards(user: User) -> ok {
+          delete DeckCard where (deck.user = $user);
+        }
+        "#);
+    assert!(
+        out.contains(
+            "DELETE `deck_card` FROM `deck_card`\nJOIN `deck` AS `j_deck` ON \
+             `j_deck`.`id` = `deck_card`.`deck_id`\nWHERE `j_deck`.`user_id` = :user;"
+        ),
+        "\n{out}"
+    );
+}
+
 // ---------- multi-scope DNF: create auto-set of the named alternative  ---
 
 /// A `create` on an AND model (`@scope Page, Author`) auto-sets *both* scope columns

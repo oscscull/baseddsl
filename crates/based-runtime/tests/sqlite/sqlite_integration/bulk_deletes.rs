@@ -202,3 +202,77 @@ async fn soft_delete_all_tombstones_every_row_end_to_end() {
     let live = call(&c, &backend, "POST", "/q/live_notes", json!({}), json!({})).await;
     assert_eq!(live.body, json!([]), "all rows tombstoned");
 }
+
+#[tokio::test]
+async fn delete_and_update_across_relation_run_on_sqlite_end_to_end() {
+    // A `where` reaching through a to-one relation lowers to forms SQLite accepts
+    // (correlated EXISTS for delete, UPDATE … FROM for update), touching only the rows
+    // whose deck belongs to the given user.
+    let c = compile_sqlite(
+        r#"
+        User { id: Id, name: text }
+        Deck { id: Id, user: User, @index(user) }
+        DeckCard { id: Id, deck: Deck, name: text, @index(deck) }
+        shape CardRow from DeckCard { name }
+        query all_cards() -> CardRow[] { list DeckCard; }
+        mutation rename_user_cards(user: User, name: text) -> ok {
+          update DeckCard where (deck.user = $user) { name = $name };
+        }
+        mutation clear_user_cards(user: User) -> ok {
+          delete DeckCard where (deck.user = $user);
+        }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    backend
+        .execute_batch(&sql::ddl(&c.schema, Dialect::Sqlite))
+        .await
+        .expect("ddl");
+    let u1 = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+    let u2 = "3f2504e0-4f89-41d3-9a0c-0305e82c3302";
+    backend
+        .execute_batch(&format!(
+            r#"
+            INSERT INTO `user` (`id`, `name`) VALUES ('{u1}', 'Ada'), ('{u2}', 'Bea');
+            INSERT INTO `deck` (`id`, `user_id`) VALUES ('d-1', '{u1}'), ('d-2', '{u2}');
+            INSERT INTO `deck_card` (`id`, `deck_id`, `name`) VALUES
+                ('c-1', 'd-1', 'a'), ('c-2', 'd-1', 'b'), ('c-3', 'd-2', 'keep');
+            "#
+        ))
+        .await
+        .expect("seed");
+
+    let renamed = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/rename_user_cards",
+        json!({ "user": u1, "name": "renamed" }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(renamed.status, 200, "{:?}", renamed.body);
+    let cards = call(&c, &backend, "POST", "/q/all_cards", json!({}), json!({})).await;
+    let mut names: Vec<String> = cards
+        .body
+        .as_array()
+        .expect("card list")
+        .iter()
+        .map(|r| r["name"].as_str().expect("name").to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["keep", "renamed", "renamed"]);
+
+    let cleared = call(
+        &c,
+        &backend,
+        "POST",
+        "/m/clear_user_cards",
+        json!({ "user": u1 }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(cleared.status, 200, "{:?}", cleared.body);
+    let after = call(&c, &backend, "POST", "/q/all_cards", json!({}), json!({})).await;
+    assert_eq!(after.body, json!([{ "name": "keep" }]));
+}
