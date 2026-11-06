@@ -20,7 +20,14 @@ pub fn check_value(
 }
 
 pub fn check_func(f: &FuncCall, model: Option<usize>, cx: &Cx, params: &[String], sink: &mut Sink) {
-    if !KNOWN_FUNCS.contains(&f.name.node.as_str()) {
+    if BUCKET_FUNCS.contains(&f.name.node.as_str()) {
+        sink.error_note(
+            code::DATE_BUCKET,
+            f.name.span,
+            format!("`{}(…)` can't be used as an operand here", f.name.node),
+            "a date bucket is a shape field (`day = date(created_at)`) or a `group by` key",
+        );
+    } else if !KNOWN_FUNCS.contains(&f.name.node.as_str()) {
         sink.error(
             code::UNKNOWN_FUNC,
             f.name.span,

@@ -34,6 +34,21 @@ pub(crate) fn path(p: &Path) -> String {
         .join(".")
 }
 
+pub(crate) fn bucket_call(b: &BucketCall) -> String {
+    format!(
+        "{}({})",
+        b.func.node,
+        b.args.iter().map(path).collect::<Vec<_>>().join(", ")
+    )
+}
+
+pub(crate) fn group_key(k: &GroupKey) -> String {
+    match k {
+        GroupKey::Column(p) => path(p),
+        GroupKey::Bucket(b) => bucket_call(b),
+    }
+}
+
 fn func_call(f: &FuncCall) -> String {
     format!(
         "{}({})",

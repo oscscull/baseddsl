@@ -64,7 +64,10 @@ fn shape_value_raw<'a>(v: &'a ShapeValue, out: &mut Vec<&'a RawSql>) {
     match v {
         ShapeValue::Raw(r) => out.push(r),
         ShapeValue::Computed(e) => shape_expr_raw(e, out),
-        ShapeValue::Path(_) | ShapeValue::Agg(_) | ShapeValue::Filter(_) => {}
+        ShapeValue::Path(_)
+        | ShapeValue::Agg(_)
+        | ShapeValue::Filter(_)
+        | ShapeValue::Bucket(_) => {}
     }
 }
 

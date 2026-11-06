@@ -264,6 +264,13 @@ fn project_rename<'a>(
                 sel.q(&out_alias(out_prefix, &out.node))
             ));
         }
+        ShapeValue::Bucket(b) => {
+            let sql = sel.date_bucket(b, alias, prefix, model);
+            cols.push(format!(
+                "{sql} AS {}",
+                sel.q(&out_alias(out_prefix, &out.node))
+            ));
+        }
     }
 }
 

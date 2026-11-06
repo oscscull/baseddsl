@@ -192,6 +192,12 @@ fn rename_field(
         }
         // A filter projection: a required boolean.
         ShapeValue::Filter(_) => (alias.node.clone(), primitive_schema(Primitive::Bool), true),
+        // A date bucket: a `date`, required unless its column is nullable.
+        ShapeValue::Bucket(b) => (
+            alias.node.clone(),
+            primitive_schema(Primitive::Date),
+            !crate::sql::dml::bucket_nullable(schema, model, b),
+        ),
     }
 }
 

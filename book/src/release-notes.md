@@ -12,6 +12,8 @@ Follow [upgrading](upgrading.md) for every version change.
 - A write the database's constraints reject is a caller error instead of a retryable
   `503 database_error`: `409 unique_violation` / `foreign_key_violation`, `422
   not_null_violation` / `check_violation`, on every dialect and client.
+- `date(x)` / `week(x)` bucket a timestamp by UTC day or ISO week (Monday), as a `date`
+  shape field and a `group by` key, on every dialect.
 
 ## 1.0.0
 

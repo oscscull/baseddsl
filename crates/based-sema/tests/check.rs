@@ -47,6 +47,8 @@ mod computed_fields;
 mod context;
 #[path = "check/custom_joins.rs"]
 mod custom_joins;
+#[path = "check/date_buckets.rs"]
+mod date_buckets;
 #[path = "check/decorators.rs"]
 mod decorators;
 #[path = "check/destructive_mutations.rs"]

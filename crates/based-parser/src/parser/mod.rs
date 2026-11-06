@@ -11,6 +11,7 @@ use crate::lexer::{lex, Lexed, Tok};
 
 mod aggregate;
 mod arith;
+mod bucket;
 mod call_args;
 mod conflict;
 mod cursor;

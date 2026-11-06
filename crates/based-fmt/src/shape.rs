@@ -64,6 +64,7 @@ fn shape_value(v: &ShapeValue) -> String {
         ShapeValue::Agg(a) => aggregate(a),
         ShapeValue::Computed(e) => shape_expr(e, 0),
         ShapeValue::Filter(f) => filter_projection(f),
+        ShapeValue::Bucket(b) => bucket_call(b),
     }
 }
 

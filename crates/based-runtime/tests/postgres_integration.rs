@@ -175,6 +175,8 @@ fn sort_items(mut o: serde_json::Value) -> serde_json::Value {
 mod backend;
 #[path = "postgres_integration/composite_fk_aliases.rs"]
 mod composite_fk_aliases;
+#[path = "postgres_integration/date_buckets.rs"]
+mod date_buckets;
 #[path = "postgres_integration/hardening.rs"]
 mod hardening;
 #[path = "postgres_integration/like_lists.rs"]

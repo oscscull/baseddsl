@@ -83,10 +83,12 @@ impl<'a> Parser<'a> {
             });
         }
         if self.at(Tok::LowerIdent) && self.tok_at(1) == Some(Tok::LParen) && !self.at_kw("case") {
-            // `ident (` is a call: an aggregate (`count()` / `sum(total)`) by name, else a
-            // named-filter projection (`overdue($before)`).
+            // `ident (` is a call: an aggregate (`count()` / `sum(total)`) or a date bucket
+            // (`date(created_at)`) by name, else a named-filter projection (`overdue($before)`).
             let value = if AGG_FUNCS.iter().any(|f| self.at_kw(f)) {
                 ShapeValue::Agg(self.aggregate()?)
+            } else if self.at_bucket_call() {
+                ShapeValue::Bucket(self.bucket_call()?)
             } else {
                 ShapeValue::Filter(self.filter_projection()?)
             };

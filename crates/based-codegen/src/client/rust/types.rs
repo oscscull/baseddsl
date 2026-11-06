@@ -105,6 +105,11 @@ pub(super) fn rename_type(
         ShapeValue::Computed(expr) => computed_type(schema, model, expr),
         // A filter projection is always a non-null bool.
         ShapeValue::Filter(_) => primitive(Primitive::Bool).to_string(),
+        // A date bucket is a `Date`, null when its column is.
+        ShapeValue::Bucket(b) => {
+            let optional = crate::sql::dml::bucket_nullable(schema, model, b);
+            wrap(primitive(Primitive::Date), optional, false)
+        }
     }
 }
 

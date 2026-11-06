@@ -230,13 +230,17 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// `group by (col, …)` — aggregate grouping.
+    /// `group by (key, …)` — aggregate grouping by columns and date buckets of columns.
     fn group_by_clause(&mut self) -> PResult<Clause> {
         self.expect_kw("by", "`by`")?;
         self.expect(Tok::LParen, "`(`")?;
         let mut cols = Vec::new();
         loop {
-            cols.push(self.path()?);
+            cols.push(if self.at_bucket_call() {
+                GroupKey::Bucket(self.bucket_call()?)
+            } else {
+                GroupKey::Column(self.path()?)
+            });
             if !self.eat(Tok::Comma) {
                 break;
             }

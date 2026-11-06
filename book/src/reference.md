@@ -12,7 +12,7 @@
 - [Shapes](#shapes) — projections: nest, flatten, spread, computed, `case`, aggregates
 - [Queries](#queries) — `get` / `list`, filters, params, `scoped`
 - [Sorting](#sorting) · [Pagination](#pagination) · [Streaming](#streaming) · [Locking & distinct](#locking--distinct)
-- [Named filters](#named-filters) · [Group by](#group-by)
+- [Named filters](#named-filters) · [Group by](#group-by) — incl. `date(x)` / `week(x)` buckets
 - [Mutations](#mutations) — `create` / `update` / `delete` / `restore` / `tx`
 - [Bulk & nested writes](#bulk--nested-writes) — `create M[] from $rows`
 - [Upsert](#upsert) — `on conflict … update`, `incoming`, `...incoming`
@@ -185,6 +185,7 @@ shape OrderCard from Order {
   net       = total - discount              # computed (+ - * /, || concat)
   tier      = case when total > 100 then "premium" else "standard" end
   is_late   = late($before)                 # named filter, projected as a bool
+  day       = date(placed_at)               # date bucket: date(x) / week(x)
 }
 ```
 
@@ -297,6 +298,16 @@ Query clauses that pair with an aggregate shape:
 
 ```
 list Order group by (placed_by) having (revenue > 1000) order (revenue desc);
+```
+
+**Date buckets:** `date(x)` is the calendar day of a `timestamp`/`date` column; `week(x)` is
+the Monday starting its ISO week. Both are typed `date`, usable as a shape field and as a
+`group by` key; a projected bucket is grouped by the same call. Timestamps bucket by their
+UTC day. A wrong arity or a non-temporal column is E0246.
+
+```
+shape SignupsPerWeek from User { week = week(created_at), n = count() }
+list User group by (week(created_at)) order (week);
 ```
 
 ## Mutations

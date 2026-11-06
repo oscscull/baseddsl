@@ -422,6 +422,17 @@ fn aggregate_shape_and_group_by_render_canonically() {
 }
 
 #[test]
+fn date_buckets_render_canonically() {
+    let src = "shape PerWeek from User {\n week = week( created_at )\n n = count()\n}\nquery per_week() -> PerWeek[] {\n list User group by (plan,week(created_at)) having (n > 1) order (week);\n}\n";
+    let out = fmt(src);
+    assert_eq!(
+        out,
+        "shape PerWeek from User {\n  week = week(created_at)\n  n    = count()\n}\nquery per_week() -> PerWeek[] {\n  list User\n    group by (plan, week(created_at))\n    having (n > 1)\n    order (week);\n}\n"
+    );
+    assert_eq!(fmt(&out), out);
+}
+
+#[test]
 fn upsert_reprints_conflict_clause() {
     let got = fmt(
         "mutation record_hit(path: text) -> R {\n  create Page { path=$path, hits=1 } on conflict (path) update { hits=hits+1 };\n}\n",

@@ -663,10 +663,13 @@ fn shape_demand_in(
         match f {
             ShapeField::Bare(_) => {}
             ShapeField::Rename { value, .. } => {
-                if let ShapeValue::Path(p) = value {
-                    if p.segments.len() > 1 {
-                        trace(p, mi, cx, usage, joins);
-                    }
+                let reached: &[Path] = match value {
+                    ShapeValue::Path(p) => std::slice::from_ref(p),
+                    ShapeValue::Bucket(b) => &b.args,
+                    _ => &[],
+                };
+                for p in reached.iter().filter(|p| p.segments.len() > 1) {
+                    trace(p, mi, cx, usage, joins);
                 }
             }
             ShapeField::Nest { field, body } => {
