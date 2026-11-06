@@ -64,33 +64,38 @@ pub fn collect_mutation(m: &Mutation, cx: &Cx, scope_reqs: Vec<CtxReq>) -> Vec<C
 
 /// Closed-world coherence : a `$ctx.<field>` must carry the same type
 /// everywhere, since every callable reads the one context bag the caller builds.
-/// Reports `CTX_CONFLICT` at the first use whose type disagrees with an earlier one.
+/// Reports `CTX_CONFLICT` at each use whose type disagrees with the field's anchor use.
 pub fn check_coherence(queries: &[RQuery], mutations: &[RMutation], sink: &mut Sink) {
-    // field -> the first (type, human name) seen. Iteration order is the callable
-    // declaration order, so the diagnostic points at the later, conflicting use.
-    let mut seen: std::collections::HashMap<&str, (&CtxField, String)> =
-        std::collections::HashMap::new();
-    let all = queries
+    let all: Vec<&CtxReq> = queries
         .iter()
         .flat_map(|q| &q.ctx_requires)
-        .chain(mutations.iter().flat_map(|m| &m.ctx_requires));
+        .chain(mutations.iter().flat_map(|m| &m.ctx_requires))
+        .collect();
+    // field -> the use every other use is checked against: its first relation use when
+    // there is one (a key-of-model scalar use only agrees with that), else its first use.
+    // Iteration order is the callable declaration order, so the diagnostic points at a
+    // later, conflicting use.
+    let mut anchor: std::collections::HashMap<&str, &CtxReq> = std::collections::HashMap::new();
+    for req in &all {
+        let slot = anchor.entry(req.field.as_str()).or_insert(req);
+        if matches!(req.ty, CtxField::Relation(_)) && !matches!(slot.ty, CtxField::Relation(_)) {
+            *slot = req;
+        }
+    }
     for req in all {
-        match seen.get(req.field.as_str()) {
-            Some((prev_ty, prev_name)) if !compatible(prev_ty, &req.ty) => sink.error_note(
+        let prev = anchor[req.field.as_str()];
+        if !std::ptr::eq(prev, req) && !compatible(prev, req) {
+            sink.error_note(
                 code::CTX_CONFLICT,
                 req.span,
                 format!(
                     "`$ctx.{}` is used as {} here but {} elsewhere",
                     req.field,
                     ty_name(&req.ty),
-                    prev_name
+                    ty_name(&prev.ty)
                 ),
                 "the caller supplies one request context; a field must have one type",
-            ),
-            Some(_) => {}
-            None => {
-                seen.insert(req.field.as_str(), (&req.ty, ty_name(&req.ty)));
-            }
+            );
         }
     }
 }
@@ -215,11 +220,15 @@ fn record_ctx_use(path: &Path, value: &Value, model: usize, cx: &Cx, out: &mut V
     let Value::Param(pr) = value else { return };
     let Some(field) = ctx_field(pr) else { return };
     if let Some(term) = resolve::resolve_path(path, model, cx, &mut Sink::default()) {
+        let key_of = matches!(term, Terminal::Scalar(_))
+            .then(|| resolve::own_key_model(path, model, cx))
+            .flatten();
         out.push(CtxReq {
             field,
             ty: term_to_ctx(&term),
             span: pr.path[0].span,
             optional: pr.optional,
+            key_of,
         });
     }
 }
@@ -249,9 +258,12 @@ fn record_assign(a: &Assign, mi: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
     let Some(member) = cx.model(mi).member(&a.col.node) else {
         return;
     };
-    let ty = match &member.kind {
-        MemberKind::Scalar { ty, .. } => CtxField::Scalar(*ty),
-        MemberKind::Forward { target, .. } => CtxField::Relation(target.clone()),
+    let (ty, key_of) = match &member.kind {
+        MemberKind::Scalar { ty, .. } => (
+            CtxField::Scalar(*ty),
+            resolve::member_key_model(cx.model(mi), &a.col.node),
+        ),
+        MemberKind::Forward { target, .. } => (CtxField::Relation(target.clone()), None),
         MemberKind::Inverse { .. } => return, // not an assignable column
     };
     out.push(CtxReq {
@@ -259,6 +271,7 @@ fn record_assign(a: &Assign, mi: usize, cx: &Cx, out: &mut Vec<CtxReq>) {
         ty,
         span: pr.path[0].span,
         optional: pr.optional,
+        key_of,
     });
 }
 
@@ -280,15 +293,15 @@ fn term_to_ctx(t: &Terminal) -> CtxField {
     }
 }
 
-/// Two inferred types for the same field agree when they are the same primitive
-/// family, or relations to the same model. Coarse on primitives (family, not exact
-/// type) to match the operand checker, but strict on relations — `$ctx.org` should
-/// not be an `Org` key in one place and a `User` key in another.
-fn compatible(a: &CtxField, b: &CtxField) -> bool {
-    match (a, b) {
-        (CtxField::Scalar(x), CtxField::Scalar(y)) => prim_family(*x) == prim_family(*y),
-        (CtxField::Relation(x), CtxField::Relation(y)) => x == y,
-        _ => false,
+/// Two uses of the same field agree when they are the same primitive family, relations
+/// to the same model, or a relation and a scalar use of that model's own whole key.
+/// Coarse on primitives (family, not exact type) to match the operand checker, but
+/// strict on relations: `$ctx.org` should be one model's key everywhere.
+fn compatible(a: &CtxReq, b: &CtxReq) -> bool {
+    match (&a.ty, &b.ty) {
+        (CtxField::Scalar(_), CtxField::Relation(m)) => a.key_of.as_ref() == Some(m),
+        (CtxField::Relation(m), CtxField::Scalar(_)) => b.key_of.as_ref() == Some(m),
+        (x, y) => same_type(x, y),
     }
 }
 
@@ -303,20 +316,53 @@ fn ty_name(t: &CtxField) -> String {
 /// the same field — an intra-callable clash must survive to the coherence pass.
 fn dedup(reqs: Vec<CtxReq>) -> Vec<CtxReq> {
     let mut out: Vec<CtxReq> = Vec::new();
-    for r in reqs {
+    for r in adopt_key_relations(reqs) {
         // A field is optional for binding only if *every* use marks `?`; any required use
         // makes it required (mixed use is separately flagged `E0349`, but AND-ing here keeps
         // the conservative required binding even when that error is present).
         if let Some(e) = out
             .iter_mut()
-            .find(|e| e.field == r.field && compatible(&e.ty, &r.ty))
+            .find(|e| e.field == r.field && same_type(&e.ty, &r.ty))
         {
             e.optional = e.optional && r.optional;
+            if e.key_of != r.key_of {
+                e.key_of = None;
+            }
         } else {
             out.push(r);
         }
     }
     out
+}
+
+/// A key-of-model scalar use takes its callable's relation type for that model, so the
+/// field binds once as the model key (the type the scope or relation use already gives it).
+fn adopt_key_relations(mut reqs: Vec<CtxReq>) -> Vec<CtxReq> {
+    let relations: Vec<(String, String)> = reqs
+        .iter()
+        .filter_map(|r| match &r.ty {
+            CtxField::Relation(m) => Some((r.field.clone(), m.clone())),
+            CtxField::Scalar(_) => None,
+        })
+        .collect();
+    for r in &mut reqs {
+        let Some(m) = r.key_of.clone() else { continue };
+        if matches!(r.ty, CtxField::Scalar(_)) && relations.contains(&(r.field.clone(), m.clone()))
+        {
+            r.ty = CtxField::Relation(m);
+            r.key_of = None;
+        }
+    }
+    reqs
+}
+
+/// Same primitive family, or relations to the same model.
+fn same_type(a: &CtxField, b: &CtxField) -> bool {
+    match (a, b) {
+        (CtxField::Scalar(x), CtxField::Scalar(y)) => prim_family(*x) == prim_family(*y),
+        (CtxField::Relation(x), CtxField::Relation(y)) => x == y,
+        _ => false,
+    }
 }
 
 // Primitive family/name mirror the operand checker's coarse buckets (resolve.rs).

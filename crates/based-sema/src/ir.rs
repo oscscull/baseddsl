@@ -1179,6 +1179,9 @@ pub struct CtxReq {
     /// rather than erroring. Optional iff every use in the callable marks `?` (mixed use is
     /// `E0349`). The client carries an optional field as `Option<T>`.
     pub optional: bool,
+    /// The model whose whole primary key this scalar use compared against (`id = $ctx.user`).
+    /// Such a value is that model's key, so it agrees with a relation use of the same model.
+    pub key_of: Option<String>,
 }
 
 /// A `$ctx` field's inferred type: a primitive, or a relation to a model (the

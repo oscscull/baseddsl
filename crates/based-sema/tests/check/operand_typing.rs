@@ -132,6 +132,51 @@ fn relation_param_typed_wrong_model_rejected() {
 }
 
 #[test]
+fn own_key_param_typed_as_model_ok() {
+    // A model's own `id` is that model's key, so a param mapped onto it may be typed as
+    // the model.
+    let (_, d) = analyze(
+        r#"
+        Maker { id: Id, name: text }
+        @key(code)
+        Brand { code: text, name: text }
+        shape M from Maker { name }
+        shape B from Brand { name }
+        query maker(id: Maker) -> M;
+        query brand(code: Brand) -> B;
+        "#,
+    );
+    assert!(errors(&d).is_empty(), "{:?}", codes(&d));
+}
+
+#[test]
+fn own_key_param_typed_as_other_model_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Maker { id: Id, name: text }
+        Other { id: Id, name: text }
+        shape M from Maker { name }
+        query maker(id: Other) -> M;
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0152"), "{:?}", codes(&d));
+}
+
+#[test]
+fn composite_key_part_param_typed_as_model_rejected() {
+    let (_, d) = analyze(
+        r#"
+        Tenant { id: Id, name: text }
+        @key(tenant, code)
+        Member { tenant: Tenant  code: uuid  name: text }
+        shape M from Member { name }
+        query members(code: Member) -> M[];
+        "#,
+    );
+    assert!(errors(&d).contains(&"E0152"), "{:?}", codes(&d));
+}
+
+#[test]
 fn relation_param_typed_as_id_ok() {
     // a relation param may be typed as its key (`Id`) instead of the model.
     assert_clean(
