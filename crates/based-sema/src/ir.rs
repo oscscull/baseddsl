@@ -138,6 +138,7 @@ pub mod code {
     pub const AGG_CONTEXT: &str = "E0243"; // `group by` / `having` on a query whose return shape carries no aggregate
     pub const AGG_PAGE: &str = "E0244"; // `page` on an aggregate query (grouped keyset paging is unsupported)
     pub const AGG_COMPOSE: &str = "E0245"; // an aggregate shape nests/references a relation, is nested/referenced, or is a mutation return
+    pub const DATE_BUCKET: &str = "E0246"; // a `date(…)` / `week(…)` call without exactly one argument, or over a column that is not a `timestamp`/`date`
 
     // explicit-in-source structure (E026x): the two engine-created facts that carry
     // independent write/disk cost are written in source, not silently derived.

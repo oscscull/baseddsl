@@ -140,3 +140,73 @@ async fn aggregate_having_on_enum_group_column_end_to_end() {
         ])
     );
 }
+
+/// `date(x)` / `week(x)` bucket stored UTC timestamps by day and by ISO week: a Sunday
+/// belongs to the week of the Monday before it, a Monday starts its own week.
+#[tokio::test]
+async fn date_and_week_buckets_end_to_end() {
+    let c = compile_sqlite(
+        r#"
+        Signup { id: text, created_at: timestamp }
+        shape PerDay from Signup { day = date(created_at), n = count() }
+        shape PerWeek from Signup { week = week(created_at), n = count() }
+        shape Joined from Signup { id, day = date(created_at), week = week(created_at) }
+        query per_day() -> PerDay[] { list Signup group by (date(created_at)) order (day); }
+        query per_week() -> PerWeek[] { list Signup group by (week(created_at)) order (week); }
+        query joined() -> Joined[] { list Signup order (id); }
+        "#,
+    );
+    let backend = SqliteBackend::in_memory().expect("open sqlite");
+    let ddl = sql::ddl(&c.schema, Dialect::Sqlite);
+    backend
+        .execute_batch(&ddl)
+        .await
+        .unwrap_or_else(|e| panic!("DDL failed: {e:?}\n{ddl}"));
+    // s1 Tuesday, s2 Sunday late, s3/s4 Monday, s5 Sunday.
+    backend
+        .execute_batch(
+            "INSERT INTO `signup` (`id`, `created_at`) VALUES
+               ('s1', '2026-11-03T08:00:00.000000Z'),
+               ('s2', '2026-11-08T23:30:00.000000Z'),
+               ('s3', '2026-11-09T00:15:00.000000Z'),
+               ('s4', '2026-11-09T22:00:00.000000Z'),
+               ('s5', '2026-11-15T12:00:00.000000Z');",
+        )
+        .await
+        .expect("seed");
+
+    let per_day = call(&c, &backend, "POST", "/q/per_day", json!({}), json!({})).await;
+    assert_eq!(per_day.status, 200, "{:?}", per_day.body);
+    assert_eq!(
+        per_day.body,
+        json!([
+            { "day": "2026-11-03", "n": 1 },
+            { "day": "2026-11-08", "n": 1 },
+            { "day": "2026-11-09", "n": 2 },
+            { "day": "2026-11-15", "n": 1 }
+        ])
+    );
+
+    let per_week = call(&c, &backend, "POST", "/q/per_week", json!({}), json!({})).await;
+    assert_eq!(per_week.status, 200, "{:?}", per_week.body);
+    assert_eq!(
+        per_week.body,
+        json!([
+            { "week": "2026-11-02", "n": 2 },
+            { "week": "2026-11-09", "n": 3 }
+        ])
+    );
+
+    let joined = call(&c, &backend, "POST", "/q/joined", json!({}), json!({})).await;
+    assert_eq!(joined.status, 200, "{:?}", joined.body);
+    assert_eq!(
+        joined.body,
+        json!([
+            { "id": "s1", "day": "2026-11-03", "week": "2026-11-02" },
+            { "id": "s2", "day": "2026-11-08", "week": "2026-11-02" },
+            { "id": "s3", "day": "2026-11-09", "week": "2026-11-09" },
+            { "id": "s4", "day": "2026-11-09", "week": "2026-11-09" },
+            { "id": "s5", "day": "2026-11-15", "week": "2026-11-09" }
+        ])
+    );
+}

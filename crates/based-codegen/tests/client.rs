@@ -1116,6 +1116,19 @@ fn aggregate_shape_types_each_function() {
 }
 
 #[test]
+fn date_bucket_fields_are_typed_date() {
+    let out = gen(r#"
+        Signup { id: Id, created_at: timestamp, seen_at: timestamp? }
+        shape PerWeek from Signup { week = week(created_at), n = count() }
+        shape Seen from Signup { id, day = date(seen_at) }
+        query per_week() -> PerWeek[] { list Signup group by (week(created_at)); }
+        query seen() -> Seen[] { list Signup; }
+        "#);
+    assert!(out.contains("pub week: Date"), "\n{out}");
+    assert!(out.contains("pub day: Option<Date>"), "\n{out}");
+}
+
+#[test]
 fn opaque_column_projects_as_a_plain_string() {
     let out = gen(r#"
         Place { id: Id, name: text, location: raw("geometry(Point,4326)")? }

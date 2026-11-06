@@ -1302,3 +1302,79 @@ fn limit_clause_takes_a_literal_or_a_param_with_max() {
     assert_eq!(b.value, LimitValue::Lit(3));
     assert_eq!(b.max, None);
 }
+
+#[test]
+fn date_buckets_parse_in_shapes_and_group_by() {
+    let sf = parse_ok(
+        r#"
+        shape PerWeek from User { day = date(created_at), week = week(created_at), n = count() }
+        query per_week() -> PerWeek[] { list User group by (status, week(created_at), date(created_at)); }
+        "#,
+    );
+    let Decl::Shape(shape) = &sf.decls[0] else {
+        panic!("expected shape")
+    };
+    let bucket_of = |f: &ShapeField| match f {
+        ShapeField::Rename {
+            value: ShapeValue::Bucket(b),
+            ..
+        } => (b.bucket, b.args.len()),
+        other => panic!("expected a bucket, got {other:?}"),
+    };
+    assert_eq!(bucket_of(&shape.body[0]), (Bucket::Day, 1));
+    assert_eq!(bucket_of(&shape.body[1]), (Bucket::Week, 1));
+
+    let Decl::Query(q) = &sf.decls[1] else {
+        panic!("expected query")
+    };
+    let QueryBody::Block(s) = &q.body else {
+        panic!("expected block body")
+    };
+    let keys = s
+        .clauses
+        .iter()
+        .find_map(|c| match c {
+            Clause::GroupBy(keys) => Some(keys.clone()),
+            _ => None,
+        })
+        .expect("group by clause");
+    assert!(matches!(&keys[0], GroupKey::Column(p) if p.segments[0].node == "status"));
+    assert!(matches!(
+        &keys[1],
+        GroupKey::Bucket(b)
+            if b.bucket == Bucket::Week && b.arg().is_some_and(|p| p.segments[0].node == "created_at")
+    ));
+    assert!(matches!(&keys[2], GroupKey::Bucket(b) if b.bucket == Bucket::Day));
+}
+
+#[test]
+fn date_bucket_keeps_every_argument_for_arity_checks() {
+    let sf = parse_ok("shape S from User { a = date(), b = week(x, y) }");
+    let Decl::Shape(shape) = &sf.decls[0] else {
+        panic!("expected shape")
+    };
+    let arity = |f: &ShapeField| match f {
+        ShapeField::Rename {
+            value: ShapeValue::Bucket(b),
+            ..
+        } => b.args.len(),
+        other => panic!("expected a bucket, got {other:?}"),
+    };
+    assert_eq!(arity(&shape.body[0]), 0);
+    assert_eq!(arity(&shape.body[1]), 2);
+}
+
+#[test]
+fn column_named_date_stays_a_reach() {
+    let sf = parse_ok("shape S from Event { held = date }");
+    let Decl::Shape(shape) = &sf.decls[0] else {
+        panic!("expected shape")
+    };
+    assert!(matches!(
+        &shape.body[0],
+        ShapeField::Rename {
+            value: ShapeValue::Path(_),
+            ..
+        }
+    ));
+}

@@ -128,6 +128,11 @@ impl Snapshot {
                     value: ShapeValue::Filter(fp),
                     ..
                 } => fp.args.iter().for_each(|a| value_paths(a, from, out)),
+                // A date bucket's column is a field reference.
+                ShapeField::Rename {
+                    value: ShapeValue::Bucket(b),
+                    ..
+                } => b.args.iter().for_each(|p| out.push((from, &p.segments))),
                 ShapeField::Rename { .. } => {}
                 ShapeField::Nest { field, body } => {
                     out.push((from, std::slice::from_ref(field)));

@@ -770,6 +770,13 @@ fn walk_shape_join_in(
                 value: ShapeValue::Path(p),
                 ..
             } => walk_path_join(p, model, cx, out),
+            ShapeField::Rename {
+                value: ShapeValue::Bucket(b),
+                ..
+            } => b
+                .args
+                .iter()
+                .for_each(|p| walk_path_join(p, model, cx, out)),
             // A computed field reaches columns exactly like a `Path` projection — every
             // reached path (and CASE `when` comparison) lowers to a real join carrying the
             // reached model's `@scope`, so each such model is *touched* and must be walked

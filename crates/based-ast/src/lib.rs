@@ -495,6 +495,10 @@ pub enum ShapeValue {
     /// (a filter that is NULL for the row projects `false`). A `$p` argument binds to
     /// the same-named param of each query returning the shape.
     Filter(FilterProjection),
+    /// `out = date(created_at)` / `out = week(created_at)` — a column truncated to a
+    /// calendar bucket, typed `date`. In an aggregate shape it is a group column whose
+    /// `group by` key is the same call.
+    Bucket(BucketCall),
 }
 
 /// A named-filter call in a shape value (`is_overdue = overdue($before)`).
@@ -562,6 +566,75 @@ impl ShapeExpr {
 /// The aggregate function names a shape value's `name(…)` call can take; any other name
 /// is a named-filter projection.
 pub const AGG_FUNCS: &[&str] = &["count", "sum", "avg", "min", "max"];
+
+/// The date-bucket function names a shape value or `group by` key's `name(…)` call can
+/// take.
+pub const BUCKET_FUNCS: &[&str] = &["date", "week"];
+
+/// A calendar bucket a `timestamp`/`date` column truncates to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bucket {
+    /// `date(x)` — the calendar day.
+    Day,
+    /// `week(x)` — the Monday starting the ISO week.
+    Week,
+}
+
+impl Bucket {
+    /// The bucket a [`BUCKET_FUNCS`] name spells.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "date" => Some(Self::Day),
+            "week" => Some(Self::Week),
+            _ => None,
+        }
+    }
+
+    /// The function name that spells this bucket.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Day => "date",
+            Self::Week => "week",
+        }
+    }
+}
+
+/// A date-bucket call (`date(created_at)`). `args` keeps every written argument so sema
+/// can report a wrong arity; a well-formed call has exactly one column path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BucketCall {
+    pub bucket: Bucket,
+    pub func: Ident,
+    pub args: Vec<Path>,
+    pub span: Span,
+}
+
+impl BucketCall {
+    /// The bucketed column, when the call has exactly one argument.
+    pub fn arg(&self) -> Option<&Path> {
+        match self.args.as_slice() {
+            [p] => Some(p),
+            _ => None,
+        }
+    }
+}
+
+/// One `group by` key: a column, or a date bucket of one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupKey {
+    Column(Path),
+    Bucket(BucketCall),
+}
+
+impl GroupKey {
+    /// The span of the key's first token.
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::Column(p) => p.segments.first().map(|s| s.span),
+            Self::Bucket(b) => Some(b.span),
+        }
+    }
+}
 
 /// One aggregate call in a shape value. `func` is the (contextual) function name —
 /// `count`/`sum`/`avg`/`min`/`max`, validated in sema; `arg` is the aggregated column
@@ -692,9 +765,9 @@ pub enum Clause {
     /// `limit (N | $p[, max N])` — cap a `list` at a row count, returning plain rows.
     Limit(LimitClause),
     Unindexed(Unindexed),
-    /// `group by (col, …)` — grouping columns for an aggregate-shape query. Every
-    /// non-aggregate projected column must appear here.
-    GroupBy(Vec<Path>),
+    /// `group by (col | date(col) | week(col), …)` — grouping keys for an aggregate-shape
+    /// query. Every non-aggregate projected column must appear here.
+    GroupBy(Vec<GroupKey>),
     /// `having (predicate)` — filters groups by their aggregates, after grouping. Its
     /// left operands name the shape's projected aggregate aliases / group columns.
     Having(Predicate),

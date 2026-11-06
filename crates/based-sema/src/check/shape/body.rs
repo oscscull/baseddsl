@@ -48,6 +48,7 @@ pub(super) fn check_shape_body(
                 // type-check the expression against this model.
                 ShapeValue::Computed(expr) => resolve::check_shape_expr(expr, mi, cx, sink),
                 ShapeValue::Filter(fp) => check_filter_projection(fp, mi, cx, sink),
+                ShapeValue::Bucket(b) => check_bucket_call(b, mi, cx, sink),
             },
             ShapeField::Nest { field, body } => {
                 if let Some(ti) = nest_target(field, mi, cx, sink).and_then(|t| cx.find(t)) {

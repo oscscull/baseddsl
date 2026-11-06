@@ -1,9 +1,42 @@
 use super::*;
 
-/// A projected non-aggregate column of an aggregate shape (`buyer = placed_by`): its
-/// output alias and the column path it projects — the path that must appear in `group by`.
+/// A projected non-aggregate column of an aggregate shape (`buyer = placed_by` /
+/// `day = date(created_at)`): the column path it projects and the date bucket applied to
+/// it — the key that must appear in `group by`.
 struct GroupCol {
     path: Path,
+    bucket: Option<Bucket>,
+    span: Option<Span>,
+}
+
+impl GroupCol {
+    fn column(path: Path) -> Self {
+        let span = path.segments.last().map(|s| s.span);
+        Self {
+            path,
+            bucket: None,
+            span,
+        }
+    }
+
+    /// Whether `key` groups exactly this projection.
+    fn grouped_by(&self, key: &GroupKey) -> bool {
+        match (key, self.bucket) {
+            (GroupKey::Column(p), None) => same_path(p, &self.path),
+            (GroupKey::Bucket(b), Some(bucket)) => {
+                b.bucket == bucket && b.arg().is_some_and(|p| same_path(p, &self.path))
+            }
+            _ => false,
+        }
+    }
+
+    /// The projection as written (`placed_by` / `date(created_at)`).
+    fn display(&self) -> String {
+        match self.bucket {
+            Some(b) => format!("{}({})", b.name(), join_path(&self.path)),
+            None => join_path(&self.path),
+        }
+    }
 }
 
 /// Summarize an aggregate shape body: the output names of all projected fields (for
@@ -16,16 +49,25 @@ fn summarize_agg_shape(body: &[ShapeField]) -> (Vec<String>, Vec<GroupCol>) {
         match f {
             ShapeField::Bare(id) => {
                 out_names.push(id.node.clone());
-                group_cols.push(GroupCol {
-                    path: Path {
-                        segments: vec![id.clone()],
-                    },
-                });
+                group_cols.push(GroupCol::column(Path {
+                    segments: vec![id.clone()],
+                }));
             }
             ShapeField::Rename { out, value } => {
                 out_names.push(out.node.clone());
-                if let ShapeValue::Path(p) = value {
-                    group_cols.push(GroupCol { path: p.clone() });
+                match value {
+                    ShapeValue::Path(p) => group_cols.push(GroupCol::column(p.clone())),
+                    // A malformed call is already reported by the bucket check.
+                    ShapeValue::Bucket(b) => {
+                        if let Some(p) = b.arg() {
+                            group_cols.push(GroupCol {
+                                path: p.clone(),
+                                bucket: Some(b.bucket),
+                                span: Some(b.span),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
             // Nests are rejected on an aggregate shape; ignore here.
@@ -51,8 +93,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 /// The `group by` / `having` clauses of a query body (aggregate queries only). Returns
-/// the group paths and the having predicate, plus whether either clause was written.
-fn agg_clauses(clauses: &[Clause]) -> (Vec<&Path>, Option<&Predicate>, bool) {
+/// the group keys and the having predicate, plus whether either clause was written.
+fn agg_clauses(clauses: &[Clause]) -> (Vec<&GroupKey>, Option<&Predicate>, bool) {
     let mut groups = Vec::new();
     let mut having = None;
     let mut present = false;
@@ -77,10 +119,7 @@ pub(crate) fn reject_agg_clauses(q: &Query, clauses: &[Clause], sink: &mut Sink)
     for c in clauses {
         match c {
             Clause::GroupBy(cols) => {
-                let span = cols
-                    .first()
-                    .and_then(|p| p.segments.first())
-                    .map_or(q.span, |s| s.span);
+                let span = cols.first().and_then(GroupKey::span).unwrap_or(q.span);
                 sink.error_note(
                     code::AGG_CONTEXT,
                     span,
@@ -118,24 +157,28 @@ pub(crate) fn check_agg_query(
     sink: &mut Sink,
 ) {
     let (out_names, group_cols) = summarize_agg_shape(body);
-    let (group_paths, having, _present) = agg_clauses(clauses);
+    let (group_keys, having, _present) = agg_clauses(clauses);
 
-    // Group-by columns must resolve against the model.
-    for p in &group_paths {
-        if let Some(term) = resolve::resolve_path(p, mi, cx, sink) {
-            resolve::reject_opaque(&term, p, "group", sink);
+    // Group-by keys must resolve against the model.
+    for key in &group_keys {
+        match key {
+            GroupKey::Column(p) => {
+                if let Some(term) = resolve::resolve_path(p, mi, cx, sink) {
+                    resolve::reject_opaque(&term, p, "group", sink);
+                }
+            }
+            GroupKey::Bucket(b) => check_bucket_call(b, mi, cx, sink),
         }
     }
     // Group-by consistency: every projected non-aggregate column must be grouped.
     for gc in &group_cols {
-        if !group_paths.iter().any(|gp| same_path(gp, &gc.path)) {
-            let span = gc.path.segments.last().map_or(q.span, |s| s.span);
+        if !group_keys.iter().any(|key| gc.grouped_by(key)) {
             sink.error_note(
                 code::AGG_GROUP_BY,
-                span,
+                gc.span.unwrap_or(q.span),
                 format!(
                     "projected column `{}` must be a `group by` column",
-                    join_path(&gc.path)
+                    gc.display()
                 ),
                 "add it to `group by`, or make it an aggregate (`count()`/`sum(…)`/…)",
             );

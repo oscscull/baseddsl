@@ -18,6 +18,7 @@ mod columns;
 #[cfg(any(feature = "client", feature = "openapi"))]
 mod computed_result;
 mod count;
+mod date_bucket;
 mod expr;
 mod filter;
 mod filter_projection;
@@ -53,6 +54,7 @@ pub(crate) use columns::*;
 #[cfg(any(feature = "client", feature = "openapi"))]
 pub(crate) use computed_result::computed_result;
 pub(crate) use count::*;
+pub(crate) use date_bucket::*;
 pub(crate) use join_on::*;
 pub(crate) use joins::*;
 pub(crate) use keyset::*;

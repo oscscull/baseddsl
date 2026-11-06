@@ -46,6 +46,8 @@ mod aggregates;
 mod computed_fields;
 #[path = "dml/custom_joins.rs"]
 mod custom_joins;
+#[path = "dml/date_buckets.rs"]
+mod date_buckets;
 #[path = "dml/distinct.rs"]
 mod distinct;
 #[path = "dml/enum_filters.rs"]

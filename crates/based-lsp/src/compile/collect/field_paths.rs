@@ -18,9 +18,16 @@ pub(crate) fn clause_paths<'a>(
         // `group by` columns are model columns rooted at the query target (navigable /
         // renamable). A `having` predicate names shape-local aggregate aliases, not model
         // fields, so it contributes no field references.
-        Clause::GroupBy(cols) => {
-            for p in cols {
-                out.push((root, &p.segments));
+        Clause::GroupBy(keys) => {
+            for key in keys {
+                match key {
+                    GroupKey::Column(p) => out.push((root, &p.segments)),
+                    GroupKey::Bucket(b) => {
+                        for p in &b.args {
+                            out.push((root, &p.segments));
+                        }
+                    }
+                }
             }
         }
         Clause::Page(_) | Clause::Limit(_) | Clause::Unindexed(_) | Clause::Having(_) => {}

@@ -34,12 +34,18 @@ pub(crate) fn lower_agg_query<'a>(
     let wheres = build_wheres(&mut sel, q, root, dialect);
 
     // `group by` columns, `having`, and `order` (all naming projected columns).
-    let (group_paths, having_pred, order_terms) = agg_clause_parts(q);
-    let group_by: Vec<String> = group_paths
+    let (group_keys, having_pred, order_terms) = agg_clause_parts(q);
+    let group_by: Vec<String> = group_keys
         .iter()
-        .map(|p| {
-            let (a, c) = sel.resolve(p, root);
-            sel.qcol(&a, &c)
+        .map(|key| match key {
+            GroupKey::Column(p) => {
+                let (a, c) = sel.resolve(p, root);
+                sel.qcol(&a, &c)
+            }
+            GroupKey::Bucket(b) => {
+                let root_alias = sel.root_alias.clone();
+                sel.date_bucket(b, &root_alias, "", root)
+            }
         })
         .collect();
     let having = having_pred.map(|hp| sel.having(hp, root, &expr_map, &group_col_paths));
@@ -142,6 +148,10 @@ fn agg_projection<'a>(
                     let e = sel.filter_projection(fp, &root_alias, "", root);
                     (out.node.clone(), e.clone(), e)
                 }
+                ShapeValue::Bucket(b) => {
+                    let e = sel.date_bucket(b, &root_alias, "", root);
+                    (out.node.clone(), e.clone(), e)
+                }
             },
             // Aggregate shapes are flat (sema `E0245`); a stray nest/flatten is ignored.
             ShapeField::Nest { .. } | ShapeField::NestRef { .. } | ShapeField::Flatten { .. } => {
@@ -155,9 +165,9 @@ fn agg_projection<'a>(
     (cols, expr_map, group_col_paths)
 }
 
-/// The `group by` paths, `having` predicate, and `order` terms of an aggregate query's
+/// The `group by` keys, `having` predicate, and `order` terms of an aggregate query's
 /// body (inline or block).
-fn agg_clause_parts(q: &Query) -> (Vec<&Path>, Option<&Predicate>, Vec<&SortTerm>) {
+fn agg_clause_parts(q: &Query) -> (Vec<&GroupKey>, Option<&Predicate>, Vec<&SortTerm>) {
     let clauses: &[Clause] = match &q.body {
         QueryBody::Inline(cs) => cs,
         QueryBody::Block(s) => &s.clauses,

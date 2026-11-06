@@ -77,7 +77,7 @@ pub(crate) fn clause(c: &Clause) -> String {
         },
         Clause::GroupBy(cols) => format!(
             "group by ({})",
-            cols.iter().map(path).collect::<Vec<_>>().join(", ")
+            cols.iter().map(group_key).collect::<Vec<_>>().join(", ")
         ),
         Clause::Having(p) => format!("having ({})", predicate(p, 0)),
     }

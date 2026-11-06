@@ -115,6 +115,29 @@ fn time_and_bytes_fields_carry_string_formats() {
 }
 
 #[test]
+fn date_bucket_fields_carry_date_format() {
+    let doc = gen(r#"
+        Signup { id: Id, created_at: timestamp, seen_at: timestamp? }
+        shape PerDay from Signup { day = date(created_at), n = count() }
+        shape Seen from Signup { id, week = week(seen_at) }
+        query per_day() -> PerDay[] { list Signup group by (date(created_at)); }
+        query seen() -> Seen[] { list Signup; }
+        "#);
+    let per_day = &doc["components"]["schemas"]["PerDay"];
+    assert_eq!(per_day["properties"]["day"]["type"], "string");
+    assert_eq!(per_day["properties"]["day"]["format"], "date");
+    assert!(per_day["required"]
+        .as_array()
+        .is_some_and(|r| r.contains(&Value::from("day"))));
+    // A bucket over a nullable column is optional.
+    let seen = &doc["components"]["schemas"]["Seen"];
+    assert_eq!(seen["properties"]["week"]["format"], "date");
+    assert!(!seen["required"]
+        .as_array()
+        .is_some_and(|r| r.contains(&Value::from("week"))));
+}
+
+#[test]
 fn list_query_response_is_array() {
     let doc = gen(r#"
         @soft_delete(deleted_at)

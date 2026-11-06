@@ -309,6 +309,10 @@ impl<'a> Select<'a> {
                         let sql = self.filter_projection(fp, alias, prefix, model);
                         pairs.push(format!("'{}', {sql}", out.node));
                     }
+                    ShapeValue::Bucket(b) => {
+                        let sql = self.date_bucket(b, alias, prefix, model);
+                        pairs.push(format!("'{}', {sql}", out.node));
+                    }
                 },
                 ShapeField::Nest { field, body } => {
                     self.json_nest_pair(field, body, model, alias, prefix, &mut pairs);
