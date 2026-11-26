@@ -30,6 +30,8 @@ mod like_list_integration;
 mod migrate_apply;
 #[path = "migrate_data.rs"]
 mod migrate_data;
+#[path = "migrate_add_generated.rs"]
+mod migrate_add_generated;
 #[path = "migrate_rebuild_fks.rs"]
 mod migrate_rebuild_fks;
 #[path = "optional_ctx_integration.rs"]

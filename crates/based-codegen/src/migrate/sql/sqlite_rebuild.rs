@@ -36,8 +36,10 @@ pub(crate) fn sqlite_plan<'a>(steps: &'a [Step], target: &Snapshot) -> Vec<Emit<
 }
 
 /// The table a step forces a SQLite rebuild of (an in-place edit SQLite lacks), else `None`.
+/// SQLite's `ADD COLUMN` takes only a virtual generated column, so a stored one rebuilds too.
 fn rebuild_trigger_table(step: &Step) -> Option<&str> {
     match step {
+        Step::AddColumn { table, column, .. } if column.generated.is_some() => Some(table),
         Step::AlterColumn { table, .. }
         | Step::AddForeignKey { table, .. }
         | Step::DropForeignKey { table, .. }
@@ -160,7 +162,8 @@ fn rebuild_renames<'a>(
 
 /// The rebuild's `INSERT … SELECT` column lists: the columns the target keeps (its
 /// synthesized `id` included), each paired with its source name — a renamed column copies
-/// from its old name. Columns introduced this migration have no source, so they are skipped.
+/// from its old name. Columns introduced this migration have no source, and generated columns
+/// compute their own value, so both are skipped.
 fn rebuild_copy_lists(
     tt: &TableSnap,
     added: &HashSet<&str>,
@@ -169,7 +172,7 @@ fn rebuild_copy_lists(
 ) -> (Vec<String>, Vec<String>) {
     let (mut tcols, mut scols) = (Vec::new(), Vec::new());
     for c in physical_columns(tt) {
-        if added.contains(c.as_str()) {
+        if added.contains(c.as_str()) || tt.column(&c).is_some_and(|c| c.generated.is_some()) {
             continue;
         }
         let src_col = old_name.get(c.as_str()).copied().unwrap_or(c.as_str());

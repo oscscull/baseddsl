@@ -3,6 +3,12 @@
 Each release has a section here; its archive and GitHub release carry that section.
 Follow [upgrading](upgrading.md) for every version change.
 
+## Unreleased
+
+- A SQLite migration that adds a generated column to an existing table rebuilds the table,
+  since SQLite's `ALTER TABLE … ADD COLUMN` refuses a stored generated column. Existing rows
+  get the computed value, and every rebuild leaves generated columns to compute themselves.
+
 ## 1.0.1
 
 - `col ~ all $terms` / `col ~ any $terms` match a text column against a `text[]` list
