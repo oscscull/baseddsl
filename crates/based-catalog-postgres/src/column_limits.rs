@@ -10,7 +10,7 @@ pub(crate) fn report(
     for attribute in ["attoptions", "attfdwoptions"] {
         if row
             .try_get::<Option<Vec<String>>, _>(attribute)?
-            .is_some_and(|options| !options.is_empty())
+            .is_some_and(|options| options.iter().any(|option| !server_stamp(option)))
         {
             findings.push(CatalogDiagnostic {
                 table: id.clone(),
@@ -22,4 +22,9 @@ pub(crate) fn report(
         }
     }
     Ok(())
+}
+
+/// PostgreSQL 16.16+ records `pg_attver` on every column; it is not a user-set option.
+fn server_stamp(option: &str) -> bool {
+    option.starts_with("pg_attver=")
 }

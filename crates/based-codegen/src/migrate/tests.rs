@@ -1083,3 +1083,42 @@ fn content_hash_ignores_comments_and_whitespace_but_not_steps() {
     assert_eq!(content_hash(a).len(), 16);
     assert!(content_hash(a).bytes().all(|b| b.is_ascii_hexdigit()));
 }
+
+/// SQLite's `ADD COLUMN` takes only a virtual generated column, so adding a stored one
+/// rebuilds the table; the copy leaves the generated column to compute itself.
+#[test]
+fn sqlite_add_generated_column_rebuilds_without_copying_it() {
+    let mut net = col("net", "int", false);
+    net.generated = Some("price - discount".to_string());
+    let target = snap1(table(
+        "t",
+        vec![
+            col("price", "int", false),
+            col("discount", "int", false),
+            net.clone(),
+        ],
+    ));
+    let steps = vec![Step::AddColumn {
+        table: "t".to_string(),
+        schema: None,
+        column: net,
+    }];
+
+    let stmts = migration_sql(&steps, Sqlite, &target).unwrap();
+    let joined = stmts.join("\n");
+    assert!(!joined.contains("ADD COLUMN"), "{joined}");
+    assert!(
+        stmts
+            .iter()
+            .any(|s| s.starts_with("CREATE TABLE `t` (") && s.contains("GENERATED ALWAYS AS")),
+        "{joined}"
+    );
+    assert!(
+        stmts.iter().any(|s| s
+            == "INSERT INTO `t` (`id`, `price`, `discount`) SELECT `id`, `price`, `discount` FROM `t__based_rebuild`"),
+        "{joined}"
+    );
+
+    let pg = migration_sql(&steps, Postgres, &target).unwrap().join("\n");
+    assert!(pg.contains("ADD COLUMN"), "Postgres adds it in place: {pg}");
+}
