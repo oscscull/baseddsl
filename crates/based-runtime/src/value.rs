@@ -41,13 +41,10 @@ pub enum SqlValue {
 
 impl SqlValue {
     /// How this value fills placeholders, for [`crate::scan::to_positional`]: a `List` expands
-    /// to one bind per element — an **empty** list to a single `NULL`, so `col IN (:p)` renders
-    /// `col IN (NULL)` (matches nothing) rather than the illegal `IN ()`; every scalar is one
-    /// bind.
+    /// to one bind per element (an empty one to a literal `NULL`); every scalar is one bind.
     pub(crate) fn expand(self) -> crate::scan::Bound<Self> {
         use crate::scan::Bound;
         match self {
-            Self::List(items) if items.is_empty() => Bound::Many(vec![Self::Null]),
             Self::List(items) => Bound::Many(items),
             other => Bound::One(other),
         }
