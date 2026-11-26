@@ -1,9 +1,10 @@
 //! Lower `~ all` / `~ any` — LIKE against a runtime-sized pattern list.
 //!
-//! The list param keeps the single `:p` placeholder `in $arr` uses, which the runtime
-//! expands to one bind per element (an empty list to one `NULL`). Each dialect turns those
-//! binds into rows the column is matched against inside `[NOT] EXISTS`, so the predicate is
-//! always true or false — never NULL — and `not (…)` is its exact complement.
+//! The predicate is always true or false — never NULL — so `not (…)` is its exact complement.
+//! SQLite repeats the `LIKE` once per pattern (the runtime expands a `{:p OP …}` repeat); the
+//! other dialects keep the single `:p` placeholder, which the runtime expands to one bind per
+//! element (an empty list to `NULL`), and match the column against those binds as rows inside
+//! `[NOT] EXISTS`.
 
 use super::*;
 
@@ -13,9 +14,12 @@ pub(crate) enum Quantifier {
     Any,
 }
 
-/// `EXISTS` a pattern the column matches (`any`; an empty list is false), or `NOT EXISTS` a
-/// pattern it fails to match (`all`; an empty list is true, a NULL column false).
+/// Some pattern the column matches (`any`; an empty list is false), or no pattern it fails
+/// to match (`all`; an empty list is true, a NULL column false).
 pub(crate) fn like_list(dialect: Dialect, lhs: &str, q: Quantifier, list: &str) -> String {
+    if dialect == Dialect::Sqlite {
+        return inline_likes(lhs, q, list);
+    }
     let PatternRows {
         from,
         present,
@@ -31,6 +35,16 @@ pub(crate) fn like_list(dialect: Dialect, lhs: &str, q: Quantifier, list: &str) 
     }
 }
 
+/// One `LIKE` per pattern, joined by `OR` (`any`) or `AND` (`all`). A correlated row source
+/// would be rebuilt for every candidate row; SQLite cannot hoist it.
+fn inline_likes(lhs: &str, q: Quantifier, list: &str) -> String {
+    let op = match q {
+        Quantifier::All => "AND",
+        Quantifier::Any => "OR",
+    };
+    format!("{{{list} {op} {lhs} LIKE {list}}} IS TRUE")
+}
+
 /// The expanded binds as rows: the row source, the test that a row is a pattern (not the
 /// empty list's `NULL`), and the pattern itself.
 struct PatternRows {
@@ -41,11 +55,7 @@ struct PatternRows {
 
 fn pattern_rows(dialect: Dialect, list: &str) -> PatternRows {
     match dialect {
-        Dialect::Sqlite => PatternRows {
-            from: format!("json_each(json_array({list})) AS __pattern"),
-            present: "__pattern.value IS NOT NULL",
-            pattern: "__pattern.value",
-        },
+        Dialect::Sqlite => unreachable!("SQLite inlines its patterns"),
         Dialect::Postgres => PatternRows {
             from: format!("unnest(ARRAY[{list}]::text[]) AS __pattern(value)"),
             present: "__pattern.value IS NOT NULL",

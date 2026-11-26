@@ -16,22 +16,17 @@ fn q(dialect: Dialect) -> String {
 }
 
 #[test]
-fn sqlite_matches_against_json_each_rows() {
+fn sqlite_repeats_the_like_per_pattern() {
     let sql = q(Dialect::Sqlite);
     assert!(
-        sql.contains(
-            "NOT EXISTS (SELECT 1 FROM json_each(json_array(:terms)) AS __pattern \
-             WHERE __pattern.value IS NOT NULL AND (`card`.`body` LIKE __pattern.value) IS NOT TRUE)"
-        ),
+        sql.contains("{:terms AND `card`.`body` LIKE :terms} IS TRUE"),
         "\n{sql}"
     );
     assert!(
-        sql.contains(
-            "NOT (EXISTS (SELECT 1 FROM json_each(json_array(:banned)) AS __pattern \
-             WHERE __pattern.value IS NOT NULL AND `card`.`body` LIKE __pattern.value))"
-        ),
+        sql.contains("NOT ({:banned OR `card`.`body` LIKE :banned} IS TRUE)"),
         "\n{sql}"
     );
+    assert!(!sql.contains("json_each"), "\n{sql}");
 }
 
 #[test]
@@ -72,10 +67,7 @@ fn mysql_family_matches_against_json_table_rows() {
 fn a_signature_binding_lowers_like_the_predicate_form() {
     let sql = query_section(&gen_for(CARDS, Dialect::Sqlite), "bare").to_string();
     assert!(
-        sql.contains(
-            "EXISTS (SELECT 1 FROM json_each(json_array(:terms)) AS __pattern \
-             WHERE __pattern.value IS NOT NULL AND `card`.`body` LIKE __pattern.value)"
-        ),
+        sql.contains("{:terms OR `card`.`body` LIKE :terms} IS TRUE"),
         "\n{sql}"
     );
 }
@@ -84,9 +76,7 @@ fn a_signature_binding_lowers_like_the_predicate_form() {
 fn an_optional_list_is_present_guarded() {
     let sql = query_section(&gen_for(CARDS, Dialect::Sqlite), "opt").to_string();
     assert!(
-        sql.contains(
-            "(:terms__present = 0 OR NOT EXISTS (SELECT 1 FROM json_each(json_array(:terms))"
-        ),
+        sql.contains("(:terms__present = 0 OR {:terms AND `card`.`body` LIKE :terms} IS TRUE)"),
         "\n{sql}"
     );
 }

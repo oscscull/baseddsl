@@ -1,7 +1,6 @@
-//! `~ all $patterns` / `~ any $patterns` against a real SQLite engine: the list param expands
-//! to one bind per pattern inside `json_each(json_array(…))`. Covers many / one / empty lists,
-//! the `not (… ~ any …)` exclusion, a NULL column, the optional `?` param, the signature
-//! binding form, and a list passed through a named filter.
+//! `~ all $patterns` / `~ any $patterns` against a real SQLite engine: one `LIKE` per pattern.
+//! Covers many / one / empty lists, the `not (…)` complements, a NULL column, the optional `?`
+//! param, the signature binding form, a list passed through a named filter, and the query plan.
 
 use serde_json::json;
 
@@ -9,7 +8,8 @@ use based_ast::FileId;
 use based_codegen::{sql, Dialect};
 use based_parser::parse_file;
 use based_runtime::idempotency::NoStore;
-use based_runtime::{dispatch, Compiled, Guards, SeqIdGen};
+use based_runtime::explain::explain;
+use based_runtime::{dispatch, fetch_all, Backend, Compiled, Guards, SeqIdGen, SqlValue};
 use crate::driver::SqliteBackend;
 use based_sema::check;
 
@@ -28,6 +28,7 @@ filter search(include, exclude) = body ~ all $include and not (body ~ any $exclu
 query all_of(terms: text[]) -> CardRow[] { list Card where (body ~ all $terms) order (name); }
 query any_of(terms: text[]) -> CardRow[] { list Card where (body ~ any $terms) order (name); }
 query none_of(terms: text[]) -> CardRow[] { list Card where (not (body ~ any $terms)) order (name); }
+query not_all_of(terms: text[]) -> CardRow[] { list Card where (not (body ~ all $terms)) order (name); }
 query all_of_opt(terms?: text[]) -> CardRow[] { list Card where (body ~ all $terms) order (name); }
 query any_of_bind(terms: text[] ~ any body) -> CardRow[] order (name);
 query searched(include: text[], exclude: text[]) -> CardRow[] {
@@ -144,4 +145,29 @@ async fn lists_pass_through_a_named_filter() {
     )
     .await;
     assert_eq!(got, ["Counter", "Growth"]);
+}
+
+#[tokio::test]
+async fn not_all_keeps_null_columns_and_partial_matches() {
+    let got = names("/q/not_all_of", json!({ "terms": ["%damage%", "%3%"] })).await;
+    assert_eq!(got, ["Counter", "Growth", "Shock", "Vanilla"]);
+    assert!(names("/q/not_all_of", json!({ "terms": [] })).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_plan_has_no_correlated_pattern_subquery() {
+    let (c, backend) = backend().await;
+    for query in ["all_of", "any_of", "searched"] {
+        let stmt = &explain(&c, query)[0].statements[0];
+        let params = vec![SqlValue::Text("%x%".into()); stmt.params.len()];
+        let mut db = Backend::checkout(&backend, "").await.expect("connection");
+        let sql = format!("EXPLAIN QUERY PLAN {}", stmt.sql);
+        let plan = fetch_all(db.fetch(&sql, &params)).await.expect("plan");
+        let details: Vec<&str> = plan.iter().filter_map(|r| r["detail"].as_str()).collect();
+        assert!(
+            details.iter().all(|d| !d.contains("SUBQUERY") && !d.contains("json_each")),
+            "{query}: {details:?}\n{}",
+            stmt.sql
+        );
+    }
 }

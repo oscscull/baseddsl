@@ -19,12 +19,20 @@ use based_codegen::Dialect;
 
 /// How one resolved placeholder fills the positional query: a single bind, or a
 /// variable-length list expanded into one placeholder per element (`col IN (?, ?, …)`) —
-/// the mechanism behind `col in $arr` for an array-typed param. `resolve` returns this so
-/// the scan emits the right number of positional markers; the empty-list-to-`NULL` decision
-/// is made by the caller (see [`crate::value::SqlValue::expand`]).
+/// the mechanism behind `col in $arr` for an array-typed param. An empty list fills its
+/// placeholder with a literal `NULL` (`col IN (NULL)` matches nothing).
 pub enum Bound<T> {
     One(T),
     Many(Vec<T>),
+}
+
+impl<T> Bound<T> {
+    fn into_vec(self) -> Vec<T> {
+        match self {
+            Self::One(v) => vec![v],
+            Self::Many(vs) => vs,
+        }
+    }
 }
 
 /// Rewrite `:name` placeholders to the dialect's positional form (`?` for
@@ -33,7 +41,11 @@ pub enum Bound<T> {
 /// which expands to one positional marker per element (variable-length `IN (…)`). `resolve`
 /// returns `None` for an unknown placeholder; the scan then returns `Err(name)` so the
 /// caller reports it.
-pub fn to_positional<T>(
+///
+/// A repeat `{:name AND body}` / `{:name OR body}` expands to one copy of `body` per element
+/// of `:name`'s list, joined by the operator and parenthesized, each copy's `:name` bound to
+/// its own element. An empty list yields the operator's identity (`TRUE` / `FALSE`).
+pub fn to_positional<T: Clone>(
     sql: &str,
     dialect: Dialect,
     resolve: impl FnMut(&str) -> Option<Bound<T>>,
@@ -45,89 +57,213 @@ pub fn to_positional<T>(
 /// fragment (a bulk upsert's `ON CONFLICT … SET` tail) after `offset` binds already emitted
 /// on the same statement, so the fragment's `$n` continues the running count. `?`-dialects
 /// are offset-independent. The returned `Vec` holds only the fragment's own binds.
-pub fn to_positional_from<T>(
+pub fn to_positional_from<T: Clone>(
     sql: &str,
     dialect: Dialect,
     offset: usize,
     mut resolve: impl FnMut(&str) -> Option<Bound<T>>,
 ) -> Result<(String, Vec<T>), String> {
-    let bytes = sql.as_bytes();
+    let mut scan = Scan {
+        dialect,
+        offset,
+        out: Vec::with_capacity(sql.len()),
+        params: Vec::new(),
+    };
+    scan.run(sql, &mut resolve)?;
+    // `out` is the original UTF-8 bytes with ASCII placeholders spliced in at char
+    // boundaries — always valid UTF-8.
+    let out = String::from_utf8(scan.out).expect("scan preserves UTF-8");
+    Ok((out, scan.params))
+}
+
+/// The positional output under construction.
+struct Scan<T> {
+    dialect: Dialect,
+    offset: usize,
     // Built as bytes so verbatim SQL text is copied intact: a multi-byte UTF-8 character
     // (a non-ASCII literal in a raw block, say) must survive byte-for-byte. Every delimiter
     // the scan tests for is ASCII, and UTF-8 never puts an ASCII byte inside a multi-byte
     // sequence, so the byte-level quote/placeholder detection is unaffected.
-    let mut out: Vec<u8> = Vec::with_capacity(sql.len());
-    let mut params = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        // Inside a quoted literal: copy verbatim to the matching close quote.
-        // SQL escapes a quote by doubling it (`''`), which this handles naturally —
-        // the doubled close is seen as close-then-reopen, leaving us still "inside".
-        if c == b'\'' || c == b'"' || c == b'`' {
-            out.push(c);
-            i += 1;
-            while i < bytes.len() {
-                out.push(bytes[i]);
-                i += 1;
-                if bytes[i - 1] == c {
-                    break;
-                }
+    out: Vec<u8>,
+    params: Vec<T>,
+}
+
+impl<T: Clone> Scan<T> {
+    fn run(
+        &mut self,
+        sql: &str,
+        resolve: &mut dyn FnMut(&str) -> Option<Bound<T>>,
+    ) -> Result<(), String> {
+        let bytes = sql.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            // Inside a quoted literal: copy verbatim to the matching close quote.
+            if is_quote(c) {
+                let end = quoted_end(bytes, i);
+                self.out.extend_from_slice(&bytes[i..end]);
+                i = end;
+                continue;
             }
-            continue;
-        }
-        // `::` is not one of our placeholders (it is Postgres's cast operator) — copy
-        // both colons and move on so the second `:` cannot start a spurious placeholder.
-        if c == b':' && i + 1 < bytes.len() && bytes[i + 1] == b':' {
-            out.extend_from_slice(b"::");
-            i += 2;
-            continue;
-        }
-        // `:name` — an identifier placeholder.
-        if c == b':' && i + 1 < bytes.len() && is_ident_start(bytes[i + 1]) {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && is_ident_char(bytes[j]) {
-                j += 1;
+            // `::` is not one of our placeholders (it is Postgres's cast operator) — copy
+            // both colons and move on so the second `:` cannot start a spurious placeholder.
+            if c == b':' && bytes.get(i + 1) == Some(&b':') {
+                self.out.extend_from_slice(b"::");
+                i += 2;
+                continue;
             }
-            let name = &sql[start..j];
-            match resolve(name) {
-                // One value → one marker; a list → one marker per element (`(?, ?, …)`), so a
-                // variable-length `col in $arr` binds each element positionally.
-                Some(bound) => {
-                    let values = match bound {
-                        Bound::One(v) => vec![v],
-                        Bound::Many(vs) => vs,
-                    };
-                    for (k, v) in values.into_iter().enumerate() {
-                        if k > 0 {
-                            out.extend_from_slice(b", ");
-                        }
-                        params.push(v);
-                        // Anonymous `?` or ordinal `$n` (1-based) per dialect. The ordinal
-                        // is the running parameter count, so it matches the bind order.
-                        match dialect {
-                            Dialect::Postgres => {
-                                out.extend_from_slice(
-                                    format!("${}", offset + params.len()).as_bytes(),
-                                );
-                            }
-                            _ => out.push(b'?'),
-                        }
-                    }
-                    i = j;
+            if c == b'{' {
+                if let Some(rep) = Repeat::parse(sql, i) {
+                    self.repeat(&rep, resolve)?;
+                    i = rep.end;
                     continue;
                 }
-                None => return Err(name.to_string()),
+            }
+            if let Some(end) = placeholder_end(bytes, i) {
+                let name = &sql[i + 1..end];
+                let bound = resolve(name).ok_or_else(|| name.to_string())?;
+                self.binds(bound.into_vec());
+                i = end;
+                continue;
+            }
+            self.out.push(c);
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// One marker per value, comma-separated; none is a literal `NULL`.
+    fn binds(&mut self, values: Vec<T>) {
+        if values.is_empty() {
+            self.out.extend_from_slice(b"NULL");
+        }
+        for (k, v) in values.into_iter().enumerate() {
+            if k > 0 {
+                self.out.extend_from_slice(b", ");
+            }
+            self.params.push(v);
+            // Anonymous `?` or ordinal `$n` (1-based) per dialect. The ordinal is the running
+            // parameter count, so it matches the bind order.
+            match self.dialect {
+                Dialect::Postgres => {
+                    let n = self.offset + self.params.len();
+                    self.out.extend_from_slice(format!("${n}").as_bytes());
+                }
+                _ => self.out.push(b'?'),
             }
         }
-        out.push(c);
+    }
+
+    fn repeat(
+        &mut self,
+        rep: &Repeat<'_>,
+        resolve: &mut dyn FnMut(&str) -> Option<Bound<T>>,
+    ) -> Result<(), String> {
+        let items = resolve(rep.name)
+            .ok_or_else(|| rep.name.to_string())?
+            .into_vec();
+        if items.is_empty() {
+            let identity: &[u8] = if rep.op == "AND" { b"TRUE" } else { b"FALSE" };
+            self.out.extend_from_slice(identity);
+            return Ok(());
+        }
+        self.out.push(b'(');
+        for (k, item) in items.into_iter().enumerate() {
+            if k > 0 {
+                self.out
+                    .extend_from_slice(format!(" {} ", rep.op).as_bytes());
+            }
+            let mut each = |name: &str| {
+                if name == rep.name {
+                    Some(Bound::One(item.clone()))
+                } else {
+                    resolve(name)
+                }
+            };
+            self.run(rep.body, &mut each)?;
+        }
+        self.out.push(b')');
+        Ok(())
+    }
+}
+
+/// A `{:name OP body}` repeat starting at a `{`: the list placeholder, the joining operator,
+/// the body, and the offset just past the closing `}`.
+struct Repeat<'a> {
+    name: &'a str,
+    op: &'static str,
+    body: &'a str,
+    end: usize,
+}
+
+impl<'a> Repeat<'a> {
+    fn parse(sql: &'a str, open: usize) -> Option<Self> {
+        let bytes = sql.as_bytes();
+        let name_end = placeholder_end(bytes, open + 1)?;
+        let rest = &sql[name_end..];
+        let op = ["AND", "OR"]
+            .into_iter()
+            .find(|op| rest.starts_with(&format!(" {op} ")))?;
+        let body_start = name_end + op.len() + 2;
+        let close = closing_brace(bytes, body_start)?;
+        Some(Self {
+            name: &sql[open + 2..name_end],
+            op,
+            body: &sql[body_start..close],
+            end: close + 1,
+        })
+    }
+}
+
+/// The `}` closing a repeat body, skipping quoted literals and nested braces.
+fn closing_brace(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = from;
+    while i < bytes.len() {
+        match bytes[i] {
+            c if is_quote(c) => {
+                i = quoted_end(bytes, i);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return Some(i),
+            b'}' => depth -= 1,
+            _ => {}
+        }
         i += 1;
     }
-    // `out` is the original UTF-8 bytes with ASCII placeholders spliced in at char
-    // boundaries — always valid UTF-8.
-    let out = String::from_utf8(out).expect("scan preserves UTF-8");
-    Ok((out, params))
+    None
+}
+
+/// The end of a `:name` placeholder starting at `at`, if one starts there.
+fn placeholder_end(bytes: &[u8], at: usize) -> Option<usize> {
+    if bytes.get(at) != Some(&b':') || !bytes.get(at + 1).copied().is_some_and(is_ident_start) {
+        return None;
+    }
+    let mut j = at + 1;
+    while j < bytes.len() && is_ident_char(bytes[j]) {
+        j += 1;
+    }
+    Some(j)
+}
+
+fn is_quote(b: u8) -> bool {
+    b == b'\'' || b == b'"' || b == b'`'
+}
+
+/// Just past the quote closing the literal opened at `open`. SQL escapes a quote by
+/// doubling it (`''`), which this handles naturally — the doubled close is seen as
+/// close-then-reopen, leaving the scan still "inside".
+fn quoted_end(bytes: &[u8], open: usize) -> usize {
+    let q = bytes[open];
+    let mut i = open + 1;
+    while i < bytes.len() {
+        i += 1;
+        if bytes[i - 1] == q {
+            break;
+        }
+    }
+    i
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -249,5 +385,71 @@ mod tests {
         .unwrap();
         assert_eq!(sql, "c IN ($1, $2, $3) AND d = $4");
         assert_eq!(ps, vec!["a", "b", "c", "d"]);
+    }
+
+    fn many(sql: &str, dialect: Dialect, list: &[&str]) -> (String, Vec<String>) {
+        let list: Vec<String> = list.iter().map(ToString::to_string).collect();
+        to_positional(sql, dialect, |n| match n {
+            "arr" => Some(Bound::Many(list.clone())),
+            other => Some(Bound::One(other.to_string())),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_list_is_a_literal_null() {
+        let (sql, ps) = many("c IN (:arr) AND d = :d", Dialect::Postgres, &[]);
+        assert_eq!(sql, "c IN (NULL) AND d = $1");
+        assert_eq!(ps, vec!["d"]);
+    }
+
+    #[test]
+    fn repeat_copies_the_body_per_element() {
+        let (sql, ps) = many(
+            "a = :a AND {:arr OR `t`.`c` LIKE :arr} IS TRUE AND d = :d",
+            Dialect::Sqlite,
+            &["x", "y", "z"],
+        );
+        assert_eq!(
+            sql,
+            "a = ? AND (`t`.`c` LIKE ? OR `t`.`c` LIKE ? OR `t`.`c` LIKE ?) IS TRUE AND d = ?"
+        );
+        assert_eq!(ps, vec!["a", "x", "y", "z", "d"]);
+    }
+
+    #[test]
+    fn repeat_continues_postgres_ordinals_and_resolves_other_names() {
+        let (sql, ps) = many(
+            "{:arr AND c LIKE :arr || :sfx} AND d = :d",
+            Dialect::Postgres,
+            &["x", "y"],
+        );
+        assert_eq!(sql, "(c LIKE $1 || $2 AND c LIKE $3 || $4) AND d = $5");
+        assert_eq!(ps, vec!["x", "sfx", "y", "sfx", "d"]);
+    }
+
+    #[test]
+    fn empty_repeat_is_the_operator_identity() {
+        assert_eq!(
+            many("{:arr AND c LIKE :arr}", Dialect::Sqlite, &[]).0,
+            "TRUE"
+        );
+        assert_eq!(
+            many("{:arr OR c LIKE :arr}", Dialect::Sqlite, &[]).0,
+            "FALSE"
+        );
+    }
+
+    #[test]
+    fn repeat_body_skips_quoted_braces() {
+        let (sql, _) = many("{:arr OR \"a}b\" LIKE :arr}", Dialect::Sqlite, &["x"]);
+        assert_eq!(sql, "(\"a}b\" LIKE ?)");
+    }
+
+    #[test]
+    fn a_brace_that_is_not_a_repeat_is_text() {
+        let (sql, ps) = go("SELECT {fn now()}, {:x} = :y");
+        assert_eq!(sql, "SELECT {fn now()}, {?} = ?");
+        assert_eq!(ps, vec!["x", "y"]);
     }
 }
