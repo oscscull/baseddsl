@@ -99,7 +99,7 @@ fn three_dialects_preserve_independent_physical_keys_defaults_relations_and_inde
             .clone()])
         .unwrap();
         let partial =
-            based_catalog::Discovery::checked(discovery.catalog.clone(), &parent_only, Vec::new());
+            based_catalog::Discovery::checked(discovery.catalog, &parent_only, Vec::new());
         let Err(report) = emit(&partial, &parent_only, &fixture::manifest(dialect, "none")) else {
             panic!("partial selection accepted")
         };
