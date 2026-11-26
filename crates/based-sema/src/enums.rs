@@ -39,7 +39,7 @@ pub fn resolve_decls(
             );
             continue;
         }
-        index.insert(name.clone(), enums.len());
+        index.insert(name, enums.len());
         enums.push(resolve_enum(d, sink));
     }
     (enums, index)

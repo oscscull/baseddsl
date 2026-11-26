@@ -138,7 +138,7 @@ fn build_insert_columns(
     for (field, ctx_field) in sel.scope_terms_for(&model.name).to_vec() {
         let col = physical_col(model, &field);
         value_by_field
-            .entry(field.clone())
+            .entry(field)
             .or_insert_with(|| format!(":ctx_{ctx_field}"));
         if !assigned.contains(&col) {
             cols.push(dialect.quote(&col));
