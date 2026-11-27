@@ -85,6 +85,9 @@ pub mod sqlite;
 #[cfg(feature = "sqlite-rusqlite")]
 pub mod sqlite_rusqlite;
 
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+mod sqlite_pool_config;
+
 #[cfg(any(feature = "mariadb", feature = "postgres", feature = "sqlite"))]
 mod sqlx_integrity;
 
@@ -150,6 +153,9 @@ pub use http::{
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::{AdoptedSqlite, SqliteBackend, SqliteDb, SqliteLocation, SqliteLocationError};
+
+#[cfg(any(feature = "sqlite", feature = "sqlite-rusqlite"))]
+pub use sqlite_pool_config::SqlitePoolConfig;
 
 #[cfg(feature = "sqlite-rusqlite")]
 pub use sqlite_rusqlite::{AdoptedRusqlite, RusqliteBackend, RusqliteDb};
