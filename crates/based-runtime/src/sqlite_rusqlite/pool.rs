@@ -4,10 +4,8 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::worker::{Opener, Worker};
-use crate::run::DbError;
-
-/// How long a checkout waits for a free connection (sqlx's pool default).
-const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+use crate::run::{DbError, DbErrorKind};
+use crate::sqlite_pool_config::SqlitePoolConfig;
 
 /// A bounded pool of connection workers, opened lazily and kept until the pool drops.
 /// Cloning shares the pool.
@@ -19,16 +17,18 @@ pub(super) struct Pool {
 struct Shared {
     idle: Mutex<Vec<Worker>>,
     slots: Arc<Semaphore>,
+    checkout_timeout: Duration,
     open: Opener,
 }
 
 impl Pool {
-    pub(super) fn new(max_connections: u32, open: Opener) -> Self {
-        let max = usize::try_from(max_connections.max(1)).unwrap_or(usize::MAX);
+    pub(super) fn new(cfg: SqlitePoolConfig, open: Opener) -> Self {
+        let max = usize::try_from(cfg.max.max(1)).unwrap_or(usize::MAX);
         Self {
             shared: Arc::new(Shared {
                 idle: Mutex::new(Vec::new()),
                 slots: Arc::new(Semaphore::new(max)),
+                checkout_timeout: cfg.checkout_timeout,
                 open,
             }),
         }
@@ -36,11 +36,16 @@ impl Pool {
 
     /// Check out an idle connection, or open one while under the bound.
     pub(super) async fn acquire(&self) -> Result<Pooled, DbError> {
-        let permit =
-            tokio::time::timeout(ACQUIRE_TIMEOUT, self.shared.slots.clone().acquire_owned())
-                .await
-                .map_err(|_| DbError::new("pool timed out while waiting for an open connection"))?
-                .map_err(|_| DbError::new("the sqlite pool is closed"))?;
+        let slot = self.shared.slots.clone().acquire_owned();
+        let permit = tokio::time::timeout(self.shared.checkout_timeout, slot)
+            .await
+            .map_err(|_| {
+                DbError::of(
+                    DbErrorKind::PoolExhausted,
+                    "connection pool exhausted: pool timed out while waiting for an open connection",
+                )
+            })?
+            .map_err(|_| DbError::new("the sqlite pool is closed"))?;
         let idle = self
             .shared
             .idle

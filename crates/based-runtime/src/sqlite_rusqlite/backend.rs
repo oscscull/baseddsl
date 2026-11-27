@@ -6,10 +6,15 @@ use super::execute::execute;
 use super::open;
 use super::pool::Pool;
 use crate::run::{Backend, Db, DbError, DbRead};
+use crate::sqlite_pool_config::SqlitePoolConfig;
 
-/// Default pool size for a file backend: with WAL, readers run alongside each other and a
-/// writer, so one connection would be a needless ceiling.
-const DEFAULT_FILE_POOL: u32 = 5;
+/// A pool of one with the default checkout wait.
+fn single() -> SqlitePoolConfig {
+    SqlitePoolConfig {
+        max: 1,
+        ..SqlitePoolConfig::default()
+    }
+}
 
 /// The SQLite [`Backend`] over rusqlite: one bounded pool over one database, no shards
 /// (the shard key is ignored). An in-memory backend pins the pool to one connection, so
@@ -24,20 +29,33 @@ impl RusqliteBackend {
     /// backend's life, so one request's writes are visible to the next.
     pub fn in_memory() -> Result<Self, DbError> {
         Ok(Self {
-            pool: Pool::new(1, open::memory()),
+            pool: Pool::new(single(), open::memory()),
         })
     }
 
-    /// A backend over the file database at `path` (created if absent), in WAL mode over a
-    /// bounded pool of 5 connections. [`open_with_pool`](Self::open_with_pool) sizes it.
+    /// A backend over the file database at `path` (created if absent), in WAL mode over the
+    /// [`SqlitePoolConfig::default`] pool. [`open_with_config`](Self::open_with_config)
+    /// sizes it and bounds the checkout wait.
     pub fn open(path: &str) -> Result<Self, DbError> {
-        Self::open_with_pool(path, DEFAULT_FILE_POOL)
+        Self::open_with_config(path, SqlitePoolConfig::default())
     }
 
     /// [`open`](Self::open) with an explicit maximum pool size (at least 1).
     pub fn open_with_pool(path: &str, max_connections: u32) -> Result<Self, DbError> {
+        let cfg = SqlitePoolConfig {
+            max: max_connections,
+            ..SqlitePoolConfig::default()
+        };
+        Self::open_with_config(path, cfg)
+    }
+
+    /// [`open`](Self::open) with an explicit pool size and checkout wait: a saturated pool
+    /// fails a checkout with
+    /// [`DbErrorKind::PoolExhausted`](crate::run::DbErrorKind::PoolExhausted) after
+    /// `checkout_timeout`.
+    pub fn open_with_config(path: &str, cfg: SqlitePoolConfig) -> Result<Self, DbError> {
         Ok(Self {
-            pool: Pool::new(max_connections, open::file(path)),
+            pool: Pool::new(cfg, open::file(path)),
         })
     }
 
@@ -46,7 +64,7 @@ impl RusqliteBackend {
     /// [`with_connection`](Self::with_connection).
     pub fn from_connection(conn: Connection) -> Self {
         Self {
-            pool: Pool::new(1, open::given(conn)),
+            pool: Pool::new(single(), open::given(conn)),
         }
     }
 
@@ -58,8 +76,12 @@ impl RusqliteBackend {
         connect: impl Fn() -> rusqlite::Result<Connection> + Send + Sync + 'static,
     ) -> Self {
         let open = std::sync::Arc::new(move || connect().map_err(super::error::map_err));
+        let cfg = SqlitePoolConfig {
+            max: max_connections,
+            ..SqlitePoolConfig::default()
+        };
         Self {
-            pool: Pool::new(max_connections, open),
+            pool: Pool::new(cfg, open),
         }
     }
 

@@ -30,6 +30,7 @@ mod location;
 pub use location::{SqliteLocation, SqliteLocationError};
 
 use crate::run::{Backend, Db, DbError, DbErrorKind, DbRead, Row, RowStream, Tx};
+use crate::sqlite_pool_config::SqlitePoolConfig;
 use crate::value::SqlValue;
 
 /// How long a locked SQLite database waits for the lock to clear before returning
@@ -37,13 +38,6 @@ use crate::value::SqlValue;
 /// on a file DB) a statement would otherwise fail instantly; the busy timeout lets it wait
 /// a bounded moment, and a genuine timeout then surfaces as a retryable deadlock.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Default connection-pool size for a **file** backend. A file database persists on its
-/// own, so — unlike the in-memory backend, which must pin one connection — it serves a
-/// small bounded pool: with WAL, readers run concurrently with each other and with a
-/// writer, so a single connection was a needless throughput ceiling. Override via
-/// [`SqliteBackend::open_with_pool`].
-const DEFAULT_FILE_POOL: u32 = 5;
 
 /// Map a sqlx error to the runtime's [`DbError`]. A `SQLITE_BUSY` (5) / `SQLITE_LOCKED`
 /// (6) — a writer lost the lock race after the busy timeout — is a deadlock-class failure
@@ -60,6 +54,18 @@ fn map_sqlite_err(e: sqlx::Error) -> DbError {
         _ => crate::sqlx_integrity::integrity_kind(&e).unwrap_or(DbErrorKind::Other),
     };
     DbError::of(kind, e.to_string())
+}
+
+/// A pool checkout failure: the bounded `acquire_timeout` elapsing is pool exhaustion
+/// (the fast-503 path); anything else is mapped like any other sqlx error.
+fn map_acquire_err(e: sqlx::Error) -> DbError {
+    match e {
+        sqlx::Error::PoolTimedOut => DbError::of(
+            DbErrorKind::PoolExhausted,
+            format!("connection pool exhausted: {e}"),
+        ),
+        other => map_sqlite_err(other),
+    }
 }
 
 /// Bind every [`SqlValue`] onto a query, positionally. A `bool` binds as SQLite's integer
@@ -282,6 +288,10 @@ impl SqliteBackend {
     /// recycled forever, so writes from one request are visible to the next — no infra,
     /// no file.
     pub fn in_memory() -> Result<Self, DbError> {
+        Ok(Self::memory(SqlitePoolConfig::default()))
+    }
+
+    fn memory(cfg: SqlitePoolConfig) -> Self {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             // SQLite ignores FK constraints unless this pragma is ON per connection — make
@@ -291,47 +301,63 @@ impl SqliteBackend {
         let pool = SqlitePoolOptions::new()
             .min_connections(1)
             .max_connections(1)
+            .acquire_timeout(cfg.checkout_timeout)
             // The in-memory database *is* this one connection: never let the pool
             // retire it, or the data vanishes mid-test.
             .idle_timeout(None)
             .max_lifetime(None)
             .connect_lazy_with(opts);
-        Ok(Self { pool })
+        Self { pool }
     }
 
     /// A backend over `target` — a file path, `:memory:`, or a `sqlite:` URL (see
     /// [`SqliteLocation`]); any other scheme is an error. A file database is created if
-    /// absent and runs in **WAL** mode over a bounded pool of [`DEFAULT_FILE_POOL`]
-    /// connections: a file persists on its own — no single-connection pin is needed (that
-    /// constraint is the in-memory backend's alone) — and WAL lets readers proceed
-    /// concurrently with each other and with a writer. Use
-    /// [`open_with_pool`](Self::open_with_pool) to size the pool.
+    /// absent and runs in **WAL** mode over the [`SqlitePoolConfig::default`] pool: a file
+    /// persists on its own — no single-connection pin is needed (that constraint is the
+    /// in-memory backend's alone) — and WAL lets readers proceed concurrently with each
+    /// other and with a writer. Use [`open_with_config`](Self::open_with_config) to size
+    /// the pool or bound the checkout wait.
     pub fn open(target: &str) -> Result<Self, DbError> {
-        Self::open_with_pool(target, DEFAULT_FILE_POOL)
+        Self::open_with_config(target, SqlitePoolConfig::default())
     }
 
     /// [`open`](Self::open) with an explicit maximum pool size (clamped to at least 1). A
     /// read-heavy embedding host raises this to run more reads in parallel under WAL.
     pub fn open_with_pool(target: &str, max_connections: u32) -> Result<Self, DbError> {
-        Self::open_location_with_pool(&SqliteLocation::parse(target)?, max_connections)
+        let cfg = SqlitePoolConfig {
+            max: max_connections,
+            ..SqlitePoolConfig::default()
+        };
+        Self::open_with_config(target, cfg)
+    }
+
+    /// [`open`](Self::open) with an explicit pool size and checkout wait: a saturated pool
+    /// fails a checkout with [`DbErrorKind::PoolExhausted`] after `checkout_timeout`.
+    pub fn open_with_config(target: &str, cfg: SqlitePoolConfig) -> Result<Self, DbError> {
+        Ok(Self::open_location_with_config(
+            &SqliteLocation::parse(target)?,
+            cfg,
+        ))
     }
 
     /// [`open`](Self::open) over an already-parsed [`SqliteLocation`].
     pub fn open_location(location: &SqliteLocation) -> Result<Self, DbError> {
-        Self::open_location_with_pool(location, DEFAULT_FILE_POOL)
+        Ok(Self::open_location_with_config(
+            location,
+            SqlitePoolConfig::default(),
+        ))
     }
 
-    fn open_location_with_pool(
-        location: &SqliteLocation,
-        max_connections: u32,
-    ) -> Result<Self, DbError> {
+    /// [`open_with_config`](Self::open_with_config) over an already-parsed
+    /// [`SqliteLocation`].
+    pub fn open_location_with_config(location: &SqliteLocation, cfg: SqlitePoolConfig) -> Self {
         match location {
-            SqliteLocation::Memory => Self::in_memory(),
-            SqliteLocation::File(path) => Ok(Self::open_file(path, max_connections)),
+            SqliteLocation::Memory => Self::memory(cfg),
+            SqliteLocation::File(path) => Self::open_file(path, cfg),
         }
     }
 
-    fn open_file(path: &std::path::Path, max_connections: u32) -> Self {
+    fn open_file(path: &std::path::Path, cfg: SqlitePoolConfig) -> Self {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -343,7 +369,8 @@ impl SqliteBackend {
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(BUSY_TIMEOUT);
         let pool = SqlitePoolOptions::new()
-            .max_connections(max_connections.max(1))
+            .max_connections(cfg.max.max(1))
+            .acquire_timeout(cfg.checkout_timeout)
             .connect_lazy_with(opts);
         Self { pool }
     }
@@ -380,14 +407,14 @@ impl SqliteBackend {
 impl Backend for SqliteBackend {
     async fn checkout(&self, _shard_key: &str) -> Result<Box<dyn Db>, DbError> {
         // Single database: the shard key is ignored (SQLite has no shards).
-        let conn = self.pool.acquire().await.map_err(map_sqlite_err)?;
+        let conn = self.pool.acquire().await.map_err(map_acquire_err)?;
         Ok(Box::new(SqliteDb { conn }))
     }
 
     async fn ping(&self) -> Result<(), DbError> {
         // A trivial round-trip validates the connection is usable right now.
         let mut db = SqliteDb {
-            conn: self.pool.acquire().await.map_err(map_sqlite_err)?,
+            conn: self.pool.acquire().await.map_err(map_acquire_err)?,
         };
         crate::run::fetch_all(db.fetch("SELECT 1", &[]))
             .await

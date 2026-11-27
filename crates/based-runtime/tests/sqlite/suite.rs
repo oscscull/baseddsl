@@ -14,6 +14,8 @@ mod distinct_integration;
 mod filter_projection_integration;
 #[path = "fixtures.rs"]
 mod fixtures;
+#[path = "hardening.rs"]
+mod hardening;
 #[path = "idempotency_db.rs"]
 mod idempotency_db;
 #[path = "in_list_integration.rs"]
