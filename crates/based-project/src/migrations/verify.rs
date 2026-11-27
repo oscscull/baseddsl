@@ -23,15 +23,20 @@ pub enum Severity {
 pub struct Finding {
     pub migration: Option<String>,
     pub severity: Severity,
+    /// The diagnostic code, for findings that carry one.
+    pub code: Option<&'static str>,
     pub message: String,
 }
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.migration {
-            Some(id) => write!(f, "{id}: {}", self.message),
-            None => f.write_str(&self.message),
+        if let Some(id) = &self.migration {
+            write!(f, "{id}: ")?;
         }
+        if let Some(code) = self.code {
+            write!(f, "{code} ")?;
+        }
+        f.write_str(&self.message)
     }
 }
 
@@ -46,10 +51,11 @@ pub fn verify_migrations(
     let mut out = Vec::new();
     let mut prev = Snapshot::default();
     for (idx, source) in migrations.iter().enumerate() {
-        let mut found = |severity, message: String| {
+        let mut found = |severity, code, message: String| {
             out.push(Finding {
                 migration: Some(source.id.to_string()),
                 severity,
+                code,
                 message,
             });
         };
@@ -57,31 +63,32 @@ pub fn verify_migrations(
         if source.number() != Some(expected) {
             found(
                 Severity::Problem,
+                None,
                 format!("number out of sequence (expected {expected:04})"),
             );
         }
         let snap = match Snapshot::parse(source.snapshot) {
             Ok(snap) => snap,
             Err(e) => {
-                found(Severity::Problem, e.to_string());
+                found(Severity::Problem, None, e.to_string());
                 continue;
             }
         };
         let steps = migrate::up_steps(&prev, &snap, source.up);
         check_up_mig(source.up, &steps, &snap, &mut found);
         match migrate::plan_up(&prev, &snap, source.up, dialect) {
-            Ok(plan) if plan.has_data => found(Severity::Note, "data steps checked".into()),
+            Ok(plan) if plan.has_data => found(Severity::Note, None, "data steps checked".into()),
             Ok(_) => {}
             Err(problems) => {
                 for p in &problems {
-                    found(Severity::Problem, p.to_string());
+                    found(Severity::Problem, None, p.to_string());
                 }
             }
         }
         if let Some(down) = source.down {
             if let Err(problems) = migrate::plan_down(&prev, &snap, down, dialect) {
                 for p in &problems {
-                    found(Severity::Problem, p.to_string());
+                    found(Severity::Problem, None, p.to_string());
                 }
             }
         }
@@ -104,6 +111,7 @@ pub fn verify_migrations(
         out.push(Finding {
             migration: None,
             severity: Severity::Problem,
+            code: None,
             message: message.into(),
         });
     }
@@ -117,16 +125,18 @@ fn check_up_mig(
     stored: &str,
     steps: &[Step],
     snap: &Snapshot,
-    found: &mut impl FnMut(Severity, String),
+    found: &mut impl FnMut(Severity, Option<&'static str>, String),
 ) {
     if !migrate::up_mig_matches_snapshot(stored, steps) {
         found(
             Severity::Problem,
+            None,
             "up.mig has drifted from schema.snap (re-run `based migrate gen`)".into(),
         );
     } else if migrate::has_raw_step(stored) {
         found(
             Severity::Note,
+            None,
             "partial (carries a raw step — not offline-verifiable)".into(),
         );
     }
@@ -136,9 +146,9 @@ fn check_up_mig(
             if !touched.is_empty() {
                 found(
                     Severity::Warning,
+                    Some(based_sema::code::RAW_MIGRATION_MODELED),
                     format!(
-                        "{} raw step touches modeled table(s) {} — the snapshot is blind to it",
-                        based_sema::code::RAW_MIGRATION_MODELED,
+                        "raw step touches modeled table(s) {} — the snapshot is blind to it",
                         touched.join(", ")
                     ),
                 );
